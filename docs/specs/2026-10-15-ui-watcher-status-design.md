@@ -120,7 +120,10 @@ executed under node the way `ledger_status.js` is:
   line keeps its last state; "the server is unreachable" is already toasted by boot's
   `/api/health` call and is a different problem. But if the **first** check fails there is no
   last answer, and keeping "nothing" would be silence, which is exactly what `running` looks like.
-  So a failed first check renders `unavailable` (review finding, 2026-10-15).
+  So a failed first check renders `unavailable` (review finding, 2026-10-15) — as a
+  **placeholder, not an answer**: it does not advance the sequence below, so an older check still
+  in flight (boot's, when a focus check fails first) paints when it lands. Counting the placeholder
+  as an answer made "unknown" stick for a minute over a real `not_running` (review round 2).
 * **Only a change of state touches the DOM.** Rewriting identical text into a live region can
   re-announce it, so a watcher that stays down would be read out every minute. The painted state
   is kept in `data-state` and an unchanged answer returns early.
@@ -174,6 +177,6 @@ lines at 375 px predates this change (measured with the line removed). The brows
 
 No file in CLAUDE.md's over-ceiling table is touched; every touched file stays under 800.
 
-Every guard and test above is mutation-proved: the plan's catalog holds **26** mutations, each
+Every guard and test above is mutation-proved: the plan's catalog holds **28** mutations, each
 passing all five clauses (passes unmutated, lands once, red, needle on a `>`/`E` line,
 restored green).

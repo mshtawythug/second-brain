@@ -63,6 +63,12 @@ Findings on `e221235`, each closed test-first:
   a positive control sees a real change);
 * overlapping checks are sequenced — a held older response released after a newer one is dropped.
 
+Round 2 (on `bccac42`):
+* the "unknown" placeholder no longer advances the sequence — a regression test holds boot's
+  check, fails a newer focus check with 500, then lands boot's `not_running`, which must paint;
+* the raising-detector test asserts directly that the injected lock is not held after the raise;
+  its acquire also times out loudly, so a leaked lock is a red test, never a hung suite.
+
 ### T6 — verify
 `ruff check`, `mypy src/`, `bin/brain-ci` green; `brain demo` sandbox visual check with a throwaway
 `BRAIN_VAULT_PATH` (never the live vault or prod DB).
@@ -70,9 +76,11 @@ Findings on `e221235`, each closed test-first:
 ## Mutation catalog
 
 Each was applied, seen red with its needle on a `>`/`E` line, and reverted to green
-(`PYTHONDONTWRITEBYTECODE=1`); each anchor occurs exactly once in its file. All 26 passed all
+(`PYTHONDONTWRITEBYTECODE=1`); each anchor occurs exactly once in its file. All 28 passed all
 five clauses on 2026-10-15, run in a copy of the working tree (M13/M18 re-run and M19 added after
-the layout fix; M14 re-anchored, M20–M25 added in review round 1 and M26 from the audit — M21 first went red on the
+the layout fix; M14 re-anchored, M20–M25 added in review round 1, M26 from the audit, and M14/M23 re-anchored with
+M27–M28 added in review round 2 — M1/M2, the only DB-backed entries, were re-run after the shared test Postgres crashed
+mid-run (20:10 UTC); their crash-window results were connection timeouts, not verdicts — M21 first went red on the
 test's harness precondition rather than on `calls == 1`, so the test was restructured until it
 failed on its claim).
 
@@ -91,7 +99,7 @@ failed on its claim).
 | M11 | `index.html` | drop `aria-live="polite"` from `#watcher-status` | `test_the_line_is_a_polite_live_region_that_is_never_hidden` |
 | M12 | `js/watcher.js` | delete the `visibilitychange` listener | `test_coming_back_to_the_tab_asks_again` (`Timeout`) |
 | M13 | `css/components.css` | delete the ≤1100 px visually-hidden `.watcher-full` rule | `test_a_narrow_top_bar_gets_the_short_line…[phone]` (`laid out`) |
-| M14 | `js/watcher.js` | a failure after an answer repaints as running (clears the line) | `test_a_failed_check_keeps_the_last_answer` |
+| M14 | `js/watcher.js` | every failure repaints the placeholder, even after an answer | `test_a_failed_check_keeps_the_last_answer` |
 | M15 | `js/watcher.js` | delete the window `focus` listener | `test_refocusing_the_window_asks_again` (`Timeout`) |
 | M16 | `js/watcher.js` | `if (!document.hidden) check();` → `check();` | `test_a_hidden_tab_does_not_ask` |
 | M17 | `js/watcher.js` | `POLL_MS = 30_000` | `test_a_visible_tab_asks_again_every_minute` (`before the minute`) |
@@ -100,10 +108,12 @@ failed on its claim).
 | M20 | `js/watcher.js` | `setInterval(checkIfVisible, …)` → `setInterval(check, …)` | `test_a_hidden_tab_skips_the_minute_poll` (`polled`) |
 | M21 | `ui/watcher_probe.py` | `with self._lock:` → `if True:` | `test_concurrent_requests_at_an_expired_ttl_share_one_detection` (`calls`) |
 | M22 | `ui/watcher_probe.py` | a raising detector is caught and cached as `"unavailable"` | `test_a_raising_detector_caches_nothing_and_releases_the_lock` (`DID NOT RAISE`) |
-| M23 | `js/watcher.js` | a failed FIRST check stays silent | `test_a_failed_first_check_says_unknown_not_nothing` (`Timeout`) |
+| M23 | `js/watcher.js` | a failed FIRST check stays silent (placeholder render deleted) | `test_a_failed_first_check_says_unknown_not_nothing` (`Timeout`) |
 | M24 | `js/watcher.js` | drop the unchanged-state early return in `render()` | `test_an_unchanged_answer_leaves_the_live_region_untouched` (`unchanged`) |
 | M25 | `js/watcher.js` | drop the `ticket < painted` guard | `test_a_stale_answer_cannot_overwrite_a_newer_one` (`full`) |
 | M26 | `ui/routes_meta.py` | open a connection in `watcher` (`with ctx.connect(): pass`) | `test_it_answers_when_the_database_cannot_even_be_opened` (`OperationalError`) |
+| M27 | `ui/watcher_probe.py` | `with self._lock:` → `self._lock.__enter__()` + `if True:` (lock leaks on raise) | `test_a_raising_detector_caches_nothing_and_releases_the_lock` (`leaked`) |
+| M28 | `js/watcher.js` | the placeholder advances `painted` (the round-1 shape) | `test_the_unknown_placeholder_does_not_shadow_an_older_real_answer` (`Timeout`) |
 
 ## Risks
 * **Live-region timing in headless Chromium** — asserted structurally (attributes + not hidden),

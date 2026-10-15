@@ -105,6 +105,12 @@ class _Shell:
         self.held[index].fulfill(status=200, content_type="application/json",
                                  body=json.dumps({"state": state}))
 
+    def fail(self, index: int) -> None:
+        self.held[index].fulfill(
+            status=500, content_type="application/json",
+            body=json.dumps({"error": {"code": "internal_error", "message": "synthetic"}}),
+        )
+
     def answered(self) -> int:
         return int(self.page.evaluate("window.__watcherAnswered"))
 
@@ -139,9 +145,9 @@ def make_shell(browser: Any, static_origin: str) -> Iterator[Any]:
     opened: list[Any] = []
 
     def make(state: str, *, width: int = 1280, fake_clock: bool = False,
-             read_only: bool = False, status: int = 200) -> _Shell:
+             read_only: bool = False, status: int = 200, hold: bool = False) -> _Shell:
         answer: dict[str, Any] = {"status": status, "body": {"state": state},
-                                  "hold": False}
+                                  "hold": hold}
         held: list[Any] = []
         stubs = {**_STUBS, "/api/health": {**_STUBS["/api/health"], "read_only": read_only}}
 
@@ -422,3 +428,30 @@ def test_a_stale_answer_cannot_overwrite_a_newer_one(make_shell: Any) -> None:
     shell.wait_for_answers(before + 2)
 
     assert shell.page.inner_text("#watcher-status .watcher-full") == ""
+
+
+def test_the_unknown_placeholder_does_not_shadow_an_older_real_answer(
+    make_shell: Any,
+) -> None:
+    """Review round 2: "unknown" is a placeholder, NOT an answer.
+
+    Boot's check is still in flight when a focus check starts and fails. The
+    page shows "unknown" — it has nothing better — but if that placeholder
+    counted as the newest answer, boot's real reply arriving afterwards would
+    be dropped as stale, and "unknown" would stick for a minute while the
+    server had said the watcher is down.
+    """
+    shell = make_shell("not_running", hold=True)
+    shell.wait_for_held(1)
+    shell.page.evaluate("window.dispatchEvent(new Event('focus'))")
+    shell.wait_for_held(2)
+
+    shell.fail(1)
+    shell.page.wait_for_function(
+        "p => document.querySelector('#watcher-status .watcher-full')"
+        ".textContent.startsWith(p)",
+        arg=UNKNOWN_PREFIX, timeout=5000,
+    )
+    shell.release(0, "not_running")
+
+    shell.wait_for_text(NOT_RUNNING)

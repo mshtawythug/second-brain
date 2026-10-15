@@ -56,9 +56,12 @@ async function check() {
   } catch (e) {
     /* A failure keeps the last answer. But with NO answer yet, keeping it
        means staying silent, and silence is exactly what RUNNING looks like,
-       so the first failure says "unknown" instead. */
-    if (painted !== 0) return;
-    line = watcherLine(null);
+       so it shows "unknown" instead — as a PLACEHOLDER, not an answer. It
+       does not advance `painted`, so an older check that is still in flight
+       (boot's, say) still paints when it lands instead of being dropped as
+       stale behind a failure. */
+    if (painted === 0) render(watcherLine(null));
+    return;
   }
   if (ticket < painted) return;
   painted = ticket;

@@ -162,14 +162,39 @@ def test_a_raising_detector_caches_nothing_and_releases_the_lock() -> None:
     request would hang.
     """
     detect = _Raising()
-    probe = WatcherProbe(detect=detect, clock=_Clock(), ttl_s=15.0)
+    lock = _TimedLock()
+    probe = WatcherProbe(detect=detect, clock=_Clock(), ttl_s=15.0, lock=lock)
 
     with pytest.raises(_DetectorBug):
         probe.state()
+    assert not lock.locked(), "the probe's lock leaked when detect raised"
     with pytest.raises(_DetectorBug):
         probe.state()
 
     assert detect.calls == 2
+
+
+class _TimedLock:
+    """A real lock that can be inspected, and whose acquire gives up loudly.
+
+    The test asserts ``locked()`` directly after the raise. The bounded acquire
+    is the backstop: a leaked lock would otherwise make the SECOND ``state()``
+    wait forever, and an unbounded wait is a hung suite, not a red test (only
+    the browser tests carry a pytest-timeout).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def __enter__(self) -> None:
+        if not self._lock.acquire(timeout=5):
+            raise AssertionError("the probe's lock was never released")
+
+    def __exit__(self, *exc: object) -> None:
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
 
 
 class _DetectorBug(RuntimeError):
