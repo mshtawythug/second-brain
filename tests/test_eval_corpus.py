@@ -1,6 +1,7 @@
 """Unit tests for brain.eval.corpus — YAML loader + EvalQuery validation."""
 
 import textwrap
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -330,4 +331,128 @@ def test_load_corpus_rejects_unknown_fields(tmp_path: Path) -> None:
         """,
     )
     with pytest.raises(EvalCorpusError, match="unknown field"):
+        load_corpus(path)
+
+
+# ---------------------------------------------------------------------------
+# Absolute date bounds — ``after`` / ``before`` (spec
+# docs/specs/2026-10-15-eval-recency-determinism-design.md §3.1). A
+# ``since_days`` query's matched set moves with the wall clock; a closed
+# ``after``/``before`` range does not, so these are how a recency query is
+# pinned.
+# ---------------------------------------------------------------------------
+
+
+def _corpus_with_bounds(tmp_path: Path, bounds: str) -> Path:
+    """Write a one-query corpus whose entry carries the given bound lines."""
+    body = "\n".join(f"            {line}" for line in bounds.strip().splitlines())
+    return _write_corpus(
+        tmp_path,
+        f"""\
+        version: 1
+        queries:
+          - query: "daily digest"
+            category: recency
+            expected_doc_ids: [abcd1234]
+{body}
+        """,
+    )
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        "after: 2026-09-04\nbefore: 2026-10-15",
+        "after: '2026-09-04'\nbefore: '2026-10-15'",
+    ],
+    ids=["yaml-date", "quoted-string"],
+)
+def test_load_corpus_parses_absolute_date_bounds(tmp_path: Path, bounds: str) -> None:
+    """``after``/``before`` parse from an unquoted YAML date and a quoted ISO string."""
+    (q,) = load_corpus(_corpus_with_bounds(tmp_path, bounds))
+    assert q.after == date(2026, 9, 4)
+    assert q.before == date(2026, 10, 15)
+    assert q.since_days is None
+
+
+def test_load_corpus_date_bounds_default_to_none(tmp_path: Path) -> None:
+    """A corpus without the new fields parses exactly as before."""
+    (q,) = load_corpus(_write_corpus(tmp_path, _MINIMAL_VALID_CORPUS))
+    assert q.after is None
+    assert q.before is None
+
+
+def test_load_corpus_accepts_before_alone(tmp_path: Path) -> None:
+    """``before`` alone is deterministic (everything before a fixed date)."""
+    (q,) = load_corpus(_corpus_with_bounds(tmp_path, "before: 2026-10-15"))
+    assert q.after is None
+    assert q.before == date(2026, 10, 15)
+
+
+def test_load_corpus_rejects_after_without_before(tmp_path: Path) -> None:
+    """An open upper bound is the leading-edge drift being fixed — refused."""
+    path = _corpus_with_bounds(tmp_path, "after: 2026-09-04")
+    with pytest.raises(EvalCorpusError, match="'after' requires 'before'"):
+        load_corpus(path)
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        "after: 2026-10-15\nbefore: 2026-10-15",
+        "after: 2026-10-16\nbefore: 2026-10-15",
+    ],
+    ids=["equal", "inverted"],
+)
+def test_load_corpus_rejects_after_not_before_before(tmp_path: Path, bounds: str) -> None:
+    """Half-open range: ``after == before`` matches nothing, so it is refused too."""
+    path = _corpus_with_bounds(tmp_path, bounds)
+    with pytest.raises(EvalCorpusError, match="'after' must be earlier than 'before'"):
+        load_corpus(path)
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        "since_days: 40\nafter: 2026-09-04\nbefore: 2026-10-15",
+        "since_days: 40\nbefore: 2026-10-15",
+    ],
+    ids=["with-both", "with-before"],
+)
+def test_load_corpus_rejects_since_days_with_absolute_bound(
+    tmp_path: Path, bounds: str
+) -> None:
+    """``since_days`` (ingested_at) and the bounds (coalesce(sent_at, ingested_at))
+    filter different columns; mixing them keeps the clock dependency."""
+    path = _corpus_with_bounds(tmp_path, bounds)
+    with pytest.raises(EvalCorpusError, match="'since_days' cannot be combined"):
+        load_corpus(path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-10-15T00:00:00Z",
+        "'15/10/2026'",
+        "20261015",
+        "'20261015'",
+        "'2026-10'",
+        "'2026-02-30'",
+    ],
+    ids=[
+        "datetime",
+        "non-iso-string",
+        "int",
+        "basic-iso-string",
+        "partial-date",
+        "impossible-date",
+    ],
+)
+def test_load_corpus_rejects_non_date_bound(tmp_path: Path, value: str) -> None:
+    """Only a ``YYYY-MM-DD`` calendar date is accepted — a time of day is a second
+    drift source. ``'20261015'`` is listed because Python 3.11's
+    ``date.fromisoformat`` accepts the ISO *basic* format, so it is the case a
+    regex-less parser lets through."""
+    path = _corpus_with_bounds(tmp_path, f"before: {value}")
+    with pytest.raises(EvalCorpusError, match="'before' must be a calendar date"):
         load_corpus(path)
