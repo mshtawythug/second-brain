@@ -30,7 +30,8 @@ means see "Vector-leg candidate pool" under "Known retrieval issues" below. The 
 absolute scores understate quality until `golden_corpus.yaml` is re-judged
 against the new documents.
 
-**2. Two `recency` queries are clock-dependent.** They filter on
+**2. Two `recency` queries were clock-dependent until 2026-10-15**, when they
+were pinned to absolute dates (see "The fix" and "Applied" below). They filtered on
 `documents.ingested_at` via `since_days: 40`, so the matched set is stable only
 while `today - 40 days` stays inside one gap in this brain's ingest history.
 The baseline was re-recorded on **2026-10-13**, when that boundary sat inside a
@@ -132,6 +133,18 @@ WHERE left(id::text, 8) = ANY (ARRAY['abcd1234', 'ef567890'])
 An empty result means the range covers the judgments. A judged document
 outside the range can never be retrieved, so it caps that query's recall.
 
+**Applied 2026-10-15.** Both `recency` entries were converted to
+`after: 2026-09-05` / `before: 2026-10-15`, and `ci.json` was re-recorded. The
+check above was **not** empty: 18 of the daily-brief query's 28 judged
+documents and all 5 of the other query's fall before 2026-09-05. The
+`since_days` window at the previous recording already excluded the same set.
+Nothing was ingested between 2026-08-31 and 2026-09-21, so both lower bounds
+fall in the same gap, and the conversion lost no reachable judgment. Both rows
+stay capped until they are re-judged. The means are unchanged at
+**0.2724 / 0.3826 / 0.7089**, and only the second query's top 20 moved: four
+Krisp meetings ingested 2026-10-05 but sent in July and August dropped out
+under the new filter column. That row still scores 0.0.
+
 For a query still on `since_days`, re-derive the window before you re-record.
 It is a property of the document set, not of the code:
 
@@ -178,7 +191,8 @@ dilute the mean; but a re-judged one silently changes what "correct" means.
   then for the iterative scan, whose metrics are identical): the means went
   from 0.2589 / 0.3697 / 0.5852 to 0.2779 / 0.3826 / 0.7112, on the same
   document set and the same window as in (2). The current committed means,
-  after the 2026-10-14 re-record for the synced daily briefs in (2), are
+  re-recorded 2026-10-15 when the recency queries were pinned in (2), and
+  unchanged from the 2026-10-14 re-record for the synced daily briefs, are
   **0.2724 / 0.3826 / 0.7089**. The same
   HNSW shape remains in `related.py` and `connect.py`; those are unmeasured
   follow-ups.
