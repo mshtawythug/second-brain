@@ -1,7 +1,8 @@
-"""`GET /api/health`, `/api/status`, `/api/facets`."""
+"""`GET /api/health`, `/api/status`, `/api/facets`, `/api/watcher`."""
 from __future__ import annotations
 
 import psycopg
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -48,6 +49,23 @@ async def health(request: Request) -> JSONResponse:
             "notices": list(ctx.notices),
         }
     )
+
+
+async def watcher(request: Request) -> JSONResponse:
+    """Whether the vault-sync watcher is running (A9): ``{"state": <enum>}``.
+
+    ONE ENUM AND NOTHING ELSE, by requirement. The answer comes from a ``ps``
+    snapshot holding every command line on the machine, and the watcher's own
+    names the vault path; a body that echoed any of it would turn a status line
+    into a process listing for whoever holds the token. The state strings are
+    ``brain.doctor_watcher.WATCHER_STATES``.
+
+    No database, like :func:`health`: a dead Postgres must not take this line
+    down. The probe may fork ``ps``, so it runs off the event loop; its TTL
+    cache bounds how often (spec §3.1).
+    """
+    ctx = context_of(request)
+    return ok({"state": await run_in_threadpool(ctx.watcher_probe.state)})
 
 
 async def status(request: Request) -> JSONResponse:

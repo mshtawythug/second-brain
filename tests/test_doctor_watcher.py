@@ -29,9 +29,11 @@ from brain.config import Config
 from brain.doctor_runtime import runtime_doctor_checks, wiki_freshness_doctor_check
 from brain.doctor_watcher import (
     WATCHER_LABEL,
+    WATCHER_STATES,
     is_vault_watcher,
     retired_daemon_doctor_check,
     watcher_doctor_check,
+    watcher_state,
 )
 from tests.test_doctor_runtime import _write_build
 
@@ -282,3 +284,38 @@ def test_a_dormant_wiki_never_turns_the_daemons_line_red(tmp_path: Path) -> None
     assert by_name["daemons"].status == "warn", by_name["daemons"].detail
     assert by_name["wiki build"].status == "ok"
     assert "wiki" not in by_name["daemons"].detail.lower()
+
+
+# --------------------------------------------------------------------------
+# watcher_state — the UI status line's question (A9's UI half)
+# --------------------------------------------------------------------------
+
+
+def test_watcher_state_is_running_when_a_watcher_is_in_the_snapshot() -> None:
+    assert watcher_state(["/bin/zsh", _WATCH_CMD]) == "running"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "/x/bin/brain ui",
+        "/x/bin/brain search vault sync --watch",
+        "/x/bin/brain vault sync --vault /v",
+    ],
+)
+def test_watcher_state_is_not_running_for_a_snapshot_without_one(cmd: str) -> None:
+    assert watcher_state(["/bin/zsh", cmd]) == "not_running"
+
+
+def test_an_empty_snapshot_is_unavailable_not_not_running() -> None:
+    """``snapshot_processes`` returns ``[]`` only when ``ps`` failed.
+
+    A real snapshot always holds at least the asking process, so ``[]`` means
+    the check could not run — and reporting that as "not running" would claim
+    a fact nobody observed.
+    """
+    assert watcher_state([]) == "unavailable"
+
+
+def test_watcher_states_is_the_closed_vocabulary() -> None:
+    assert WATCHER_STATES == ("running", "not_running", "unavailable")

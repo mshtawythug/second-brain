@@ -61,6 +61,23 @@
   color: var(--flag-draft); border: 1px solid var(--flag-draft);
   border-radius: var(--radius-chip); padding: 1px var(--s-2);
 }
+/* The A9 watcher line (js/watcher.js). Meaning is in the WORDS; the tone only
+   adds colour, so nothing is lost without it. `flex: none` because the line
+   must never be the thing that gives way: an earlier ellipsis version rendered
+   "Wa…" at 375px — present, announced, and unreadable. The tab strip, which
+   scrolls inside itself, absorbs the squeeze instead. The full sentence does
+   not fit below 1100px, so that breakpoint swaps in the short form. */
+.watcher-status {
+  margin: 0; flex: none;
+  font-family: var(--font-mono); font-size: var(--t-meta);
+  white-space: nowrap;
+}
+.watcher-status[data-tone="warn"] {
+  color: var(--flag-draft); border: 1px solid var(--flag-draft);
+  border-radius: var(--radius-chip); padding: 1px var(--s-2);
+}
+.watcher-status[data-tone="muted"] { color: var(--ink-muted); }
+.watcher-short { display: none; }
 
 /* ----------------------------------------------------------------- rail --- */
 
@@ -498,6 +515,15 @@ button[disabled] { cursor: not-allowed; opacity: 0.5; }
     transform: translateX(-101%);
   }
   .rail.is-open { transform: none; }
+  /* The A9 sentence does not fit this top bar beside the badge (measured: it
+     squeezed READ-ONLY onto two lines at 900px). Show the short form and keep
+     the full one VISUALLY hidden — not display:none — so it stays the live
+     region's accessible text. */
+  .watcher-short { display: inline; }
+  .watcher-full {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap;
+  }
 }
 
 /* Below 780px the ledger and inspector become a two-view stack. */

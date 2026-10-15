@@ -75,6 +75,12 @@
     <button class="tab" data-tab="agent" type="button">Agent</button>
   </nav>
   <div class="topbar-right">
+    <!-- A9: "watcher not running — external edits will not appear in search".
+         Filled by js/watcher.js. A live region that is NEVER `hidden` and is
+         simply empty while the watcher runs: un-hiding a region in the same
+         moment its text changes is announced unreliably. The short span is for
+         a narrow top bar only and is aria-hidden; components.css swaps them. -->
+    <p class="watcher-status" id="watcher-status" role="status" aria-live="polite"><span class="watcher-full"></span><span class="watcher-short" aria-hidden="true"></span></p>
     <span class="badge" id="mode-badge" hidden>read-only</span>
     <button class="icon-btn" id="theme-toggle" type="button" aria-label="Toggle colour theme">☾</button>
   </div>
