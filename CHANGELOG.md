@@ -53,7 +53,11 @@ git tag scheme:
     (it used to FAIL after 3 days);
   - a new `vault watcher` line warns when the vault-sync watcher is not
     installed (macOS) or not running (elsewhere), because external edits will
-    not reach search until `brain vault sync`;
+    not reach search until `brain vault sync`. Off macOS, a process list that
+    cannot be read (`ps` failed) is a separate "status unknown" warning, not
+    "not running", and its remedy is to check with `ps` and start
+    `brain vault sync --watch` only if none is running — the watcher may be
+    up, and nothing stops a second one from starting;
   - a new `retired daemon` line warns while a `com.brain.build` plist is still
     installed.
 - **`brain ui`:** the Publish tab is gone.
@@ -71,6 +75,16 @@ git tag scheme:
 
 ### Added
 
+- **`brain ui` reports the vault-sync watcher in its top bar.** When
+  `brain vault sync --watch` is not running it says "Watcher not running —
+  external edits will not appear in search" ("Watcher off" on a narrow
+  screen), and "Watcher status unknown" when the process list cannot be read.
+  It says nothing while the watcher runs. The page asks
+  `GET /api/watcher` — one enum, no process details, behind the same token
+  and Host checks as every other `/api/` route — at load, every minute while the tab
+  is visible, and when you return to it. On macOS it can differ from
+  `brain doctor`, which checks the `com.brain.watcher` plist rather than the
+  process; see `docs/vault-and-wiki.md`.
 - **`brain ui --lan`** — read from a phone or tablet on the same network. It
   binds this machine's LAN address and uses `--token` if given, otherwise mints
   one, then prints the URL to open. It cannot be combined with `--host`, and

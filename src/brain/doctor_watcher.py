@@ -8,6 +8,11 @@
     Whether it is loaded and healthy is the ``daemons`` check's job, so an
     installed watcher that is down FAILs there and is not reported twice.
     Elsewhere there is no launchd, so a process scan looks for it.
+``watcher_state``
+    The same detection, as the three-way answer ``brain ui``'s status line
+    shows (A9's UI half, ``docs/specs/2026-10-15-ui-watcher-status-design.md``).
+    It is a process scan on every platform, macOS included, because the UI's
+    sentence is "not RUNNING" and it has no ``daemons`` line beside it.
 ``retired daemon``
     ``com.brain.build``, the Quartz rebuild daemon, is retired at R2.
     ``brain-down`` boots it out but leaves its plist, and the next
@@ -25,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from .bin.launchd import _RETIRED_LABELS
 from .doctor_runtime import _check
@@ -57,13 +62,38 @@ def is_vault_watcher(cmd: str) -> bool:
     return False
 
 
+#: What ``brain ui`` may say about the watcher. Closed: the UI mirrors these
+#: strings in ``static/js/watcher_status.js`` and a test holds the two equal.
+WatcherState = Literal["running", "not_running", "unavailable"]
+WATCHER_STATES: tuple[WatcherState, ...] = ("running", "not_running", "unavailable")
+
+
+def watcher_state(processes: Sequence[str] | None = None) -> WatcherState:
+    """Whether the vault-sync watcher is running, as far as a ``ps`` snapshot can tell.
+
+    An EMPTY snapshot is ``"unavailable"``, not ``"not_running"``.
+    ``snapshot_processes`` returns ``[]`` only when ``ps`` is missing, timed
+    out or raised, because a snapshot that worked always contains at least the
+    process asking. So ``[]`` means the check did not run, and calling that
+    "not running" would report a fact nobody observed.
+    """
+    procs = processes if processes is not None else snapshot_processes()
+    if not procs:
+        return "unavailable"
+    if any(is_vault_watcher(cmd) for cmd in procs):
+        return "running"
+    return "not_running"
+
+
 def watcher_doctor_check(
     *, launchd_dir: Path, platform: str, processes: Sequence[str] | None = None
 ) -> list[_DoctorCheck]:
     """Report whether the vault-sync watcher is installed (macOS) or running (elsewhere).
 
     ``processes`` is the test seam, the same one ``maintenance.ingest_in_flight``
-    has: ``None`` takes a ``ps`` snapshot. It is consulted only off macOS.
+    has: ``None`` takes a ``ps`` snapshot. It is consulted only off macOS, where
+    the answer is :func:`watcher_state`'s — so an unreadable snapshot is a
+    distinct "unknown" WARN, matching ``brain ui``, not "not running".
     """
     if platform == "darwin":
         if (launchd_dir / f"{WATCHER_LABEL}.plist").is_file():
@@ -83,9 +113,24 @@ def watcher_doctor_check(
             )
         ]
 
-    procs = processes if processes is not None else snapshot_processes()
-    if any(is_vault_watcher(cmd) for cmd in procs):
+    # One rule with the UI's status line: `watcher_state` owns the scan, so an
+    # unreadable process list is "unknown" here exactly as it is in `brain ui`.
+    state = watcher_state(processes)
+    if state == "running":
         return [_check("vault watcher", "ok", "`brain vault sync --watch` is running")]
+    if state == "unavailable":
+        return [
+            _check(
+                "vault watcher",
+                "warn",
+                "the process list could not be read (`ps` failed), so the watcher's "
+                f"status is unknown; if it is stopped, {_INVISIBLE_EDITS}",
+                # Check before starting: the watcher may be running, and
+                # nothing stops a second one from starting beside it.
+                "check with `ps`; if no `brain vault sync --watch` is running, "
+                "start one with `brain vault sync --watch`",
+            )
+        ]
     return [
         _check(
             "vault watcher",

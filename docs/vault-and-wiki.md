@@ -74,7 +74,7 @@ brain graph --root <id> --depth 2 --format dot | dot -Tsvg > focus.svg
 brain vault sync --watch
 ```
 
-Runs as a daemon (Ctrl-C to stop). Filesystem events trigger debounced (500ms) per-file syncs — edit a note, save, and within a beat the chunk + embedding update in the DB. Skips `_templates/`, `_attachments/`, hidden directories. `brain-install-launchd` (which `bin/brain-up` runs) keeps it running under launchd as `com.brain.watcher`, and `brain doctor`'s `vault watcher` line reports when it is not installed (macOS) or not running (elsewhere).
+Runs as a daemon (Ctrl-C to stop). Filesystem events trigger debounced (500ms) per-file syncs — edit a note, save, and within a beat the chunk + embedding update in the DB. Skips `_templates/`, `_attachments/`, hidden directories. `brain-install-launchd` (which `bin/brain-up` runs) keeps it running under launchd as `com.brain.watcher`, and `brain doctor`'s `vault watcher` line reports when it is not installed (macOS) or not running (elsewhere). `brain ui` reports it too, in its top bar: "Watcher not running — external edits will not appear in search" (or "Watcher status unknown" where the process list cannot be read — doctor says the same off macOS). The two can legitimately differ only on macOS, where doctor checks that the `com.brain.watcher` plist is installed (leaving its health to the `daemons` line) while the UI looks for a running `brain vault sync --watch` process. That gives two disagreements: a watcher that is installed but has crashed is "not running" in the UI while doctor's `vault watcher` line says ok, and a watcher started by hand without the plist leaves the UI silent while doctor warns that it is not installed.
 
 ### Vault maintenance
 

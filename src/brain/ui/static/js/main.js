@@ -30,6 +30,10 @@ import { wireKeys } from "/static/js/keys.js";
    import plus the wirePalette() call in boot() is the whole integration — there
    is deliberately no keys.js edit and no markup in index.html to keep in sync. */
 import { wirePalette } from "/static/js/palette.js";
+/* The A9 watcher status line. Order-free like wirePalette(): it owns
+   #watcher-status in the top bar, which no renderer touches, and subscribes to
+   nothing. */
+import { wireWatcherStatus } from "/static/js/watcher.js";
 /* marginalia.js is NOT symmetric with palette.js, and the difference is the
    whole reason its call site is where it is. wirePalette() builds a <dialog> on
    document.body and subscribes to nothing, so it is order-free. wireMarginalia()
@@ -226,6 +230,7 @@ async function boot() {
      to the block order. */
   wireGraph();
   wireRelated();
+  wireWatcherStatus();
 
   seedControls();
 

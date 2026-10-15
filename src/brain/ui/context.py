@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..errors import BrainError
+from .watcher_probe import WatcherProbe
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
     import psycopg
@@ -154,6 +155,10 @@ class UiContext:
     #: dataclass default is the fail-closed one so a context built without it
     #: (every test fixture that does not care) hides rather than leaks.
     serve_confidential_titles: bool = False
+    #: Answers ``GET /api/watcher`` (A9's UI half): is the vault-sync watcher
+    #: running. One probe per app, so its TTL cache is shared by every tab.
+    #: Injected so a test can fix the answer instead of forking ``ps``.
+    watcher_probe: WatcherProbe = field(default_factory=WatcherProbe)
 
     def connect(self) -> AbstractContextManager[psycopg.Connection[Any]]:
         """Open a per-request connection. Always used as a ``with`` block."""

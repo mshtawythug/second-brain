@@ -139,6 +139,7 @@ def create_app(context: UiContext) -> Starlette:
         Route("/api/health", routes_meta.health, methods=["GET"]),
         Route("/api/status", routes_meta.status, methods=["GET"]),
         Route("/api/facets", routes_meta.facets, methods=["GET"]),
+        Route("/api/watcher", routes_meta.watcher, methods=["GET"]),
         Route("/api/tree", routes_tree.tree, methods=["GET"]),
         Route("/api/search", routes_search.search, methods=["GET"]),
         Route("/api/recent", routes_discovery.recent, methods=["GET"]),
