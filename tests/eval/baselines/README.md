@@ -66,7 +66,9 @@ on either edge, so a pinned query drifts only when the document set changes
 *inside* the range. That is trigger (1), and it is a real re-record. The
 recency boost does not bring the clock back: `0.5^(age/halflife)` scales every
 candidate by the same factor as `now` advances, so the ranked order, which is
-all the metrics read, is unchanged. See
+all the metrics read, is unchanged, *provided no candidate is dated after
+`now`*. The boost clamps a future document's age to 0, which breaks the
+identity. A `before` that is already in the past guarantees the condition. See
 `docs/specs/2026-10-15-eval-recency-determinism-design.md` §2.2.
 
 `load_corpus` enforces the rules that keep a pinned query pinned:
@@ -92,9 +94,15 @@ gitignored, so no PR does it for you. On each `recency` entry, replace
 with
 
 ```yaml
-    after: 2026-09-04    # example: before - 41 days reproduces the 40-day window
-    before: 2026-10-15   # example: the day after you re-record
+    after: 2026-09-05    # example: before - 40 days (the half-open range is 40 days)
+    before: 2026-10-15   # example: <= TODAY's UTC date when you re-record, never later
 ```
+
+`before` must not be later than the UTC date on which you re-record, so its
+midnight is already past. With a `before` of tomorrow, a brief ingested after
+the recording but before UTC midnight lands inside the "pinned" range, and the
+drift comes back for good. Briefs ingested earlier on the re-record day are
+left out; that is the intended trade-off.
 
 Then **re-record `ci.json`**. A converted row filters a different column
 against a fixed range, so its numbers move once, by design. Before

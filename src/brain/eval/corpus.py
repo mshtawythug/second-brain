@@ -145,8 +145,13 @@ def load_corpus(path: Path | None = None) -> list[EvalQuery]:
         Parsed list of :class:`EvalQuery` objects.
 
     Raises:
-        EvalCorpusError: On missing/malformed file, version mismatch, unknown
-            category, missing required fields, or empty ``expected_doc_ids``.
+        EvalCorpusError: On missing/malformed file (including an unquoted
+            impossible YAML date), version mismatch, unknown category, missing
+            required fields, empty ``expected_doc_ids``, or a non-integer
+            ``since_days``; and on the date-bound rules — an ``after``/``before``
+            that is not a ``YYYY-MM-DD`` calendar date, ``after`` without
+            ``before``, ``after >= before``, or ``since_days`` combined with
+            either bound.
     """
     if path is None:
         path = _DEFAULT_CORPUS_PATH
@@ -156,7 +161,11 @@ def load_corpus(path: Path | None = None) -> list[EvalQuery]:
 
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, ValueError) as exc:
+        # ``ValueError`` too: PyYAML's timestamp constructor builds an unquoted
+        # ``before: 2026-02-30`` with ``datetime.date(...)`` INSIDE safe_load,
+        # so an impossible date raises a bare ValueError before
+        # ``_parse_date_bound`` ever sees the value.
         raise EvalCorpusError(f"corpus YAML parse error in {path}: {exc}") from exc
 
     if not isinstance(raw, dict):
@@ -219,7 +228,12 @@ def load_corpus(path: Path | None = None) -> list[EvalQuery]:
             )
 
         since_raw = entry.get("since_days")
-        since_days = int(since_raw) if since_raw is not None else None
+        try:
+            since_days = int(since_raw) if since_raw is not None else None
+        except (TypeError, ValueError) as exc:
+            raise EvalCorpusError(
+                f"corpus query #{i + 1} 'since_days' must be an integer, got {since_raw!r}"
+            ) from exc
         after = _parse_date_bound(entry.get("after"), field="after", index=i + 1)
         before = _parse_date_bound(entry.get("before"), field="before", index=i + 1)
         _check_date_bounds(after=after, before=before, since_days=since_days, index=i + 1)

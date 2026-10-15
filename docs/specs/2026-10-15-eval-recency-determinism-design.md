@@ -78,7 +78,10 @@ so the **order** is unchanged. The order is all that nDCG, MRR and Recall
 read. Two conditions apply:
 
 - **The clamp.** `age = max(0, now − t)` breaks the identity only for
-  documents dated in the future. Inside a closed past range, none are.
+  documents dated in the future. Inside a closed past range, none are. That
+  is why `before` must already be in the past when the baseline is recorded
+  (§3.3). A `before` later than `now` leaves room for a document dated after
+  `now`.
 - **Candidate pools.** The FTS and vector legs are `LIMIT`-ed on leg rank,
   before the boost is applied, so the pools do not depend on `now` either.
 
@@ -118,7 +121,7 @@ dependency is documented in the README and in CLAUDE.md, not enforced.
 ### 3.2 Runner (`brain.eval.runner`)
 
 `run_eval` passes `after` / `before` to `hybrid_search` as UTC-aware midnight
-datetimes, built by one helper, `_utc_midnight(d: date | None)`. Building them
+datetimes, built by one helper, `_utc_midnight(day: date | None)`. Building them
 UTC-aware in the eval layer means the bound does not depend on the session
 time zone, and on `_ensure_utc` being called later.
 
@@ -143,10 +146,19 @@ path and Ollama. The re-record is **required**, because the filter column
 changes from `ingested_at` to `coalesce(sent_at, ingested_at)` and the window
 becomes fixed. Choosing the dates:
 
-- `before` = the day after the re-record, so that every judged document is
-  older than it.
-- `after` = `before − 41 days`, which reproduces the 40-day window the current
-  judgments were made against.
+- `before` = a UTC date **no later than today's UTC date at re-record time**,
+  so its midnight is already in the past. The bound must be closed *before*
+  the recording, not after it. A `before` of tomorrow would leave the window
+  open until the next UTC midnight: a brief ingested after the recording but
+  before that midnight lands inside the pinned range, and the drift this spec
+  removes comes back permanently, until someone re-records. It would also break
+  the "closed past range" premise of the clamp argument in §2.2.
+- `after` = `before − 40 days`. The half-open `[after, before)` is then the
+  same 40 days the current `since_days: 40` judgments were made against.
+
+A brief ingested on the re-record day itself, before the recording, is
+excluded when `before` is today. That is the intended trade-off: the range
+covers only days that are complete.
 
 The README has a read-only SQL check that every judged document of a pinned
 query falls inside its range.
@@ -177,6 +189,16 @@ Integration tests, in `tests/test_eval_runner.py` against the real test DB:
 11. `_utc_midnight` returns a UTC-aware midnight for a date, and `None` for
     `None`.
 
+Regression tests (CLAUDE.md rule 12), added after review, in
+`tests/test_eval_corpus.py`:
+
+12. An **unquoted** impossible date (`before: 2026-02-30`) raises
+    `EvalCorpusError`. PyYAML's timestamp constructor raises a bare
+    `ValueError` inside `safe_load`, before `_parse_date_bound` runs, so this
+    escaped as a traceback.
+13. A non-integer `since_days` (`forty`, `[40]`) raises `EvalCorpusError`, not
+    a bare `ValueError` or `TypeError` from `int()`.
+
 ## 5. Compatibility
 
 - **`ci.json`:** no schema change. `load_baseline` is untouched, and the
@@ -188,14 +210,16 @@ Integration tests, in `tests/test_eval_runner.py` against the real test DB:
 
 ## 6. Mutation catalog
 
-Each new guard must go red under its mutation (see the plan's §Mutation proofs):
+Each new guard must go red under its mutation. The plan's §Mutation proofs has the exact needles, their counts, and the `>`/`E` needles:
 
 | ID | Mutation | Expected red |
 |---|---|---|
 | M1 | Drop the `after`-requires-`before` check | test 3 |
-| M2 | Change `after >= before` to `after > before` | test 4 (the equal case) |
+| M2 | Change `after >= before:` to `after > before:` (the colon makes the needle unique, since docstrings quote the bare expression) | test 4 (the equal case) |
 | M3 | Drop the `since_days` exclusivity check | test 5 |
 | M4 | Accept `datetime` (remove the `isinstance(v, datetime)` rejection) | test 6 |
 | M5 | Runner does not pass `after` / `before` to `hybrid_search` | tests 9 and 10 |
 | M6 | Runner swaps `after` and `before` | test 10 |
 | M7 | `_utc_midnight` returns a naive datetime | test 11 |
+| M8 | `safe_load` catches only `yaml.YAMLError` | test 12 |
+| M9 | `since_days` `int()` is not wrapped | test 13 |

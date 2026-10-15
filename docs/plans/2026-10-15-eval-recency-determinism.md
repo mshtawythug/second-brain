@@ -24,8 +24,10 @@ search-layer change, no baseline-format change, and no CLI change.
 | `tests/eval/baselines/README.md` | (2): pinned form, the user-applied corpus edit, the window-check SQL |
 | `CLAUDE.md` | "The committed `ci.json` baseline", item 2 |
 
-No touched source file is in CLAUDE.md's over-ceiling table. `corpus.py` is
-152 lines and `runner.py` is 223.
+No touched source file is in CLAUDE.md's over-ceiling table. Both are far
+under 800: at the base `e1fc28e`, `corpus.py` was 152 lines and `runner.py`
+223 (`git show "e1fc28e:src/brain/eval/corpus.py" | wc -l`). Take the present
+counts from `wc -l`.
 
 ## Task 1 — corpus schema (TDD)
 
@@ -45,7 +47,7 @@ No touched source file is in CLAUDE.md's over-ceiling table. `corpus.py` is
 1. RED: write spec §4 tests 8–11 in `tests/test_eval_runner.py`. Test 8 (the
    drift reproduced) must PASS on the unmodified code, because it is the bug.
    Tests 9–11 must fail.
-2. GREEN: add `_utc_midnight(d: date | None) -> datetime | None` and pass
+2. GREEN: add `_utc_midnight(day: date | None) -> datetime | None` and pass
    `after=_utc_midnight(q.after), before=_utc_midnight(q.before)` to the
    `hybrid_search` call.
 
@@ -63,27 +65,42 @@ green, using a sibling test DB name unique to this worktree.
 
 ## Mutation proofs
 
-Apply each mutation in a `git archive` copy, not in the worktree, so the suite
-of record is never mutated. Run with `PYTHONDONTWRITEBYTECODE=1`. Check all
-five clauses: the unmutated run passes; the mutation lands exactly its declared
-count; the run goes red; the needle appears on a `>` or `E` line; and the
-restored copy is green again.
+Apply each mutation in a copy of the tree (a `git archive` or an `rsync` that
+excludes `.venv` and `.git`), never in the worktree, so the suite of record is
+never mutated. Run with `PYTHONDONTWRITEBYTECODE=1`, and with `PYTHONPATH` set
+to the copy's `src`, so that `brain` imports from the copy. Check all five
+clauses:
 
-| ID | File | Mutation (sed-level) | Count | Red test (needle) |
-|---|---|---|---|---|
-| M1 | corpus.py | delete the `after`-without-`before` raise | 1 | `test_load_corpus_rejects_after_without_before` |
-| M2 | corpus.py | `after >= before` → `after > before` | 1 | `test_load_corpus_rejects_after_not_before_before[equal]` |
-| M3 | corpus.py | delete the `since_days` exclusivity raise | 1 | `test_load_corpus_rejects_since_days_with_absolute_bound` |
-| M4 | corpus.py | drop the `datetime` rejection branch | 1 | `test_load_corpus_rejects_non_date_bound[datetime]` |
-| M5 | runner.py | drop the `after=` / `before=` kwargs | 1 | `test_run_eval_pinned_window_is_stable_under_new_ingest` |
-| M6 | runner.py | swap `q.after` / `q.before` | 1 | `test_run_eval_pinned_bounds_are_half_open` |
-| M7 | runner.py | `tzinfo=UTC` → removed | 1 | `test_utc_midnight_is_utc_aware` |
+1. The unmutated run passes.
+2. The **exact** needle below occurs the declared number of times, and the
+   replacement changed the file.
+3. The run goes red.
+4. The `>`/`E` needle appears on a `>` or `E` line of the failure.
+5. The restored copy is green again.
+
+The needles are literal substrings. Count them against the file as it stands,
+because a docstring that quotes the same expression changes the count. The bare
+`after >= before` occurs three times in `corpus.py` (twice in docstrings), and
+that is why M2's needle includes the trailing colon.
+
+| ID | File | Exact needle → replacement | Count | Red test | `>`/`E` needle |
+|---|---|---|---|---|---|
+| M1 | corpus.py | `if after is not None and before is None:` → `if False:` | 1 | `test_load_corpus_rejects_after_without_before` | `'after' requires 'before'` |
+| M2 | corpus.py | `after >= before:` → `after > before:` | 1 | `test_load_corpus_rejects_after_not_before_before[equal]` | `'after' must be earlier than 'before'` |
+| M3 | corpus.py | `if since_days is not None and (after is not None or before is not None):` → `if False:` | 1 | `test_load_corpus_rejects_since_days_with_absolute_bound` | `'since_days' cannot be combined` |
+| M4 | corpus.py | `if isinstance(value, date) and not isinstance(value, datetime):` → `if isinstance(value, date):` | 1 | `test_load_corpus_rejects_non_date_bound[datetime]` | `'before' must be a calendar date` |
+| M5 | runner.py | the two-line block `after=_utc_midnight(q.after),` / `before=_utc_midnight(q.before),` → deleted | 1 | `test_run_eval_pinned_window_is_stable_under_new_ingest` | `assert` |
+| M6 | runner.py | the same block → `after=_utc_midnight(q.before),` / `before=_utc_midnight(q.after),` | 1 | `test_run_eval_pinned_bounds_are_half_open` | `assert` |
+| M7 | runner.py | `return datetime(day.year, day.month, day.day, tzinfo=UTC)` → `return datetime(day.year, day.month, day.day)` | 1 | `test_utc_midnight_is_utc_aware` | `assert` |
+| M8 | corpus.py | `except (yaml.YAMLError, ValueError) as exc:` → `except yaml.YAMLError as exc:` | 1 | `test_load_corpus_unquoted_impossible_date_raises_corpus_error` | `ValueError: day is out of range for month` (the bare escape the guard exists to catch) |
+| M9 | corpus.py | `except (TypeError, ValueError) as exc:` → `except () as exc:` | 1 | `test_load_corpus_non_integer_since_days_raises_corpus_error` | `invalid literal for int()` (the bare escape) |
 
 ## What the coordinator / user applies after merge
 
 1. In the local `tests/eval/golden_corpus.yaml`, replace `since_days: 40` on
-   the two `recency` entries with `after:` / `before:` dates. Spec §3.3 explains
-   how to choose them.
+   the two `recency` entries with `after:` / `before:` dates: `before` no later
+   than the re-record day's UTC date (never tomorrow), and `after` = `before` −
+   40 days. Spec §3.3 explains why.
 2. Re-record `ci.json` (`brain eval --record-baseline ci`, read-only on prod,
    with Ollama), and commit it with the trigger "an edit to
    `golden_corpus.yaml`".

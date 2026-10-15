@@ -456,3 +456,24 @@ def test_load_corpus_rejects_non_date_bound(tmp_path: Path, value: str) -> None:
     path = _corpus_with_bounds(tmp_path, f"before: {value}")
     with pytest.raises(EvalCorpusError, match="'before' must be a calendar date"):
         load_corpus(path)
+
+
+def test_load_corpus_unquoted_impossible_date_raises_corpus_error(tmp_path: Path) -> None:
+    """Regression: an UNQUOTED impossible date never reaches ``_parse_date_bound``.
+    PyYAML's timestamp constructor raises a bare ``ValueError`` inside
+    ``safe_load``, which escaped as a traceback instead of ``EvalCorpusError``
+    (the CLI's exit-1 mapping)."""
+    path = _corpus_with_bounds(tmp_path, "before: 2026-02-30")
+    with pytest.raises(EvalCorpusError, match="corpus YAML parse error"):
+        load_corpus(path)
+
+
+@pytest.mark.parametrize("value", ["forty", "[40]"], ids=["non-numeric", "list"])
+def test_load_corpus_non_integer_since_days_raises_corpus_error(
+    tmp_path: Path, value: str
+) -> None:
+    """Regression: ``int()`` on a non-numeric ``since_days`` raised a bare
+    ``ValueError`` / ``TypeError`` instead of ``EvalCorpusError``."""
+    path = _corpus_with_bounds(tmp_path, f"since_days: {value}")
+    with pytest.raises(EvalCorpusError, match="'since_days' must be an integer"):
+        load_corpus(path)
