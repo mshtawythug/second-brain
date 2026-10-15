@@ -11,7 +11,9 @@ enum. Four properties, each its own test because each fails on its own:
 * **behind the same guards as every /api/ route** — the token on a protected
   server, ``no-store``, GET only;
 * **database-free**, like ``/api/health``: the watcher question does not depend
-  on Postgres, so a dead database must not take the line down with it.
+  on Postgres, so a dead database must not take the line down with it. Proven
+  with a connection factory that fails ON ENTRY — ``_FakeConn`` raising on
+  ``execute`` alone let a route that opened a connection pass.
 
 No monkey-patching: ``UiContext.watcher_probe`` is the seam.
 No PII: the snapshot is synthetic paths.
@@ -22,6 +24,7 @@ import contextlib
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 from starlette.testclient import TestClient
 
@@ -132,3 +135,25 @@ def test_the_default_context_probes_with_the_doctors_rule(tmp_path: Path) -> Non
 
     assert isinstance(default.watcher_probe, WatcherProbe)
     assert default.watcher_probe.detect is watcher_state
+
+
+def test_it_answers_when_the_database_cannot_even_be_opened(tmp_path: Path) -> None:
+    """Database-free means never OPENING a connection, not merely never querying.
+
+    The other tests' ``_FakeConn`` raises only on ``execute``, so a route that
+    opened a connection and did nothing with it passed them. Here the factory
+    fails on entry, the way an unreachable Postgres does.
+    """
+
+    @contextlib.contextmanager
+    def unreachable() -> Any:
+        raise psycopg.OperationalError("synthetic: connection refused")
+        yield  # pragma: no cover — makes this a generator
+
+    context = _context(tmp_path, _fixed("not_running"), conn_factory=unreachable)
+
+    with TestClient(create_app(context), base_url=ORIGIN) as c:
+        response = c.get("/api/watcher")
+
+    assert response.status_code == 200
+    assert response.json() == {"state": "not_running"}

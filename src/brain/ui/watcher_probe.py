@@ -14,6 +14,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 
 from ..doctor_watcher import WatcherState, watcher_state
 
@@ -29,6 +30,18 @@ class WatcherProbe:
         default. Injected so tests count calls instead of forking ``ps``.
     :param clock: a monotonic clock in seconds. Injected for the same reason.
     :param ttl_s: how long a detection stays fresh.
+    :param lock: serialises detection, so requests that arrive together at an
+        expired TTL share ONE ``ps`` fork. A fresh ``threading.Lock`` by
+        default; injected so a test can observe that a second request reached
+        it, which is what makes the concurrency test deterministic.
+
+    A ``detect`` that RAISES caches nothing and the exception propagates (the
+    route answers a logged 500). The real detector cannot raise for an
+    environmental reason, because ``snapshot_processes`` already turns a
+    missing or failing ``ps`` into ``"unavailable"``, which is cached like any
+    answer. An exception is therefore a bug, and caching an invented answer
+    would hide it behind a plausible status line. The ``with`` block releases
+    the lock either way.
     """
 
     def __init__(
@@ -37,11 +50,14 @@ class WatcherProbe:
         detect: Callable[[], WatcherState] = watcher_state,
         clock: Callable[[], float] = time.monotonic,
         ttl_s: float = DEFAULT_TTL_S,
+        lock: AbstractContextManager[object] | None = None,
     ) -> None:
         self.detect = detect
         self._clock = clock
         self._ttl_s = ttl_s
-        self._lock = threading.Lock()
+        self._lock: AbstractContextManager[object] = (
+            lock if lock is not None else threading.Lock()
+        )
         self._cached: tuple[float, WatcherState] | None = None
 
     def state(self) -> WatcherState:

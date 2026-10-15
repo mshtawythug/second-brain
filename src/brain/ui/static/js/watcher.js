@@ -15,8 +15,10 @@
  * decides; the short one is aria-hidden, so a screen reader hears the full
  * sentence at every width).
  *
- * A FAILED CHECK CHANGES NOTHING. "The server is unreachable" is boot's toast
- * and a different problem; it is not evidence about the watcher either way.
+ * A FAILED CHECK CHANGES NOTHING once there is an answer on screen. "The
+ * server is unreachable" is boot's toast and a different problem; it is not
+ * evidence about the watcher either way. Before the first answer it says
+ * "unknown", because an empty line would claim the watcher is running.
  *
  * Spec: docs/specs/2026-10-15-ui-watcher-status-design.md §3.1, §4.
  */
@@ -27,24 +29,40 @@ import { watcherLine } from "/static/js/watcher_status.js";
 
 const POLL_MS = 60_000;
 
+/* Overlapping checks are SEQUENCED. Focus and visibilitychange often fire
+   together, and across the server's 15 s cache boundary two overlapping
+   requests can get different answers, in either arrival order. Each check
+   takes a ticket; an answer older than the last one painted is dropped. */
+let issued = 0;
+let painted = 0;
+
+/* Writes ONLY on a change of state. Rewriting identical text into a live
+   region can re-announce it, so a watcher that stays down would be read out
+   again every minute. The state painted is kept on the element. */
 function render(line) {
   const region = $("watcher-status");
+  if (region.dataset.state === line.state) return;
+  region.dataset.state = line.state;
   region.dataset.tone = line.tone;
   region.querySelector(".watcher-full").textContent = line.text;
   region.querySelector(".watcher-short").textContent = line.short;
 }
 
-/* Focus and visibilitychange often fire together, so two checks can overlap.
-   They are not sequenced: both reach the server's 15 s snapshot cache and get
-   the same answer, so their arrival order cannot change what is painted. */
 async function check() {
-  let payload;
+  const ticket = ++issued;
+  let line;
   try {
-    payload = await api("/api/watcher");
+    line = watcherLine(await api("/api/watcher"));
   } catch (e) {
-    return;
+    /* A failure keeps the last answer. But with NO answer yet, keeping it
+       means staying silent, and silence is exactly what RUNNING looks like,
+       so the first failure says "unknown" instead. */
+    if (painted !== 0) return;
+    line = watcherLine(null);
   }
-  render(watcherLine(payload));
+  if (ticket < painted) return;
+  painted = ticket;
+  render(line);
 }
 
 function checkIfVisible() {

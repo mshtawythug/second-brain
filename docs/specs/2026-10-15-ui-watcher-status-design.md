@@ -83,7 +83,16 @@ default), which is a separate ruling.
    does not poll.
 
 The probe lives on `UiContext` (`watcher_probe`, default-constructed), which is the app's existing
-injection seam; tests pass a probe over a fake detector instead of patching anything.
+injection seam; tests pass a probe over a fake detector instead of patching anything. Its lock is
+injectable too, so the concurrency test observes "the second request reached the lock" as an
+acquire-attempt count instead of sleeping and hoping.
+
+**Ruling — a detector that raises caches nothing.** The exception propagates and the route answers
+a logged 500. The real detector cannot raise for an environmental reason: `snapshot_processes`
+already converts a missing, slow or failing `ps` into `[]`, i.e. `unavailable`, which *is* cached
+like any answer. An exception is therefore a bug, and caching an invented state for it would hide
+the bug behind a plausible status line. The retry rate is bounded by the page's own cadence, and
+the lock is released either way (both pinned by a test).
 
 ## 4. The status line
 
@@ -107,9 +116,19 @@ executed under node the way `ledger_status.js` is:
 * **`unavailable` is shown, quietly.** Hiding it would claim a health the server could not check.
   It is styled muted, not as a warning: on a platform without `ps` it is permanent, and a permanent
   warning cries wolf (the doctor's ruling R8-5, same reasoning).
-* **A failed request changes nothing.** If `/api/watcher` errors, the line keeps its last state;
-  "the server is unreachable" is already toasted by boot's `/api/health` call and is a different
-  problem.
+* **A failed request keeps the last answer — once there is one.** If `/api/watcher` errors, the
+  line keeps its last state; "the server is unreachable" is already toasted by boot's
+  `/api/health` call and is a different problem. But if the **first** check fails there is no
+  last answer, and keeping "nothing" would be silence, which is exactly what `running` looks like.
+  So a failed first check renders `unavailable` (review finding, 2026-10-15).
+* **Only a change of state touches the DOM.** Rewriting identical text into a live region can
+  re-announce it, so a watcher that stays down would be read out every minute. The painted state
+  is kept in `data-state` and an unchanged answer returns early.
+* **Overlapping checks are sequenced.** Focus and `visibilitychange` often fire together, and
+  across the server's 15 s cache boundary two overlapping requests can get *different* answers in
+  either arrival order. Each check takes a ticket and an answer older than the last one painted is
+  dropped. (The first cut argued sequencing was unnecessary because both requests hit the same
+  cache; that is false exactly at a TTL boundary.)
 
 **Narrow viewports — measured, not assumed.** The element carries two spans: the full sentence and
 a short form. Below **1100 px** (the existing breakpoint where the rail becomes a drawer) the short
@@ -150,7 +169,11 @@ lines at 375 px predates this change (measured with the line removed). The brows
 | `src/brain/ui/static/js/watcher.js` | **new** — DOM wiring + polling |
 | `src/brain/ui/static/js/main.js` | import + `wireWatcherStatus()` in `boot()` |
 | `src/brain/ui/static/index.html` | the `#watcher-status` live region |
-| `src/brain/ui/static/css/components.css` | `.watcher-status` rules + the ≤ 780 px swap |
+| `src/brain/ui/static/css/components.css` | `.watcher-status` rules + the ≤ 1100 px swap |
 | `.github/workflows/ci.yml` | `tests/test_ui_browser_watcher.py` in the explicit browser roster |
 
 No file in CLAUDE.md's over-ceiling table is touched; every touched file stays under 800.
+
+Every guard and test above is mutation-proved: the plan's catalog holds **26** mutations, each
+passing all five clauses (passes unmutated, lands once, red, needle on a `>`/`E` line,
+restored green).

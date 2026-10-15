@@ -86,9 +86,24 @@ def browser() -> Iterator[Any]:
 class _Shell:
     """A booted shell plus the holder ``/api/watcher`` answers from."""
 
-    def __init__(self, page: Any, answer: dict[str, Any]) -> None:
+    def __init__(self, page: Any, answer: dict[str, Any], held: list[Any]) -> None:
         self.page = page
         self.answer = answer
+        #: Requests parked while ``answer["hold"]`` is set, oldest first, so a
+        #: test can answer them in an order the network chose for it.
+        self.held = held
+
+    def wait_for_held(self, count: int) -> None:
+        """Pump the page until ``count`` requests are parked (bounded, ~5 s)."""
+        for _ in range(250):
+            if len(self.held) >= count:
+                return
+            self.page.wait_for_timeout(20)
+        raise AssertionError(f"only {len(self.held)} of {count} requests were held")
+
+    def release(self, index: int, state: str) -> None:
+        self.held[index].fulfill(status=200, content_type="application/json",
+                                 body=json.dumps({"state": state}))
 
     def answered(self) -> int:
         return int(self.page.evaluate("window.__watcherAnswered"))
@@ -124,12 +139,17 @@ def make_shell(browser: Any, static_origin: str) -> Iterator[Any]:
     opened: list[Any] = []
 
     def make(state: str, *, width: int = 1280, fake_clock: bool = False,
-             read_only: bool = False) -> _Shell:
-        answer: dict[str, Any] = {"status": 200, "body": {"state": state}}
+             read_only: bool = False, status: int = 200) -> _Shell:
+        answer: dict[str, Any] = {"status": status, "body": {"state": state},
+                                  "hold": False}
+        held: list[Any] = []
         stubs = {**_STUBS, "/api/health": {**_STUBS["/api/health"], "read_only": read_only}}
 
         def route_api(route: Any) -> None:
             path = urlsplit(route.request.url).path
+            if path == "/api/watcher" and answer["hold"]:
+                held.append(route)
+                return
             if path == "/api/watcher":
                 route.fulfill(status=answer["status"], content_type="application/json",
                               body=json.dumps(answer["body"]))
@@ -146,7 +166,7 @@ def make_shell(browser: Any, static_origin: str) -> Iterator[Any]:
         if fake_clock:
             page.clock.install()
         page.goto(f"{static_origin}/static/index.html")
-        return _Shell(page, answer)
+        return _Shell(page, answer, held)
 
     try:
         yield make
@@ -322,3 +342,83 @@ def test_a_visible_tab_asks_again_every_minute(make_shell: Any) -> None:
     shell.page.clock.run_for(1_000)
     shell.wait_for_text("")
     assert shell.answered() == before + 1
+
+
+def test_a_hidden_tab_skips_the_minute_poll(make_shell: Any) -> None:
+    """The interval, not only the event listeners, must respect a hidden tab."""
+    shell = make_shell("not_running", fake_clock=True)
+    shell.wait_for_text(NOT_RUNNING)
+    before = shell.answered()
+    shell.answer["body"] = {"state": "running"}
+    shell.page.evaluate(
+        "Object.defineProperty(document, 'hidden', {value: true, configurable: true})"
+    )
+
+    shell.page.clock.run_for(60_000)
+    shell.page.wait_for_timeout(300)
+
+    assert shell.answered() == before, "a hidden tab polled /api/watcher"
+    assert shell.page.inner_text("#watcher-status .watcher-full") == NOT_RUNNING
+
+
+def test_a_failed_first_check_says_unknown_not_nothing(make_shell: Any) -> None:
+    """With no answer yet, silence would read exactly like a running watcher."""
+    shell = make_shell("running", status=500)
+    shell.page.wait_for_function(
+        "p => document.querySelector('#watcher-status .watcher-full')"
+        ".textContent.startsWith(p)",
+        arg=UNKNOWN_PREFIX, timeout=5000,
+    )
+
+    assert shell.page.get_attribute("#watcher-status", "data-tone") == "muted"
+
+
+_OBSERVE_LIVE_REGION = (
+    "() => { window.__liveMutations = 0;"
+    " new MutationObserver((m) => { window.__liveMutations += m.length; })"
+    "   .observe(document.getElementById('watcher-status'),"
+    "            {subtree: true, childList: true, characterData: true,"
+    "             attributes: true}); }"
+)
+
+
+def test_an_unchanged_answer_leaves_the_live_region_untouched(make_shell: Any) -> None:
+    """Rewriting identical text can re-announce it, every minute, forever."""
+    shell = make_shell("not_running")
+    shell.wait_for_text(NOT_RUNNING)
+    shell.page.evaluate(_OBSERVE_LIVE_REGION)
+    before = shell.answered()
+
+    shell.come_back()
+    shell.wait_for_answers(before + 1)
+    unchanged = shell.page.evaluate("window.__liveMutations")
+    shell.answer["body"] = {"state": "running"}
+    shell.come_back()
+    shell.wait_for_text("")
+    changed = shell.page.evaluate("window.__liveMutations")
+
+    assert unchanged == 0
+    assert changed > 0, "the observer saw nothing even for a real change"
+
+
+def test_a_stale_answer_cannot_overwrite_a_newer_one(make_shell: Any) -> None:
+    """Two checks overlap (focus + visibilitychange); the older answers last.
+
+    Across a server TTL boundary the two can genuinely differ, so the page must
+    keep the answer to the NEWER request, whichever arrives last.
+    """
+    shell = make_shell("not_running")
+    shell.wait_for_text(NOT_RUNNING)
+    shell.answer["hold"] = True
+
+    shell.come_back()
+    shell.wait_for_held(1)
+    shell.come_back()
+    shell.wait_for_held(2)
+    before = shell.answered()
+    shell.release(1, "running")
+    shell.wait_for_text("")
+    shell.release(0, "not_running")
+    shell.wait_for_answers(before + 2)
+
+    assert shell.page.inner_text("#watcher-status .watcher-full") == ""

@@ -152,6 +152,8 @@ Reading from another device always needs a token. `--lan` binds this machine's L
 
 It adds no runtime dependency — `starlette` and `uvicorn` already ship as transitive deps of the MCP SDK — and the front end is hand-written static assets with no bundler and no CDN, so it works fully offline.
 
+If the vault-sync watcher is not running, the top bar says so — "Watcher not running — external edits will not appear in search" — because edits made outside `brain ui` only reach search once `brain vault sync --watch` (or a manual `brain vault sync`) picks them up.
+
 Beside each note, the inspector shows its local link graph — the note and its direct neighbours, click a node to open it — and a rail of related notes ranked by the same hybrid scoring and cosine floor `brain search` uses. Both are read-only: they read what is already in the database and never trigger a build.
 
 ## Claude integrations
