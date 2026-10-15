@@ -125,7 +125,10 @@ def watcher_doctor_check(
                 "warn",
                 "the process list could not be read (`ps` failed), so the watcher's "
                 f"status is unknown; if it is stopped, {_INVISIBLE_EDITS}",
-                "brain vault sync --watch",
+                # Check before starting: the watcher may be running, and
+                # nothing stops a second one from starting beside it.
+                "check with `ps`; if no `brain vault sync --watch` is running, "
+                "start one with `brain vault sync --watch`",
             )
         ]
     return [

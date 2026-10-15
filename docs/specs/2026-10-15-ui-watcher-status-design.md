@@ -43,17 +43,25 @@ ambiguity in the direction that is merely *probably* right. The ledger's "UNKNOW
 re-derive the scan (`snapshot` + `any(is_vault_watcher …)`), which made it report an unreadable
 process list as "not running" while the UI said "unknown". It now calls `watcher_state` and maps
 `running` → ok, `not_running` → the existing WARN, `unavailable` → a distinct WARN saying the
-process list could not be read so the status is unknown (audit ruling, 2026-10-15). Off macOS
-the two surfaces therefore always agree.
+process list could not be read so the status is unknown (audit ruling, 2026-10-15). Its remedy is
+"check with `ps`; if no `brain vault sync --watch` is running, start one" — not a bare start
+command, because the watcher may be running and nothing prevents a second instance. Off macOS the
+two surfaces therefore **apply the same rule**. They can still show different things for a moment:
+the UI answers from a 15 s cache, and if its first check fails it shows an "unknown" placeholder
+until a real answer lands.
 
 **Process scan on every platform, including macOS.** The doctor check on macOS asks whether the
 `com.brain.watcher` plist is *installed* and leaves liveness to its `daemons` line. The UI line has
 no `daemons` line beside it, and its sentence is "watcher not **running**", so the UI asks the
 direct question everywhere. The launchd wrapper `bin/_brain-watcher-fg` `exec`s
 `brain vault sync --watch --vault …`, so a launchd-supervised watcher is visible to the scan.
-This is the **one documented divergence** between the two surfaces: on macOS an installed watcher
-that has crashed is "not running" in the UI while doctor's `vault watcher` line is ok (its health
-is reported on the `daemons` line instead).
+Because doctor asks a different question on macOS, the two surfaces can **legitimately disagree
+there, in two ways**:
+
+* **installed but crashed** — the UI says "not running"; doctor's `vault watcher` line is ok,
+  because the plist is installed (the crash is reported on its `daemons` line instead);
+* **not installed but started by hand** — the UI is silent (a watcher process is running); doctor
+  WARNs that `com.brain.watcher` is not installed.
 
 **Known residue (not fixed here):** the scan does not compare the watcher's `--vault` with the
 UI's vault. A watcher for a different vault reads as `running`. The doctor check has the same
@@ -190,6 +198,6 @@ lines at 375 px predates this change (measured with the line removed). The brows
 
 No file in CLAUDE.md's over-ceiling table is touched; every touched file stays under 800.
 
-Every guard and test above is mutation-proved: the plan's catalog holds **30** mutations, each
+Every guard and test above is mutation-proved: the plan's catalog holds **31** mutations, each
 passing all five clauses (passes unmutated, lands once, red, needle on a `>`/`E` line,
 restored green).

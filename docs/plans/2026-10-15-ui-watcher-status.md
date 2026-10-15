@@ -78,6 +78,10 @@ Round 3 (on `dba6c19`):
 * doctor's non-darwin branch delegates to `watcher_state` — an unreadable snapshot is a distinct
   "unknown" WARN, as in the UI; the near-miss list is one constant shared by both scan tests.
 
+Round 4 (on `e6176b5`):
+* the unknown WARN's remedy is check-then-start (asserted), since the watcher may be running and
+  there is no single-instance guard; the spec and user guide name BOTH macOS divergences.
+
 ### T6 — verify
 `ruff check`, `mypy src/`, `bin/brain-ci` green; `brain demo` sandbox visual check with a throwaway
 `BRAIN_VAULT_PATH` (never the live vault or prod DB).
@@ -85,10 +89,10 @@ Round 3 (on `dba6c19`):
 ## Mutation catalog
 
 Each was applied, seen red with its needle on a `>`/`E` line, and reverted to green
-(`PYTHONDONTWRITEBYTECODE=1`); each anchor occurs exactly once in its file. All 30 passed all
+(`PYTHONDONTWRITEBYTECODE=1`); each anchor occurs exactly once in its file. All 31 passed all
 five clauses on 2026-10-15, run in a copy of the working tree (M13/M18 re-run and M19 added after
 the layout fix; M14 re-anchored, M20–M25 added in review round 1, M26 from the audit, and M14/M23 re-anchored with
-M27–M28 added in review round 2, M29–M30 in round 3 — M1/M2, the only DB-backed entries, were re-run after the shared test Postgres crashed
+M27–M28 added in review round 2, M29–M30 in round 3, M31 in round 4 — M1/M2, the only DB-backed entries, were re-run after the shared test Postgres crashed
 mid-run (20:10 UTC); their crash-window results were connection timeouts, not verdicts — M21 first went red on the
 test's harness precondition rather than on `calls == 1`, so the test was restructured until it
 failed on its claim).
@@ -125,6 +129,7 @@ failed on its claim).
 | M28 | `js/watcher.js` | the placeholder advances `painted` (the round-1 shape) | `test_the_unknown_placeholder_does_not_shadow_an_older_real_answer` (`Timeout`) |
 | M29 | `ui/routes_meta.py` | `await run_in_threadpool(ctx.watcher_probe.state)` → `ctx.watcher_probe.state()` (detection on the event loop) | `test_detection_never_runs_on_the_event_loop` (`event loop`) |
 | M30 | `doctor_watcher.py` | the non-darwin `unavailable` branch deleted (falls through to "not running") | `test_off_macos_an_unreadable_process_list_warns_unknown_not_stopped` (`could not be read`) |
+| M31 | `doctor_watcher.py` | the unknown branch's remedy dropped | `test_off_macos_an_unreadable_process_list_warns_unknown_not_stopped` (`remedy`) |
 
 ## Risks
 * **Live-region timing in headless Chromium** — asserted structurally (attributes + not hidden),

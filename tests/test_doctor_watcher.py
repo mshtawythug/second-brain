@@ -182,6 +182,12 @@ def test_off_macos_an_unreadable_process_list_warns_unknown_not_stopped(
     assert "could not be read" in check.detail
     assert "unknown" in check.detail
     assert "is not running" not in check.detail
+    # Check first, THEN start: the watcher may well be running, and nothing
+    # stops a second `brain vault sync --watch` from starting beside it.
+    assert check.remedy == (
+        "check with `ps`; if no `brain vault sync --watch` is running, "
+        "start one with `brain vault sync --watch`"
+    )
 
 
 def test_runtime_doctor_checks_threads_the_processes_seam(tmp_path: Path) -> None:
