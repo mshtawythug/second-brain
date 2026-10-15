@@ -36,6 +36,7 @@ from brain.sensitivity import CONFIDENTIAL
 from brain.ui import routes_related
 from brain.ui.app import create_app
 from brain.ui.context import UiContext
+from tests.ordered_ids import next_chunk_id
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -87,9 +88,9 @@ def _insert_doc(
     for index, content in enumerate(chunk_contents):
         if index < len(vectors):
             conn.execute(
-                "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
-                "VALUES (%s::uuid, %s, %s, %s::vector)",
-                (doc_id, index, content, vectors[index]),
+                "INSERT INTO chunks (id, document_id, chunk_index, content, embedding) "
+                "VALUES (%s::uuid, %s::uuid, %s, %s, %s::vector)",
+                (next_chunk_id(), doc_id, index, content, vectors[index]),
             )
         else:
             conn.execute(
@@ -110,6 +111,10 @@ SHORT_BODY = "ZZQUARK short body."
 def _seed(conn: psycopg.Connection[Any]) -> dict[str, str]:
     """Source ``A``; two neighbours ``B`` (title + body overlap) and ``C``
     (body only), both near ``A`` on the vector leg.
+
+    ``B`` and ``C`` share one vector, a tie the vector leg breaks by chunk id;
+    ``_insert_doc`` issues ids in insertion order (:mod:`tests.ordered_ids`), so
+    ``B`` ranks first there. See ``tests/test_related_compute.py::_seed_a_b_c``.
     """
     near = _vector(0.99, 0.05)
     a = _insert_doc(

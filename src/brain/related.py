@@ -16,33 +16,21 @@ emitter's job and lives in :mod:`brain.wiki.build_related`, which imports
 from here. :mod:`brain.connect` reuses the eligibility + embedding helpers
 for its own auto-link scoring.
 
-**File-size ceiling (CLAUDE.md): this file is now OVER, and the F6 gate below
-is what put it over.** Re-derive with ``wc -l src/brain/related.py``; the trail
-is 714 (``3b16527``, where the wiki/ui split created it) -> 720 (``0473b5f``)
--> 726 (``7b5579e``) -> 851 (``b7fd0e8``, the F6 gate) -> 851 (``f0abf64``, the
-merge; no line changed) -> 851 (``0af7353``, naming this module's consumer)
--> **the phase-5 fix-round commit that aligned this trail with CLAUDE.md's**,
-descriptive, no delta: a hop cannot name its own SHA (see ``connect.py``). Read
-it as authoritative only THROUGH THE LAST SHA IT NAMES; for anything after it
-use ``git log --oneline f8c76c0..HEAD -- src/brain/related.py``.
-
-**This crossing is a rule violation, recorded rather than smoothed over.**
-CLAUDE.md's ceiling section says an existing file under 800 "must stay under it
--- extract rather than grow past", and the F6 gate grew this file past it
-instead. The prior draft of this very paragraph asserted the file was "under
-800, but not by much" -- it was already over when that sentence was written,
-which is precisely the by-omission failure the ceiling section's closing
-"residue" note predicts and names this file as the imminent instance of. The
-honest state is: over, knowingly, pending the extraction below.
-
-The extraction is deliberately NOT done in the same change as a security fix --
-mixing a 250-line module move into the commit that closes a body-egress hole
-would make both harder to review. The clean seam is the lexeme/tsquery
-machinery at the tail of this module (``_build_self_tsquery``,
-``_corpus_common_lexemes``, ``_top_body_lexemes`` and the tsquery-escaping
-helpers, plus their module constants): it is self-contained, touches the
-database only through a passed ``conn``, and already has its own test file in
-``tests/test_build_related_signal.py``. Do that before the next addition here.
+**File-size ceiling (CLAUDE.md): back UNDER, by extraction.** Re-derive with
+``wc -l src/brain/related.py``. The trail is 714 (``3b16527``, where the wiki/ui
+split created it) -> 720 (``0473b5f``) -> 726 (``7b5579e``) -> 851 (``b7fd0e8``,
+the F6 gate, which crossed the ceiling: a recorded rule violation) -> 851
+(``f0abf64``, the merge; no line changed) -> 851 (``0af7353``) -> 851
+(``7536c4f``, promoted 2026-10-15) -> **the commit that moved both candidate legs
+to brain.related_candidates**, descriptive, no delta: a hop cannot name its own
+SHA (see ``connect.py``). Read it as authoritative only THROUGH THE LAST SHA IT
+NAMES; for anything after it use
+``git log --oneline f8c76c0..HEAD -- src/brain/related.py``. Being under is a
+live condition, not a settled one: a commit that pushes it back over needs its
+CLAUDE.md row back. The next clean seam, if one is needed, is the lexeme/tsquery
+machinery at the tail (``_build_self_tsquery``, ``_corpus_common_lexemes``,
+``_top_body_lexemes``, the tsquery-escaping helpers), already covered by
+``tests/test_build_related_signal.py``.
 """
 from __future__ import annotations
 
@@ -54,8 +42,8 @@ from typing import Any
 import psycopg
 
 from .rank_fusion import rrf_contribution
-from .search import CANDIDATE_LIMIT, PER_DOC_CHUNK_CAP, RRF_K
-from .sensitivity import not_confidential_sql
+from .related_candidates import confidential_clause, fts_candidates, vector_candidates
+from .search import RRF_K
 
 __all__ = [
     "DEFAULT_RELATED_LIMIT",
@@ -386,7 +374,7 @@ def _eligible_source_docs(
         WHERE d.draft = FALSE
           AND d.vault_path IS NOT NULL
           AND c.embedding IS NOT NULL
-          {_confidential_clause(exclude_confidential)}
+          {confidential_clause(exclude_confidential)}
         ORDER BY d.vault_path
         """
     ).fetchall()
@@ -406,115 +394,6 @@ def _avg_embedding(conn: psycopg.Connection[Any], doc_id: str) -> Any:
     if row is None:
         return None
     return row[0]
-
-
-def _confidential_clause(exclude_confidential: bool) -> str:
-    """``AND <predicate>`` for the two candidate legs, or ``""`` to include.
-
-    A frozen literal rather than a bound ``%s`` because both legs bind their
-    other parameters POSITIONALLY: a conditional extra parameter must be
-    inserted at the right index by every caller or silently bind the wrong
-    value, and the wrong direction here only ADDS rows, so no test would see
-    it. Same reasoning :func:`brain.sensitivity.not_confidential_sql` records.
-    """
-    if not exclude_confidential:
-        return ""
-    return f"AND {not_confidential_sql('d')}"
-
-
-def _fts_candidates(
-    conn: psycopg.Connection[Any],
-    *,
-    tsquery: str,
-    exclude_doc_id: str,
-    exclude_confidential: bool,
-) -> list[tuple[str, str, str]]:
-    """Return up to ``CANDIDATE_LIMIT`` (chunk_id, document_id, content) rows
-    from the per-doc-capped FTS leg. Empty list when ``tsquery`` is empty.
-
-    Mirrors the per-doc-cap CTE in :func:`brain.search.hybrid_search` but
-    with the eligibility filters from the related-docs pipeline (non-draft,
-    non-NULL ``vault_path``) and an explicit self-exclusion.
-    """
-    if not tsquery:
-        return []
-    # ts_rank weights array (Postgres float4[] order is ``{D, C, B, A}``).
-    # Override the runtime defaults ``{0.1, 0.2, 0.4, 1.0}`` to de-emphasize
-    # title (A) and promote body content (C). Migration 009's chunks.tsv
-    # weighting is A=title_text, B=tags_text, C=content+search_extras,
-    # so A=0.1 keeps short commodity-token title matches like "min" or
-    # "refer" from outranking distinctive body matches like "person-b" or
-    # "topic-ih"; C=0.8 ensures title-form distinctive tokens reach the
-    # candidate set even when they only appear in body content.
-    # Phase F.D — see ``docs/plans/2026-05-06-related-docs-rebuild.md``.
-    sql = f"""
-        WITH ranked AS (
-            SELECT c.id::text AS id,
-                   c.document_id::text AS document_id,
-                   c.content AS content,
-                   ts_rank(
-                       '{{0.05, 0.8, 0.3, 0.1}}'::float4[],
-                       c.tsv,
-                       %s::tsquery
-                   ) AS score,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY c.document_id
-                       ORDER BY ts_rank(
-                           '{{0.05, 0.8, 0.3, 0.1}}'::float4[],
-                           c.tsv,
-                           %s::tsquery
-                       ) DESC
-                   ) AS rn
-            FROM chunks c
-            JOIN documents d ON d.id = c.document_id
-            WHERE c.tsv @@ %s::tsquery
-              AND d.draft = FALSE
-              AND d.vault_path IS NOT NULL
-              AND d.id <> %s::uuid
-              {_confidential_clause(exclude_confidential)}
-        )
-        SELECT id, document_id, content
-        FROM ranked
-        WHERE rn <= {PER_DOC_CHUNK_CAP}
-        ORDER BY score DESC
-        LIMIT {CANDIDATE_LIMIT}
-    """
-    rows = conn.execute(sql, (tsquery, tsquery, tsquery, exclude_doc_id)).fetchall()
-    return [(str(r[0]), str(r[1]), str(r[2] or "")) for r in rows]
-
-
-def _vector_candidates(
-    conn: psycopg.Connection[Any],
-    *,
-    src_embedding: Any,
-    exclude_doc_id: str,
-    vector_sim_floor: float,
-    exclude_confidential: bool,
-) -> list[tuple[str, str, str]]:
-    """Return up to ``CANDIDATE_LIMIT`` (chunk_id, document_id, content) rows
-    from the cosine-floor-gated vector leg. Empty list when
-    ``src_embedding`` is ``None``.
-    """
-    if src_embedding is None:
-        return []
-    sql = f"""
-        SELECT c.id::text, c.document_id::text, c.content
-        FROM chunks c
-        JOIN documents d ON d.id = c.document_id
-        WHERE d.draft = FALSE
-          AND d.vault_path IS NOT NULL
-          AND d.id <> %s::uuid
-          {_confidential_clause(exclude_confidential)}
-          AND c.embedding IS NOT NULL
-          AND 1 - (c.embedding <=> %s::vector) >= %s
-        ORDER BY c.embedding <=> %s::vector
-        LIMIT {CANDIDATE_LIMIT}
-    """
-    rows = conn.execute(
-        sql,
-        (exclude_doc_id, src_embedding, vector_sim_floor, src_embedding),
-    ).fetchall()
-    return [(str(r[0]), str(r[1]), str(r[2] or "")) for r in rows]
 
 
 def _neighbors_for_source(
@@ -547,13 +426,13 @@ def _neighbors_for_source(
     # ``content`` as the snippet, and dropping only the snippet afterwards
     # would still publish the id, title and vault_path. Same ruling as
     # ``timeline._compose_doc_filter``.
-    fts_rows = _fts_candidates(
+    fts_rows = fts_candidates(
         conn,
         tsquery=tsquery,
         exclude_doc_id=source.id,
         exclude_confidential=exclude_confidential,
     )
-    vec_rows = _vector_candidates(
+    vec_rows = vector_candidates(
         conn,
         src_embedding=src_embedding,
         exclude_doc_id=source.id,

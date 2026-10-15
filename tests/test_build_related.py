@@ -14,6 +14,7 @@ from brain.wiki.build_related import (
     refresh_related,
     regenerate_related_json,
 )
+from tests.ordered_ids import next_chunk_id
 
 VECTOR_DIM = 4096
 
@@ -69,9 +70,9 @@ def _doc(
     assert row is not None
     doc_id = str(row[0])
     conn.execute(
-        "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
-        "VALUES (%s::uuid, 0, %s, %s::vector)",
-        (doc_id, f"{title} chunk text", vector),
+        "INSERT INTO chunks (id, document_id, chunk_index, content, embedding) "
+        "VALUES (%s::uuid, %s::uuid, 0, %s, %s::vector)",
+        (next_chunk_id(), doc_id, f"{title} chunk text", vector),
     )
     return doc_id
 
