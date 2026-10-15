@@ -129,11 +129,11 @@ git tag scheme:
   exclusive, both at UTC midnight. A `since_days` window moves with the clock,
   so a `recency` query drifted whenever a competing document was ingested (a
   daily brief, on most days) and `--fail-below` exited 3 with no change to
-  search; a closed range in the past does not move. `load_corpus` refuses `after` without `before`,
-  `after >= before`, a value that is not a plain date, and either bound mixed
-  with `since_days`. Existing corpora keep `since_days` until you convert them,
-  and converting one needs a baseline re-record. How to choose the dates:
-  `tests/eval/baselines/README.md` (2).
+  search; a closed range in the past does not move. `load_corpus` refuses
+  `after` without `before`, `after >= before`, a value that is not a plain
+  date, and either bound mixed with `since_days`. Existing corpora keep
+  `since_days` until you convert them, and converting one needs a baseline
+  re-record. How to choose the dates: `tests/eval/baselines/README.md` (2).
 
 ### Fixed
 
