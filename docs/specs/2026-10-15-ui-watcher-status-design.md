@@ -67,7 +67,10 @@ default), which is a separate ruling.
 * **No database.** Like `/api/health`, it answers when Postgres is down — the watcher question is
   independent of the DB.
 * **Never blocks the event loop.** `ps` is a subprocess with a 10 s timeout; the route runs the
-  probe through `starlette.concurrency.run_in_threadpool`.
+  probe through `starlette.concurrency.run_in_threadpool`. Pinned by a route test whose detector
+  records whether it ran on the event-loop thread (`asyncio.get_running_loop()` succeeds only
+  there); a refactor to a plain `probe.state()` call passes ruff, mypy and every other test
+  (review round 3).
 
 ### 3.1 Cost and cadence
 
@@ -177,6 +180,6 @@ lines at 375 px predates this change (measured with the line removed). The brows
 
 No file in CLAUDE.md's over-ceiling table is touched; every touched file stays under 800.
 
-Every guard and test above is mutation-proved: the plan's catalog holds **28** mutations, each
+Every guard and test above is mutation-proved: the plan's catalog holds **29** mutations, each
 passing all five clauses (passes unmutated, lands once, red, needle on a `>`/`E` line,
 restored green).

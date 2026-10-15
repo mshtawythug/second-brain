@@ -1,7 +1,7 @@
 """`GET /api/watcher` — A9's UI half, proven against a real ``create_app``.
 
 The route answers one question — is the vault-sync watcher running — as one
-enum. Four properties, each its own test because each fails on its own:
+enum. Five properties, each its own test because each fails on its own:
 
 * **reachable** from an app built the normal way, for every state;
 * **minimal**: exactly ``{"state": …}``. The process snapshot carries every
@@ -10,6 +10,8 @@ enum. Four properties, each its own test because each fails on its own:
   snapshot and run through the REAL ``watcher_state``;
 * **behind the same guards as every /api/ route** — the token on a protected
   server, ``no-store``, GET only;
+* **off the event loop** — detection may fork ``ps``, so it must run in the
+  thread pool, never inline in the async route;
 * **database-free**, like ``/api/health``: the watcher question does not depend
   on Postgres, so a dead database must not take the line down with it. Proven
   with a connection factory that fails ON ENTRY — ``_FakeConn`` raising on
@@ -20,6 +22,7 @@ No PII: the snapshot is synthetic paths.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from pathlib import Path
 from typing import Any
@@ -157,3 +160,31 @@ def test_it_answers_when_the_database_cannot_even_be_opened(tmp_path: Path) -> N
 
     assert response.status_code == 200
     assert response.json() == {"state": "not_running"}
+
+
+def test_detection_never_runs_on_the_event_loop(tmp_path: Path) -> None:
+    """The probe may fork ``ps`` with a 10 s timeout; on the loop that freezes the server.
+
+    A detector run INLINE in the async route executes on the event-loop thread,
+    where ``asyncio.get_running_loop()`` succeeds; one handed to the thread pool
+    runs where it raises. That difference is deterministic under TestClient, so
+    it pins ``run_in_threadpool`` — a refactor to a plain ``probe.state()`` call
+    passes every other test and type check.
+    """
+    on_loop: list[bool] = []
+
+    def detect() -> WatcherState:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_loop.append(False)
+        else:
+            on_loop.append(True)
+        return "running"
+
+    probe = WatcherProbe(detect=detect)
+    with TestClient(create_app(_context(tmp_path, probe)), base_url=ORIGIN) as c:
+        response = c.get("/api/watcher")
+
+    assert response.json() == {"state": "running"}
+    assert on_loop == [False], "detection ran on the event loop"
