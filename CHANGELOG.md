@@ -127,9 +127,9 @@ git tag scheme:
   (`YYYY-MM-DD`) in place of `since_days:`. They are `hybrid_search`'s own
   bounds on `coalesce(sent_at, ingested_at)`: `after` inclusive, `before`
   exclusive, both at UTC midnight. A `since_days` window moves with the clock,
-  so a `recency` query drifted on most days a document was ingested and
-  `--fail-below` exited 3 with no change to search; a closed range in the past
-  does not move. `load_corpus` refuses `after` without `before`,
+  so a `recency` query drifted whenever a competing document was ingested (a
+  daily brief, on most days) and `--fail-below` exited 3 with no change to
+  search; a closed range in the past does not move. `load_corpus` refuses `after` without `before`,
   `after >= before`, a value that is not a plain date, and either bound mixed
   with `since_days`. Existing corpora keep `since_days` until you convert them,
   and converting one needs a baseline re-record. How to choose the dates:
@@ -199,6 +199,12 @@ git tag scheme:
   a positive integer. **A corpus carrying `true`, `40.7`, `'40'`, `0` or a
   negative value now exits 1** with the query number, instead of loading.
   `forty` and `[40]`, which used to escape as a traceback, exit 1 the same way.
+- **An unquoted impossible date anywhere in a golden corpus crashed
+  `brain eval` with a traceback.** PyYAML builds an unquoted `2026-02-30` as a
+  date inside `yaml.safe_load`, in any field (`notes:` included), and raises a
+  bare `ValueError` that `load_corpus` did not catch. It now exits 1 with a
+  corpus parse error naming the file. A quoted `"2026-02-30"` stays a string
+  and, in `after:` / `before:`, is refused as not a calendar date.
 
 ### Dependencies
 
