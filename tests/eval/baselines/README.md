@@ -62,8 +62,14 @@ entry can now carry `after:` / `before:` (`YYYY-MM-DD`) in place of
 `since_days:`. These are `hybrid_search`'s own `after` / `before` filters on
 `coalesce(sent_at, ingested_at)`: `after` is inclusive and `before` is
 exclusive, both at UTC midnight. A closed range does not move with the clock,
-on either edge, so a pinned query drifts only when the document set changes
-*inside* the range. That is trigger (1), and it is a real re-record. The
+on either edge, so a pinned query's candidate set depends only on the
+document set, not on the clock. That is trigger (1), and it is a real
+re-record. Usually only an ingest *inside* the range moves the row, but not
+always: the vector leg is an approximate HNSW iterative scan, with the date
+filter applied inside the walk (`src/brain/search_vector_leg.py`, recall@50
+mean 0.9987, minimum 0.98, against an exact scan). An ingest *outside* the
+range still changes the index graph, so it can, rarely, change which in-range
+chunks reach the leg's top 50. The
 recency boost does not bring the clock back: `0.5^(age/halflife)` scales every
 candidate by the same factor as `now` advances, so the ranked order, which is
 all the metrics read, is unchanged, *provided no candidate is dated after
@@ -80,10 +86,11 @@ identity. A `before` that is already in the past guarantees the condition. See
 - Values must be plain dates, so `datetime`s and the ISO basic form are
   refused.
 - `before` alone is allowed.
-- `since_days` must be a positive `int`. `true`, `40.7`, `'40'`, `0` and
-  negatives are refused rather than coerced; `0` would silently mean no window
-  at all. This is stricter than before: a corpus that loaded with one of those
-  values now exits `1` until the value is fixed.
+- `since_days` must be a positive `int`. `true`, `40.7` and `'40'` used to be
+  coerced (to 1, 40 and 40); `0` and negatives used to pass through unchanged
+  (`0` as no window at all, `-5` as a window starting in the future). All of
+  them are now refused. This is stricter than before: a corpus that loaded with
+  one of those values now exits `1` until the value is fixed.
 
 A positive-int `since_days` still loads, for corpora that have not been
 converted, and still drifts exactly as described above.

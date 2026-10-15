@@ -42,8 +42,12 @@ teaches people to ignore it.
 ### 2.1 Why pin rather than exclude
 
 - **It removes the cause.** With a closed range, the query's candidate set
-  depends only on the document set. Excluding the rows leaves them drifting
-  and stops measuring them.
+  depends only on the document set, not on the clock. That is the whole
+  document set, not just the part inside the range: the vector leg is an
+  approximate HNSW iterative scan (`src/brain/search_vector_leg.py`, recall@50
+  mean 0.9987, minimum 0.98), so an ingest outside the range can, rarely,
+  change which in-range chunks reach its top 50. Excluding the rows leaves
+  them drifting and stops measuring them.
 - **The rows stay gated.** Under option 3 the `recency` category would never
   gate. Under option 2 a real regression on those rows still trips exit 3.
 - **No search-layer change.** `hybrid_search` already accepts `after` /
@@ -238,7 +242,7 @@ Each new guard must go red under its mutation. The plan's §Mutation proofs has 
 | M1 | Drop the `after`-requires-`before` check | test 3 |
 | M2 | Change `after >= before:` to `after > before:` (the colon makes the needle unique, since docstrings quote the bare expression) | test 4 (the equal case) |
 | M3 | Drop the `since_days` exclusivity check | test 5 |
-| M4 | Accept `datetime` (remove the `isinstance(v, datetime)` rejection) | test 6 |
+| M4 | Accept `datetime` (remove the `isinstance(value, datetime)` rejection) | test 6 |
 | M5 | Runner does not pass `after` / `before` to `hybrid_search` | tests 9 and 10 |
 | M6 | Runner swaps `after` and `before` | test 10 |
 | M7 | `_utc_midnight` returns a naive datetime | test 11 |
