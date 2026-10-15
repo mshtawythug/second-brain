@@ -91,7 +91,9 @@ def watcher_doctor_check(
     """Report whether the vault-sync watcher is installed (macOS) or running (elsewhere).
 
     ``processes`` is the test seam, the same one ``maintenance.ingest_in_flight``
-    has: ``None`` takes a ``ps`` snapshot. It is consulted only off macOS.
+    has: ``None`` takes a ``ps`` snapshot. It is consulted only off macOS, where
+    the answer is :func:`watcher_state`'s — so an unreadable snapshot is a
+    distinct "unknown" WARN, matching ``brain ui``, not "not running".
     """
     if platform == "darwin":
         if (launchd_dir / f"{WATCHER_LABEL}.plist").is_file():
@@ -111,9 +113,21 @@ def watcher_doctor_check(
             )
         ]
 
-    procs = processes if processes is not None else snapshot_processes()
-    if any(is_vault_watcher(cmd) for cmd in procs):
+    # One rule with the UI's status line: `watcher_state` owns the scan, so an
+    # unreadable process list is "unknown" here exactly as it is in `brain ui`.
+    state = watcher_state(processes)
+    if state == "running":
         return [_check("vault watcher", "ok", "`brain vault sync --watch` is running")]
+    if state == "unavailable":
+        return [
+            _check(
+                "vault watcher",
+                "warn",
+                "the process list could not be read (`ps` failed), so the watcher's "
+                f"status is unknown; if it is stopped, {_INVISIBLE_EDITS}",
+                "brain vault sync --watch",
+            )
+        ]
     return [
         _check(
             "vault watcher",

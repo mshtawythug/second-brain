@@ -39,11 +39,21 @@ a reliable signal that detection failed, and reporting it as `not_running` would
 ambiguity in the direction that is merely *probably* right. The ledger's "UNKNOWN" status
 (`ledger_status.js`) made the same call for the same reason.
 
+**Doctor reads the same rule off macOS.** `watcher_doctor_check`'s non-darwin branch used to
+re-derive the scan (`snapshot` + `any(is_vault_watcher …)`), which made it report an unreadable
+process list as "not running" while the UI said "unknown". It now calls `watcher_state` and maps
+`running` → ok, `not_running` → the existing WARN, `unavailable` → a distinct WARN saying the
+process list could not be read so the status is unknown (audit ruling, 2026-10-15). Off macOS
+the two surfaces therefore always agree.
+
 **Process scan on every platform, including macOS.** The doctor check on macOS asks whether the
 `com.brain.watcher` plist is *installed* and leaves liveness to its `daemons` line. The UI line has
 no `daemons` line beside it, and its sentence is "watcher not **running**", so the UI asks the
 direct question everywhere. The launchd wrapper `bin/_brain-watcher-fg` `exec`s
 `brain vault sync --watch --vault …`, so a launchd-supervised watcher is visible to the scan.
+This is the **one documented divergence** between the two surfaces: on macOS an installed watcher
+that has crashed is "not running" in the UI while doctor's `vault watcher` line is ok (its health
+is reported on the `daemons` line instead).
 
 **Known residue (not fixed here):** the scan does not compare the watcher's `--vault` with the
 UI's vault. A watcher for a different vault reads as `running`. The doctor check has the same
@@ -180,6 +190,6 @@ lines at 375 px predates this change (measured with the line removed). The brows
 
 No file in CLAUDE.md's over-ceiling table is touched; every touched file stays under 800.
 
-Every guard and test above is mutation-proved: the plan's catalog holds **29** mutations, each
+Every guard and test above is mutation-proved: the plan's catalog holds **30** mutations, each
 passing all five clauses (passes unmutated, lands once, red, needle on a `>`/`E` line,
 restored green).

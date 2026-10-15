@@ -12,8 +12,11 @@ Every task is TDD: the test lands first and is seen red for the stated reason, t
 
 ### T1 — `watcher_state()` in `doctor_watcher.py`
 * Test (`tests/test_doctor_watcher.py`): `running` for a snapshot containing a watcher;
-  `not_running` for a non-empty snapshot without one; `unavailable` for `[]`; the near-miss
-  command lines already in that file are `not_running`.
+  `not_running` for a non-empty snapshot without one; `unavailable` for `[]`; every near-miss
+  command line is `not_running` — one module constant, `_NEAR_MISSES`, parametrizes both this test
+  and the `is_vault_watcher` one (a hand-copied subset had covered 2 of 6; audit, 2026-10-15).
+* Doctor's non-darwin branch calls `watcher_state` (unavailable → a distinct "unknown" WARN), so
+  doctor and the UI agree off macOS; regression test for the unreadable-snapshot case.
 * Code: `WatcherState = Literal[...]`, `WATCHER_STATES` tuple, `watcher_state(processes=None)`.
 
 ### T2 — `WatcherProbe` (`src/brain/ui/watcher_probe.py`, new)
@@ -72,6 +75,8 @@ Round 2 (on `bccac42`):
 Round 3 (on `dba6c19`):
 * detection runs off the event loop — a route test whose detector records whether
   `asyncio.get_running_loop()` succeeds (it does only on the loop thread).
+* doctor's non-darwin branch delegates to `watcher_state` — an unreadable snapshot is a distinct
+  "unknown" WARN, as in the UI; the near-miss list is one constant shared by both scan tests.
 
 ### T6 — verify
 `ruff check`, `mypy src/`, `bin/brain-ci` green; `brain demo` sandbox visual check with a throwaway
@@ -80,10 +85,10 @@ Round 3 (on `dba6c19`):
 ## Mutation catalog
 
 Each was applied, seen red with its needle on a `>`/`E` line, and reverted to green
-(`PYTHONDONTWRITEBYTECODE=1`); each anchor occurs exactly once in its file. All 29 passed all
+(`PYTHONDONTWRITEBYTECODE=1`); each anchor occurs exactly once in its file. All 30 passed all
 five clauses on 2026-10-15, run in a copy of the working tree (M13/M18 re-run and M19 added after
 the layout fix; M14 re-anchored, M20–M25 added in review round 1, M26 from the audit, and M14/M23 re-anchored with
-M27–M28 added in review round 2, M29 in round 3 — M1/M2, the only DB-backed entries, were re-run after the shared test Postgres crashed
+M27–M28 added in review round 2, M29–M30 in round 3 — M1/M2, the only DB-backed entries, were re-run after the shared test Postgres crashed
 mid-run (20:10 UTC); their crash-window results were connection timeouts, not verdicts — M21 first went red on the
 test's harness precondition rather than on `calls == 1`, so the test was restructured until it
 failed on its claim).
@@ -119,6 +124,7 @@ failed on its claim).
 | M27 | `ui/watcher_probe.py` | `with self._lock:` → `self._lock.__enter__()` + `if True:` (lock leaks on raise) | `test_a_raising_detector_caches_nothing_and_releases_the_lock` (`leaked`) |
 | M28 | `js/watcher.js` | the placeholder advances `painted` (the round-1 shape) | `test_the_unknown_placeholder_does_not_shadow_an_older_real_answer` (`Timeout`) |
 | M29 | `ui/routes_meta.py` | `await run_in_threadpool(ctx.watcher_probe.state)` → `ctx.watcher_probe.state()` (detection on the event loop) | `test_detection_never_runs_on_the_event_loop` (`event loop`) |
+| M30 | `doctor_watcher.py` | the non-darwin `unavailable` branch deleted (falls through to "not running") | `test_off_macos_an_unreadable_process_list_warns_unknown_not_stopped` (`could not be read`) |
 
 ## Risks
 * **Live-region timing in headless Chromium** — asserted structurally (attributes + not hidden),
