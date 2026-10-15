@@ -139,8 +139,9 @@ check above was **not** empty: 18 of the daily-brief query's 28 judged
 documents and all 5 of the other query's fall before 2026-09-05. The
 `since_days` window at the previous recording already excluded the same set.
 Nothing was ingested between 2026-08-31 and 2026-09-21, so both lower bounds
-fall in the same gap, and the conversion lost no reachable judgment. Both rows
-stay capped until they are re-judged. The means are unchanged at
+fall in the same gap, and the conversion lost no reachable judgment: 10 of 28
+and 0 of 5 judged documents are reachable, before and after. Both rows stay
+capped until they are re-judged. The means are unchanged at
 **0.2724 / 0.3826 / 0.7089**, and only the second query's top 20 moved: four
 Krisp meetings ingested 2026-10-05 but sent in July and August dropped out
 under the new filter column. That row still scores 0.0.
