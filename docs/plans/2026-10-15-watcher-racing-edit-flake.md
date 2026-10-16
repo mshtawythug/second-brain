@@ -67,8 +67,9 @@ nobody re-chases it.)
 2. **Siblings → backstop.** At base (`e1fc28e`) the file had **39** `_wait_for` calls, and **35**
    of them passed an explicit 1–3 s timeout. **3** of those 35 were in the target test and went
    with its threaded body. The other **32** are sibling sites with the same weakness. (Re-derive
-   with an AST walk of `git show e1fc28e:tests/test_vault_watcher.py`.) `_wait_for` now defaults to `_WAIT_FOR_BACKSTOP_S = 10.0`, and every per-site
-   override is removed. This is the `_wait_for_observer` precedent from 2026-08-21.
+   with an AST walk of `git show e1fc28e:tests/test_vault_watcher.py`.) `_wait_for` now defaults
+   to `_WAIT_FOR_BACKSTOP_S = 10.0`, and every per-site override is removed. This is the
+   `_wait_for_observer` precedent from 2026-08-21.
    **Why a longer deadline is the right fix for these:** every one is a *positive* wait for
    something that will happen on another thread, so a passing run returns as soon as the predicate
    holds and never pays the deadline. Those tests exist to exercise the threaded path (debounce
