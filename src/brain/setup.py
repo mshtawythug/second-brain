@@ -1227,12 +1227,12 @@ def run_setup(
 
     # 5. Voyage API key prompt. The .env leg: a key an earlier run appended was
     # invisible here, so a re-run refused (--non-interactive) or re-prompted and
-    # appended a duplicate line.
-    has_voyage_key = bool(
+    # appended a duplicate line. Checked only under voyage, so no other run
+    # reads the secret or parses .env a second time.
+    if effective_embedder == "voyage" and not (
         os.environ.get("VOYAGE_API_KEY")
         or _brain_home_dotenv_value(brain_home, "VOYAGE_API_KEY")
-    )
-    if effective_embedder == "voyage" and not has_voyage_key:
+    ):
         if non_interactive:
             typer.secho(
                 "error: --embedder voyage requires VOYAGE_API_KEY to be set "

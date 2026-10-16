@@ -7,19 +7,15 @@ the first run. Every test is a dry run: no file is written, nothing is exported.
 """
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 import typer
 
-from brain.setup import run_setup
-
-
-def _unset_for_test(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
-    """Remove *name* from the env with a restore registered either way."""
-    monkeypatch.setenv(name, "")
-    monkeypatch.delenv(name)
+from brain.setup import _brain_home_dotenv_value, run_setup
 
 
 def _existing_brain_home(tmp_path: Path, env_body: str) -> Path:
@@ -59,7 +55,7 @@ def test_rerun_takes_vault_from_existing_brain_home_dotenv(
     """
     custom_vault = tmp_path / "custom-vault"
     brain_home = _existing_brain_home(tmp_path, f"BRAIN_VAULT_PATH={custom_vault}\n")
-    _unset_for_test(monkeypatch, "BRAIN_VAULT_PATH")
+    monkeypatch.delenv("BRAIN_VAULT_PATH", raising=False)
 
     _dry_run_setup(brain_home)
 
@@ -95,7 +91,7 @@ def test_vault_override_beats_brain_home_dotenv(
     brain_home = _existing_brain_home(
         tmp_path, f"BRAIN_VAULT_PATH={tmp_path / 'from-file'}\n"
     )
-    _unset_for_test(monkeypatch, "BRAIN_VAULT_PATH")
+    monkeypatch.delenv("BRAIN_VAULT_PATH", raising=False)
 
     _dry_run_setup(brain_home, vault_override=override)
 
@@ -103,7 +99,9 @@ def test_vault_override_beats_brain_home_dotenv(
 
 
 def test_rerun_accepts_voyage_key_from_existing_brain_home_dotenv(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Regression: the key setup itself appended to ``.env`` was not seen.
 
@@ -111,9 +109,11 @@ def test_rerun_accepts_voyage_key_from_existing_brain_home_dotenv(
     interactive re-run prompted again and appended a duplicate line.
     """
     brain_home = _existing_brain_home(tmp_path, "VOYAGE_API_KEY=synthetic-key\n")
-    _unset_for_test(monkeypatch, "VOYAGE_API_KEY")
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
 
     _dry_run_setup(brain_home, embedder_choice="voyage")
+
+    assert "requires VOYAGE_API_KEY" not in capsys.readouterr().err
 
 
 def test_voyage_key_missing_everywhere_still_refuses(
@@ -123,10 +123,92 @@ def test_voyage_key_missing_everywhere_still_refuses(
 ) -> None:
     """The fallback must not turn a genuinely missing key into a pass."""
     brain_home = _existing_brain_home(tmp_path, "DATABASE_URL=postgresql://x\n")
-    _unset_for_test(monkeypatch, "VOYAGE_API_KEY")
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
 
     with pytest.raises(typer.Exit) as excinfo:
         _dry_run_setup(brain_home, embedder_choice="voyage")
 
     assert excinfo.value.exit_code == 1
     assert "requires VOYAGE_API_KEY" in capsys.readouterr().err
+
+
+def test_voyage_key_is_not_looked_up_for_other_embedders(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Only a voyage run reads the key: no second parse of ``.env`` otherwise.
+
+    A malformed line makes every parse observable, because python-dotenv warns
+    once per parse. A non-voyage run parses ``.env`` once, for the vault.
+    """
+    brain_home = _existing_brain_home(tmp_path, "this line does not parse\n")
+    monkeypatch.delenv("BRAIN_VAULT_PATH", raising=False)
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="dotenv.main"):
+        _dry_run_setup(brain_home, embedder_choice="none")
+
+    parse_warnings = [r for r in caplog.records if "could not parse" in r.getMessage()]
+    assert len(parse_warnings) == 1
+
+
+def test_reset_keeps_the_vault_named_in_the_old_brain_home_dotenv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--reset`` without ``--vault`` keeps the vault the old ``.env`` named.
+
+    Decided in review: the vault resolves BEFORE the reset deletes
+    ``$BRAIN_HOME``, and reset never deletes the vault, so the fresh config is
+    pointed back at the user's existing vault rather than at ``~/brain-vault``.
+    """
+    custom_vault = tmp_path / "custom-vault"
+    brain_home = _existing_brain_home(tmp_path, f"BRAIN_VAULT_PATH={custom_vault}\n")
+    monkeypatch.delenv("BRAIN_VAULT_PATH", raising=False)
+
+    with patch("typer.prompt", return_value="yes, delete my data"):
+        _dry_run_setup(brain_home, reset=True)
+
+    out = capsys.readouterr().out
+    assert f"would: shutil.rmtree({brain_home})" in out
+    assert f"vault:      {custom_vault}" in out
+
+
+def _dotenv_as_directory(brain_home: Path) -> None:
+    (brain_home / ".env").mkdir()
+
+
+def _dotenv_unreadable(brain_home: Path) -> None:
+    path = brain_home / ".env"
+    path.write_text("BRAIN_VAULT_PATH=/synthetic/vault\n", encoding="utf-8")
+    path.chmod(0)
+
+
+def _dotenv_not_utf8(brain_home: Path) -> None:
+    (brain_home / ".env").write_bytes(b"BRAIN_VAULT_PATH=/synthetic/\xff\xfe\n")
+
+
+@pytest.mark.parametrize(
+    "make_bad_dotenv",
+    [_dotenv_as_directory, _dotenv_unreadable, _dotenv_not_utf8],
+    ids=["directory", "unreadable", "not-utf8"],
+)
+def test_unusable_brain_home_dotenv_reads_as_unset(
+    tmp_path: Path, make_bad_dotenv: object
+) -> None:
+    """A ``.env`` that cannot be read falls back (``None``); it never raises.
+
+    Setup must keep going and resolve the default, not crash on a broken file
+    it is about to report on anyway.
+    """
+    if make_bad_dotenv is _dotenv_unreadable and os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 file")
+    brain_home = tmp_path / ".brain"
+    brain_home.mkdir()
+    make_bad_dotenv(brain_home)  # type: ignore[operator]
+    try:
+        assert _brain_home_dotenv_value(brain_home, "BRAIN_VAULT_PATH") is None
+    finally:
+        (brain_home / ".env").chmod(0o700)

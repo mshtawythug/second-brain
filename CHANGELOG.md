@@ -208,7 +208,9 @@ git tag scheme:
   `.env` named another vault. With `--embedder voyage` it refused under
   `--non-interactive`, or asked for the key again and added a second copy to
   the `.env`. Setup now falls back to `$BRAIN_HOME/.env` for both. `--vault`
-  and a value in the process environment still win.
+  and a value in the process environment still win. This also applies to
+  `--reset` without `--vault`: the fresh config keeps the vault the old `.env`
+  named, because reset deletes `$BRAIN_HOME` but never the vault.
 - **`brain eval --record-baseline` could save a poisoned baseline and exit 0.**
   When a query's embed call failed (an Ollama timeout while another process
   held a large model), the runner scored that query `0.0` and carried on, and

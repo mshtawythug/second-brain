@@ -4910,10 +4910,17 @@ def _load_config() -> Config:
     The order is the fix. ``Config.load`` is what setdefaults the dotenv chain
     into ``os.environ``; configuring logging first read ``BRAIN_MCP_LOG_LEVEL``
     before any ``.env`` had been applied, so the knob worked only from the real
-    process env. Nothing logs at DEBUG/INFO during the load (python-dotenv's
-    unparseable-line WARNING still reaches stderr via ``logging.lastResort``),
-    and a ``ConfigError`` is never logged -- it propagates out of ``main()`` as
-    a stderr traceback either way.
+    process env.
+
+    How the level takes effect: importing this module builds the FastMCP server
+    (``make_server`` at module scope), which installs a stderr ``RichHandler``
+    on the root logger at INFO. So ``_configure_logging``'s ``basicConfig`` is a
+    no-op here and the level lands through ``logger.setLevel`` on ``brain.mcp``.
+    That handler is already in place during the load, so python-dotenv's
+    unparseable-line WARNING -- the only record the load can emit -- reaches
+    stderr under either order, and stdout stays clean for JSON-RPC. A
+    ``ConfigError`` is never logged: it propagates out of ``main()`` as a stderr
+    traceback, as before.
     """
     cfg = Config.load()
     _configure_logging()

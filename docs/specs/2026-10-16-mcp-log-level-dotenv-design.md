@@ -1,6 +1,6 @@
 # `BRAIN_MCP_LOG_LEVEL` from `.env` — design
 
-**Date:** 2026-10-16 · **Branch:** `fix/mcp-log-level-dotenv` · **Base:** `a967685`
+**Date:** 2026-10-16 · **Branch:** `fix/mcp-log-level-dotenv` · **Base:** `a967685` (master `1cd136a` merged in afterwards)
 **Plan:** `docs/plans/2026-10-16-mcp-log-level-dotenv.md`
 
 ## 1. The bug
@@ -38,13 +38,26 @@ ceiling), or re-implements the chain's precedence a second time. (a) reuses the
 one precedence implementation (`process env > repo .env > cwd .env >
 $BRAIN_HOME/.env`) by construction, and is the smallest change.
 
-**Records emitted during `Config.load`.** `config.py` has no logger. The only
-record that can fire during the load is python-dotenv's WARNING for an
-unparseable `.env` line (`dotenv.main`). Before `basicConfig` runs, that record
-still reaches stderr through `logging.lastResort` (WARNING and above, bare
-message; verified). Nothing at DEBUG/INFO is emitted during the load, so no
-record the configured level would have shown is lost. Buffering records across
-the load was considered and rejected as machinery for an empty set.
+**Records emitted during `Config.load`, and how the level takes effect.**
+`config.py` has no logger. The only record that can fire during the load is
+python-dotenv's WARNING for an unparseable `.env` line (`dotenv.main`).
+Importing `brain.mcp_server` builds the FastMCP server at module scope
+(`make_server`), and that installs a stderr `RichHandler` on the root logger at
+INFO before `main()` runs. That handler is therefore in place during the load,
+so the WARNING reaches stderr under either order, formatted by Rich. The same
+fact makes `_configure_logging`'s `basicConfig` a no-op in production: the level
+takes effect through `logger.setLevel` on `brain.mcp`, whose records propagate
+to that handler. This was verified end to end: with `brain.mcp` at DEBUG, stdout
+stays empty and both the dotenv WARNING and a DEBUG line reach stderr. Nothing at
+DEBUG/INFO is emitted during the load, so no record the configured level would
+have shown is lost, and buffering records across the load was rejected as
+machinery for an empty set.
+
+*(Corrected in review. The first draft, and the message of the pushed commit
+`8669e8b`, said the WARNING reached stderr through `logging.lastResort` and that
+`basicConfig` configured the stream. Both were true only of a bare interpreter
+that had not imported `brain.mcp_server`, which is never the case in
+`brain-mcp`. The behaviour was correct; the stated mechanism was not.)*
 
 **Failure path.** A `ConfigError` (e.g. no `DATABASE_URL` anywhere) was never
 routed through logging: it propagates out of `main()` as an uncaught traceback
@@ -74,10 +87,45 @@ ignored where the rest of the system honours it.
 | `_compose.compose_project_name` (`BRAIN_COMPOSE_PROJECT`) | left | Documented as `export BRAIN_COMPOSE_PROJECT=…` (`docs/cli-reference.md`), a per-invocation isolation switch for a second stack. |
 | `bin/monitor.py` (`BRAIN_VAULT_PATH`, `BRAIN_WIKI_PORT`, no `Config.load`) | left, **follow-up** | Part of the shell-tooling family documented as "Env overrides" (`docs/vault-and-wiki.md`). `brain-up` / `brain-status` and the `_brain-*-fg` shims read the same variables from the process env only, and the daemons get `BRAIN_VAULT_PATH` from their plist. Fixing monitor alone would make it disagree with the rest of that family. Whether the shell tooling should read `.env` is a separate decision. `BRAIN_WIKI_PORT` is not a `Config` knob at all. |
 | `editor.py` (`EDITOR`/`VISUAL`), `BRAIN_LAUNCHD_DIR` | left | Shell convention / test seam, never `.env` knobs. |
+| `bin/launchd.resolve_brain_py` (`BRAIN_PY`) | left | An interpreter pin for rendering plists against a different install (docstring example: `BRAIN_PY=… brain-install-launchd`). It is a per-invocation override, and the plists it renders carry `BRAIN_PY` themselves. |
+| `doctor_runtime._plist_brain_py` (`BRAIN_PY`) | not an env read | It reads `EnvironmentVariables.BRAIN_PY` out of an installed plist file, not `os.environ`. |
+| `bin/launchd.install_main` / `uninstall_main` (`brain-install-launchd` / `brain-uninstall-launchd` in `[project.scripts]`; read `BRAIN_PY`, `BRAIN_LAUNCHCTL`, `BRAIN_LAUNCHD_DIR`) | left | Test seams and shell-tooling overrides, documented as such in `docs/vault-and-wiki.md` (the "Env overrides" table). None of them is a `.env` knob. (These entry points ignoring `BRAIN_VAULT_PATH` altogether is the separate follow-up below.) |
+| `bin/launchd.resolve_launchctl` (`BRAIN_LAUNCHCTL`) | left | A test seam that keeps the real `launchctl` unreachable from the suite (phase 8 T0). It is not a user knob. |
+| `bin/monitor.py` (`BRAIN_WATCH_PID`, `BRAIN_BUILD_PID`, read at import) | left | Test seams and parity with the shell shims' PID paths (module comment at the constants); same shell-tooling family as the monitor row above. |
+| `claude_hook.load_thresholds` (`BRAIN_HOOK_*` and `BRAIN_VAULT_PATH`, read through name constants from an injected mapping; `cli_claude` passes `os.environ`) | left | Deliberate and documented at the function: the Stop hook must survive the absence of `DATABASE_URL` and must not pay dotenv resolution on every event, so these are real environment variables, not `.env` entries. |
 
 The check ran over every `os.environ.get` / `os.getenv` / `os.environ[...]`
-read outside `config.py`, plus every `main()`, `cli_main()` and `__main__` block
-under `src/brain`.
+read outside `config.py`, including reads through a name constant
+(`MAX_BYTES_ENV`, `BUILD_TIMEOUT_ENV_VAR`) or through an injected mapping that
+a caller fills from `os.environ` (`claude_hook`), plus every `main()`,
+`cli_main()` and `__main__` block under `src/brain`. *(Corrected in review: the
+first draft claimed completeness while missing the `BRAIN_PY`,
+`BRAIN_LAUNCHCTL`, `BRAIN_*_PID` and `BRAIN_HOOK_*` rows above. Its grep matched
+only string-literal names, so reads through constants and injected mappings
+slipped past it.)*
+
+**Follow-up found during review, not fixed here: `brain-install-launchd`
+ignores `BRAIN_VAULT_PATH` entirely.** `bin/launchd.install_main` calls
+`install_plists(brain_home, launchd_dir, launchctl)` without a `vault_path`,
+and `install_plists` then falls back to `~/brain-vault`. It reads neither the
+process env nor any `.env`, and every `brain-up` runs it. So an install with a
+custom vault gets correct plists from `brain setup`, and they are rewritten to
+point at `~/brain-vault` on the next `brain-up`. This is the same hazard this
+change fixes in setup, but it is not the same class: no read happens too early,
+because no read happens at all. It needs its own change and test, so it is
+raised with the coordinator rather than folded in here. **Coordinator decision:** kept out of this PR; it runs as its own track after #39 merges.
+
+### `--reset` keeps the old `.env`'s vault (decided in review)
+
+`run_setup` resolves the vault (and now reads `$BRAIN_HOME/.env` for it) BEFORE
+the `--reset` branch deletes `$BRAIN_HOME`. So `--reset` without `--vault` now
+keeps the vault the old `.env` named; it used to fall back to `~/brain-vault`.
+**Kept deliberately:** reset deletes `$BRAIN_HOME` (config, Postgres data,
+shims) but never the vault, so pointing the fresh config back at the user's
+existing vault is the right outcome. The alternative silently orphans their
+notes behind a default path. `--vault` and the process env still override it.
+Pinned by `test_reset_keeps_the_vault_named_in_the_old_brain_home_dotenv`, which
+is a dry run on tmp paths.
 
 ### Setup fix shape
 
@@ -112,9 +160,21 @@ different home than the one setup is installing into.
   (red).
 - `test_voyage_key_missing_everywhere_still_refuses`: the fallback must not
   turn a missing key into a pass.
+- `test_voyage_key_is_not_looked_up_for_other_embedders`: only a voyage run
+  reads the key. A malformed line makes each parse observable as one
+  python-dotenv warning, and a non-voyage run must parse exactly once.
+- `test_reset_keeps_the_vault_named_in_the_old_brain_home_dotenv`: §3's
+  `--reset` decision.
+- `test_unusable_brain_home_dotenv_reads_as_unset` (a directory, mode 000, or
+  not UTF-8): the helper falls back to `None` and never raises.
 
-They use `isolate_config_dotenv(..., project_env=...)` and pytest's
-`monkeypatch` only. There is no monkey-patching of production code.
+They isolate config with `isolate_config_dotenv(..., project_env=...)` and
+pytest's `monkeypatch`. The setup tests also use `unittest.mock.patch` to stub
+`shutil.which` / `subprocess.run` (and `typer.prompt` for the reset
+confirmation), as `tests/test_setup.py` does. All of these are standard test
+doubles with automatic cleanup. The tests run under the suite-wide `os.environ` restore
+(`tests/env_isolation.py`, PR #38), so a key `Config.load` setdefaults in from
+a test's `.env` cannot outlive the test. There is no monkey-patching of production code.
 
 ## 5. Ceiling records
 
@@ -123,4 +183,9 @@ both grew. Each growth carries an inline reason (the `_load_config` docstring;
 the helper docstring and a comment at each read) and a module-docstring
 pointer. Neither row had a trailing descriptive hop left to promote: both were
 already SHA-bound through `2475d11` / `120934a`, and nothing touched either file
-from there through `a967685`. Each row gains a descriptive hop for this change.
+from there through `1cd136a`. Each row gains a SHA-bound hop at `8669e8b`, the
+commit that grew both files (4,960 and 1,390 lines, measured with `git show`).
+The merge of master changes neither file. The PR #39 review-fix commit after it
+touches both, and each row gets a descriptive hop for it: `mcp_server.py` grows
+by the corrected `_load_config` docstring (§2), and `setup.py` changes at net
+zero (the Voyage short-circuit).

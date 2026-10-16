@@ -1170,16 +1170,6 @@ def _restore_mcp_logger_level() -> Iterator[None]:
     mcp_logger.setLevel(saved)
 
 
-def _unset_for_test(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
-    """Remove *name* from the env with a restore registered either way.
-
-    ``monkeypatch.delenv(raising=False)`` on an ABSENT name records nothing to
-    undo, so a value ``Config.load`` later setdefaults in from a ``.env`` would
-    outlive the test. Setting first guarantees teardown removes it again.
-    """
-    monkeypatch.setenv(name, "")
-    monkeypatch.delenv(name)
-
 
 @pytest.mark.usefixtures("_restore_mcp_logger_level")
 def test_load_config_honours_log_level_from_dotenv(
@@ -1195,7 +1185,7 @@ def test_load_config_honours_log_level_from_dotenv(
     project_env = tmp_path / "project.env"
     project_env.write_text("BRAIN_MCP_LOG_LEVEL=DEBUG\n", encoding="utf-8")
     isolate_config_dotenv(monkeypatch, tmp_path, project_env=project_env)
-    _unset_for_test(monkeypatch, "BRAIN_MCP_LOG_LEVEL")
+    monkeypatch.delenv("BRAIN_MCP_LOG_LEVEL", raising=False)
     monkeypatch.setenv("DATABASE_URL", "postgresql://synthetic@localhost:1/none")
     logging.getLogger("brain.mcp").setLevel(logging.INFO)
 
@@ -1262,7 +1252,7 @@ def test_load_config_missing_database_url_still_raises(
     as it did when logging was configured first.
     """
     isolate_config_dotenv(monkeypatch, tmp_path)
-    _unset_for_test(monkeypatch, "DATABASE_URL")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
 
     with pytest.raises(ConfigError, match="DATABASE_URL"):
         mcp_server._load_config()
