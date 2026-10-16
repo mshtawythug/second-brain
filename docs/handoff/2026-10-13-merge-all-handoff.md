@@ -80,7 +80,7 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
 
 ## Recorded follow-ups
 
-Not started, except the first item, which is fixed.
+Not started, except the first item (fixed by this PR) and the `qwen3` item (addressed by PR #36).
 
 - **Fixed by the PR that commits this doc** (branch `test/build-watcher-wait-backstop`, plan
   `docs/plans/2026-10-16-build-watcher-wait-backstop.md`). `tests/wiki/test_build_watcher.py` had its own
