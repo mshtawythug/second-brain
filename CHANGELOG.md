@@ -194,6 +194,21 @@ git tag scheme:
 
 ### Fixed
 
+- **`BRAIN_MCP_LOG_LEVEL` was ignored when set in a `.env`.** `brain-mcp`
+  configured logging before it loaded the config, and loading the config is
+  what applies the `.env` files. So the knob worked only from the real process
+  environment, such as Claude Desktop's `env` block, and never from the repo
+  `.env` or `$BRAIN_HOME/.env`. The config now loads first. A value in the
+  process environment still beats the `.env`. A missing `DATABASE_URL` still
+  stops the server with the same error on stderr.
+- **Re-running `brain setup` ignored `BRAIN_VAULT_PATH` and `VOYAGE_API_KEY`
+  in an existing `$BRAIN_HOME/.env`.** Setup read both from the process
+  environment only. Without `--vault`, a re-run fell back to `~/brain-vault`
+  and used it for the wiki install and the launchd daemons, even though the
+  `.env` named another vault. With `--embedder voyage` it refused under
+  `--non-interactive`, or asked for the key again and added a second copy to
+  the `.env`. Setup now falls back to `$BRAIN_HOME/.env` for both. `--vault`
+  and a value in the process environment still win.
 - **`brain eval --record-baseline` could save a poisoned baseline and exit 0.**
   When a query's embed call failed (an Ollama timeout while another process
   held a large model), the runner scored that query `0.0` and carried on, and

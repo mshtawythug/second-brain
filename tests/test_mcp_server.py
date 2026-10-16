@@ -16,12 +16,13 @@ import psycopg
 import pytest
 
 from brain import mcp_server
-from brain.config import Config
+from brain.config import Config, ConfigError
 from brain.embeddings import OllamaEmbedError
 from brain.errors import BrainError
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.mcp_compat import MCPError
 from brain.vault.frontmatter import parse_frontmatter
+from tests.conftest import isolate_config_dotenv
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -1158,6 +1159,113 @@ def test_configure_logging_falls_back_on_unknown_level(
             == logging.INFO
         )
     assert any("WHATEVER" in rec.message for rec in caplog.records)
+
+
+@pytest.fixture
+def _restore_mcp_logger_level() -> Iterator[None]:
+    """``_configure_logging`` sets the ``brain.mcp`` logger level; undo it."""
+    mcp_logger = logging.getLogger("brain.mcp")
+    saved = mcp_logger.level
+    yield
+    mcp_logger.setLevel(saved)
+
+
+def _unset_for_test(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Remove *name* from the env with a restore registered either way.
+
+    ``monkeypatch.delenv(raising=False)`` on an ABSENT name records nothing to
+    undo, so a value ``Config.load`` later setdefaults in from a ``.env`` would
+    outlive the test. Setting first guarantees teardown removes it again.
+    """
+    monkeypatch.setenv(name, "")
+    monkeypatch.delenv(name)
+
+
+@pytest.mark.usefixtures("_restore_mcp_logger_level")
+def test_load_config_honours_log_level_from_dotenv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: ``BRAIN_MCP_LOG_LEVEL`` set ONLY in ``.env`` must take effect.
+
+    ``main()`` used to configure logging before ``Config.load`` published the
+    dotenv chain into ``os.environ``, so the knob was honoured only from the
+    real process env (e.g. Claude Desktop's ``env`` block), never from the
+    repo or ``$BRAIN_HOME`` ``.env``.
+    """
+    project_env = tmp_path / "project.env"
+    project_env.write_text("BRAIN_MCP_LOG_LEVEL=DEBUG\n", encoding="utf-8")
+    isolate_config_dotenv(monkeypatch, tmp_path, project_env=project_env)
+    _unset_for_test(monkeypatch, "BRAIN_MCP_LOG_LEVEL")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://synthetic@localhost:1/none")
+    logging.getLogger("brain.mcp").setLevel(logging.INFO)
+
+    mcp_server._load_config()
+
+    assert logging.getLogger("brain.mcp").getEffectiveLevel() == logging.DEBUG
+
+
+@pytest.mark.usefixtures("_restore_mcp_logger_level")
+def test_load_config_process_env_log_level_beats_dotenv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The process env (Desktop's ``env`` block) still outranks ``.env``."""
+    project_env = tmp_path / "project.env"
+    project_env.write_text("BRAIN_MCP_LOG_LEVEL=DEBUG\n", encoding="utf-8")
+    isolate_config_dotenv(monkeypatch, tmp_path, project_env=project_env)
+    monkeypatch.setenv("BRAIN_MCP_LOG_LEVEL", "ERROR")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://synthetic@localhost:1/none")
+
+    mcp_server._load_config()
+
+    assert logging.getLogger("brain.mcp").getEffectiveLevel() == logging.ERROR
+
+
+class _StartupStop(Exception):
+    """Raised by the doubles below to stop ``main()`` before it serves."""
+
+
+def test_main_loads_config_before_configuring_logging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``main()`` must start through ``_load_config``, with nothing ahead of it.
+
+    Pins the call site, not just the helper: a ``main()`` that went back to
+    calling ``_configure_logging()`` before loading would reintroduce the bug
+    while every ``_load_config`` test stayed green. Both doubles stop startup,
+    so whichever runs first is the only one recorded.
+    """
+    calls: list[str] = []
+
+    def _record(name: str) -> Any:
+        def _stop() -> None:
+            calls.append(name)
+            raise _StartupStop(name)
+
+        return _stop
+
+    monkeypatch.setattr(mcp_server, "_load_config", _record("load_config"))
+    monkeypatch.setattr(mcp_server, "_configure_logging", _record("configure_logging"))
+
+    with pytest.raises(_StartupStop):
+        mcp_server.main()
+
+    assert calls == ["load_config"]
+
+
+def test_load_config_missing_database_url_still_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Loading first must not swallow the startup failure.
+
+    With no ``DATABASE_URL`` anywhere, ``ConfigError`` still propagates out of
+    ``_load_config`` (and so out of ``main()`` as a stderr traceback), exactly
+    as it did when logging was configured first.
+    """
+    isolate_config_dotenv(monkeypatch, tmp_path)
+    _unset_for_test(monkeypatch, "DATABASE_URL")
+
+    with pytest.raises(ConfigError, match="DATABASE_URL"):
+        mcp_server._load_config()
 
 
 # ---------------------------------------------------------------------------
