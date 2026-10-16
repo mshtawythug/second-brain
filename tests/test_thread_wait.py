@@ -7,10 +7,17 @@ rather than a list of files, because PR #31's per-file guard (2026-10-15) never
 saw ``test_cli_vault_watch.py``, which imported the helper from another test
 module and passed ``timeout=5.0``.
 
-What it does NOT see, deliberately: dynamic access (``importlib``,
-``__import__``, ``getattr``, ``globals()``), a rebinding chain deeper than one
-level, a helper stored under a new name inside a container or a class body
-(``staticmethod(wait_for)``), and a hand-rolled poll loop that never calls the
+The bare name ``wait_for`` is NOT ours alone: Playwright's ``Locator.wait_for``
+and ``asyncio.wait_for`` take a legitimate ``timeout``. So the underscore names
+are matched anywhere, and ``wait_for`` only where it provably resolves to
+``tests.thread_wait`` (PR #35 re-review).
+
+What it does NOT see, deliberately: the real helper under its public name
+through a base it cannot recognise (``holder.wait_for``) or a star import —
+the price of not flagging Playwright; dynamic access (``importlib``,
+``__import__``, ``getattr``, ``globals()``); a rebinding chain deeper than one
+level; a helper stored under a new name inside a container or a class body
+(``staticmethod(wait_for)``); and a hand-rolled poll loop that never calls the
 helper at all. Each needs data-flow analysis out of proportion for a test-suite
 convention; the plan records them.
 """
@@ -32,13 +39,15 @@ _HELPER_FILE = _TESTS_ROOT / "thread_wait.py"
 # Exempt from the call-site check ONLY: the raise-path test below must pass a
 # short timeout, and this file starts no threads.
 _SELF = Path(__file__).resolve()
-_WAIT_NAMES = frozenset({"wait_for", "_wait_for"})
-# ``tests/test_vault_watcher.py``'s observer-start wait. Same backstop rule; its
-# floor is pinned there by ``test_wait_for_observer_timeout_default_is_a_backstop``.
-_OBSERVER_WAIT = "_wait_for_observer"
-# Where ``timeout`` sits positionally in each guarded signature.
+# This suite's own waits, matched as a bare name or an attribute on ANY base
+# (``tvw._wait_for``, ``self._wait_for``). Value: ``timeout``'s positional
+# index. ``_wait_for_observer`` lives in ``tests/test_vault_watcher.py``, whose
+# ``test_wait_for_observer_timeout_default_is_a_backstop`` pins its floor.
+_PRIVATE_WAITS = {"_wait_for": 1, "_wait_for_observer": 0}
+# The shared helper's public name — also Playwright's and asyncio's, so it is
+# matched only through an import from ``tests.thread_wait``.
+_PUBLIC_WAIT = "wait_for"
 _HELPER_TIMEOUT_INDEX = 1
-_OBSERVER_TIMEOUT_INDEX = 0
 # Anything under this reintroduces the latency budget the backstop replaced.
 _FLOOR_S = 5.0
 # Non-vacuity: if discovery stops finding these, the guard must go red rather
@@ -52,8 +61,8 @@ _KNOWN_IMPORTERS = frozenset(
 )
 
 
-def _site(path: Path, node: ast.AST) -> str:
-    return f"{path.relative_to(_TESTS_ROOT).as_posix()}:{getattr(node, 'lineno', 0)}"
+def _site(label: str, node: ast.AST) -> str:
+    return f"{label}:{getattr(node, 'lineno', 0)}"
 
 
 def _bound_names(node: ast.AST) -> list[str]:
@@ -72,64 +81,60 @@ def _bound_names(node: ast.AST) -> list[str]:
     ]
 
 
-def _names_helper(expr: ast.AST | None, direct: set[str], modules: set[str]) -> bool:
-    """Is ``expr`` a reference to the shared helper itself (not a call of it)?"""
+def _helper_index(
+    expr: ast.AST | None, direct: dict[str, int], modules: set[str]
+) -> int | None:
+    """``timeout``'s positional index if ``expr`` names a guarded wait, else None."""
     if isinstance(expr, ast.Name):
-        return expr.id in direct or expr.id in _WAIT_NAMES
+        if expr.id in direct:
+            return direct[expr.id]
+        return _PRIVATE_WAITS.get(expr.id)
     if isinstance(expr, ast.Attribute):
-        return expr.attr in _WAIT_NAMES or (
-            expr.attr == "wait_for" and ast.unparse(expr.value) in modules
-        )
-    return False
+        if expr.attr in _PRIVATE_WAITS:
+            return _PRIVATE_WAITS[expr.attr]
+        if expr.attr == _PUBLIC_WAIT and ast.unparse(expr.value) in modules:
+            return _HELPER_TIMEOUT_INDEX
+    return None
 
 
-def _helper_bindings(tree: ast.Module) -> tuple[set[str], set[str], set[str]]:
-    """Return (imported names, those plus one level of rebinding, module names)."""
-    imported: set[str] = set()
+def _assignments(tree: ast.Module) -> list[ast.Assign | ast.AnnAssign | ast.NamedExpr]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr))
+    ]
+
+
+def _bindings(tree: ast.Module) -> tuple[bool, dict[str, int], set[str]]:
+    """Return (imports the helper?, guarded callee names → index, module names).
+
+    Resolves import aliases plus ONE level of rebinding — ``w = _wait_for``,
+    ``obs = _wait_for_observer``, ``tw = thread_wait`` (PR #35 reviews).
+    Deeper chains are recorded residue.
+    """
+    imported: dict[str, int] = {}
     modules: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.level == 0:
             for alias in node.names:
-                if node.module == _HELPER_MODULE and alias.name == "wait_for":
-                    imported.add(alias.asname or alias.name)
+                if node.module == _HELPER_MODULE and alias.name == _PUBLIC_WAIT:
+                    imported[alias.asname or alias.name] = _HELPER_TIMEOUT_INDEX
                 elif node.module == "tests" and alias.name == "thread_wait":
                     modules.add(alias.asname or alias.name)
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == _HELPER_MODULE:
                     modules.add(alias.asname or alias.name)
-    # One level of rebinding: ``w = _wait_for`` makes ``w(p, timeout=1.0)`` a
-    # helper call (PR #35 review). Deeper chains are recorded residue.
-    rebound = {
-        name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr))
-        and _names_helper(node.value, imported, modules)
-        for name in _bound_names(node)
-    }
-    return imported, imported | rebound, modules
-
-
-def _timeout_index(func: ast.expr, direct: set[str]) -> int | None:
-    """``timeout``'s positional index if ``func`` is a guarded wait, else None.
-
-    An attribute call is matched on its attribute name whatever its base, so
-    ``tvw._wait_for(...)`` through a test module and ``self._wait_for(...)``
-    are both checked (PR #35 review).
-    """
-    if isinstance(func, ast.Name):
-        name = func.id
-        if name in direct:
-            return _HELPER_TIMEOUT_INDEX
-    elif isinstance(func, ast.Attribute):
-        name = func.attr
-    else:
-        return None
-    if name in _WAIT_NAMES:
-        return _HELPER_TIMEOUT_INDEX
-    if name == _OBSERVER_WAIT:
-        return _OBSERVER_TIMEOUT_INDEX
-    return None
+    direct = dict(imported)
+    rebound_modules: set[str] = set()
+    for node in _assignments(tree):
+        if isinstance(node.value, ast.Name) and node.value.id in modules:
+            rebound_modules.update(_bound_names(node))
+            continue
+        index = _helper_index(node.value, imported, modules)
+        if index is not None:
+            direct.update(dict.fromkeys(_bound_names(node), index))
+    return bool(imported or modules), direct, modules | rebound_modules
 
 
 def _has_timeout_keyword(node: ast.Call) -> bool:
@@ -138,51 +143,83 @@ def _has_timeout_keyword(node: ast.Call) -> bool:
     return any(k.arg in (None, "timeout") for k in node.keywords)
 
 
-def _passes_timeout(node: ast.Call, index: int) -> bool:
+def _passes_timeout(args: list[ast.expr], node: ast.Call, index: int) -> bool:
     return (
-        len(node.args) > index
+        len(args) > index
         # A ``*args`` splat can carry a positional timeout.
-        or any(isinstance(arg, ast.Starred) for arg in node.args)
+        or any(isinstance(arg, ast.Starred) for arg in args)
         or _has_timeout_keyword(node)
     )
 
 
-def _binds_a_timeout_to_the_helper(
-    node: ast.Call, direct: set[str], modules: set[str]
-) -> bool:
-    """``functools.partial(wait_for, timeout=2.0)`` under any name, annotated or not."""
+def _is_override(node: ast.Call, direct: dict[str, int], modules: set[str]) -> bool:
+    """A guarded wait called with a timeout, or one bound in via ``partial``."""
+    index = _helper_index(node.func, direct, modules)
+    if index is not None:
+        return _passes_timeout(node.args, node, index)
+    # ``functools.partial(_wait_for, timeout=2.0)`` under any name: the helper
+    # is an argument, and what follows it reaches the helper's parameters.
     for i, arg in enumerate(node.args):
-        if _names_helper(arg, direct, modules):
-            rest = node.args[i + 1 :]
-            return (
-                _has_timeout_keyword(node)
-                or len(rest) >= 2
-                or any(isinstance(a, ast.Starred) for a in rest)
-            )
+        index = _helper_index(arg, direct, modules)
+        if index is not None:
+            return _passes_timeout(node.args[i + 1 :], node, index)
     return False
 
 
-def _mirror_sites(path: Path, tree: ast.Module) -> list[str]:
+def _mirror_sites(label: str, tree: ast.Module) -> list[str]:
+    """A non-import binding of ``_wait_for`` anywhere, or of ``wait_for`` at module level.
+
+    A ``def wait_for`` METHOD (a page object's, say) is not a mirror, so the
+    public name is checked only among top-level statements.
+    """
+    top_level = {id(node) for node in tree.body}
     sites = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name in _WAIT_NAMES:
-                sites.append(_site(path, node))
-        elif any(name in _WAIT_NAMES for name in _bound_names(node)):
-            sites.append(_site(path, node))
+            names = [node.name]
+        else:
+            names = _bound_names(node)
+        for name in names:
+            if name == "_wait_for" or (name == _PUBLIC_WAIT and id(node) in top_level):
+                sites.append(_site(label, node))
     return sites
 
 
-def _reexport_sites(path: Path, tree: ast.Module) -> list[str]:
-    return [
-        f"{_site(path, node)} (imports {alias.name} "
-        f"from {'.' * node.level}{node.module or ''})"
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        and (node.level != 0 or node.module != _HELPER_MODULE)
-        for alias in node.names
-        if alias.name in _WAIT_NAMES
-    ]
+def _reexport_sites(label: str, tree: ast.Module) -> list[str]:
+    """``_wait_for`` from anywhere but the helper; ``wait_for`` from a test module.
+
+    ``from asyncio import wait_for`` is somebody else's ``wait_for``.
+    """
+    sites = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or (
+            node.level == 0 and node.module == _HELPER_MODULE
+        ):
+            continue
+        source = f"{'.' * node.level}{node.module or ''}"
+        from_tests = node.level != 0 or source == "tests" or source.startswith("tests.")
+        for alias in node.names:
+            if alias.name == "_wait_for" or (alias.name == _PUBLIC_WAIT and from_tests):
+                sites.append(f"{_site(label, node)} (imports {alias.name} from {source})")
+    return sites
+
+
+def _scan_source(label: str, source: str, *, check_calls: bool = True) -> dict[str, list[str]]:
+    """Scan one module's source; the unit the probes below exercise directly."""
+    tree = ast.parse(source)
+    imports_helper, direct, modules = _bindings(tree)
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    uses_helper = any(
+        _helper_index(c.func, direct, modules) == _HELPER_TIMEOUT_INDEX for c in calls
+    )
+    return {
+        "overrides": [
+            _site(label, c) for c in calls if check_calls and _is_override(c, direct, modules)
+        ],
+        "mirrors": _mirror_sites(label, tree),
+        "reexports": _reexport_sites(label, tree),
+        "importers": [label] if imports_helper and uses_helper else [],
+    }
 
 
 @functools.cache
@@ -195,24 +232,13 @@ def _scan() -> dict[str, list[str]]:
         "importers": [],
     }
     for path in sorted(_TESTS_ROOT.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        if path != _HELPER_FILE:
-            found["mirrors"].extend(_mirror_sites(path, tree))
-            found["reexports"].extend(_reexport_sites(path, tree))
-        imported, direct, modules = _helper_bindings(tree)
-        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-        if (imported or modules) and any(
-            _timeout_index(c.func, direct) == _HELPER_TIMEOUT_INDEX for c in calls
-        ):
-            found["importers"].append(path.relative_to(_TESTS_ROOT).as_posix())
-        if path == _SELF:
-            continue
-        for call in calls:
-            index = _timeout_index(call.func, direct)
-            if (index is not None and _passes_timeout(call, index)) or (
-                _binds_a_timeout_to_the_helper(call, direct, modules)
-            ):
-                found["overrides"].append(_site(path, call))
+        label = path.relative_to(_TESTS_ROOT).as_posix()
+        one = _scan_source(label, path.read_text(encoding="utf-8"), check_calls=path != _SELF)
+        if path == _HELPER_FILE:
+            one["mirrors"] = []
+            one["reexports"] = []
+        for key, sites in one.items():
+            found[key].extend(sites)
     return found
 
 
@@ -260,9 +286,9 @@ def test_wait_for_timeout_is_a_backstop_at_every_call_site() -> None:
     file to every test module. Pinning the default alone would not hold: one
     ``timeout=2.0`` at a call site brings the flake straight back. "Any
     spelling" covers a keyword, a positional, ``*``/``**`` splats, an import
-    alias, one level of rebinding (``w = _wait_for``), an attribute call on any
-    base (``tvw._wait_for``, ``self._wait_for``) and a timeout bound in with
-    ``functools.partial``.
+    alias, one level of rebinding (``w = _wait_for``), an underscore-named call
+    on any base (``tvw._wait_for``, ``self._wait_for``) and a timeout bound in
+    with ``functools.partial``.
     """
     overrides = _scan()["overrides"]
 
@@ -301,3 +327,88 @@ def test_guard_discovers_every_known_importer() -> None:
         f"importers not discovered: {missing}; the call-site guard is scanning nothing "
         "for them"
     )
+
+
+# Third-party ``wait_for``s the guard must leave alone (PR #35 re-review). Each
+# would be wrong advice if flagged: their ``timeout`` is a real API argument.
+_THIRD_PARTY_WAIT_FOR = {
+    "playwright_locator": (
+        "def t(page):\n"
+        "    page.locator('#a').wait_for(state='visible', timeout=5000)\n"
+    ),
+    "asyncio_attribute": (
+        "import asyncio\n"
+        "async def t(c):\n"
+        "    await asyncio.wait_for(c, timeout=1.0)\n"
+    ),
+    "asyncio_bare_import": (
+        "from asyncio import wait_for\n"
+        "async def t(c):\n"
+        "    await wait_for(c, 1.0)\n"
+    ),
+    "threading_condition": (
+        "import threading\n"
+        "cond = threading.Condition()\n"
+        "cond.wait_for(lambda: True, timeout=1.0)\n"
+    ),
+    "page_object_method": (
+        "class Page:\n"
+        "    def wait_for(self, selector, timeout=2.0):\n"
+        "        return None\n"
+    ),
+}
+
+# True positives that must stay red under the narrowed matching. Value: the
+# finding kind each must produce.
+_TRUE_POSITIVES = {
+    "imported_keyword": (
+        "from tests.thread_wait import wait_for\nwait_for(p, timeout=1.0)\n",
+        "overrides",
+    ),
+    "module_alias_positional": (
+        "from tests import thread_wait as tw\ntw.wait_for(p, 1.0)\n",
+        "overrides",
+    ),
+    "module_rebind": (
+        "from tests import thread_wait\ntw = thread_wait\ntw.wait_for(p, timeout=1.0)\n",
+        "overrides",
+    ),
+    "underscore_any_base": ("tvw._wait_for(p, timeout=1.0)\n", "overrides"),
+    "observer_partial": (
+        "import functools\nquick = functools.partial(_wait_for_observer, timeout=1.0)\n",
+        "overrides",
+    ),
+    "observer_positional_partial": (
+        "import functools\nquick = functools.partial(_wait_for_observer, 1.0)\n",
+        "overrides",
+    ),
+    "observer_rebind": ("obs = _wait_for_observer\nobs(1.0)\n", "overrides"),
+    "top_level_public_mirror": (
+        "def wait_for(predicate, timeout=2.0):\n    return None\n",
+        "mirrors",
+    ),
+    "public_reexport_from_test_module": (
+        "from tests.test_vault_watcher import wait_for\n",
+        "reexports",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_THIRD_PARTY_WAIT_FOR))
+def test_guard_leaves_third_party_wait_for_alone(case: str) -> None:
+    """Playwright's and asyncio's ``wait_for`` are not the backstop helper."""
+    found = _scan_source(f"<{case}>", _THIRD_PARTY_WAIT_FOR[case])
+
+    flagged = {kind: sites for kind, sites in found.items() if sites and kind != "importers"}
+
+    assert flagged == {}, f"false positive on a third-party wait_for ({case}): {flagged}"
+
+
+@pytest.mark.parametrize("case", sorted(_TRUE_POSITIVES))
+def test_guard_still_flags_the_helper_under_narrowed_matching(case: str) -> None:
+    """Narrowing ``wait_for`` must not open a hole for the real helper."""
+    source, kind = _TRUE_POSITIVES[case]
+
+    found = _scan_source(f"<{case}>", source)
+
+    assert found[kind], f"true positive not flagged as {kind} ({case}): {found}"

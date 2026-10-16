@@ -27,7 +27,8 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
    running master's `brain-install-launchd` logic directly, not `brain-up`. `launchctl list` now shows
    only `com.brain.watcher` and `com.brain.brief`. **Trap:** running `brain-up` or
    `brain-install-launchd` from a STALE install re-creates `com.brain.build`. The main checkout's editable
-   `.venv` is still at `6a82db2`, and so was the pre-upgrade uv tool.
+   `.venv` is at `6a82db2` (whose `pyproject.toml` already says 0.3.0), and the pre-upgrade uv tool
+   (v0.2.1) was staler still.
 2. **The daemons and the uv tool `secondbrain-py` were upgraded from v0.2.1 to 0.3.0.** The install came
    from the detached worktree `.claude/worktrees/daemon-src` at `8900725`. **Do not delete that worktree**
    until the tool is reinstalled from somewhere else: the uv receipt's source `directory` points at it.
@@ -45,6 +46,12 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
 7. **The merged remote branches on `second-brain` were deleted:** 24 of them, per the ops record. Of the
    pre-existing branches, only `chore/eval-ci-baseline` remains. It is unmerged (PR #11 closed and was
    superseded by #13), so deleting it is the user's call.
+8. **Claude Desktop's `brain` MCP server now launches the uv tool.** In
+   `~/Library/Application Support/Claude/claude_desktop_config.json`, the `brain` server's `command` was
+   repointed from the main checkout's `.venv/bin/brain-mcp`, which is editable, sits at `6a82db2` and
+   bypassed the Homebrew shims, to `~/.local/bin/brain-mcp`. This is the only brain MCP config on the
+   machine; no Claude Code config launches `brain-mcp`. **To revert,** restore
+   `claude_desktop_config.json.bak-20261016T161548` from the same directory.
 
 ## Still needs the user
 
@@ -53,7 +60,7 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
    by hand.
 3. **Optional: lower `OLLAMA_CONTEXT_LENGTH`** in `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`, so
    other clients stop forcing 65536-context reloads. Brew may regenerate that plist.
-4. **Restart open Claude Code sessions,** so their `brain-mcp` respawns on 0.3.0.
+4. **Restart Claude Desktop,** so its `brain-mcp` respawns on the upgraded install (see Done #8).
 5. **After the next ingest, confirm that `ollama ps` shows CONTEXT 8192.**
 6. **Host disk:** the data volume was 93% full when measured on 2026-10-16.
 7. **The main checkout** is 157 commits behind `second-brain/master` (measured 2026-10-16) and belongs to

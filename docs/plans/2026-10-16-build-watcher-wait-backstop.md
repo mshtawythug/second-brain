@@ -111,23 +111,29 @@ same name, so a grep for it still finds it) and is widened:
    checked separately, so a hard-coded literal default can't slip past.
 2. **Every call site, in every test module.** The guard parses every `tests/**/*.py`. A call counts as
    a guarded wait when its callee is any of these:
-   - a name bound to the shared `wait_for` (`from tests.thread_wait import wait_for [as X]`), plus one
-     level of rebinding (`w = _wait_for`);
-   - the bare names `wait_for` or `_wait_for`;
-   - an attribute named `wait_for` or `_wait_for` on ANY base. That covers `M.wait_for` through the
-     helper module, `tvw._wait_for` through a test module, and `self._wait_for`;
-   - `_wait_for_observer`, by name or attribute. That is `test_vault_watcher.py`'s observer-start wait;
-     its floor is pinned in that file, and its `timeout` is the FIRST parameter.
+   - **the underscore names `_wait_for` and `_wait_for_observer`**, as a bare name or as an attribute
+     on ANY base (`tvw._wait_for`, `self._wait_for`). They belong to this suite alone.
+     `_wait_for_observer` is `test_vault_watcher.py`'s observer-start wait; its floor is pinned in that
+     file, and its `timeout` is the FIRST parameter;
+   - **the public name `wait_for`, only where it provably resolves to `tests.thread_wait`.** That means
+     a bare name bound by `from tests.thread_wait import wait_for [as X]`, or `M.wait_for` where `M` is
+     bound by `import tests.thread_wait [as M]` or `from tests import thread_wait [as M]`. Playwright's
+     `Locator.wait_for`, `asyncio.wait_for` and `threading.Condition.wait_for` all take a real
+     `timeout`, so matching the public name on any base was a false positive (PR #35 re-review);
+   - **any of the above through ONE level of rebinding:** `w = _wait_for`,
+     `obs = _wait_for_observer`, `w = M.wait_for`, and the module rebind `tw = thread_wait`.
 
    A guarded wait is flagged if it passes a timeout in any form: positionally, as `timeout=`, or
    through a `*`/`**` splat. A call that passes the helper itself as an argument together with a
    timeout (`functools.partial(wait_for, timeout=2.0)`, under any name) is flagged too.
-3. **No mirror.** No file other than `tests/thread_wait.py` may bind `wait_for` or `_wait_for` other
-   than by import. That covers `def`, plain, annotated and walrus assignment, and every name inside a
-   tuple, list or starred target. This catches a re-introduced local helper that shadows or replaces
+3. **No mirror.** No file other than `tests/thread_wait.py` may bind `_wait_for` anywhere, or `wait_for`
+   at module level, other than by import. That covers `def`, plain, annotated and walrus assignment,
+   and every name inside a tuple, list or starred target. A `def wait_for` METHOD, such as a page
+   object's, is not a mirror. This catches a re-introduced local helper that shadows or replaces
    the import, which is the pre-PR state of `test_build_watcher.py`.
-4. **No re-export path.** No file may import a name `wait_for` or `_wait_for` from any module other than
-   `tests.thread_wait`. This catches the pre-PR `from tests.test_vault_watcher import _wait_for`, which
+4. **No re-export path.** No file may import `_wait_for` from any module other than
+   `tests.thread_wait`, or import `wait_for` from another test module (`tests.*` or a relative import).
+   `from asyncio import wait_for` is not the helper and is left alone. This catches the pre-PR `from tests.test_vault_watcher import _wait_for`, which
    is how the 5.0 got past PR #31's guard.
 5. **Non-vacuity.** The discovered importers must include the three known files, and each of them must
    have at least one call. If the discovery logic breaks, the guard goes red instead of passing over
@@ -251,8 +257,21 @@ declared; rc ≠ 0; the needle on an `E`/`>` line; `git checkout` → green with
 **Known residue in the guard.** *(Rewritten in the PR #35 review round. The earlier paragraph listed
 the wrong gaps: it said a renamed wrapper that forwards a timeout is not caught. It is caught, because
 the wrapper's inner `wait_for(p, t)` passes a timeout. It also said a renamed `partial` is not caught,
-and that is now closed.)* These are the real gaps, each needing data-flow analysis that is out of
-proportion for a test-suite convention:
+and that is now closed.)* **After the re-review narrowing, this is exactly what is and isn't matched.** Matched: the two
+underscore names on any base; the public `wait_for` only through a `tests.thread_wait` import binding
+or a module alias; one level of rebinding of either; and a `partial` that binds a timeout to any of
+them. **Not matched, by design:** a `wait_for` on any other base or from any other import:
+`page.locator(…).wait_for(timeout=5000)`, `asyncio.wait_for(c, timeout=1.0)`,
+`threading.Condition().wait_for(pred, timeout=…)`, and `from asyncio import wait_for`. Their
+`timeout` is a real API argument. The cost of that narrowing is one new gap, listed first below.
+
+These are the real gaps, each needing data-flow analysis that is out of proportion for a test-suite
+convention:
+
+- **The real helper reached under its public name through an unrecognised base or a star import:**
+  `holder.wait_for(p, timeout=1.0)`, where `holder` is some object carrying the helper, or
+  `from tests.thread_wait import *`. The guard can't tell that base from Playwright's, so it doesn't
+  guess.
 
 - **Dynamic access:** `importlib.import_module("tests.thread_wait").wait_for`, `__import__`,
   `getattr(module, "wait_for")`, `globals()["_wait_for"]`.
@@ -304,12 +323,71 @@ One correction from the run: the first M11/M12 form *replaced* the import line. 
 guard's non-vacuity clause and made it go red for an unrelated reason. Re-formed to keep the import
 (the reviewer's shape), both stay green at `8e9e921` and go red at the fix.
 
+## Re-review round (PR #35, reviewer and auditor @ `b53b74d`)
+
+**Reviewer:**
+
+1. **False positives on third-party `wait_for`** (LOW). Matching the public name on any base flagged
+   `page.locator(…).wait_for(timeout=5000)` and `asyncio.wait_for(…, timeout=1.0)`, and the re-export
+   check flagged `from asyncio import wait_for`. These were latent: no test file makes such a call
+   today, and the browser files use `wait_for_function`/`wait_for_selector`. The fix narrows the match,
+   as written in clauses 2–4.
+2. **`_wait_for_observer` rebind and `partial` not covered** (LOW). Fixed: `_helper_index` returns a
+   per-name positional index, so `partial(_wait_for_observer, 1.0)` and `obs = _wait_for_observer;
+   obs(1.0)` are both flagged.
+
+**Auditor:** the handoff's Claude Code MCP item and its "Done #1" version wording are corrected (see
+"Handoff doc" below). The residue now states exactly what is and isn't matched, including that
+`threading.Condition().wait_for(pred, timeout=…)` is not flagged, by design.
+
+**Source-level probes** (`test_guard_leaves_third_party_wait_for_alone`,
+`test_guard_still_flags_the_helper_under_narrowed_matching`) run synthetic snippets through
+`_scan_source`, the per-module scan that the guard itself runs over every file.
+
+- **Five must stay green:** Playwright's locator, `asyncio.wait_for`, `from asyncio import wait_for`,
+  `threading.Condition().wait_for`, and a page-object `def wait_for` method.
+- **Nine must stay red:** an imported keyword timeout, a module-alias positional timeout, a module
+  rebind, an underscore name on any base, the observer `partial` (keyword and positional), the
+  observer rebind, a top-level public mirror, and a public re-export from a test module.
+
+**Mutations, round 3: 25/25 PASS on all five clauses.** M1–M18 are unchanged, plus these new rows:
+
+| # | Mutation | Count | Red line |
+|---|---|---|---|
+| M19 | `quick = functools.partial(_wait_for_observer, timeout=1.0)`; `observer = quick()` | 1 | `explicit timeout at ['test_cli_vault_watch.py:98']` |
+| M20 | `obs_wait = _wait_for_observer`; `observer = obs_wait(1.0)` | 1 | `explicit timeout at ['test_cli_vault_watch.py:99']` |
+| M21 | guard: public `wait_for` matched on any attribute base | 1 | `false positive on a third-party wait_for (playwright_locator)`, and in a single-row re-run (threading_condition) |
+| M22 | guard: bare `wait_for` matched without an import | 1 | `… (asyncio_bare_import): {'overrides': …}` |
+| M23 | guard: re-export exemption for non-test modules removed | 1 | `… (asyncio_bare_import): {'reexports': …}` |
+| M24 | guard: public-name mirror check not limited to top level | 1 | `… (page_object_method): {'mirrors': …}` |
+| M25 | guard: rebinding skips index-0 (observer) waits | 1 | `true positive not flagged as overrides (observer_rebind)` |
+
+M21–M25 mutate the guard itself. They show that each probe can fail, and that each narrowing rule is
+load-bearing.
+
+**False-positive rows** (FP1: a Playwright `locator.wait_for(timeout=5000)` helper added to
+`test_build_watcher.py`; FP2: `from asyncio import wait_for` plus `await wait_for(c, 1.0)`) **stay green
+at the fix.**
+
+**Counter-proofs** on a `git archive b53b74d` copy:
+
+- M19 and M20 stay GREEN, so the observer holes were real;
+- FP1 and FP2 go RED, with `wait_for called with an explicit timeout at
+  ['wiki/test_build_watcher.py:50']` and `…:51`, so the false positives were real.
+
+**Browser files under the guard.** The guard's `_scan_source` was run over all 26 files that mention
+Playwright, the `browser` mark, `wait_for_selector` or `wait_for_function`: 0 overrides, 0 mirrors,
+0 re-exports. Across `tests/`, the only exact `.wait_for(` attribute call is the guard file's own exempt
+raise-path test. This PR changes no browser file, and Playwright is not installed in this worktree's
+venv, so the browser tests themselves were not executed. They are outside the default marker set, and
+nothing here can change their behaviour.
+
 ## Verification
 
 - `ruff check`, `mypy src/`: zero.
 - `tests/test_thread_wait.py`, `tests/wiki/test_build_watcher.py`, `tests/test_cli_vault_watch.py`,
   `tests/test_vault_watcher.py`, and `tests/test_repo_hygiene_files.py` (it reads `docs/`):
-  **109 passed**, on a sibling database.
+  **109 passed** in round 1 and **123 passed** in round 3 (the 14 new probes), on a sibling database.
 - No test reads `docs/handoff/2026-10-13-merge-all-handoff.md` or this plan.
 - A full suite in `bin/brain-ci`'s environment against the sibling DB was started on the commit that
   adds this section. Its result goes in the team-lead report, not here, because a section cannot
@@ -329,6 +407,16 @@ disk figure is the measured 93 %. The title date is now 2026-10-16. The round-1 
 - The build-watcher follow-up is marked as fixed by this PR.
 - The absence-window follow-up names the build watcher's tests as the same class.
 - The `#17–#21` date reads 2026-10-12/13 instead of 2026-10-13. `1a1d068` (#17) merged on 2026-10-12.
+
+**Correction (audit @ `b53b74d`):** the claim above that every fact was re-checked read-only
+was false for one item. "Restart open Claude Code sessions so brain-mcp respawns" assumed a Claude Code
+MCP config that does not exist. The only brain MCP config is Claude Desktop's, and its `command`
+pointed at the main checkout's editable `.venv` (at `6a82db2`), bypassing the shims. Team-lead
+repointed it to `~/.local/bin/brain-mcp`, backing it up to `.bak-20261016T161548`. The doc now records
+that under Done #8, with the revert, and lists "restart Claude Desktop" under the user's items. Both
+were verified by loading the JSON and printing only the `command` field (current: the uv tool; backup:
+the checkout's `.venv`). Done #1 is reworded too: `6a82db2`'s `pyproject.toml` already says 0.3.0, and
+it was the pre-upgrade tool (v0.2.1) that was staler.
 
 All 13 merge SHAs in its table were checked against `git log --merges second-brain/master`, and each
 names its own PR. Every referenced repo path exists on master. It contains no PII and no golden-corpus
