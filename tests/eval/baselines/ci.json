@@ -5,7 +5,7 @@
     "snippet_context_tokens": 200,
     "vector_sim_floor": 0.25
   },
-  "generated_at": "2026-10-14T16:43:10.594830Z",
+  "generated_at": "2026-10-15T22:24:25.936511Z",
   "mean_mrr": 0.3826,
   "mean_ndcg_at_5": 0.2724,
   "mean_recall_at_20": 0.7089,
@@ -1083,15 +1083,15 @@
         "f4f385ff-43d1-5cee-8115-60092a825b37",
         "c6cf2af9-a1c9-5401-8d75-abaf136a034e",
         "f56233b9-6c4f-5936-95a5-a19e1fad5d14",
-        "259caa51-579d-4057-9bbf-9cad9c1e27c8",
         "59a36d45-10b3-40c9-bd76-a9aa00c9588e",
-        "7a21bd85-0db7-4329-a914-0bd50d18710a",
         "70ca1223-f1b2-5987-85d1-8fd99dbbb857",
         "4d132b6f-838d-55dd-8293-3dc3c591c05e",
-        "92fbf4b8-63c9-44a5-b529-e968e4e34bd2",
-        "706cc710-b71f-4884-b3f3-ea9be4bec4a3",
         "2e0b8f87-d821-50d2-a127-131950422e18",
-        "571ed71b-3850-57fe-8021-b650385f7f6a"
+        "571ed71b-3850-57fe-8021-b650385f7f6a",
+        "9aef2e71-a76e-58ab-9140-66221420c17d",
+        "f9c6b3f3-23a6-5b35-9bf6-9fe49b5eae49",
+        "8a8fd286-a3b8-4224-ba2b-b8447e0b1605",
+        "e4ac0830-b9a3-5b7d-bd9a-e088056be723"
       ],
       "category": "recency",
       "expected_doc_ids": [

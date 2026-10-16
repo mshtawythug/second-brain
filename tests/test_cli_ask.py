@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 
 import brain.cli as cli
 from brain.config import Config
-from brain.errors import OllamaUnavailable
+from brain.errors import OllamaContextOverflow, OllamaUnavailable
 
 runner = CliRunner()
 
@@ -214,3 +214,38 @@ def test_cli_eval_answer_ollama_unavailable(
     result = runner.invoke(cli.app, ["eval", "--answer"])
     assert result.exit_code == 1
     assert "Ollama is not available" in result.output
+
+
+def test_cli_eval_answer_context_overflow_exits_cleanly(
+    test_db: psycopg.Connection,  # noqa: ARG001 — schema reset
+    patch_embedder: Callable[[object], None],
+    fake_embedder: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REGRESSION (PR #32 audit): with ``truncate``/``shift`` off an over-window
+    prompt is ``OllamaContextOverflow`` (it used to be truncated silently), and
+    this handler caught only ``OllamaUnavailable`` -- so it escaped as a
+    traceback. It must be a clean exit 1 naming the knob.
+    """
+    patch_embedder(fake_embedder)
+
+    def _overflowing_chat(
+        prompt: str,
+        *,
+        schema: dict[str, Any],
+        cfg: Config,
+        model: str | None = None,
+        num_predict: int | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        raise OllamaContextOverflow(
+            "Ollama refused a prompt larger than num_ctx=8192; "
+            "raise BRAIN_OLLAMA_NUM_CTX or shrink the input"
+        )
+
+    monkeypatch.setattr(cli, "_build_chat", lambda cfg: _overflowing_chat)
+
+    result = runner.invoke(cli.app, ["eval", "--answer"])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit), result.exception
+    assert "BRAIN_OLLAMA_NUM_CTX" in result.output

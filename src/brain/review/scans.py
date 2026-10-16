@@ -18,7 +18,7 @@ import psycopg
 
 from ..config import Config
 from ..enrichment import ContradictionVerdict
-from ..errors import OllamaUnavailable, ReviewError
+from ..errors import OllamaContextOverflow, OllamaUnavailable, ReviewError
 from ..ingest import Embedder
 from . import queries
 
@@ -210,7 +210,9 @@ def _adjudicate_entity(
 
     Returns ``None`` when no pair is judged contradictory. On
     :class:`OllamaUnavailable` commits the findings written so far (unless
-    ``dry_run``) and raises :class:`ReviewError` with the partial result.
+    ``dry_run``) and raises :class:`ReviewError` with the partial result. On
+    :class:`OllamaContextOverflow` skips that one pair: the refusal is
+    permanent for that prompt only, and the next pair is a different prompt.
     """
     for doc_a, doc_b, _sim in pairs:
         summary_a = summaries.get(doc_a)
@@ -230,6 +232,16 @@ def _adjudicate_entity(
                 processed=processed,
                 total=total,
             ) from exc
+        except OllamaContextOverflow as exc:
+            # Not a down server: one pair's prompt exceeded BRAIN_OLLAMA_NUM_CTX.
+            # Skip the pair (mirrors elicit's per-entity skip) instead of
+            # aborting the scan. Log the entity key only, never the summaries.
+            _logger.warning(
+                "conflict scan: pair for %r over the context window; skipping: %s",
+                cand.canonical_key,
+                exc,
+            )
+            continue
         if verdict.contradicts:
             if not dry_run:
                 queries.upsert_review_finding(

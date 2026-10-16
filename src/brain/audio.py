@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from .chat import chat_json
 from .errors import AudioError, EnrichmentError, OllamaUnavailable, TtsError
+from .ollama_budget import AUDIO_NUM_PREDICT
 
 if TYPE_CHECKING:
     import psycopg
@@ -68,7 +69,8 @@ KIND_GLOBAL = "global"
 _DOCS_PER_GROUP = 2
 
 # Default completion-length budget for the dialogue call (spec §3 step 4c).
-_DEFAULT_NUM_PREDICT = 2048
+# Bound from ``ollama_budget``, where ``num_ctx`` is validated against it.
+_DEFAULT_NUM_PREDICT = AUDIO_NUM_PREDICT
 
 # The schema handed to ``chat_json`` — its KEYS are the required top-level keys
 # of the returned JSON object. The generator does the deeper per-turn structural
