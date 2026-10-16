@@ -40,6 +40,7 @@ from tests.hnsw_fixtures import (
     current_scan_settings,
     floor_hitting_distance_exactly,
     index_scan_nodes,
+    insert_ineligible_twins,
     plan_text,
     use_hnsw_dimension,
     vector_literal,
@@ -447,3 +448,31 @@ def test_zero_norm_chunk_never_passes_the_floor(
     assert zero not in doc_ids
     if floor == -1.0:
         assert normal in doc_ids  # every real cosine passes -1: the leg is not empty
+
+
+@pytest.mark.fresh_schema
+def test_ineligible_twins_of_the_source_never_enter_the_pool(
+    related_corpus: tuple[psycopg.Connection[Any], str, list[str]],
+) -> None:
+    """A draft doc and a vault-less doc whose chunk EQUALS the source never appear.
+
+    Each would rank first (cosine 1.0), so dropping either eligibility predicate
+    from the leg's CTE puts it at the top of the pool deterministically, rather
+    than by the luck of where an ordinary ineligible chunk happens to rank. The
+    pool must still hold ``CANDIDATE_LIMIT`` eligible rows.
+    """
+    conn, source, _ = related_corpus
+    src = _src_embedding(conn, source)
+    twins = insert_ineligible_twins(conn, src)
+
+    rows = vector_candidates(
+        conn,
+        src_embedding=src,
+        exclude_doc_id=source,
+        vector_sim_floor=-1.0,
+        exclude_confidential=True,
+    )
+    doc_ids = [doc_id for _, doc_id, _ in rows]
+    assert twins["draft"] not in doc_ids
+    assert twins["vaultless"] not in doc_ids
+    assert len(rows) == CANDIDATE_LIMIT

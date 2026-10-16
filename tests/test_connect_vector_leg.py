@@ -34,6 +34,7 @@ from tests.hnsw_fixtures import (
     apply_planner_pressure,
     build_hnsw_index,
     current_scan_settings,
+    insert_ineligible_twins,
     plan_text,
     use_hnsw_dimension,
     vector_literal,
@@ -87,7 +88,9 @@ def _seed(conn: psycopg.Connection[Any]) -> tuple[list[str], FakeEmbedder]:
 def _oracle(conn: psycopg.Connection[Any], source: str) -> list[tuple[str, float]]:
     """Per-doc best cosine to the source's average embedding, computed in Python."""
     rows = conn.execute(
-        "SELECT document_id::text, embedding::text FROM chunks"
+        "SELECT c.document_id::text, c.embedding::text FROM chunks c "
+        "JOIN documents d ON d.id = c.document_id "
+        "WHERE d.draft = FALSE AND d.vault_path IS NOT NULL"
     ).fetchall()
     by_doc: dict[str, list[list[float]]] = {}
     for doc_id, emb in rows:
@@ -263,3 +266,64 @@ def _capped_knn_row_count(conn: psycopg.Connection[Any], source: str, k: int) ->
             {"vec": src[0], "source": source, "k": k},
         ).fetchall()
     return len(rows)
+
+
+@pytest.mark.fresh_schema
+def test_ineligible_twins_of_the_source_never_score(
+    affinity_corpus: tuple[psycopg.Connection[Any], list[str]],
+) -> None:
+    """A draft doc and a vault-less doc whose chunk EQUALS the source's average.
+
+    Each would score cosine 1.0 and rank first, so dropping either eligibility
+    predicate from the KNN query surfaces it deterministically. The KNN path
+    really runs here (800 eligible chunks fill k = 400; no under-fill), and the
+    result must still be the oracle's top 50 over eligible documents only.
+    """
+    conn, ids = affinity_corpus
+    source = ids[0]
+    avg = conn.execute(
+        "SELECT avg(embedding)::text FROM chunks WHERE document_id = %s::uuid", (source,)
+    ).fetchone()
+    assert avg is not None
+    twins = insert_ineligible_twins(conn, avg[0])
+
+    got = _affinity(conn, source)
+    assert twins["draft"] not in got
+    assert twins["vaultless"] not in got
+    assert len(got) == _CANDIDATE_LIMIT
+    assert list(got) == [doc for doc, _ in _oracle(conn, source)]
+
+
+@pytest.mark.parametrize("floor", [-1.0, 0.0, 0.25])
+def test_a_zero_norm_chunk_never_scores_on_the_exhaustive_path(
+    test_db: psycopg.Connection[Any], fake_embedder: FakeEmbedder, floor: float
+) -> None:
+    """A zero vector's cosine is NaN; it must never take a candidate slot.
+
+    Five documents on the default 4096-dim schema: k = 400 can never fill, so
+    every call concedes to the exhaustive query (the path every corpus under 400
+    eligible chunks takes). That query floored with ``1 - dist >= floor``, and
+    ``1 - NaN >= x`` is TRUE in Postgres, so the zero-norm doc came back with
+    cosine NaN and sorted FIRST under ``ORDER BY cosine DESC``. ``dist <= 1 -
+    floor`` is FALSE for NaN.
+    """
+    ids = [_make_doc(test_db, fake_embedder, i) for i in range(5)]
+    zero = ids[4]
+    test_db.execute(
+        "UPDATE chunks SET embedding = array_fill(0, ARRAY[%s])::vector "
+        "WHERE document_id = %s::uuid",
+        [fake_embedder.dim, zero],
+    )
+    got = _affinity_with_floor(test_db, ids[0], floor)
+    assert zero not in got
+    assert not any(math.isnan(score) for score in got.values())
+    if floor == -1.0:
+        assert set(got) == set(ids[1:4])  # every real cosine passes -1
+
+
+def _affinity_with_floor(
+    conn: psycopg.Connection[Any], source: str, floor: float
+) -> dict[str, float]:
+    return connect_mod.embedding_affinity(
+        conn, source_doc_id=source, candidate_limit=_CANDIDATE_LIMIT, vector_sim_floor=floor
+    )

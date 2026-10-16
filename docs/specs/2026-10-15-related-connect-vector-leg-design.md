@@ -14,7 +14,8 @@ PR #22 fixed `brain search`'s vector leg. Two other chunk-vector queries kept th
 | `related._vector_candidates` | Eligibility filters, F6 gate **and the cosine floor** in one `WHERE`, `ORDER BY embedding <=> q LIMIT 50`, pgvector's default session settings. |
 | `connect._embedding_affinity_knn` | Same filter shape without a floor, `LIMIT k` (k = 400 at the default `connect_candidate_limit` of 50), `SET LOCAL hnsw.iterative_scan = strict_order`, adaptive doubling of k, an exhaustive fallback, and a written argument that the result is **exact**. |
 
-On the live corpus (21,286 embedded chunks, pgvector 0.8.2) the planner serves both from
+On the live corpus (21,286 embedded chunks at the morning probe on 2026-10-15; 21,288 by
+the afternoon re-check, every one of them eligible; pgvector 0.8.2) the planner serves both from
 `chunks_embedding_idx` (verified with `EXPLAIN`).
 
 ## 2. Evidence (measured 2026-10-15)
@@ -189,7 +190,8 @@ loop treated a batch of fewer than k rows as "every eligible chunk seen". The
 iterative scan also stops at `hnsw.max_scan_tuples` (20,000 visited tuples, and
 approximate), so a short batch proves nothing about exhaustion. (An earlier draft of
 this round "justified" the premise by saying all eligible chunks fit under the cap.
-That is false: prod has 21,288 eligible chunks.) Now `len(rows) < k` returns "not
+That is false: prod had 21,288 embedded chunks on the 2026-10-15 afternoon re-check,
+all eligible, against a cap of 20,000.) Now `len(rows) < k` returns "not
 converged", and the caller runs the exact `_embedding_affinity_exhaustive`. This
 costs nothing on the live corpus, where every embedded chunk is eligible and k
 (≤ 400·2³ = 3,200) fills long before the cap. On a corpus too small to fill k (demo,
@@ -197,6 +199,18 @@ tests) the exhaustive query is cheap by definition. The early-stop argument no l
 depends on `max_scan_tuples` at all. The test forces a real under-fill by lowering
 `ef_search` and the cap to 1 (91 of 400 rows). At ef 40 / cap 100, pgvector still
 returned all 400 rows, so the precondition asserts the short batch first.
+
+**The exhaustive query's floor (review round 3).** Sending every under-fill to
+`_embedding_affinity_exhaustive` exposed its floor: `1 - dist >= floor`, which admits
+a zero-norm chunk because `1 - NaN >= x` is TRUE in Postgres. The NaN-scored document
+then sorted FIRST under `ORDER BY cosine DESC` and took a candidate slot. On the base
+branch a small corpus never reached that query: its under-fill was taken as complete,
+and the Python floor dropped the NaN. So this was a regression this change introduced,
+on exactly the corpora (demo, fresh installs, under 400 eligible chunks) that now take
+the exhaustive path. The floor is now `dist <= 1 - floor`, the same form as the other
+two legs, and a test on the default schema pins it. No other SQL floor of the old form
+remains in `src/`. The Python-side floors in `connect` and `review/scans` compare with
+`>=` / `<`, where a NaN compares False and is dropped.
 
 ## 4. Revisit
 
@@ -207,6 +221,11 @@ these happen:
 - pgvector is upgraded past 0.8.x;
 - the corpus doubles;
 - `search_vector_leg`'s own revisit trigger fires. It shares these settings.
+
+Open the probe connection with `prepare_threshold=None`. Otherwise psycopg's
+auto-prepare (after 5 executions) can keep a cached plan past a later
+`SET LOCAL enable_indexscan = off`, and the "exact" reference stops being exact.
+Plan §4 explains why the 2026-10-15 references were unaffected.
 
 ## 5. Out of scope
 

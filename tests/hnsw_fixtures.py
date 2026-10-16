@@ -126,3 +126,36 @@ def floor_hitting_distance_exactly(distance: float) -> float | None:
             candidate, math.inf if 1.0 - candidate > distance else -math.inf
         )
     return None
+
+
+#: ``(label, vault_path, draft)`` for the two ways a document is ineligible to be
+#: a related-docs or ``connect`` candidate.
+INELIGIBLE_TWINS: tuple[tuple[str, str | None, bool], ...] = (
+    ("draft", "twins/draft-twin.md", True),
+    ("vaultless", None, False),
+)
+
+
+def insert_ineligible_twins(conn: psycopg.Connection[Any], vector: str) -> dict[str, str]:
+    """One draft doc and one vault-less doc, each with a single chunk of ``vector``.
+
+    Give them the SOURCE's query vector: each then ranks first (cosine 1.0), so a
+    leg that drops either eligibility predicate surfaces it deterministically.
+    Returns ``{label: document_id}``.
+    """
+    twins: dict[str, str] = {}
+    for label, vault_path, draft in INELIGIBLE_TWINS:
+        row = conn.execute(
+            "INSERT INTO documents "
+            "(title, content, content_hash, content_type, vault_path, draft, kind) "
+            "VALUES (%s, %s, %s, 'note', %s, %s, 'vault') RETURNING id::text",
+            (f"Synthetic {label} twin", "twin body", f"hash-twin-{label}", vault_path, draft),
+        ).fetchone()
+        assert row is not None
+        conn.execute(
+            "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
+            "VALUES (%s::uuid, 0, 'twin chunk', %s::vector)",
+            (row[0], vector),
+        )
+        twins[label] = str(row[0])
+    return twins

@@ -21,8 +21,9 @@ audit. Re-derive with ``wc -l src/brain/connect.py``. What does not rot is the
 base and the trail: 925 (``f8c76c0``, branch base) -> 925 (``3b16527``, touched
 but no net change) -> 952 (``ec6afb6``) -> 972 (``56cc984``, the commit that
 wrote this very record -- its +20 lines ARE the ceiling record) -> 993
-(``b7fd0e8``) -> 1,091 (``f4d914d``, promoted 2026-10-15) -> **the commit that
-moved the KNN onto brain.hnsw_scan**, descriptive, no delta; it did not grow it.
+(``b7fd0e8``) -> 1,091 (``f4d914d``) -> 1,088 (``7dfa9e8``, the KNN onto
+brain.hnsw_scan) -> 1,090 (``c5e8a76``, +2: the under-fill fallback) -> **the
+commit that promoted these two hops**, descriptive, no delta.
 (A descriptive hop is promotable to a SHA-bound one the moment a later edit can
 see it. That is the maintenance the terminating form requires, and skipping it
 is how a trail keeps arriving one hop short while each author believes they just
@@ -111,12 +112,10 @@ _KNN_CANDIDATE_MULTIPLIER = 8
 # worst case; correctness holds either way (the fallback is exact).
 _KNN_MAX_ITERATIONS = 4
 
-# The KNN runs under brain.hnsw_scan.STRICT_SCAN_SETTINGS, scoped to the scan.
-# Iterating fixes a filtered scan under-returning (a ``LIMIT 400`` once yielded
-# 27 rows on prod); ``strict_order`` keeps rows in distance order, which the
-# early stop below needs; ef_search 1000 is the 2026-10-15 fix: at the default
-# 40 the result matched the exhaustive query for 106 of 200 live sources, at
-# 1000 for 199 (docs/specs/2026-10-15-related-connect-vector-leg-design.md).
+# The KNN runs under brain.hnsw_scan.STRICT_SCAN_SETTINGS: ``strict_order`` keeps
+# rows in the distance order the early stop needs, and ef_search 1000 took exact
+# agreement from 106 to 199 of 200 live sources; see
+# docs/specs/2026-10-15-related-connect-vector-leg-design.md.
 
 
 @dataclass(frozen=True)
@@ -471,13 +470,13 @@ def _embedding_affinity_exhaustive(
     candidate_limit: int,
     vector_sim_floor: float,
 ) -> dict[str, float]:
-    """Pre-4.1 exhaustive ``MAX(...) GROUP BY`` scan — exact but seq-scans every
-    chunk (the range predicate on the cosine defeats the HNSW index).
+    """Exhaustive ``MAX(...) GROUP BY`` scan: exact, but reads every chunk.
 
-    Retained verbatim as the correctness fallback for the rare case where the
-    adaptive KNN re-query in :func:`_embedding_affinity_knn` cannot converge
-    (a cold / sparse corpus where k would have to grow past the cap). Callers
-    reach it only after that path returns ``None``.
+    The fallback whenever :func:`_embedding_affinity_knn` returns ``None``: it
+    could not converge, or a batch under-filled, which every corpus with fewer
+    than k eligible chunks does. The floor is ``dist <= 1 - floor``, because
+    ``1 - NaN >= x`` is TRUE in Postgres: a zero-norm chunk scored NaN, sorted
+    first, and took a candidate slot.
     """
     rows = conn.execute(
         """
@@ -489,7 +488,7 @@ def _embedding_affinity_exhaustive(
           AND d.vault_path IS NOT NULL
           AND d.id <> %(source)s::uuid
           AND c.embedding IS NOT NULL
-          AND 1 - (c.embedding <=> %(vec)s::vector) >= %(floor)s
+          AND (c.embedding <=> %(vec)s::vector) <= 1 - %(floor)s
         GROUP BY d.id
         ORDER BY cosine DESC, doc_id
         LIMIT %(limit)s
