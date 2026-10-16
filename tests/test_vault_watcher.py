@@ -191,14 +191,32 @@ def _wait_for_observer(
     )
 
 
-def _wait_for(predicate: Any, timeout: float = 2.0) -> None:
-    """Block until ``predicate()`` returns truthy or the deadline passes."""
+# Backstop for ``_wait_for`` — same reasoning as ``_wait_for_observer``'s.
+_WAIT_FOR_BACKSTOP_S = 10.0
+
+
+def _wait_for(predicate: Any, timeout: float = _WAIT_FOR_BACKSTOP_S) -> None:
+    """Block until ``predicate()`` returns truthy or the deadline passes.
+
+    ``timeout`` is a BACKSTOP against a hung watcher, NOT a latency
+    assertion: every call site waits for something that WILL happen on
+    another thread (a debounce timer, then the worker's sync), so a passing
+    run returns as soon as the predicate holds and never pays the deadline.
+    Call sites used to pass 1-3s. Under a full suite at load average 50-140
+    that flaked ``test_racing_edit_during_sync_is_not_masked_by_body_cache``
+    twice on 2026-10-15; probed at load ~95 a single phase took 1.945s of
+    its 2.0s. Do not pass a shorter ``timeout`` —
+    ``test_wait_for_timeout_is_a_backstop_at_every_call_site`` refuses it.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
             return
         time.sleep(0.01)
-    raise AssertionError("predicate never became true")
+    raise AssertionError(
+        f"predicate never became true within {timeout}s "
+        "(backstop, not a latency assertion)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +429,7 @@ def test_burst_of_modifies_collapses_to_one_sync(
     for _ in range(5):
         observer.inject(FileModifiedEvent(str(note)))
 
-    _wait_for(lambda: len(events) >= 1, timeout=2.0)
+    _wait_for(lambda: len(events) >= 1)
     # Allow a little slack for any spurious extras to arrive.
     time.sleep(0.1)
     assert len(events) == 1, f"expected 1 collapsed event, got {events!r}"
@@ -451,7 +469,7 @@ def test_multi_path_bursts_yield_one_sync_per_path(
     for _ in range(3):
         observer.inject(FileModifiedEvent(str(b)))
 
-    _wait_for(lambda: len(events) >= 2, timeout=2.0)
+    _wait_for(lambda: len(events) >= 2)
     time.sleep(0.1)
     assert len(events) == 2
     paths = sorted(p.name for _, p in events)
@@ -567,7 +585,6 @@ def test_delete_event_removes_row(
             "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
         ).fetchone()[0]
         == 0,
-        timeout=2.0,
     )
     assert events == [("delete", note)]
 
@@ -632,7 +649,7 @@ def test_stale_delete_event_preserves_existing_file(
     # Wait for the worker to drain the event queue. The on_event hook
     # fires when a job is enqueued (post-debounce); poll for it before
     # asserting on DB state so we don't race the worker.
-    _wait_for(lambda: ("delete", note) in events, timeout=2.0)
+    _wait_for(lambda: ("delete", note) in events)
 
     # Give the worker a brief moment to actually process the dequeued
     # job. We can't sync on the row's deletion because it shouldn't
@@ -707,7 +724,7 @@ def test_stale_upsert_event_for_vanished_file(
     # the worker to finish acting on it. We can't sync on a DB row appearing
     # (it shouldn't) or on processed advancing (it shouldn't either, per the
     # impl decision to ``continue``), so the bounded wait is the right shape.
-    _wait_for(lambda: ("upsert", ghost) in events, timeout=2.0)
+    _wait_for(lambda: ("upsert", ghost) in events)
     deadline = time.monotonic() + 0.5
     while time.monotonic() < deadline:
         time.sleep(0.02)
@@ -774,7 +791,6 @@ def test_graceful_shutdown_drains_pending(
 
     _wait_for(
         lambda: len(observer.handler._state.pending_timers) == 1,
-        timeout=1.0,
     )
 
     # Stop now — the drain logic should still flush the pending edit.
@@ -895,7 +911,6 @@ def test_overflow_triggers_full_sync(
 
     _wait_for(
         lambda: any(p == vault for _, p in events),
-        timeout=2.0,
     )
     overflow = [(a, p) for a, p in events if p == vault]
     assert overflow == [("upsert", vault)]
@@ -932,7 +947,7 @@ def test_worker_swallows_per_file_errors(
     observer = _wait_for_observer(result_q=result_q)
 
     observer.inject(FileModifiedEvent(str(bad)))
-    _wait_for(lambda: len(events) >= 1, timeout=2.0)
+    _wait_for(lambda: len(events) >= 1)
     # Now write a healthy file and verify the worker is still alive.
     _write(good, {"id": good_id, "title": "Good"}, "y\n")
     observer.inject(FileCreatedEvent(str(good)))
@@ -942,7 +957,6 @@ def test_worker_swallows_per_file_errors(
             "SELECT count(*) FROM documents WHERE id = %s", (good_id,)
         ).fetchone()[0]
         == 1,
-        timeout=2.0,
     )
 
     state = observer.handler._state
@@ -993,7 +1007,6 @@ def test_on_any_event_swallows_classify_errors(
             "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
         ).fetchone()[0]
         == 1,
-        timeout=2.0,
     )
 
     state = observer.handler._state
@@ -1102,7 +1115,6 @@ def test_on_event_hook_exceptions_are_swallowed(
     # Worker still picks up the job even though the hook raised.
     _wait_for(
         lambda: observer.handler._state.processed >= 1,
-        timeout=2.0,
     )
 
     state = observer.handler._state
@@ -1150,11 +1162,11 @@ def test_worker_logs_and_continues_on_sync_exception(
 
     # First event triggers the simulated failure; the worker stays alive.
     observer.inject(FileModifiedEvent(str(note)))
-    _wait_for(lambda: observer.handler._state.errors >= 1, timeout=2.0)
+    _wait_for(lambda: observer.handler._state.errors >= 1)
 
     # Second event must succeed — proves the worker didn't die.
     observer.inject(FileModifiedEvent(str(note)))
-    _wait_for(lambda: observer.handler._state.processed >= 1, timeout=2.0)
+    _wait_for(lambda: observer.handler._state.processed >= 1)
 
     state = observer.handler._state
     state.stop_event.set()
@@ -1199,7 +1211,7 @@ def test_overflow_full_sync_is_dispatched_to_worker(
         path.write_text("# x")
         observer.inject(FileModifiedEvent(str(path)))
 
-    _wait_for(lambda: len(sync_called) >= 2, timeout=2.0)
+    _wait_for(lambda: len(sync_called) >= 2)
     # First call was the startup sync; second is the overflow recovery.
 
     state = observer.handler._state
@@ -1238,7 +1250,7 @@ def test_run_watcher_install_signal_handlers_real_path(
     )
     _wait_for_observer(result_q=result_q)  # ensures the watcher has fully started up
     # Two install calls (SIGINT, SIGTERM), each capturing the closure.
-    _wait_for(lambda: len(captured_handlers) >= 2, timeout=2.0)
+    _wait_for(lambda: len(captured_handlers) >= 2)
 
     # Invoking the handler MUST trigger the stop_event — that's the
     # only thing the handler does (besides the log line).
@@ -1614,7 +1626,6 @@ def test_fence_only_write_skips_resync(
 
     _wait_for(
         lambda: state.skipped_fence_only >= 1,
-        timeout=2.0,
     )
     # ``sync_one_file`` was NOT called for this event.
     assert spy_calls == [], (
@@ -1659,7 +1670,7 @@ def test_real_body_change_with_fence_triggers_resync(
     _write(note, {"id": note_id, "title": "Changed"}, body_v2)
     observer.inject(FileModifiedEvent(str(note)))
 
-    _wait_for(lambda: len(spy_calls) >= 1, timeout=2.0)
+    _wait_for(lambda: len(spy_calls) >= 1)
     assert spy_calls == [note]
     assert state.skipped_fence_only == 0
 
@@ -1697,7 +1708,7 @@ def test_real_body_change_without_fence_triggers_resync(
     _write(note, {"id": note_id, "title": "Plain"}, "v2 — completely different\n")
     observer.inject(FileModifiedEvent(str(note)))
 
-    _wait_for(lambda: len(spy_calls) >= 1, timeout=2.0)
+    _wait_for(lambda: len(spy_calls) >= 1)
     assert spy_calls == [note]
     assert state.skipped_fence_only == 0
 
@@ -1735,11 +1746,11 @@ def test_cold_start_first_sight_triggers_resync(
 
     observer.inject(FileModifiedEvent(str(note)))
 
-    _wait_for(lambda: len(spy_calls) >= 1, timeout=2.0)
+    _wait_for(lambda: len(spy_calls) >= 1)
     assert spy_calls == [note]
     # Cache was populated post-sync (the spy is a no-op so the file
     # contents are unchanged).
-    _wait_for(lambda: note in state.body_cache, timeout=1.0)
+    _wait_for(lambda: note in state.body_cache)
     assert state.body_cache[note] == strip_fence(note.read_text())
 
     state.stop_event.set()
@@ -1777,7 +1788,7 @@ def test_delete_invalidates_cache_recreate_resyncs(
 
     note.unlink()
     observer.inject(FileDeletedEvent(str(note)))
-    _wait_for(lambda: note not in state.body_cache, timeout=2.0)
+    _wait_for(lambda: note not in state.body_cache)
 
     # Re-create with byte-identical content — a fence-only check against
     # the (now-evicted) cache would skip and we'd lose the row. Instead
@@ -1785,7 +1796,7 @@ def test_delete_invalidates_cache_recreate_resyncs(
     _write(note, {"id": note_id, "title": "Rebirth"}, body)
     observer.inject(FileCreatedEvent(str(note)))
 
-    _wait_for(lambda: len(spy_calls) >= 1, timeout=2.0)
+    _wait_for(lambda: len(spy_calls) >= 1)
     assert spy_calls == [note]
     assert state.skipped_fence_only == 0
 
@@ -1822,12 +1833,12 @@ def test_cache_refreshed_after_real_sync(
 
     # First event: cold start → sync runs and cache is populated.
     observer.inject(FileModifiedEvent(str(note)))
-    _wait_for(lambda: note in state.body_cache, timeout=2.0)
+    _wait_for(lambda: note in state.body_cache)
     assert spy_calls == [note]
 
     # Second event: same content, no cache miss → fence-only skip.
     observer.inject(FileModifiedEvent(str(note)))
-    _wait_for(lambda: state.skipped_fence_only >= 1, timeout=2.0)
+    _wait_for(lambda: state.skipped_fence_only >= 1)
     assert len(spy_calls) == 1, (
         f"second identical event must not call sync_one_file; got {spy_calls!r}"
     )
@@ -1872,7 +1883,6 @@ def test_overflow_full_sync_clears_body_cache(
 
     _wait_for(
         lambda: bogus not in state.body_cache,
-        timeout=3.0,
     )
 
     state.stop_event.set()
@@ -1923,7 +1933,7 @@ def test_vanished_file_with_cached_body_is_noop(
     note.unlink()
     observer.inject(FileModifiedEvent(str(note)))
 
-    _wait_for(lambda: ("upsert", note) in events, timeout=2.0)
+    _wait_for(lambda: ("upsert", note) in events)
     deadline = time.monotonic() + 0.5
     while time.monotonic() < deadline:
         time.sleep(0.02)
@@ -2054,6 +2064,7 @@ def _run_events_through_worker(
     embedder: Any,
     config: WatchConfig,
     *events: Any,
+    state: _WatcherState | None = None,
 ) -> _WatcherState:
     """Classify each event, enqueue the resulting job(s) in order, then drain
     the worker synchronously.
@@ -2063,8 +2074,13 @@ def _run_events_through_worker(
     (``delete(src)`` then ``upsert(dst)``). Shape-tolerant so the same test
     exercises both the pre-fix 2-tuple classifier (behavioral RED) and the
     post-fix 3-tuple ``move`` classifier (GREEN).
+
+    Pass ``state`` from an earlier call to drain again against the SAME
+    watcher state — the body cache a previous drain primed carries over,
+    exactly as it does across jobs in the long-lived worker thread.
     """
-    state = _WatcherState()
+    if state is None:
+        state = _WatcherState()
     for event in events:
         classified = _classify_event(event, config.vault_path)
         if classified is None:
@@ -2196,7 +2212,6 @@ def test_move_within_vault_preserves_backlinks_end_to_end(
             (a_id, b_id),
         ).fetchone()[0]
         == 1,
-        timeout=2.0,
     )
 
     src = vault / "b.md"
@@ -2209,7 +2224,6 @@ def test_move_within_vault_preserves_backlinks_end_to_end(
             "SELECT vault_path FROM documents WHERE id = %s", (b_id,)
         ).fetchone()
         == ("b2.md",),
-        timeout=2.0,
     )
     incoming = test_db.execute(
         "SELECT src_document_id::text, dst_document_id::text FROM links "
@@ -2254,7 +2268,6 @@ def test_move_out_of_vault_still_deletes(
             "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
         ).fetchone()[0]
         == 1,
-        timeout=2.0,
     )
 
     src = vault / "leaving.md"
@@ -2267,7 +2280,6 @@ def test_move_out_of_vault_still_deletes(
             "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
         ).fetchone()[0]
         == 0,
-        timeout=2.0,
     )
 
     state = observer.handler._state
@@ -2380,7 +2392,6 @@ def test_new_top_level_dir_created_after_start_is_watched_and_synced(
             Path(p) == newdir and recursive
             for _h, p, recursive in observer.scheduled
         ),
-        timeout=2.0,
     )
     # (b) The note that already existed inside the new dir is synced without a
     #     separate file event.
@@ -2389,7 +2400,6 @@ def test_new_top_level_dir_created_after_start_is_watched_and_synced(
             "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
         ).fetchone()[0]
         == 1,
-        timeout=2.0,
     )
 
     state = observer.handler._state
@@ -2448,6 +2458,14 @@ def test_racing_edit_during_sync_is_not_masked_by_body_cache(
     filesystem event for that save must trigger a real re-sync so the DB
     catches up — it must NOT be masked as a fence-only no-op by a cache that
     was baselined from the raced disk content.
+
+    Drives the worker synchronously (``_run_events_through_worker``) rather
+    than through ``run_watcher``'s debounce timer and worker thread. What this
+    guards is ``_worker_loop``'s cache bookkeeping, which runs identically
+    either way; the threaded version waited on three wall-clock deadlines and
+    flaked twice on 2026-10-15 under full-suite load (load average 50-140)
+    with no production defect behind it. The race itself is still real: it is
+    staged inside ``sync_one_file`` by ``_EditDuringEmbed``, not by a thread.
     """
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -2457,47 +2475,41 @@ def test_racing_edit_during_sync_is_not_masked_by_body_cache(
     body_indexed = "alpha body version one\n"
     body_raced = "beta body version two — the edit that raced\n"
     raced_text = dump_frontmatter(fm, body_raced)
-
-    # The note does NOT exist at startup, so the startup sync embeds nothing
-    # and the edit-during-embed only fires on the post-startup event.
     embedder = _EditDuringEmbed(fake_embedder, note, raced_text)
-
     config = WatchConfig(vault_path=vault, debounce_ms=10)
-    thread, result_q = _start_watcher(
-        conn_factory=_conn_factory(test_db),
-        embedder=embedder,
-        config=config,
-    )
-    observer = _wait_for_observer(result_q=result_q)
-    state = observer.handler._state
 
-    # First save: body_indexed on disk. The event triggers sync, whose embed
+    # First save: body_indexed on disk. Its event triggers sync, whose embed
     # writes body_raced to disk mid-flight (the racing user edit).
     _write(note, fm, body_indexed)
-    observer.inject(FileModifiedEvent(str(note)))
+    state = _run_events_through_worker(
+        test_db, embedder, config, FileModifiedEvent(str(note))
+    )
 
     # Sync 1 done: DB holds the INDEXED body, disk holds the raced body, and
     # the cache has been primed.
-    _wait_for(lambda: embedder.fired, timeout=2.0)
-    _wait_for(lambda: note in state.body_cache, timeout=2.0)
+    assert embedder.fired, "the racing edit was never staged"
+    assert state.errors == 0
+    assert note in state.body_cache
+    assert note.read_text(encoding="utf-8") == raced_text
     row = test_db.execute(
         "SELECT content FROM documents WHERE id = %s", (note_id,)
     ).fetchone()
     assert row is not None and "alpha body version one" in row[0]
 
-    # Second event: the racing save's own filesystem event. It must NOT be
-    # masked as fence-only — the DB has to catch up to the raced body.
-    observer.inject(FileModifiedEvent(str(note)))
-    _wait_for(
-        lambda: "beta body version two"
-        in test_db.execute(
-            "SELECT content FROM documents WHERE id = %s", (note_id,)
-        ).fetchone()[0],
-        timeout=2.0,
+    # Second event: the racing save's own filesystem event, against the SAME
+    # watcher state. It must NOT be masked as fence-only — the DB has to catch
+    # up to the raced body.
+    _run_events_through_worker(
+        test_db, embedder, config, FileModifiedEvent(str(note)), state=state
     )
-
-    state.stop_event.set()
-    thread.join(timeout=5.0)
+    assert state.errors == 0
+    assert state.skipped_fence_only == 0, (
+        "the racing edit's event was masked as a fence-only write"
+    )
+    row = test_db.execute(
+        "SELECT content FROM documents WHERE id = %s", (note_id,)
+    ).fetchone()
+    assert row is not None and "beta body version two" in row[0]
 
 
 # ---------------------------------------------------------------------------
@@ -2571,4 +2583,37 @@ def test_wait_for_observer_timeout_default_is_a_backstop() -> None:
     assert default >= 5.0, (
         f"_wait_for_observer's timeout backstop was lowered to {default}s; "
         "see its docstring — this is not a latency assertion"
+    )
+
+
+def test_wait_for_timeout_is_a_backstop_at_every_call_site() -> None:
+    """``_wait_for`` stays a backstop: high default, no per-site override.
+
+    Companion to the test above (2026-10-15). ``_wait_for`` used to default
+    to 2.0s and 35 call sites passed 1-3s explicitly, each a wall-clock
+    budget for work on the watcher's timer and worker threads. Pinning the
+    default alone would not hold: one ``timeout=2.0`` at a call site brings
+    the flake straight back, so the call sites are checked too.
+    """
+    import ast  # noqa: PLC0415
+    import inspect  # noqa: PLC0415
+
+    default = inspect.signature(_wait_for).parameters["timeout"].default
+    assert default >= 5.0, (
+        f"_wait_for's timeout backstop was lowered to {default}s; "
+        "see its docstring — this is not a latency assertion"
+    )
+
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    overrides = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_wait_for"
+        and (len(node.args) > 1 or any(k.arg == "timeout" for k in node.keywords))
+    ]
+    assert overrides == [], (
+        f"_wait_for called with an explicit timeout at lines {overrides}; "
+        "it is a backstop — let the default apply"
     )
