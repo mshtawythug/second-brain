@@ -107,6 +107,8 @@ the needle on a `>`/`E` line, and go green on restore.
 | M10b (audit F3) | `cli.py` | the `save_baseline` handler narrowed to `except KeyError`, so the refusal escapes as a traceback | both CLI record-refusal tests, via the same `SystemExit` assertion |
 | M14 (re-review X5) | `cli.py` | refusal denominator `shared_degraded + len(diff_result.per_query)` replaced with `total_count + 7` | CLI fail-below refusal test, both params, via the pinned `(counting shared queries): N of M` text |
 | M15 (audit G1) | `cli.py` | refusal numerator `shared_degraded` replaced with `degraded_count + 7` | CLI fail-below refusal test, both params, via the same pinned `N of M` text |
+| M16 (audit H1, O6) | `cli.py` | refusal denominator becomes the run-wide `total_count` | CLI shared-count refusal test (baseline [a, b], run [a, b, c]): `1 of 2` reads `1 of 3` |
+| M17 (audit H1, O7) | `cli.py` | refusal numerator becomes the run-wide `degraded_count` | same test: `1 of 2` reads `2 of 2` |
 | M11 (review F1) | `cli.py` | gate keyed on any degraded current row (`degraded_count`) instead of `diff_result.degraded_queries` | CLI "only an added query is degraded" test (expects `0`, gets `1`) |
 | M12 (review X2) | `eval/runner.py` | `degraded = False` hoisted out of the per-query loop, so the flag sticks once set | runner `[healthy, failing, healthy]` flag test |
 | M13 (review X4) | `eval/baseline.py` | `path.parent.mkdir(...)` moved above the degraded guard | save-refusal "creates no directory" test |
@@ -114,4 +116,7 @@ the needle on a `>`/`E` line, and go green on restore.
 M11–M13 were added after review of PR #33, and M10's reason was corrected after its audit: the original row claimed the exit code would change, which it does not. X2 and X4 survived the first
 catalog because every fixture put the failing query last and every refusal test
 wrote into an existing `tmp_path`. The new tests fix the order and the parent
-directory, which is what kills them.
+directory, which is what kills them. M16 and M17 (run-wide counts in the
+refusal) survived M14/M15's tests because there the run's queries equal the
+baseline's; the shared-count test adds a degraded query that is new since the
+baseline, which is what separates the two counts.

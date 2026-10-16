@@ -569,3 +569,44 @@ def test_fail_below_judges_normally_when_only_an_added_query_is_degraded(
     assert diff["added_queries"] == [added]
     assert "1 of 2" in result.stderr
     assert "cannot evaluate --fail-below" not in result.stderr
+
+
+def test_fail_below_refusal_counts_shared_queries_not_the_whole_run(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    make_flaky_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """Baseline [a, b]; run [a, b, c]; b (shared) and c (added) both fail.
+
+    The refusal counts SHARED queries: 1 of 2. A run-wide count would read
+    2 of 3, which is the regression the shared-query keying fixed, and which
+    the other refusal cases cannot see because their run equals the baseline.
+    """
+    shared_ok = "degcount shared healthy query"
+    shared_bad = "degcount shared timed out query"
+    added_bad = "degcount added timed out query"
+    corpus = _degraded_corpus(
+        tmp_path, [shared_ok, shared_bad, added_bad], "00000000-0000-0000-0000-000000000000"
+    )
+    baselines_dir = _wire_flaky(
+        monkeypatch, tmp_path, make_flaky_embedder({shared_bad, added_bad})  # type: ignore[operator]
+    )
+    _write_high_baseline(baselines_dir, [shared_ok, shared_bad], "base")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "eval", "--corpus", str(corpus),
+            "--baseline", "base", "--diff", "--fail-below", "--json",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    diff = json.loads(result.stdout)
+    assert diff["degraded_queries"] == [shared_bad]
+    assert diff["added_queries"] == [added_bad]
+    assert "cannot evaluate --fail-below (counting shared queries): 1 of 2" in result.stderr
+    # The run-wide warning still counts every degraded row in the run.
+    assert "warning, no delta is computed for these: 2 of 3" in result.stderr
