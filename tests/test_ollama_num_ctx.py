@@ -112,6 +112,19 @@ def test_num_ctx_violation_message_names_caller_knob_and_requirement() -> None:
     assert "BRAIN_OLLAMA_NUM_CTX=8192" in message
 
 
+def test_default_capped_call_requirements_are_pinned() -> None:
+    """Each capped call's worst case, from the spec's arithmetic.
+
+    enrich 1200 + 1024 + 256x2; extract (1500 + 100) + 1024 + 1024x2;
+    audio 3000 + 1024 + 2048x2. A dropped term in any budget moves a number.
+    """
+    budgets = capped_call_budgets(
+        enrich_max_input_tokens=config_module.DEFAULT_ENRICH_MAX_INPUT_TOKENS,
+        audio_max_input_tokens=config_module.DEFAULT_AUDIO_MAX_INPUT_TOKENS,
+    )
+    assert [b.required_num_ctx for b in budgets] == [2736, 4672, 8120]
+
+
 def test_default_num_ctx_fits_every_default_capped_call() -> None:
     budgets = capped_call_budgets(
         enrich_max_input_tokens=config_module.DEFAULT_ENRICH_MAX_INPUT_TOKENS,
@@ -125,30 +138,106 @@ def test_default_num_ctx_fits_every_default_capped_call() -> None:
     assert num_ctx_violations(DEFAULT_OLLAMA_NUM_CTX, budgets) == []
 
 
-def test_system_prompts_fit_frame_reserve() -> None:
-    """Every enricher system prompt must fit the reserve the budget assumes.
+# Every key any enricher method requires, so one canned reply satisfies them all.
+_UNIVERSAL_REPLY = {
+    "summary": "s",
+    "tags": [],
+    "entities": [],
+    "title": "t",
+    "rule": "r",
+    "contradicts": False,
+    "rationale": "x",
+}
 
-    The reserve covers system prompt + user framing labels + chat template; the
-    template/label share is ``CHAT_TEMPLATE_MARGIN_TOKENS``. Enumerated, not
-    listed, so a new ``*_SYSTEM_PROMPT`` is covered the day it lands.
+
+def _frame_calls(enricher: OllamaEnricher) -> dict[str, Any]:
+    """Each enricher method, called with EMPTY variable inputs.
+
+    What reaches the wire is then exactly the frame: the system prompt plus the
+    fixed user-turn labels. ``summarize_bucket`` passes the ``prev_*`` values so
+    its optional PREVIOUS block is measured too (the larger frame).
+    """
+    return {
+        "summarize": lambda: enricher.summarize("", ""),
+        "propose_tags": lambda: enricher.propose_tags(
+            title="", summary="", existing_vocab=[], current_tags=[]
+        ),
+        "extract_entities": lambda: enricher.extract_entities(""),
+        "summarize_group": lambda: enricher.summarize_group(
+            person=None, entity_names=[], doc_titles=[]
+        ),
+        "summarize_bucket": lambda: enricher.summarize_bucket(
+            bucket_label="",
+            entity_name="",
+            doc_titles=[],
+            cotopics=[],
+            doc_summaries=[],
+            prev_bucket_label="p",
+            prev_cotopics=[],
+            prev_synthesis="p",
+        ),
+        "draft_rule": lambda: enricher.draft_rule(subject="", evidence_texts=[""]),
+        "assess_contradiction": lambda: enricher.assess_contradiction(
+            subject="", summaries=["", ""]
+        ),
+    }
+
+
+def test_prompt_frames_fit_frame_reserve() -> None:
+    """Every enricher call's system prompt + fixed user framing fits the reserve.
+
+    The budget check assumes ``PROMPT_FRAME_RESERVE_TOKENS`` covers everything
+    around a call's bounded input; ``CHAT_TEMPLATE_MARGIN_TOKENS`` of it is kept
+    for the model's chat template and short variable fields (a title). The frame
+    is measured off the real wire messages, not restated, and every
+    ``*_SYSTEM_PROMPT`` must appear on the wire so a new prompt cannot dodge it.
     """
     enc = tiktoken.get_encoding("cl100k_base")
-    prompts = {
-        name: getattr(enrichment, name)
+    captured: list[dict[str, Any]] = []
+    enricher = OllamaEnricher(
+        host="http://x", model="m", client=_client(_capturing(captured, _UNIVERSAL_REPLY))
+    )
+    frames: dict[str, int] = {}
+    for method, call in _frame_calls(enricher).items():
+        call()
+        messages = captured[-1]["messages"]
+        frames[method] = sum(len(enc.encode(m["content"])) for m in messages)
+
+    system_prompts = {
+        getattr(enrichment, name)
         for name in dir(enrichment)
         if name.endswith("_SYSTEM_PROMPT")
     }
-    assert len(prompts) >= 7
+    on_wire = {m["content"] for body in captured for m in body["messages"]}
+    assert system_prompts <= on_wire, "a *_SYSTEM_PROMPT is not exercised here"
     limit = PROMPT_FRAME_RESERVE_TOKENS - CHAT_TEMPLATE_MARGIN_TOKENS
-    sizes = {name: len(enc.encode(text)) for name, text in prompts.items()}
-    over = {name: size for name, size in sizes.items() if size > limit}
-    assert over == {}, f"system prompts over the {limit}-token frame share: {over}"
+    over = {method: size for method, size in frames.items() if size > limit}
+    assert over == {}, f"prompt frames over the {limit}-token share: {over}"
 
 
 def test_extract_chunk_constants_are_the_budgeted_ones() -> None:
     assert extract._DEFAULT_CHUNK_TARGET_TOKENS is EXTRACT_CHUNK_TARGET_TOKENS
     assert extract._DEFAULT_CHUNK_OVERLAP_TOKENS is EXTRACT_CHUNK_OVERLAP_TOKENS
     assert enrichment._EXTRACT_NUM_PREDICT is ollama_budget.EXTRACT_NUM_PREDICT
+
+
+def test_draft_rule_sends_the_budgeted_default_num_predict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``draft_rule`` must read the shared default, not restate ``256``.
+
+    The sentinel value proves the call site reads the binding at call time; a
+    restated literal would still send 256.
+    """
+    monkeypatch.setattr(enrichment, "CHAT_DEFAULT_NUM_PREDICT", 321)
+    captured: list[dict[str, Any]] = []
+    enricher = OllamaEnricher(
+        host="http://x",
+        model="m",
+        client=_client(_capturing(captured, {"title": "t", "rule": "r"})),
+    )
+    enricher.draft_rule(subject="s", evidence_texts=["e"])
+    assert captured[0]["options"]["num_predict"] == 321
 
 
 def test_audio_num_predict_is_the_budgeted_one() -> None:
@@ -215,23 +304,65 @@ def test_truncation_retry_grows_by_shared_factor() -> None:
     assert budgets == [100, 100 * NUM_PREDICT_RETRY_FACTOR]
 
 
+# The body Ollama 0.33.0 actually sends with truncate:false. llama-server's
+# exceed-context error is relayed as HTTP 400 whose ``error`` field is the
+# runner's raw JSON body as an escaped STRING (llm/llama_server.go:1648-1654,
+# server/routes.go:3028-3031): 199 characters, "context size" at index 83, so a
+# classifier that looked at a shorter prefix would miss it.
+_OLLAMA_0_33_EXCEED_CONTEXT_BODY = json.dumps(
+    {
+        "error": json.dumps(
+            {
+                "error": {
+                    "code": 400,
+                    "message": (
+                        "the request exceeds the available context size, "
+                        "try increasing it"
+                    ),
+                    "type": "exceed_context_size_error",
+                    "n_prompt_tokens": 9000,
+                    "n_ctx": 8192,
+                }
+            },
+            separators=(",", ":"),
+        )
+    },
+    separators=(",", ":"),
+)
+
+
+def test_realistic_overflow_body_shape() -> None:
+    """Pin the fixture to the measured wire shape the classifier must handle."""
+    assert len(_OLLAMA_0_33_EXCEED_CONTEXT_BODY) == 199
+    assert _OLLAMA_0_33_EXCEED_CONTEXT_BODY.find("context size") == 83
+
+
 @pytest.mark.parametrize(
-    ("status", "body"),
+    ("status", "raw_body"),
     [
-        # Ollama's own promptTooLongMessage (server-side check).
-        (400, "the prompt is longer than the context length currently available"),
-        # llama-server's exceed-context error, surfaced as a 5xx.
-        (500, "the request exceeds the available context size, try increasing it"),
+        # The real path (truncate:false): llama-server's error, nested, as a 400.
+        (400, _OLLAMA_0_33_EXCEED_CONTEXT_BODY),
+        # Ollama's own promptTooLongMessage. Only reachable when truncate is
+        # TRUE (llama_server.go:281 passes the prompt through untouched when it
+        # is false), so not on the brain's path; kept because the wording is
+        # Ollama's and the match must not depend on which side refused.
+        (400, json.dumps({"error": "the prompt is longer than the context length"})),
+        # The same wording on a 5xx. Not what 0.33.0 sends; pins that the
+        # classification is by BODY, not status, so a proxy or another version
+        # that reports it as a 500 is still an overflow, not "Ollama down".
+        (500, json.dumps({"error": "the request exceeds the available context size"})),
     ],
 )
-def test_context_overflow_5xx_is_overflow_not_unavailable(
-    status: int, body: str
+def test_context_overflow_is_overflow_not_unavailable(
+    status: int, raw_body: str
 ) -> None:
     calls: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(1)
-        return httpx.Response(status, json={"error": body})
+        return httpx.Response(
+            status, content=raw_body, headers={"content-type": "application/json"}
+        )
 
     with pytest.raises(OllamaContextOverflow) as excinfo:
         chat_json_with_client(

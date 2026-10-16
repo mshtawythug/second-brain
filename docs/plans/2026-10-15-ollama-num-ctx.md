@@ -20,10 +20,13 @@ prompt raises `OllamaContextOverflow` instead of being truncated silently.
 | `src/brain/graph_rag/extract.py` | `make_extractor` threads `num_ctx`; chunk constants from leaf | **in table**: same |
 | `src/brain/audio.py` | `_DEFAULT_NUM_PREDICT` from leaf | under |
 | `src/brain/config.py` | `DEFAULT_OLLAMA_NUM_CTX` re-export, `ollama_num_ctx` field + parse + budget validation; stale `/api/generate` comment fixed | **in table**: inline why + docstring pointer + promote `f0abf64` hop + new descriptive hop |
-| `CLAUDE.md` | trail rows for `config.py`, `enrichment.py`, `graph_rag/extract.py` | — |
+| `src/brain/review/scans.py` | per-pair skip on `OllamaContextOverflow` (PR #32 audit) | under |
+| `src/brain/cli.py` | `eval --answer`: clean exit 1 on `OllamaContextOverflow` (PR #32 audit) | **in table**: inline why + docstring pointer + promote `f0abf64`/`651710f`/`a099839` hops + new hop |
+| `CLAUDE.md` | trail rows for `config.py`, `enrichment.py`, `graph_rag/extract.py`, `cli.py` | — |
 | `.env.example`, `docs/` knob reference | document `BRAIN_OLLAMA_NUM_CTX` | — |
-| `tests/test_ollama_num_ctx.py` | **new**: M1–M15 targets | — |
+| `tests/test_ollama_num_ctx.py` | **new**: targets for M1–M16 and M19–M20 (M17 is in `tests/test_review.py`, M18 in `tests/test_cli_ask.py`) | — |
 | existing tests that call `chat_json_with_client` | pass the now-required `num_ctx=` | — |
+| `tests/test_review.py`, `tests/test_cli_ask.py` | regression tests for the two audit sites (M17, M18) | — |
 
 ## Tasks (TDD — each red first, then green)
 

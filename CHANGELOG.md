@@ -27,8 +27,9 @@ git tag scheme:
 - **Every Ollama chat call now sends `options.num_ctx`** (new knob
   `BRAIN_OLLAMA_NUM_CTX`, default `8192`) instead of inheriting the server's
   `OLLAMA_CONTEXT_LENGTH`. On a server tuned to 65536, each brain-loaded
-  `llama3.1:8b` runner used to allocate a 4352 MiB KV cache (q8_0); at 8192 it
-  is 544 MiB, about **3.8 GB less wired memory**, for prompts that never
+  `llama3.1:8b` runner used to allocate a 4,352 MiB (~4.25 GiB) KV cache
+  (q8_0); at 8192 it is 544 MiB, **3,808 MiB (~3.7 GiB) less wired memory**,
+  for prompts that never
   exceeded ~4k tokens. Embeddings are unchanged.
 - **The first brain call after upgrading reloads the resident chat model once.**
   Another tool that uses the same model without its own `num_ctx` reloads it

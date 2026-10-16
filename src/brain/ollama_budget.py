@@ -5,19 +5,22 @@ Spec: ``docs/specs/2026-10-15-ollama-num-ctx-design.md``.
 The brain sends an explicit ``options.num_ctx`` on every ``/api/chat`` request
 (``BRAIN_OLLAMA_NUM_CTX``) instead of inheriting the Ollama server's global
 default — which on a machine tuned for other tools can be 65,536 tokens and cost
-~4.3 GB of KV cache per ``llama3.1:8b`` runner for prompts the brain keeps under
+4,352 MiB (~4.25 GiB) of KV cache per ``llama3.1:8b`` runner for prompts the brain keeps under
 ~4k. One value, shared by every caller: Ollama reloads a runner whenever a
 request's ``num_ctx`` differs from the loaded one, so per-caller values on a
 shared model would thrash.
 
 This module is a LEAF — it imports nothing from :mod:`brain` — so
 :mod:`brain.config` can validate the budget at load time without an import
-cycle. It is also the single definition of every number that must fit inside
-``num_ctx``: the completion budgets, the GraphRAG extract chunk ceiling, and the
-truncation-retry growth factor. ``chat``, ``enrichment``, ``audio`` and
-``graph_rag.extract`` bind these objects under their historical names rather
-than restating them, so the validated arithmetic and the wire values cannot
-drift apart.
+cycle. It is also the single definition of every number the load-time check
+reads: the shared default completion budget and the capped calls' budgets
+(extract, audio), the GraphRAG extract chunk ceiling, and the truncation-retry
+growth factor. ``chat``, ``enrichment``, ``audio`` and ``graph_rag.extract``
+bind these objects under their historical names rather than restating them, so
+the validated arithmetic and the wire values cannot drift apart. Budgets that
+belong to uncapped callers and differ from the default (``ask``'s 128/128/512,
+``assess_contradiction``'s 200) stay with their callers; the server-side refusal
+bounds those calls, not this check.
 """
 from __future__ import annotations
 
@@ -59,10 +62,11 @@ EXTRACT_CHUNK_OVERLAP_TOKENS = 100
 #: the system prompt, the user-turn labels, and the model's chat template.
 PROMPT_FRAME_RESERVE_TOKENS = 1024
 
-#: The share of :data:`PROMPT_FRAME_RESERVE_TOKENS` kept for the chat template
-#: and user-turn labels. Every enricher system prompt must fit in the rest —
-#: asserted by ``tests/test_ollama_num_ctx.py`` so a prompt that outgrows the
-#: reserve fails a test instead of silently eating the input budget.
+#: The share of :data:`PROMPT_FRAME_RESERVE_TOKENS` kept for the model's chat
+#: template and short variable fields (a title). Every enricher call's system
+#: prompt plus its fixed user-turn labels must fit in the rest — measured off
+#: the real wire messages by ``tests/test_ollama_num_ctx.py``, so a frame that
+#: outgrows the reserve fails a test instead of silently eating the input budget.
 CHAT_TEMPLATE_MARGIN_TOKENS = 256
 
 

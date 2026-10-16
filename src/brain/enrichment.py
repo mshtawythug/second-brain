@@ -385,7 +385,7 @@ class OllamaEnricher:
         self._keep_alive = keep_alive
         # Over-ceiling growth (see module docstring): every chat call sends an
         # explicit context window rather than inheriting the Ollama server's
-        # global default (65,536 on a machine tuned for other tools = ~4.3 GB
+        # global default (65,536 on a machine tuned for other tools = 4,352 MiB
         # of KV cache for prompts under ~4k). Spec 2026-10-15-ollama-num-ctx.
         self._num_ctx = num_ctx
         self._tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -677,7 +677,7 @@ class OllamaEnricher:
             system=_ELICIT_SYSTEM_PROMPT,
             user=user,
             schema_keys=("title", "rule"),
-            num_predict=256,
+            num_predict=CHAT_DEFAULT_NUM_PREDICT,
         )
         title = data["title"]
         if not isinstance(title, str) or not title.strip():

@@ -35,10 +35,14 @@ _logger = logging.getLogger(__name__)
 # ``ollama_budget`` (not restated) because ``num_ctx`` is validated against it.
 DEFAULT_NUM_PREDICT = CHAT_DEFAULT_NUM_PREDICT
 
-# An HTTP error body naming the context window: Ollama's ``promptTooLongMessage``
-# ("... longer than the context length ...") and llama-server's exceed-context
-# error ("... exceeds the available context size ..."). Matched on the body,
-# not the status, because the runner's variant can surface as a 5xx.
+# An HTTP error body naming the context window. With ``truncate: false`` Ollama
+# 0.33.0 relays llama-server's exceed-context error ("... exceeds the available
+# context size ...") as an HTTP 400 whose ``error`` is the runner's raw JSON
+# body as an escaped string -- the phrase sits ~83 characters in, inside the
+# 200-character preview searched below. Ollama's own ``promptTooLongMessage``
+# ("... longer than the context length ...") is the truncate:true wording, kept
+# in the pattern. Matched on the body, not the status, so the classification
+# does not depend on which side refused or what code it chose.
 _CONTEXT_OVERFLOW_RE = re.compile(r"context (length|size)", re.IGNORECASE)
 
 # One chat message: ``{"role": ..., "content": ...}``.
@@ -296,8 +300,8 @@ def _chat_once(
             exc.response.text[:200] if exc.response is not None else "<no body>"
         )
         if _CONTEXT_OVERFLOW_RE.search(body_preview):
-            # Checked before the 5xx branch: an over-window prompt is permanent
-            # for this request, not a down server.
+            # Checked before the status branches: an over-window prompt is
+            # permanent for this request, not a down server.
             raise OllamaContextOverflow(
                 f"Ollama refused a prompt larger than num_ctx={num_ctx} "
                 f"(HTTP {status}: {body_preview}); raise BRAIN_OLLAMA_NUM_CTX "

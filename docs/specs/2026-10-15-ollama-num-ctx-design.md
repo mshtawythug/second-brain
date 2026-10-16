@@ -81,8 +81,8 @@ which was trained at 131,072, so 8,192 is far inside what the model supports.
 ## 3. Goals / non-goals
 
 * **Goal:** every brain `/api/chat` request carries an explicit `num_ctx`,
-  sized to the brain's largest call, so a brain-triggered runner allocates ~0.5
-  GB of KV cache, not ~4.3 GB.
+  sized to the brain's largest call, so a brain-triggered runner allocates
+  544 MiB of KV cache, not 4,352 MiB (~4.25 GiB).
 * **Goal:** a prompt larger than `num_ctx` must be impossible for the capped
   callers and loud for every caller. Today Ollama drops the overflow silently.
 * **Non-goal:** touching the Ollama server config (the plist, `ollama serve`
@@ -154,8 +154,10 @@ script). An unset knob grows to the largest `required` (D1). If an *explicit*
 `ConfigError` naming the caller, the input knob, and the required value. With
 the defaults: 2,736 / 4,672 / 8,120 ≤ 8,192.
 
-**The reserve is guarded, not trusted.** A test asserts that every enricher
-system prompt plus its fixed user framing fits within
+**The reserve is guarded, not trusted.** `test_prompt_frames_fit_frame_reserve`
+calls every enricher method with empty variable inputs and measures the real
+wire messages. It asserts that every system prompt plus its fixed user framing
+fits within
 `PROMPT_FRAME_RESERVE_TOKENS − CHAT_TEMPLATE_MARGIN_TOKENS` (1,024 − 256). If
 someone grows the 701-token extract prompt past that, the test fails at the
 point where the reserve would otherwise quietly stop covering it.
@@ -174,16 +176,52 @@ escape hatch) and any tokenizer drift between cl100k and the model.
 `runner.contextShift`. The brain sends the same `shift:false` on every request,
 so it adds no reload beyond D2's single runner.
 
+**What actually arrives (Ollama 0.33.0).** With `truncate:false`, Ollama
+passes the prompt through untouched (`llm/llama_server.go:281`). llama-server
+refuses it, and Ollama relays that refusal as **HTTP 400**, whose `error` field
+is the runner's raw JSON body as an escaped string
+(`llm/llama_server.go:1648-1654`, `server/routes.go:3028-3031`):
+
+    {"error":"{\"error\":{\"code\":400,\"message\":\"the request exceeds the available context size, try increasing it\",...}}"}
+
+That is about 199 characters, with "context size" at about index 83. Ollama's own
+`promptTooLongMessage` ("… longer than the context length …") is only reachable
+when `truncate` is **true**, so it is not on the brain's path.
+
 An HTTP error whose body names the context window (`context length` /
-`context size`, the wording of both Ollama's `promptTooLongMessage` and
-llama-server's exceed-context error) maps to a new
-`OllamaContextOverflow(EnrichmentError)`, whatever the status code, with a
-message naming `num_ctx` and `BRAIN_OLLAMA_NUM_CTX`. It subclasses
+`context size`) maps to a new `OllamaContextOverflow(EnrichmentError)`,
+whatever the status code, with a message naming `num_ctx` and
+`BRAIN_OLLAMA_NUM_CTX`. The match searches the 200-character body preview,
+which holds the nested phrase (R4 pins this). It is status-agnostic, so it does
+not depend on which side refused or which code it chose. It subclasses
 `EnrichmentError` and **not** `OllamaUnavailable`, because an over-window
-prompt is permanent, not transient. Every caller already handles
-`EnrichmentError` (4xx has always raised it), so no caller's contract changes.
-Extraction skips that one chunk instead of aborting the document, which is what
-it does for any other `EnrichmentError`.
+prompt is permanent, not transient.
+
+**Not every caller already handled it.** That was this paragraph's original
+claim, and the PR #32 audit disproved it. Before this change, Ollama
+truncated an over-window prompt silently (`truncate` and `shift` both default
+on), so no caller ever saw an overflow error. Now one can occur. Two sites
+caught *only* `OllamaUnavailable`, so the new type would have escaped them as a
+bare `EnrichmentError`:
+
+* `review/scans.py`, the contradiction scan's per-pair loop. It now **skips
+  that pair** and logs a warning. The refusal is permanent for that one prompt,
+  and the next pair is a different prompt. Aborting the whole scan with
+  `ReviewError` (the scan's down-server path) would stop every other entity's
+  adjudication for one oversize pair. This mirrors `elicit/detectors.py`'s
+  per-entity skip.
+* `cli.py`, `eval --answer`. It now gets a **clean exit 1** whose message names
+  `BRAIN_OLLAMA_NUM_CTX`. A per-case skip would silently change the reported
+  means.
+
+Each has a regression test. Every other `except OllamaUnavailable` in `src/`
+is followed by an `except EnrichmentError` that now catches the overflow
+(re-derive with `grep -rn 'except OllamaUnavailable' src/brain`). Those sites:
+`ingest/__init__.py` hook, `graph_rag/extract.py` (skips the one chunk, as it
+does for any `EnrichmentError`), `cli.py` enrich backfill (skips the row), ask,
+tag, gaps, and `mcp_server.py`. `audio.py` re-raises `OllamaUnavailable` and
+wraps every other `EnrichmentError` in `AudioError`. `chat.py`'s own clause
+only re-raises.
 
 ## 5. Consequences
 
@@ -222,17 +260,23 @@ line; restored → green). Run with `PYTHONDONTWRITEBYTECODE=1`.
 | M3 | `chat.py`: drop `"shift": False` | 1 | same |
 | M4 | `chat.py`: `chat_json` passes a literal `num_ctx=4096` instead of `cfg.ollama_num_ctx` | 1 | `test_chat_json_threads_cfg_num_ctx` |
 | M5 | `chat.py`: retry growth `*= NUM_PREDICT_RETRY_FACTOR` → `*= 3` | 1 | `test_truncation_retry_grows_by_shared_factor` |
-| M6 | `chat.py`: remove the overflow classification branch | 1 | `test_context_overflow_5xx_is_overflow_not_unavailable` |
+| M6 | `chat.py`: remove the overflow classification branch | 1 | `test_context_overflow_is_overflow_not_unavailable` |
 | M7 | `enrichment.py`: `_chat_with_retry` passes `num_ctx=8192` literal instead of `self._num_ctx` | 1 | `test_enricher_sends_its_num_ctx` |
 | M8 | `enrichment.py`: `make_enricher` omits `num_ctx=` | 1 | `test_make_enricher_threads_num_ctx` |
 | M9 | `extract.py`: `make_extractor` omits `num_ctx=` | 1 | `test_make_extractor_threads_num_ctx` |
 | M10 | `config.py`: delete the budget-validation call | 1 | `test_config_rejects_num_ctx_below_budget` |
 | M11 | `config.py`: `max([DEFAULT_OLLAMA_NUM_CTX]` → `max([65536]` at the parse site | 1 | `test_config_num_ctx_default_is_8192` |
 | M12 | `ollama_budget.py`: `required_num_ctx` drops `× NUM_PREDICT_RETRY_FACTOR` | 1 | `test_required_num_ctx_counts_retry_output` |
-| M13 | `enrichment.py`: append 120 tokens of text to `_EXTRACT_SYSTEM_PROMPT` | 1 | `test_system_prompts_fit_frame_reserve` |
+| M13 | `enrichment.py`: append 120 tokens of text to `_EXTRACT_SYSTEM_PROMPT` | 1 | `test_prompt_frames_fit_frame_reserve` |
 | M14 | `extract.py`: `_DEFAULT_CHUNK_TARGET_TOKENS = 1400` literal | 1 | `test_extract_chunk_constants_are_the_budgeted_ones` |
 | M15 | `audio.py`: `_DEFAULT_NUM_PREDICT = 3072` literal | 1 | `test_audio_num_predict_is_the_budgeted_one` |
 | M16 | `config.py`: the unset default stops growing (`max([...])` → `DEFAULT_OLLAMA_NUM_CTX`) | 1 | `test_config_unset_num_ctx_grows_to_fit_raised_cap` |
+| M17 | `review/scans.py`: delete the `except OllamaContextOverflow` per-pair skip | 1 | `test_review.py::test_conflict_scan_context_overflow_skips_pair` |
+| M18 | `cli.py`: delete the `eval --answer` `except OllamaContextOverflow` handler | 1 | `test_cli_ask.py::test_cli_eval_answer_context_overflow_exits_cleanly` |
+| M19 | `enrichment.py`: `draft_rule` passes the literal `num_predict=256` again | 1 | `test_draft_rule_sends_the_budgeted_default_num_predict` |
+| M20 | `enrichment.py`: grow `extract_entities`' user label (`TEXT:` + 80 tokens), system prompt untouched | 1 | `test_prompt_frames_fit_frame_reserve` (proves the framing is measured, not only the system prompt) |
+| R3 | `ollama_budget.py`: extract input drops `+ EXTRACT_CHUNK_OVERLAP_TOKENS` | 1 | `test_default_capped_call_requirements_are_pinned` (reviewer's surviving mutation, now killed) |
+| R4 | `chat.py`: overflow search window `exc.response.text[:200]` → `[:60]` | 1 | `test_context_overflow_is_overflow_not_unavailable[…]` real-0.33.0 nested-400 case (reviewer's surviving mutation, now killed) |
 
 M6's needle is the exception that escapes under the mutation
 (`EnrichmentError: Ollama returned HTTP 400`), not `OllamaContextOverflow`.

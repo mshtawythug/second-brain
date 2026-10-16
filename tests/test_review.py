@@ -17,7 +17,7 @@ import pytest
 
 from brain.config import Config, ConfigError
 from brain.enrichment import ContradictionVerdict
-from brain.errors import OllamaUnavailable, ReviewError
+from brain.errors import OllamaContextOverflow, OllamaUnavailable, ReviewError
 from brain.review import queries
 from brain.review.scans import (
     ReviewFinding,
@@ -176,6 +176,22 @@ class _RaisingEnricher:
         if self.calls == 1:
             return ContradictionVerdict(contradicts=True, rationale="first")
         raise OllamaUnavailable("ollama down")
+
+
+class _OverflowingEnricher(_FakeEnricher):
+    """Refuses every pair for ``overflow_subject`` as over the context window."""
+
+    def __init__(self, overflow_subject: str) -> None:
+        super().__init__()
+        self._overflow_subject = overflow_subject
+
+    def assess_contradiction(
+        self, *, subject: str, summaries: list[str]
+    ) -> ContradictionVerdict:
+        if subject == self._overflow_subject:
+            self.calls.append((subject, list(summaries)))
+            raise OllamaContextOverflow("prompt larger than num_ctx=8192")
+        return super().assess_contradiction(subject=subject, summaries=summaries)
 
 
 def _cfg(**overrides: object) -> Config:
@@ -721,6 +737,36 @@ def test_conflict_scan_ollama_unavailable_partial(test_db: psycopg.Connection) -
         "SELECT count(*) FROM elicitation_gaps WHERE signal_kind = 'contradiction'"
     ).fetchone()[0]
     assert surfaced == 1
+
+
+def test_conflict_scan_context_overflow_skips_pair(test_db: psycopg.Connection) -> None:
+    """REGRESSION (PR #32 audit): with ``truncate``/``shift`` off an over-window
+    prompt is ``OllamaContextOverflow`` (it used to be truncated silently), and
+    this loop caught only ``OllamaUnavailable`` -- so it escaped the scan. It is
+    permanent for that one prompt only, so the pair is skipped and the scan
+    finishes with every other entity's finding.
+    """
+    _seed_conflict_entity(test_db)
+    e_go = _insert_doc(
+        test_db, title="Other — go", summary="GO on the other thing", embedding=[1.0, 0.1]
+    )
+    e_stop = _insert_doc(
+        test_db,
+        title="Other — stop",
+        summary="STOP the other thing",
+        embedding=[1.0, 0.2],
+    )
+    _insert_entity(
+        test_db, canonical_key="other-thing", name="Other thing", doc_ids=[e_go, e_stop]
+    )
+    cfg = _cfg(elicit_contradiction_min_docs=2)
+    enricher = _OverflowingEnricher("Other thing")
+
+    findings = run_conflict_scan(
+        test_db, enricher, _NullEmbedder(), cfg, tenant_id=_TENANT
+    )
+    assert [f.target_id for f in findings] == ["synthetic-initiative"]
+    assert "Other thing" in {subject for subject, _ in enricher.calls}
 
 
 # ---------------------------------------------------------------------------
