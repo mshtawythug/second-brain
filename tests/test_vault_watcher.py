@@ -52,6 +52,10 @@ from brain.vault.watch import (
     run_watcher,
 )
 
+# The shared backstop wait (PR #31's, moved 2026-10-16); its call-site
+# guard covers every importer, in tests/test_thread_wait.py.
+from tests.thread_wait import wait_for as _wait_for
+
 # ---------------------------------------------------------------------------
 # Test doubles for watchdog Observer.
 # ---------------------------------------------------------------------------
@@ -187,34 +191,6 @@ def _wait_for_observer(
         time.sleep(0.01)
     raise AssertionError(
         f"watcher did not start observer within {timeout}s "
-        "(backstop, not a latency assertion)"
-    )
-
-
-# Backstop for ``_wait_for`` — same reasoning as ``_wait_for_observer``'s.
-_WAIT_FOR_BACKSTOP_S = 10.0
-
-
-def _wait_for(predicate: Any, timeout: float = _WAIT_FOR_BACKSTOP_S) -> None:
-    """Block until ``predicate()`` returns truthy or the deadline passes.
-
-    ``timeout`` is a BACKSTOP against a hung watcher, NOT a latency
-    assertion: every call site waits for something that WILL happen on
-    another thread (a debounce timer, then the worker's sync), so a passing
-    run returns as soon as the predicate holds and never pays the deadline.
-    Call sites used to pass 1-3s. Under a full suite at load average 50-140
-    that flaked ``test_racing_edit_during_sync_is_not_masked_by_body_cache``
-    twice on 2026-10-15; probed at load ~95 a single phase took 1.945s of
-    its 2.0s. Do not pass a shorter ``timeout`` —
-    ``test_wait_for_timeout_is_a_backstop_at_every_call_site`` refuses it.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.01)
-    raise AssertionError(
-        f"predicate never became true within {timeout}s "
         "(backstop, not a latency assertion)"
     )
 
@@ -2591,40 +2567,3 @@ def test_wait_for_observer_timeout_default_is_a_backstop() -> None:
         "see its docstring — this is not a latency assertion"
     )
 
-
-def test_wait_for_timeout_is_a_backstop_at_every_call_site() -> None:
-    """``_wait_for`` stays a backstop: high default, no per-site override.
-
-    Companion to the test above (2026-10-15). ``_wait_for`` used to default
-    to 2.0s and 35 call sites passed 1-3s explicitly, each a wall-clock
-    budget for work on the watcher's timer and worker threads. Pinning the
-    default alone would not hold: one ``timeout=2.0`` at a call site brings
-    the flake straight back, so the call sites are checked too.
-    """
-    import ast  # noqa: PLC0415
-    import inspect  # noqa: PLC0415
-
-    default = inspect.signature(_wait_for).parameters["timeout"].default
-    assert default >= 5.0, (
-        f"_wait_for's timeout backstop was lowered to {default}s; "
-        "see its docstring — this is not a latency assertion"
-    )
-
-    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
-    overrides = [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "_wait_for"
-        and (
-            len(node.args) > 1
-            # ``k.arg is None`` is a ``**kwargs`` splat, which can carry a
-            # timeout the keyword-name check alone would miss.
-            or any(k.arg in (None, "timeout") for k in node.keywords)
-        )
-    ]
-    assert overrides == [], (
-        f"_wait_for called with an explicit timeout at lines {overrides}; "
-        "it is a backstop — let the default apply"
-    )

@@ -25,11 +25,13 @@ def _write(path: Path, fields: dict[str, Any], body: str) -> None:
 
 
 # Reuse the FakeObserver from the unit tests to keep the test surface DRY.
+# ``_wait_for`` comes from the shared helper, not through that test module, so
+# the call-site guard in tests/test_thread_wait.py can see this file.
 from tests.test_vault_watcher import (  # noqa: E402
     _FakeObserver,
-    _wait_for,
     _wait_for_observer,
 )
+from tests.thread_wait import wait_for as _wait_for  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -93,7 +95,7 @@ def test_watch_smoke(
 
     def _driver() -> None:
         try:
-            observer = _wait_for_observer(timeout=5.0)
+            observer = _wait_for_observer()
             new_note = vault / "after-watch.md"
             new_id = str(uuid.uuid4())
             _write(new_note, {"id": new_id, "title": "After"}, "y\n")
@@ -103,7 +105,6 @@ def test_watch_smoke(
                     "SELECT count(*) FROM documents WHERE id = %s", (new_id,)
                 ).fetchone()[0]
                 == 1,
-                timeout=5.0,
             )
             # Trigger graceful shutdown.
             state = observer.handler._state
@@ -165,7 +166,7 @@ def test_watch_prints_initial_sync_summary(
 
     def _stopper() -> None:
         try:
-            obs = _wait_for_observer(timeout=5.0)
+            obs = _wait_for_observer()
             time.sleep(0.05)
             obs.handler._state.stop_event.set()
         except AssertionError:
