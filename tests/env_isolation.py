@@ -5,12 +5,14 @@ because conftest is already far past the 800-line ceiling.
 
 **Why ``monkeypatch`` is not enough.** ``Config.load()`` publishes every key
 from the dotenv chain into the process env with ``os.environ.setdefault``. That
-is intended production behaviour: code outside ``brain.config`` and child
-processes read those knobs from ``os.environ``. ``monkeypatch`` undoes only the
-names it was handed, and a ``delenv(..., raising=False)`` of an absent name
-records nothing. So a test that loads config from a ``.env`` it wrote leaks
-whatever keys that file held. On 2026-10-16, ``BRAIN_EMBEDDER=none`` leaked
-from ``test_config_dotenv_chain.py`` into seven ``test_cli_doctor.py`` tests
+is intended production behaviour: code outside ``brain.config`` (e.g.
+``maintenance.py``'s ``BRAIN_WIKI_KEEP_BUILDS``) and child processes (the wiki
+build that ``wiki/build_swap.py`` spawns) read those knobs from ``os.environ``.
+``monkeypatch`` undoes only the names it was handed, and a
+``delenv(..., raising=False)`` of an absent name records nothing. So a test
+that loads config from a ``.env`` it wrote leaks whatever keys that file held.
+On 2026-10-16, ``BRAIN_EMBEDDER=none`` leaked from
+``test_config_dotenv_chain.py`` into seven ``test_cli_doctor.py`` tests
 whenever the chain module ran first. See
 ``docs/specs/2026-10-16-dotenv-isolation-leak-design.md``.
 

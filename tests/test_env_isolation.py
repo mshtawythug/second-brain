@@ -35,6 +35,10 @@ _REMOVED = "BRAIN_TEST_ENV_ISOLATION_REMOVED"
 # Two inner tests, run in file order by an inner pytest session: the first
 # publishes a key through the real ``Config.load_minimal`` path (the same
 # mechanism as the original leak), the second asserts it did not survive.
+#
+# Every env read below is bound to a local BEFORE it is asserted on. An
+# ``assert os.environ...`` makes pytest's rewriter print the whole ``environ``
+# mapping on failure (tokens, ``DATABASE_URL``); a local prints only its value.
 _BOUNDARY_PAIR = f'''
 import os
 
@@ -46,11 +50,13 @@ def test_a_publishes_a_dotenv_key(monkeypatch, tmp_path):
     project = isolate_config_dotenv(monkeypatch, tmp_path)
     project.write_text("{_SENTINEL}=leaked\\n", encoding="utf-8")
     Config.load_minimal()
-    assert os.environ["{_SENTINEL}"] == "leaked"
+    published = os.environ.get("{_SENTINEL}")
+    assert published == "leaked"
 
 
 def test_b_does_not_inherit_it():
-    assert os.environ.get("{_SENTINEL}") is None
+    inherited = os.environ.get("{_SENTINEL}")
+    assert inherited is None
 '''
 
 
@@ -66,20 +72,25 @@ def test_restored_environ_undoes_what_config_load_publishes(
     with restored_environ():
         Config.load_minimal()
         # The leak path is live: without this the test would pass vacuously.
-        assert os.environ[_SENTINEL] == "published"
+        published = os.environ.get(_SENTINEL)
+        assert published == "published"
         os.environ[_CHANGED] = "after"
         del os.environ[_REMOVED]
 
-    assert os.environ.get(_SENTINEL) is None
-    assert os.environ.get(_CHANGED) == "before"
-    assert os.environ.get(_REMOVED) == "present"
+    leaked = os.environ.get(_SENTINEL)
+    changed = os.environ.get(_CHANGED)
+    removed = os.environ.get(_REMOVED)
+    assert leaked is None
+    assert changed == "before"
+    assert removed == "present"
 
 
 def test_published_key_does_not_cross_a_test_boundary(
     pytester: pytest.Pytester,
 ) -> None:
     """In a fixed a-then-b order, the guard stops test_a's key from reaching test_b."""
-    assert os.environ.get(_SENTINEL) is None
+    preexisting = os.environ.get(_SENTINEL)
+    assert preexisting is None
     pytester.makepyfile(test_boundary_pair=_BOUNDARY_PAIR)
 
     result = pytester.runpytest("-p", "tests.env_isolation", "-p", "no:cacheprovider")
@@ -94,7 +105,8 @@ def test_boundary_pair_fails_without_the_guard(pytester: pytest.Pytester) -> Non
     defends against still exists. The key this leaks into this process is
     removed again by this test's own guard.
     """
-    assert os.environ.get(_SENTINEL) is None
+    preexisting = os.environ.get(_SENTINEL)
+    assert preexisting is None
     pytester.makepyfile(test_boundary_pair=_BOUNDARY_PAIR)
 
     result = pytester.runpytest("-p", "no:cacheprovider")

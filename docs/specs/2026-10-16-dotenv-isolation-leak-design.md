@@ -57,15 +57,28 @@ It does mutate it, but on purpose, and other code depends on it:
 * The behaviour is documented at the call site. The comment above the
   `setdefault` loop sets out the precedence contract: process env is never
   overwritten, and dotenv values sit beneath it.
-* Code outside `brain.config` reads knobs straight from `os.environ` *after*
-  `Config.load()`. A value in a user's `.env` reaches it only because the
-  loader published it:
-  `maintenance.py` reads `BRAIN_WIKI_KEEP_BUILDS` on the line after
-  `cfg = Config.load()`. `mcp_server.py` reads `BRAIN_MCP_LOG_LEVEL`,
-  `bin/monitor.py` reads `BRAIN_WIKI_PORT`, and `setup.py` reads `VOYAGE_API_KEY`.
-* Subprocesses inherit it. `wiki/build_swap.py`, `wiki/build_partial.py`,
-  `backup/pgtool.py`, `cli_claude.py` and `bin/_launcher.py` pass `os.environ`
-  (or a copy) to child processes, so a `.env` value configures them too.
+* Code outside `brain.config` reads a knob straight from `os.environ` *after*
+  `Config.load()`, so a value in a user's `.env` reaches it only because the
+  loader published it. `src/brain/maintenance.py` does `cfg = Config.load()`
+  and then reads `BRAIN_WIKI_KEEP_BUILDS` from `os.environ` on the very next
+  line (lines 372-373 at `210d288`).
+* A child process inherits it. `src/brain/wiki/build_swap.py` calls
+  `_refresh_pre_build_adornments`, which runs `Config.load()` (line 623), and
+  then `_run_build`, which spawns the build with `dict(os.environ)` (line 457).
+  So a `.env` value reaches that child too.
+
+*(Corrected in review of PR #38. This section, and commit `d427b3e`'s
+message, also cited `mcp_server.py` (`BRAIN_MCP_LOG_LEVEL`),
+`bin/monitor.py` (`BRAIN_WIKI_PORT`), `setup.py` (`VOYAGE_API_KEY`), and
+`wiki/build_partial.py`, `backup/pgtool.py`, `cli_claude.py` and
+`bin/_launcher.py` as subprocess spawners. Those were over-citations:
+`mcp_server.main()` configures logging before it calls `Config.load()`;
+`setup.py`'s `VOYAGE_API_KEY` check has no `Config.load()` ahead of it;
+`src/brain/bin/monitor.py` (whose path was also given wrongly) and
+`bin/_launcher.py` never call `Config.load()`. The other three spawners were
+listed without showing a `Config.load()` ahead of them in the same flow. The
+two citations above are the ones that hold. The commit message is not amended;
+this note records that it over-cited.)*
 
 Making `Config.load` pure would silently stop those `.env` knobs from working.
 That is a behaviour change to production with no bug report behind it. The
@@ -168,10 +181,29 @@ publishes from a test's `.env` are undone by the guard in §4.1, not by
 
 * **The cwd walk-up inside a worktree.** A worktree at
   `<checkout>/.claude/worktrees/<name>` walks up into `<checkout>/.env`. That is
-  the developer's real config. `tests/conftest.py`'s module-level `load_dotenv()`
-  and any un-isolated `Config.load()` read it there. CI has no such file, and
-  the guard stops its keys from crossing test boundaries, but a test still sees
-  them within itself. This is recorded here and not fixed, because changing the
-  walk-up is a production decision (see `_cwd_dotenv_enabled`).
+  the developer's real config. CI has no such file. Locally, two different
+  readers pick it up, and the guard treats them differently:
+  * **An un-isolated `Config.load()` inside a test** publishes the file's keys
+    during that test. The test sees them, and the guard removes them when the
+    test ends, so they do not reach the next test.
+  * **`tests/conftest.py`'s module-level `load_dotenv()`** runs at import,
+    before any test's snapshot is taken. Its keys are part of every test's
+    baseline, so the guard never removes them. They are session-wide, and
+    every test sees them.
+
+  *(Corrected in the PR #38 audit. This note said the guard stops the file's
+  keys from crossing test boundaries without separating the two readers. That
+  is false for the import-time `load_dotenv()`. The auditor showed it with a
+  synthetic fake checkout: 2 passed.)*
+
+  This is recorded here and not fixed. Changing the walk-up is a production
+  decision (see `_cwd_dotenv_enabled`), and removing conftest's
+  `load_dotenv()` would change what every local run sees.
 * A pytest-randomly dependency. The suite does not install it. Ordering checks
   use explicit file orders.
+* **Follow-up, production: `BRAIN_MCP_LOG_LEVEL` set in a `.env` is silently
+  ignored.** `mcp_server.main()` calls `_configure_logging()`, which reads
+  `BRAIN_MCP_LOG_LEVEL`, *before* `Config.load()` publishes the dotenv chain. So
+  the knob works only from the process environment, such as a launchd plist,
+  and never from `.env`. This branch does not fix it, because it is a
+  production behaviour change. It was found while correcting §3 in review.

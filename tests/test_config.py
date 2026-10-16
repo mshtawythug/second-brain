@@ -689,7 +689,9 @@ class TestDotenvChain:
         )
         Config.load()
         # The process-env value must survive through Config.load() unchanged.
-        assert os.environ["DATABASE_URL"] == "postgresql://process-env:5432/db"
+        # Bound to a local so a failure prints the value, not the whole env.
+        database_url = os.environ.get("DATABASE_URL")
+        assert database_url == "postgresql://process-env:5432/db"
 
 
 # ---------------------------------------------------------------------------

@@ -27,17 +27,38 @@ migration table.
    the ceiling.
 4. **Helper:** add `brain_home_root=` to `isolate_config_dotenv`, and update
    its docstring.
-5. **Migrate** the 13 sites the spec table marks "migrated". Leave the two
-   chain sites inline.
-6. **Mutation proofs, five clauses each** (`PYTHONDONTWRITEBYTECODE=1`):
-   * M1: `restored_environ` restores nothing, so the mechanism and boundary
-     tests go red.
-   * M2: the `pytest_plugins` entry is removed, so the wiring test goes red and
-     the bad-order run goes red again.
-   * M3: the guard skips keys that were deleted or changed, not just added
-     ones, so the mechanism test goes red on the restore assertions.
-   * M4: the isolation is removed from one migrated module while a `.env` is
-     planted at the project root, so that module goes red on the planted value.
+5. **Migrate** the 14 sites the spec table marks "migrated", across 13 modules
+   (`test_config.py` has two blocks). Leave the two chain sites inline.
+   *(Commit `d427b3e`'s message says "Thirteen". It counted modules, not
+   sites. Not amended.)*
+6. **Mutation proofs, five clauses each** (`PYTHONDONTWRITEBYTECODE=1`). The
+   clauses are: green unmutated; the mutation lands its declared count; red;
+   the needle appears on a `>`/`E` line; green again once restored. These are
+   the mutations that were actually run:
+   * M1a: `restored_environ`'s restore body becomes `pass`. The mechanism test
+     goes red (`> assert ... _SENTINEL ... is None`).
+   * M1b: the same mutation turns the boundary test red
+     (`> result.assert_outcomes(passed=2)`).
+   * M1c: the same mutation turns the original bad-order run red (the chain
+     module, then `test_doctor_pings_ollama`), with `embedder=none` on `E` lines.
+   * M2a: `tests.env_isolation` is removed from `pytest_plugins`. The wiring
+     test goes red (`E ... '_restore_os_environ' in [...]`).
+   * M2b: the same mutation turns the original bad-order run red again.
+   * M3: the restore loop for changed and deleted keys is removed, leaving
+     only the cleanup of added keys. The mechanism test goes red on the
+     `_CHANGED` assertion (`'after'`).
+   * M4: the helper call in migrated `test_config_audio_envvars.py` is
+     dropped, with `BRAIN_AUDIO_SCRIPT_MODEL=planted-leak-model` planted in the
+     project `.env`. The test goes red with the planted value on `E` lines. Run
+     unmutated with the same planted file, it stays green.
+   * M4b: the same for migrated `test_config.py` `isolated_dotenv`, with a
+     planted `OLLAMA_HOST`. 13 tests go red.
+   * M5: the helper ignores `brain_home_root=`. Migrated
+     `test_config_new_fields.py` goes red (4 tests).
+
+   M4 was first tried on `test_config_enrich_envvars.py`, and it stayed green
+   under the mutation. Every test there sets each variable explicitly, so its
+   isolation is not load-bearing, and that module cannot carry the proof.
 7. **Verify:** `ruff check`, `mypy src/`, every touched test file, the
    bad-order run, the reverse order, and three or more explicit permutations of
    the config/dotenv/doctor/cli files. Do not run the full suite; GitHub CI is
