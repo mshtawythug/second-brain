@@ -36,8 +36,8 @@ from pathlib import Path
 
 import pytest
 
-from brain import config as config_module
 from brain.config import Config
+from tests.conftest import isolate_config_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OVERRIDES_DIR = REPO_ROOT / "src" / "brain" / "quartz_overrides"
@@ -463,12 +463,7 @@ def test_custom_scss_imports_email_thread_partial(custom_scss_source: str) -> No
 @pytest.fixture()
 def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Block .env file sources so delenv tests aren't undone by T1.0 setdefault."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "project.env")
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
-    )
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
+    isolate_config_dotenv(monkeypatch, tmp_path)
 
 
 def test_config_defaults_user_email_to_none(

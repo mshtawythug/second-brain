@@ -15,12 +15,11 @@ from pathlib import Path
 import psycopg
 import pytest
 
-from brain import config as config_module
 from brain.config import Config
 from brain.db import connect
 from brain.embeddings import OllamaEmbedError, make_embedder
 from brain.search import hybrid_search
-from tests.conftest import prod_database_url
+from tests.conftest import isolate_config_dotenv, prod_database_url
 
 # Point the canary at the REAL prod corpus (host port 55432), read-only. The
 # session autouse fixture pins DATABASE_URL to the *test* DB, so the prod URL is
@@ -33,12 +32,7 @@ LIVE_DB_URL = prod_database_url()
 @pytest.fixture()
 def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Block .env file sources so delenv tests aren't undone by T1.0 setdefault."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "project.env")
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
-    )
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
+    isolate_config_dotenv(monkeypatch, tmp_path)
 
 
 # Each canary: (raw_query, expected_pre_fix_top1_doc_id_prefix). The

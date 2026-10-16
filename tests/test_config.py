@@ -13,6 +13,7 @@ from brain.config import (
     Config,
     ConfigError,
 )
+from tests.conftest import isolate_config_dotenv
 
 
 @pytest.fixture
@@ -30,28 +31,23 @@ def isolated_dotenv(monkeypatch, tmp_path: Path) -> Path:
     Returns the tmp path the project_dotenv shim points at; tests can write a
     fake .env there to exercise the project-fallback branch.
     """
-    monkeypatch.chdir(tmp_path)
-    fake_project_env = tmp_path / "project.env"
-    monkeypatch.setattr(config_module, "_project_dotenv", lambda: fake_project_env)
-    fake_brain_home_env = tmp_path / "brain_home.env"
-    monkeypatch.setattr(config_module, "_brain_home_dotenv", lambda: fake_brain_home_env)
-    # T1.1: also patch _brain_home_root so Config.brain_home is deterministic in
+    # T1.1: also pin _brain_home_root so Config.brain_home is deterministic in
     # tests that don't specifically exercise BRAIN_HOME resolution behaviour.
-    monkeypatch.setattr(
-        config_module,
-        "_brain_home_root",
-        lambda _config_file=None: tmp_path / "brain_home_root",
-    )
-    # Strip any inherited overrides so default-vs-explicit tests stay
+    # ``clear`` strips inherited overrides so default-vs-explicit tests stay
     # deterministic regardless of the developer's shell env.
-    monkeypatch.delenv("OLLAMA_HOST", raising=False)
-    monkeypatch.delenv("QWEN3_MODEL", raising=False)
-    monkeypatch.delenv("BRAIN_EMBEDDER", raising=False)
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    monkeypatch.delenv("BRAIN_OWNER_PARTICIPANTS", raising=False)
-    monkeypatch.delenv("BRAIN_PEOPLE_HUB_MIN_DOCS", raising=False)
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
-    return fake_project_env
+    return isolate_config_dotenv(
+        monkeypatch,
+        tmp_path,
+        clear=(
+            "OLLAMA_HOST",
+            "QWEN3_MODEL",
+            "BRAIN_EMBEDDER",
+            "VOYAGE_API_KEY",
+            "BRAIN_OWNER_PARTICIPANTS",
+            "BRAIN_PEOPLE_HUB_MIN_DOCS",
+        ),
+        brain_home_root=tmp_path / "brain_home_root",
+    )
 
 
 def test_loads_database_url(monkeypatch, isolated_dotenv):
@@ -718,13 +714,12 @@ class TestBrainHomeResolution:
         The directory does NOT need to exist — no I/O happens at resolution time.
         """
         custom_home = tmp_path / "custom"
+        # Dotenv isolation without pinning _brain_home_root, so the real
+        # env-var branch fires inside Config.load(). The helper unsets
+        # BRAIN_HOME, so it must run BEFORE the setenv below.
+        isolate_config_dotenv(monkeypatch, tmp_path)
         monkeypatch.setenv("BRAIN_HOME", str(custom_home))
         monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
-        # Minimal dotenv isolation without patching _brain_home_root, so the
-        # real env-var branch fires inside Config.load().
-        monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "nope.env")
-        monkeypatch.setattr(config_module, "_brain_home_dotenv", lambda: tmp_path / "nope.env")
-        monkeypatch.chdir(tmp_path)
         cfg = Config.load()
         assert cfg.brain_home == custom_home
 

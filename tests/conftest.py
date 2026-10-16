@@ -13,8 +13,12 @@ it giving the reason it must live here, and this paragraph. Its growth on
 feat/wiki-to-ui-phase8 (T0) is :func:`_force_test_launchctl_stubs` and its
 helper ``_write_launchctl_stub``: the session-wide ``launchctl`` stand-ins that
 keep the suite off the real binary, guarded by
-tests/test_launchctl_isolation.py. No line count is given here: it would be
-stale as soon as written (``wc -l tests/conftest.py``).
+tests/test_launchctl_isolation.py. Its growth on test/dotenv-isolation-leak is a
+second ``pytest_plugins`` entry, tests/env_isolation.py (the session-wide
+``os.environ`` restore), with the comment giving its reason, and the
+``brain_home_root`` keyword on :func:`isolate_config_dotenv` that let the
+copy-pasted dotenv blocks migrate onto it. No line count is given here: it
+would be stale as soon as written (``wc -l tests/conftest.py``).
 """
 
 import hashlib
@@ -39,7 +43,10 @@ from tests.db_lock import concurrent_suite_message, try_acquire_suite_lock
 # Fails a hung browser test (see that module). The hook itself lives there, out of
 # this over-ceiling file, but `pytest_plugins` can only be declared in a conftest
 # (or a plugin already loaded), so this one line has to be here.
-pytest_plugins = ("tests.browser_timeout",)
+# tests.env_isolation restores os.environ after every test. Config.load publishes
+# a test's .env keys into the process env, and monkeypatch cannot undo names it
+# was never given. tests/test_env_isolation.py checks that it is registered here.
+pytest_plugins = ("tests.browser_timeout", "tests.env_isolation")
 
 load_dotenv()
 
@@ -128,17 +135,28 @@ def isolate_config_dotenv(
     *,
     clear: Iterable[str] = (),
     project_env: Path | None = None,
+    brain_home_root: Path | None = None,
 ) -> Path:
     """Block every ``.env`` source so only ``os.environ`` reaches ``Config.load``.
 
-    ``chdir`` neutralises the cwd walk-up, the project and ``BRAIN_HOME``
+    ``chdir`` neutralises the cwd walk-up. The project and ``BRAIN_HOME``
     dotenv helpers point into ``tmp_path`` (``project_env`` overrides the
-    project one, e.g. for a test that writes it), ``BRAIN_HOME`` is unset, and
+    project one, e.g. for a test that writes it). ``BRAIN_HOME`` is unset, and
     every name in ``clear`` is removed from the environment so a developer's
-    shell cannot leak a knob into the test. Returns the project ``.env`` path.
-    The shared copy of a block that was pasted into many test modules; other
-    modules still inline it -- find them with
-    ``git grep -l '"_brain_home_dotenv"' -- tests``.
+    shell cannot leak a knob into the test. ``brain_home_root``, when given,
+    also pins ``_brain_home_root`` so ``Config.brain_home`` (and defaults
+    derived from it) is deterministic. Returns the project ``.env`` path.
+
+    Keys that ``Config.load`` publishes into ``os.environ`` from a ``.env`` the
+    test wrote are NOT undone by ``monkeypatch``, which restores only the names
+    it was given. ``tests/env_isolation.py`` restores them after every test.
+
+    This is the shared copy of a block that was pasted into many test modules.
+    Two sites in ``test_config_dotenv_chain.py`` stay inline on purpose:
+    ``chain_paths`` builds the three-link chain those tests inspect, and
+    ``test_dotenv_chain_collapses_duplicate_candidates`` re-points
+    ``_brain_home_dotenv`` as its scenario. Neither is an isolation block. Find
+    any others with ``git grep -l '"_brain_home_dotenv"' -- tests``.
     """
     monkeypatch.chdir(tmp_path)
     project = project_env if project_env is not None else tmp_path / "project.env"
@@ -146,6 +164,12 @@ def isolate_config_dotenv(
     monkeypatch.setattr(
         _config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
     )
+    if brain_home_root is not None:
+        monkeypatch.setattr(
+            _config_module,
+            "_brain_home_root",
+            lambda _config_file=None: brain_home_root,
+        )
     monkeypatch.delenv("BRAIN_HOME", raising=False)
     for var in clear:
         monkeypatch.delenv(var, raising=False)
