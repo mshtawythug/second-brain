@@ -8,11 +8,12 @@ import pytest
 
 from brain.eval.baseline import (
     _assert_baseline_name,
+    degraded_run_message,
     diff_reports,
     load_baseline,
     save_baseline,
 )
-from brain.eval.errors import EvalBaselineError
+from brain.eval.errors import DegradedBaselineError, EvalBaselineError
 from brain.eval.runner import CategorySummary, EvalReport, EvalResult
 
 # ---------------------------------------------------------------------------
@@ -336,3 +337,106 @@ def test_baseline_name_validator_rejects_space() -> None:
     """Spaces raise EvalBaselineError."""
     with pytest.raises(EvalBaselineError):
         _assert_baseline_name("my baseline")
+
+
+# ---------------------------------------------------------------------------
+# Degraded rows (an embed call failed): never saved, never diffed
+# ---------------------------------------------------------------------------
+
+
+def _degraded(query: str, category: str = "semantic") -> EvalResult:
+    """A row as run_eval records it after an OllamaEmbedError."""
+    return EvalResult(
+        query=query,
+        category=category,
+        expected_doc_ids=["abc12345-0000-0000-0000-000000000000"],
+        actual_doc_ids=[],
+        ndcg_at_5=0.0,
+        mrr=0.0,
+        recall_at_20=0.0,
+        degraded=True,
+    )
+
+
+def test_save_baseline_refuses_a_degraded_report(tmp_path: Path) -> None:
+    """The writer refuses, names the COUNT (not the query), and writes nothing."""
+    secret_query = "synthetic-private-query-text"
+    report = _make_report([_make_result("fine query"), _degraded(secret_query)])
+    path = tmp_path / "ci.json"
+
+    with pytest.raises(DegradedBaselineError) as excinfo:
+        save_baseline(report, path=path)
+
+    message = str(excinfo.value)
+    assert "1 of 2" in message
+    assert secret_query not in message
+    assert not path.exists()
+
+
+def test_save_baseline_refusal_leaves_an_existing_file_untouched(tmp_path: Path) -> None:
+    path = tmp_path / "ci.json"
+    save_baseline(_make_report([_make_result("fine query")]), path=path)
+    before = path.read_bytes()
+
+    with pytest.raises(DegradedBaselineError):
+        save_baseline(_make_report([_degraded("fine query")]), path=path)
+
+    assert path.read_bytes() == before
+
+
+def test_degraded_baseline_error_is_an_eval_baseline_error() -> None:
+    """The CLI maps EvalBaselineError to exit 1; the refusal must ride that path."""
+    assert issubclass(DegradedBaselineError, EvalBaselineError)
+
+
+def test_saved_baseline_carries_no_degraded_key(tmp_path: Path) -> None:
+    """A saved baseline can never be degraded, so the flag is not serialized —
+    the file format (and ci.json's byte layout) is unchanged."""
+    path = tmp_path / "clean.json"
+    save_baseline(_make_report([_make_result("fine query")]), path=path)
+
+    raw = path.read_text(encoding="utf-8")
+    assert "degraded" not in raw
+    loaded = load_baseline(path)
+    assert [r.degraded for r in loaded.results] == [False]
+
+
+def test_diff_excludes_a_degraded_current_row() -> None:
+    baseline = _make_report([_make_result("q-a", ndcg=0.8), _make_result("q-b", ndcg=0.6)])
+    current = _make_report([_make_result("q-a", ndcg=0.8), _degraded("q-b")])
+
+    diff = diff_reports(baseline, current)
+
+    assert [d.query for d in diff.per_query] == ["q-a"]
+    assert diff.mean_ndcg_at_5_delta == pytest.approx(0.0)
+    assert diff.degraded_queries == ["q-b"]
+    assert diff.added_queries == [] and diff.removed_queries == []
+
+
+def test_diff_excludes_a_degraded_baseline_row() -> None:
+    """Either side degraded means the pair measured nothing comparable."""
+    baseline = _make_report([_make_result("q-a"), _degraded("q-b")])
+    current = _make_report([_make_result("q-a"), _make_result("q-b", ndcg=0.1)])
+
+    diff = diff_reports(baseline, current)
+
+    assert [d.query for d in diff.per_query] == ["q-a"]
+    assert diff.degraded_queries == ["q-b"]
+
+
+def test_diff_of_a_fully_degraded_run_has_nothing_to_compare() -> None:
+    """The case a --fail-below gate must NOT read as a pass: empty intersection."""
+    baseline = _make_report([_make_result("q-a"), _make_result("q-b")])
+    current = _make_report([_degraded("q-a"), _degraded("q-b")])
+
+    diff = diff_reports(baseline, current)
+
+    assert diff.per_query == []
+    assert diff.degraded_queries == ["q-a", "q-b"]
+
+
+def test_degraded_run_message_names_count_and_action() -> None:
+    message = degraded_run_message(3, 55, action="refusing to record baseline 'ci'")
+    assert message.startswith("refusing to record baseline 'ci'")
+    assert "3 of 55" in message
+    assert "retry" in message

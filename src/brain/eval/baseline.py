@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from ..vault._atomic import atomic_write_text
-from .errors import EvalBaselineError
-from .runner import CategorySummary, EvalReport, EvalResult
+from .errors import DegradedBaselineError, EvalBaselineError
+from .runner import CategorySummary, EvalReport, EvalResult, degraded_results
 
 _BASELINE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -46,6 +46,21 @@ def _round_floats(obj: Any, decimals: int = 4) -> Any:
     return obj
 
 
+def degraded_run_message(degraded: int, total: int, *, action: str) -> str:
+    """One stderr line for a run in which *degraded* of *total* embeds failed.
+
+    Names the COUNT, never the queries: the golden corpus is gitignored because
+    its queries are personal, and this is the line most likely to be pasted into
+    a commit message or a chat. The per-query ``WARNING`` log already names each
+    query for an operator watching the run.
+    """
+    return (
+        f"{action}: {degraded} of {total} queries are degraded (their embed call "
+        f"failed, so they scored 0.0 without measuring retrieval) — retry when "
+        f"the embedder is healthy (e.g. no other large model loaded in Ollama)."
+    )
+
+
 def save_baseline(report: EvalReport, *, path: Path) -> None:
     """Write *report* to *path* as JSON, atomically.
 
@@ -53,12 +68,32 @@ def save_baseline(report: EvalReport, *, path: Path) -> None:
     runs over the same corpus produce byte-stable diffs.  The parent
     directory is created if it does not exist.
 
+    Refuses a degraded report before touching the filesystem, so an existing
+    file at *path* is left exactly as it was. The per-row ``degraded`` flag is
+    not serialized: a saved baseline cannot contain a degraded row, so the
+    field would be a constant, and leaving it out keeps the file format (and
+    ``ci.json``'s byte layout) unchanged.
+
     Args:
         report: The eval report to persist.
         path: Destination file path (typically under ``tests/eval/baselines/``).
+
+    Raises:
+        DegradedBaselineError: When any row of *report* is degraded.
     """
+    degraded = degraded_results(report)
+    if degraded:
+        raise DegradedBaselineError(
+            degraded_run_message(
+                len(degraded),
+                len(report.results),
+                action=f"refusing to record baseline {path.stem!r}",
+            )
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     raw: dict[str, Any] = dataclasses.asdict(report)
+    for result in raw["results"]:
+        del result["degraded"]
     raw = _round_floats(raw)
     # datetime → ISO-8601 with Z suffix for UTC.
     raw["generated_at"] = report.generated_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -167,6 +202,12 @@ class BaselineDiff:
     # aggregate stays intersection-only; deterministic source order.
     added_queries: list[str]
     removed_queries: list[str]
+    # Shared queries degraded on EITHER side (an embed call failed, so the row
+    # measured nothing). Excluded from ``per_query`` and the aggregate exactly
+    # like added/removed queries. Never "passed" by the ``--fail-below`` gate:
+    # a fully degraded run has an empty intersection and zero deltas, so the CLI
+    # refuses to judge any diff where this is non-empty.
+    degraded_queries: list[str]
 
 
 def diff_reports(baseline: EvalReport, current: EvalReport) -> BaselineDiff:
@@ -183,13 +224,17 @@ def diff_reports(baseline: EvalReport, current: EvalReport) -> BaselineDiff:
     ``current - 0`` positive delta into the mean, masking regressions on the
     shared queries).
 
+    A shared query that is degraded in EITHER report (its embed call failed) is
+    excluded the same way and listed in :attr:`~BaselineDiff.degraded_queries`.
+
     Args:
         baseline: The reference (earlier) eval report.
         current: The new eval report to compare.
 
     Returns:
         A :class:`BaselineDiff` whose per-query and aggregate deltas cover the
-        shared queries, plus the added/removed query id lists.
+        shared, non-degraded queries, plus the added/removed/degraded query
+        lists.
     """
     # Build lookup dicts keyed by query string.
     base_by_q = {r.query: r for r in baseline.results}
@@ -197,10 +242,16 @@ def diff_reports(baseline: EvalReport, current: EvalReport) -> BaselineDiff:
 
     # Per-query deltas over the SHARED queries only, in baseline result order.
     per_query: list[QueryDiff] = []
+    degraded_queries: list[str] = []
     for q_str, base_r in base_by_q.items():
         curr_r = curr_by_q.get(q_str)
         if curr_r is None:
             continue  # removed query — reported separately, not in the aggregate
+        if base_r.degraded or curr_r.degraded:
+            # A 0.0 from a failed embed is not a score; a delta against it is
+            # not a delta. Reported separately, never in the aggregate.
+            degraded_queries.append(q_str)
+            continue
         per_query.append(
             QueryDiff(
                 query=q_str,
@@ -231,6 +282,7 @@ def diff_reports(baseline: EvalReport, current: EvalReport) -> BaselineDiff:
         current_signature=dict(current.config_signature),
         added_queries=added_queries,
         removed_queries=removed_queries,
+        degraded_queries=degraded_queries,
     )
 
 

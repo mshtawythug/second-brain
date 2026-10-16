@@ -42,6 +42,12 @@ class EvalResult:
     ndcg_at_5: float
     mrr: float
     recall_at_20: float
+    # True when the query's embed call raised OllamaEmbedError: the 0.0 metrics
+    # above then measure an unhealthy embedder, not retrieval. Ad-hoc runs keep
+    # scoring the row; ``save_baseline`` refuses it and ``diff_reports``
+    # excludes it (spec docs/specs/2026-10-15-eval-record-degraded-design.md).
+    # Never serialized into a baseline file, which cannot contain a degraded row.
+    degraded: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,7 +141,8 @@ def run_eval(
     bounds a pinned ``recency`` query uses in place of ``since_days``.
 
     Tolerates :exc:`~brain.embeddings.OllamaEmbedError` by skipping the affected
-    query with a warning and recording ``actual_doc_ids=[]`` / metrics=0.0.
+    query with a warning and recording ``actual_doc_ids=[]`` / metrics=0.0, with
+    ``degraded=True`` on that row so the record and gate paths can refuse it.
 
     Args:
         conn: Live psycopg connection (test_db or prod).
@@ -153,6 +160,7 @@ def run_eval(
     results: list[EvalResult] = []
 
     for q in queries:
+        degraded = False
         try:
             search_results = hybrid_search(
                 conn,
@@ -176,6 +184,7 @@ def run_eval(
                 exc,
             )
             actual_ids = []
+            degraded = True
 
         expected_ids = _normalize_ids(conn, list(q.expected_doc_ids))
 
@@ -196,6 +205,7 @@ def run_eval(
                 ndcg_at_5=ndcg,
                 mrr=mrr_score,
                 recall_at_20=recall,
+                degraded=degraded,
             )
         )
 
@@ -236,3 +246,12 @@ def run_eval(
         config_signature=config_signature,
         generated_at=datetime.now(tz=UTC),
     )
+
+
+def degraded_results(report: EvalReport) -> list[EvalResult]:
+    """The rows of *report* whose embed call failed, in result order.
+
+    The single definition of "degraded" that the baseline refusal, the diff
+    exclusion and the CLI warnings all read, so they cannot disagree.
+    """
+    return [r for r in report.results if r.degraded]

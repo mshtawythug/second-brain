@@ -2,6 +2,7 @@
 
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
@@ -298,3 +299,227 @@ def test_brain_eval_json_record_baseline_no_stdout_pollution(
     data = json.loads(result.stdout)
     assert "results" in data
     assert (baselines_dir / "noisy.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Degraded runs (an embed call raised OllamaEmbedError)
+#
+# Every failing query string below is unique to its test: brain.search caches
+# query embeddings per embedder class, and a string that once succeeded through
+# FlakyEmbedder would be served from cache instead of raising.
+# ---------------------------------------------------------------------------
+
+
+def _degraded_corpus(tmp_path: Path, queries: list[str], expected_id: str) -> Path:
+    return _write_corpus(
+        tmp_path,
+        {
+            "version": 1,
+            "queries": [
+                {"query": q, "category": "semantic", "expected_doc_ids": [expected_id]}
+                for q in queries
+            ],
+        },
+    )
+
+
+def _seed_one(test_db: psycopg.Connection, fake_embedder: object, title: str) -> str:
+    ingest_document(
+        test_db,
+        embedder=fake_embedder,  # type: ignore[arg-type]
+        doc=ExtractedDoc(
+            title=title,
+            content=f"{title} body text",
+            content_type="txt",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+    )
+    row = test_db.execute("SELECT id::text FROM documents WHERE title = %s", (title,)).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _wire_flaky(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, embedder: object
+) -> Path:
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: embedder)
+    baselines_dir = tmp_path / "baselines"
+    monkeypatch.setattr("brain.cli._BASELINES_DIR", baselines_dir)
+    return baselines_dir
+
+
+def test_record_baseline_refuses_a_degraded_run(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    make_flaky_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """Rule-12 regression: one embed timeout used to exit 0 AND save that query as
+    0.0, poisoning the baseline every later --fail-below compares against."""
+    doc_id = _seed_one(test_db, fake_embedder, "Degraded Record Doc")
+    failing = "degrecord timed out query"
+    corpus = _degraded_corpus(tmp_path, ["Degraded Record Doc body", failing], doc_id)
+    baselines_dir = _wire_flaky(monkeypatch, tmp_path, make_flaky_embedder({failing}))  # type: ignore[operator]
+
+    result = CliRunner().invoke(app, ["eval", "--corpus", str(corpus), "--record-baseline", "ci"])
+
+    assert result.exit_code == 1, result.output
+    assert not (baselines_dir / "ci.json").exists()
+    assert "1 of 2" in result.stderr
+    assert "refusing to record baseline 'ci'" in result.stderr
+    assert failing not in result.stderr.split("refusing", 1)[1]
+
+
+def test_refused_record_leaves_the_existing_baseline_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    make_flaky_embedder: object,
+    tmp_path: Path,
+) -> None:
+    doc_id = _seed_one(test_db, fake_embedder, "Degraded Keep Doc")
+    failing = "degkeep timed out query"
+    corpus = _degraded_corpus(tmp_path, ["Degraded Keep Doc body", failing], doc_id)
+    baselines_dir = _wire_flaky(monkeypatch, tmp_path, make_flaky_embedder({failing}))  # type: ignore[operator]
+    baselines_dir.mkdir()
+    existing = baselines_dir / "ci.json"
+    existing.write_text('{"sentinel": true}\n', encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["eval", "--corpus", str(corpus), "--record-baseline", "ci"])
+
+    assert result.exit_code == 1, result.output
+    assert existing.read_text(encoding="utf-8") == '{"sentinel": true}\n'
+
+
+def test_plain_run_still_exits_0_but_warns_with_the_count(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    make_flaky_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """Ad-hoc runs keep the tolerance; they just stop being silent about it."""
+    doc_id = _seed_one(test_db, fake_embedder, "Degraded Plain Doc")
+    failing = "degplain timed out query"
+    corpus = _degraded_corpus(tmp_path, ["Degraded Plain Doc body", failing], doc_id)
+    _wire_flaky(monkeypatch, tmp_path, make_flaky_embedder({failing}))  # type: ignore[operator]
+
+    result = CliRunner().invoke(app, ["eval", "--corpus", str(corpus), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert [r["degraded"] for r in payload["results"]] == [False, True]
+    assert "1 of 2" in result.stderr
+
+
+def _record_clean(
+    monkeypatch: pytest.MonkeyPatch, embedder: object, corpus: Path, name: str
+) -> None:
+    monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: embedder)
+    recorded = CliRunner().invoke(
+        app, ["eval", "--corpus", str(corpus), "--record-baseline", name]
+    )
+    assert recorded.exit_code == 0, recorded.output
+
+
+def test_diff_excludes_degraded_rows_and_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    make_flaky_embedder: object,
+    tmp_path: Path,
+) -> None:
+    doc_id = _seed_one(test_db, fake_embedder, "Degraded Diff Doc")
+    failing = "degdiff sometimes times out"
+    corpus = _degraded_corpus(tmp_path, ["Degraded Diff Doc body", failing], doc_id)
+    _wire_flaky(monkeypatch, tmp_path, fake_embedder)
+    _record_clean(monkeypatch, fake_embedder, corpus, "base")
+    monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: make_flaky_embedder({failing}))  # type: ignore[operator]
+
+    result = CliRunner().invoke(
+        app, ["eval", "--corpus", str(corpus), "--baseline", "base", "--diff", "--json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    diff = json.loads(result.stdout)
+    assert [d["query"] for d in diff["per_query"]] == ["Degraded Diff Doc body"]
+    assert diff["degraded_queries"] == [failing]
+    assert "1 of 2" in result.stderr
+
+
+def _write_high_baseline(baselines_dir: Path, queries: list[str], name: str) -> None:
+    """A baseline every current run regresses against (all metrics 1.0)."""
+    from brain.eval import save_baseline
+    from brain.eval.runner import CategorySummary, EvalReport, EvalResult
+
+    results = [
+        EvalResult(
+            query=q,
+            category="semantic",
+            expected_doc_ids=["00000000-0000-0000-0000-000000000000"],
+            actual_doc_ids=["00000000-0000-0000-0000-000000000000"],
+            ndcg_at_5=1.0,
+            mrr=1.0,
+            recall_at_20=1.0,
+        )
+        for q in queries
+    ]
+    report = EvalReport(
+        results=results,
+        mean_ndcg_at_5=1.0,
+        mean_mrr=1.0,
+        mean_recall_at_20=1.0,
+        per_category={
+            "semantic": CategorySummary(
+                category="semantic",
+                count=len(results),
+                mean_ndcg_at_5=1.0,
+                mean_mrr=1.0,
+                mean_recall_at_20=1.0,
+            )
+        },
+        config_signature={},
+        generated_at=datetime(2026, 10, 15, tzinfo=UTC),
+    )
+    save_baseline(report, path=baselines_dir / f"{name}.json")
+
+
+@pytest.mark.parametrize("fail_all", [False, True], ids=["partial", "fully-degraded"])
+def test_fail_below_refuses_to_judge_a_degraded_run(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    make_flaky_embedder: object,
+    tmp_path: Path,
+    fail_all: bool,
+) -> None:
+    """Exit 1, not 3 and not 0. Partial: the healthy row DOES regress against the
+    all-1.0 baseline, so a refusal placed after the regression check would exit
+    3. Fully degraded: nothing is comparable, so the deltas are 0 and a gate
+    that only excluded degraded rows would PASS a run that measured nothing."""
+    tag = "all" if fail_all else "part"
+    healthy = f"deggate {tag} healthy query"
+    failing = f"deggate {tag} timed out query"
+    corpus = _degraded_corpus(
+        tmp_path, [healthy, failing], "00000000-0000-0000-0000-000000000000"
+    )
+    fail_set = {healthy, failing} if fail_all else {failing}
+    baselines_dir = _wire_flaky(monkeypatch, tmp_path, make_flaky_embedder(fail_set))  # type: ignore[operator]
+    _write_high_baseline(baselines_dir, [healthy, failing], "base")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "eval", "--corpus", str(corpus),
+            "--baseline", "base", "--diff", "--fail-below", "--json",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    diff = json.loads(result.stdout)  # the report is still emitted first
+    assert len(diff["degraded_queries"]) == (2 if fail_all else 1)
+    assert "cannot evaluate --fail-below" in result.stderr

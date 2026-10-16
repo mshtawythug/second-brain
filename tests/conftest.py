@@ -31,6 +31,7 @@ from psycopg import sql
 
 from brain.config import DEFAULT_OLLAMA_HOST
 from brain.db import connect, migration_lock, run_migrations
+from brain.embeddings import OllamaEmbedError
 from brain.ingest import ExtractedDoc, ingest_document
 from tests.db_lock import concurrent_suite_message, try_acquire_suite_lock
 
@@ -929,6 +930,42 @@ class CountingEmbedder:
 @pytest.fixture
 def counting_embedder(fake_embedder: FakeEmbedder) -> CountingEmbedder:
     return CountingEmbedder(fake_embedder)
+
+
+class FlakyEmbedder:
+    """Wrap an embedder so QUERY embeds of named texts raise ``OllamaEmbedError``.
+
+    Models the observed eval failure: one query's embed call times out (another
+    process holds the GPU) while every other call succeeds. Document embeds
+    always delegate, so a test can seed with the same instance.
+
+    ``brain.search`` caches query embeddings keyed by the embedder's CLASS, so a
+    text that succeeded through this class in an earlier test would be served
+    from cache and never raise. Use failing texts unique to each test.
+    """
+
+    def __init__(self, inner: Any, fail_texts: set[str]) -> None:
+        self._inner = inner
+        self._fail_texts = frozenset(fail_texts)
+        self.dim = inner.dim
+
+    def embed(
+        self, texts: list[str], *, input_type: str = "document"
+    ) -> list[list[float]]:
+        if input_type == "query" and any(t in self._fail_texts for t in texts):
+            raise OllamaEmbedError("synthetic embed timeout")
+        return self._inner.embed(texts, input_type=input_type)  # type: ignore[no-any-return]
+
+    def count_tokens(self, text: str) -> int:
+        return self._inner.count_tokens(text)  # type: ignore[no-any-return]
+
+
+@pytest.fixture
+def make_flaky_embedder(
+    fake_embedder: FakeEmbedder,
+) -> Callable[[set[str]], FlakyEmbedder]:
+    """Factory: ``make_flaky_embedder({"q1"})`` fails query embeds of ``q1``."""
+    return lambda fail_texts: FlakyEmbedder(fake_embedder, fail_texts)
 
 
 class FakeRunner:

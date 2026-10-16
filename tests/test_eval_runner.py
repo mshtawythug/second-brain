@@ -9,7 +9,13 @@ import pytest
 
 from brain.eval.corpus import EvalQuery
 from brain.eval.errors import EvalCorpusError
-from brain.eval.runner import EvalReport, _normalize_ids, _utc_midnight, run_eval
+from brain.eval.runner import (
+    EvalReport,
+    _normalize_ids,
+    _utc_midnight,
+    degraded_results,
+    run_eval,
+)
 from brain.ingest import ExtractedDoc, ingest_document
 
 # ---------------------------------------------------------------------------
@@ -177,6 +183,41 @@ def test_run_eval_handles_ollama_failure_gracefully(test_db, fake_embedder):
     assert r.ndcg_at_5 == 0.0
     assert r.mrr == 0.0
     assert r.recall_at_20 == 0.0
+    assert r.degraded is True
+
+
+def test_run_eval_flags_only_the_query_whose_embed_failed(
+    test_db, fake_embedder, make_flaky_embedder
+):
+    """A failed embed marks THAT row degraded (metrics 0.0); a healthy row is not.
+
+    The flag is what lets ``--record-baseline`` refuse and ``--diff`` exclude:
+    without it a timed-out embed is indistinguishable from a genuine 0.0 miss.
+    """
+    healthy_id = _seed(test_db, fake_embedder, "Flag Healthy Doc", "flagrunner healthy content")
+    _seed(test_db, fake_embedder, "Flag Broken Doc", "flagrunner broken content")
+    failing = "flagrunner broken query"
+    queries = [
+        _make_query("flagrunner healthy content", healthy_id),
+        _make_query(failing, healthy_id),
+    ]
+
+    report = run_eval(test_db, embedder=make_flaky_embedder({failing}), queries=queries)
+
+    healthy, broken = report.results
+    assert healthy.degraded is False
+    assert healthy.actual_doc_ids  # it really ran
+    assert broken.degraded is True
+    assert (broken.ndcg_at_5, broken.mrr, broken.recall_at_20) == (0.0, 0.0, 0.0)
+    assert degraded_results(report) == [broken]
+
+
+def test_degraded_results_empty_for_a_clean_run(test_db, fake_embedder):
+    doc_id = _seed(test_db, fake_embedder, "Clean Run Doc", "cleanrun content")
+    report = run_eval(
+        test_db, embedder=fake_embedder, queries=[_make_query("cleanrun content", doc_id)]
+    )
+    assert degraded_results(report) == []
 
 
 def test_run_eval_aggregates_per_category(test_db, fake_embedder):

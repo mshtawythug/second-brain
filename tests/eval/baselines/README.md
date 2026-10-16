@@ -157,6 +157,29 @@ queries it touched. `diff_reports` compares the *intersection* of the two query
 sets and reports added/removed queries separately, so an added query cannot
 dilute the mean; but a re-judged one silently changes what "correct" means.
 
+## Got `exit 1` with "queries are degraded"? Retry
+
+A query is **degraded** when its embed call raised `OllamaEmbedError` (a
+timeout, usually because another process has a large model loaded in Ollama).
+The runner scores it `0.0` without having measured retrieval and marks the row
+`degraded`.
+
+- **`--record-baseline`** refuses to write a degraded run. It names how many
+  queries were degraded (never which: the corpus is personal), writes nothing,
+  leaves any existing `<NAME>.json` exactly as it was, and exits `1`. Free the
+  embedder and run it again.
+- **`--diff`** leaves degraded rows out of the per-query and mean deltas and
+  lists them under `degraded_queries`, with a stderr warning.
+- **`--diff --fail-below`** prints the diff, then exits `1` without judging it.
+  Dropping the rows alone is not enough: if every embed failed, nothing would be
+  compared, every delta would be `0`, and the gate would pass.
+- A plain run still exits `0`, with a stderr warning that gives the count.
+
+A baseline recorded **before** this guard existed (2026-10-15) could already
+contain a degraded row. Such a row reads as a genuine miss: all three metrics
+`0.0`, `actual_doc_ids` empty, on a query that ranks fine in an ad-hoc run. If
+you find one, re-record.
+
 ## Known retrieval issues
 
 - **Vector-leg candidate pool — FIXED 2026-10-13.** The vector leg was served by
@@ -204,6 +227,8 @@ git diff tests/eval/baselines/ci.json
 
 Commit the new JSON alongside the change that justifies the new numbers, and say
 in the commit message *which* of the triggers above applied.
+If the record exits `1` saying queries are degraded, nothing was written; see
+"Got `exit 1`" above.
 
 ## What CI does with this
 
