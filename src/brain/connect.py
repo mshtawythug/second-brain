@@ -21,13 +21,13 @@ audit. Re-derive with ``wc -l src/brain/connect.py``. What does not rot is the
 base and the trail: 925 (``f8c76c0``, branch base) -> 925 (``3b16527``, touched
 but no net change) -> 952 (``ec6afb6``) -> 972 (``56cc984``, the commit that
 wrote this very record -- its +20 lines ARE the ceiling record) -> 993
-(``b7fd0e8``) -> **the commit that added this paragraph**, named descriptively
-and with no delta. (The ``b7fd0e8`` hop is written in now that it HAS a SHA: the
-previous descriptive last hop was that commit, and a descriptive hop is
-promotable to a SHA-bound one the moment a later edit can see it. That is the
-maintenance the terminating form actually requires, and skipping it is how a
-trail keeps arriving one hop short while each author believes they just fixed
-it.)
+(``b7fd0e8``) -> 1,091 (``f4d914d``) -> 1,088 (``7dfa9e8``, the KNN onto
+brain.hnsw_scan) -> 1,090 (``c5e8a76``, +2: the under-fill fallback) -> **the
+commit that promoted these two hops**, descriptive, no delta.
+(A descriptive hop is promotable to a SHA-bound one the moment a later edit can
+see it. That is the maintenance the terminating form requires, and skipping it
+is how a trail keeps arriving one hop short while each author believes they just
+fixed it.)
 
 WHY THE LAST HOP HAS NO NUMBER AND NO SHA. A record of a file's size is
 invalidated by the act of writing the record: the hash does not exist until
@@ -80,6 +80,7 @@ import psycopg
 
 from .config import Config
 from .errors import ConnectError
+from .hnsw_scan import STRICT_SCAN_SETTINGS, scoped_settings
 from .related import _avg_embedding, _eligible_source_docs
 from .sensitivity import CONFIDENTIAL, DEFAULT_SENSITIVITY, not_confidential_sql
 from .vault._atomic import atomic_write_text
@@ -111,17 +112,10 @@ _KNN_CANDIDATE_MULTIPLIER = 8
 # worst case; correctness holds either way (the fallback is exact).
 _KNN_MAX_ITERATIONS = 4
 
-# pgvector 0.8.2 GUC. A *filtered* HNSW scan under a post-filter ``LIMIT``
-# under-returns by default: the index hands the planner only ``hnsw.ef_search``
-# rows, most of which the JOIN + eligibility filters then drop (measured on
-# prod: a ``LIMIT 400`` yielded only 27 rows). ``strict_order`` makes the scan
-# ITERATE until the ``LIMIT`` is satisfied AND keeps rows in exact ascending-
-# distance order, which the per-doc-max exactness argument in
-# :func:`_embedding_affinity_knn` relies on. ``SET LOCAL`` scopes it to the one
-# transaction — never a session/global ``SET``. Verified against pgvector 0.8.2:
-# the enum is ``{off, relaxed_order, strict_order}``; ``relaxed_order`` would be
-# faster but breaks the exact-order precondition, so we require ``strict_order``.
-_SET_ITERATIVE_SCAN = "SET LOCAL hnsw.iterative_scan = strict_order"
+# The KNN runs under brain.hnsw_scan.STRICT_SCAN_SETTINGS: ``strict_order`` keeps
+# rows in the distance order the early stop needs, and ef_search 1000 took exact
+# agreement from 106 to 199 of 200 live sources; see
+# docs/specs/2026-10-15-related-connect-vector-leg-design.md.
 
 
 @dataclass(frozen=True)
@@ -327,8 +321,8 @@ def embedding_affinity(
     ``MAX(...) GROUP BY`` + range-predicate query that seq-scanned every chunk
     (measured ~1.2s/doc on prod → ~40ms). When the adaptive re-query cannot
     converge within :data:`_KNN_MAX_ITERATIONS` (a cold / sparse source whose
-    nearest chunks pile onto a handful of docs) it falls back to the exact
-    :func:`_embedding_affinity_exhaustive` — correctness beats speed. The
+    nearest chunks pile onto a handful of docs), or a batch under-fills, it
+    falls back to the exact :func:`_embedding_affinity_exhaustive`. The
     output contract is identical across both paths.
 
     ``knn_multiplier`` sets the first KNN batch (``candidate_limit`` ×
@@ -364,8 +358,8 @@ def embedding_affinity(
 
 # KNN leg: the eligibility predicates live IN the query so ``LIMIT k`` counts
 # only eligible chunks and the HNSW index (``chunks_embedding_idx``) drives the
-# ordering. Paired with :data:`_SET_ITERATIVE_SCAN` so the filtered scan does
-# not under-return.
+# ordering. Run under ``STRICT_SCAN_SETTINGS`` so the filtered scan does not
+# under-return.
 _KNN_SQL = """
     SELECT c.document_id::text AS doc_id,
            1 - (c.embedding <=> %(vec)s::vector) AS cosine
@@ -393,9 +387,12 @@ def _embedding_affinity_knn(
     per-doc max → sort → truncate. Returns the ``{doc: best_cosine}`` mapping, or
     ``None`` to signal "did not converge — use the exhaustive fallback".
 
-    Exactness argument (why the returned docs match the exhaustive scan): with
-    ``strict_order`` the ``LIMIT k`` rows are the true k nearest eligible chunks
-    in exact ascending-distance (descending-cosine) order. So:
+    Near-exact, not exact. HNSW is approximate at any ``ef_search``:
+    ``strict_order`` fixes the ORDER of the ``LIMIT k`` rows, not their
+    membership. The argument below ASSUMES they are the true k nearest eligible
+    chunks; the result matched the exhaustive query for 199 of 200 live sources
+    at ef_search 1000 (2026-10-15; 106 at the old default of 40). Given that,
+    in exact ascending-distance (descending-cosine) order:
 
     * Every doc that APPEARS has its globally-best chunk among the k — that
       chunk's cosine is ≥ the k-th (smallest returned) cosine, and any other
@@ -407,20 +404,19 @@ def _embedding_affinity_knn(
     Consequently, once the k nearest chunks contain ≥ ``candidate_limit``
     distinct floor-passing docs, the top ``candidate_limit`` by best cosine are
     fully and exactly determined (no unseen doc can outrank them). We also stop
-    early when the batch is provably complete: it under-filled (all eligible
-    chunks seen) or its smallest returned cosine already fell below the floor
+    early when the smallest returned cosine already fell below the floor
     (nothing further can pass). Otherwise we double k and retry, capped at
     :data:`_KNN_MAX_ITERATIONS` before conceding to the exhaustive fallback.
+    A batch with FEWER than k rows also concedes: the iterative scan stops at
+    ``hnsw.max_scan_tuples`` (20,000) visited tuples, so an under-fill proves
+    nothing about exhaustion. On the live corpus k (<= 3,200) never under-fills;
+    on a corpus too small to fill k, the exhaustive query is cheap.
 
-    ``SET LOCAL`` is scoped by :meth:`psycopg.Connection.transaction`; under the
-    autocommit connection the CLI uses this opens a real ``BEGIN``/``COMMIT`` so
-    the GUC never leaks past the scan. (Assumes the eligible chunk count stays
-    within ``hnsw.max_scan_tuples`` so an under-fill means true exhaustion —
-    true for the current corpus; the exhaustive fallback backstops the rest.)
+    :func:`brain.hnsw_scan.scoped_settings` keeps the settings from leaking past
+    the scan, in autocommit or inside a caller's transaction.
     """
     k = candidate_limit * knn_multiplier
-    with conn.transaction():
-        conn.execute(_SET_ITERATIVE_SCAN)
+    with scoped_settings(conn, STRICT_SCAN_SETTINGS):
         for _ in range(_KNN_MAX_ITERATIONS):
             rows = conn.execute(
                 _KNN_SQL,
@@ -431,15 +427,17 @@ def _embedding_affinity_knn(
                 for r in rows
                 if float(r[1]) >= vector_sim_floor
             ]
+            # An under-fill is NOT proof every eligible chunk was seen: the
+            # scan also stops at hnsw.max_scan_tuples. Concede to the
+            # exhaustive query, which is cheap whenever the corpus cannot fill k.
+            if len(rows) < k:
+                return None
             distinct_docs = {doc_id for doc_id, _ in floor_rows}
-            # Provably complete when the batch under-filled (every eligible
-            # chunk seen) or its smallest returned cosine is already below the
-            # floor (rows are in exact descending-cosine order, so nothing
-            # further can pass).
-            seen_all = len(rows) < k or (
-                len(rows) > 0 and float(rows[-1][1]) < vector_sim_floor
-            )
-            if seen_all or len(distinct_docs) >= candidate_limit:
+            # Complete once the smallest returned cosine is below the floor
+            # (rows arrive in descending-cosine order, so nothing further can
+            # pass), or once candidate_limit distinct docs are in.
+            below_floor = float(rows[-1][1]) < vector_sim_floor
+            if below_floor or len(distinct_docs) >= candidate_limit:
                 return _group_per_doc_max(floor_rows, candidate_limit)
             k *= 2
     return None
@@ -472,13 +470,13 @@ def _embedding_affinity_exhaustive(
     candidate_limit: int,
     vector_sim_floor: float,
 ) -> dict[str, float]:
-    """Pre-4.1 exhaustive ``MAX(...) GROUP BY`` scan — exact but seq-scans every
-    chunk (the range predicate on the cosine defeats the HNSW index).
+    """Exhaustive ``MAX(...) GROUP BY`` scan: exact, but reads every chunk.
 
-    Retained verbatim as the correctness fallback for the rare case where the
-    adaptive KNN re-query in :func:`_embedding_affinity_knn` cannot converge
-    (a cold / sparse corpus where k would have to grow past the cap). Callers
-    reach it only after that path returns ``None``.
+    The fallback whenever :func:`_embedding_affinity_knn` returns ``None``: it
+    could not converge, or a batch under-filled, which every corpus with fewer
+    than k eligible chunks does. The floor is ``dist <= 1 - floor``, because
+    ``1 - NaN >= x`` is TRUE in Postgres: a zero-norm chunk scored NaN, sorted
+    first, and took a candidate slot.
     """
     rows = conn.execute(
         """
@@ -490,7 +488,7 @@ def _embedding_affinity_exhaustive(
           AND d.vault_path IS NOT NULL
           AND d.id <> %(source)s::uuid
           AND c.embedding IS NOT NULL
-          AND 1 - (c.embedding <=> %(vec)s::vector) >= %(floor)s
+          AND (c.embedding <=> %(vec)s::vector) <= 1 - %(floor)s
         GROUP BY d.id
         ORDER BY cosine DESC, doc_id
         LIMIT %(limit)s

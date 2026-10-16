@@ -40,6 +40,7 @@ from brain.related import (
 )
 from brain.sensitivity import CONFIDENTIAL
 from brain.wiki.build_related import regenerate_related_json
+from tests.ordered_ids import next_chunk_id
 
 VECTOR_DIM = 4096
 
@@ -111,9 +112,9 @@ def _insert_doc(
     for index, content in enumerate(chunk_contents):
         if index < len(vectors):
             conn.execute(
-                "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
-                "VALUES (%s::uuid, %s, %s, %s::vector)",
-                (doc_id, index, content, vectors[index]),
+                "INSERT INTO chunks (id, document_id, chunk_index, content, embedding) "
+                "VALUES (%s::uuid, %s::uuid, %s, %s, %s::vector)",
+                (next_chunk_id(), doc_id, index, content, vectors[index]),
             )
         else:
             conn.execute(
@@ -453,9 +454,15 @@ def test_title_overlap_outranks_vector_drift(
     neighbors when the vector signal is held equal — proving the title-A
     weight on the multi-field tsv is the differentiator.
 
-    Construction holds vector contribution constant across all four
-    candidates (every candidate gets ``near_vec``, cosine ≈ 0.998 with the
-    source) so vector RRF is identical leg-wise. Body content also gives
+    Construction holds the cosine constant across all four candidates (every
+    candidate gets ``near_vec``, cosine ≈ 0.998 with the source). That does
+    NOT make their vector RRF identical: rank fusion scores positions, so tied
+    chunks still get ranks 0..3, in the leg's tie-break order (chunk id).
+    ``_insert_doc`` assigns chunk ids in insertion order
+    (:mod:`tests.ordered_ids`), so the title-overlap docs, inserted first, are
+    not behind on the vector leg. Until 2026-10-15 that order came from
+    physical row order, unstated; with random ids this test was a coin flip.
+    Body content also gives
     every candidate a ``ZZZTOKEN`` body mention so all four clear
     ``_MIN_RRF_SCORE`` via dual-leg accumulation. The ONLY remaining
     difference is whether the candidate's title carries the ``ZZZTOKEN``

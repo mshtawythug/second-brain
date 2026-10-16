@@ -29,6 +29,7 @@ from brain.wiki.build_related import (
     DEFAULT_RELATED_LIMIT,
     regenerate_related_json,
 )
+from tests.ordered_ids import next_chunk_id
 
 VECTOR_DIM = 4096
 
@@ -68,9 +69,9 @@ def _insert(
     doc_id = str(row[0])
     for index, content in enumerate(chunk_contents):
         conn.execute(
-            "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
-            "VALUES (%s::uuid, %s, %s, %s::vector)",
-            (doc_id, index, content, chunk_vectors[index]),
+            "INSERT INTO chunks (id, document_id, chunk_index, content, embedding) "
+            "VALUES (%s::uuid, %s::uuid, %s, %s, %s::vector)",
+            (next_chunk_id(), doc_id, index, content, chunk_vectors[index]),
         )
     sync_chunk_search_metadata(conn, doc_id)
     return doc_id

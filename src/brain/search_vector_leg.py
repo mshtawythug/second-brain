@@ -49,13 +49,10 @@ all of them is 0.994, with a 0.96 minimum.
 The ``+ 0`` keeps the outer sort from being satisfied by the index (pgvector's
 documented pattern for Postgres 17+). The ``id`` tie-break makes the order total.
 
-**Settings are scoped to this one query and never leak.** They are set with
-``set_config(…, is_local => true)`` inside the leg's own ``conn.transaction()``.
-For an autocommit caller that is a real transaction, so the settings end at its
-COMMIT. Inside a caller's transaction it is a savepoint, and a *released*
-savepoint keeps local settings, so the prior values are read first and restored
-explicitly after the query. If the query raises, the savepoint rollback reverts
-them.
+**Settings are scoped to this one query and never leak.** The settings and the
+read / set / restore protocol live in :mod:`brain.hnsw_scan`, shared with the
+related-docs vector leg and ``connect``'s KNN; its docstring has the scoping
+argument (autocommit transaction versus a caller's savepoint).
 
 **Why the floor is written ``dist <= 1 - floor``.** A zero-norm embedding has
 a cosine distance of NaN. Postgres orders NaN above every number and evaluates
@@ -76,18 +73,17 @@ from typing import Any
 
 import psycopg
 
+from .hnsw_scan import HNSW_EF_SEARCH, RELAXED_SCAN_SETTINGS, ScanSettings, scoped_settings
 from .search_predicate import SearchPredicate
 
-#: ``hnsw.ef_search`` for the leg. 1000 is pgvector's maximum; see the module
-#: docstring for the recall measurements that chose it.
-HNSW_EF_SEARCH = 1000
+__all__ = ["HNSW_EF_SEARCH", "run_vector_leg", "vector_leg_sql"]
 
-#: ``(name, value)`` pairs set locally around the leg's query, in this order.
-_SCAN_SETTINGS: tuple[tuple[str, str], ...] = (
-    ("hnsw.ef_search", str(HNSW_EF_SEARCH)),
-    ("hnsw.iterative_scan", "relaxed_order"),
-    ("enable_seqscan", "off"),
-)
+#: ``(name, value)`` pairs set locally around the leg's query. Looked up at call
+#: time, so a test can substitute a lower ``ef_search`` to recreate the live
+#: corpus's regime on a small table. ``HNSW_EF_SEARCH`` (1000, pgvector's
+#: maximum) is re-exported from :mod:`brain.hnsw_scan`; the recall measurements
+#: that chose it are above.
+_SCAN_SETTINGS: ScanSettings = RELAXED_SCAN_SETTINGS
 
 
 def vector_leg_sql(
@@ -164,38 +160,9 @@ def run_vector_leg(
         vector_sim_floor=vector_sim_floor,
         limit=limit,
     )
-    names = [name for name, _ in _SCAN_SETTINGS]
-    with conn.transaction():
-        prior = conn.execute(
-            "SELECT current_setting(%s, true), current_setting(%s, true), "
-            "current_setting(%s, true)",
-            names,
-        ).fetchone()
-        assert prior is not None  # a SELECT with no FROM always returns one row
-        conn.execute(
-            "SELECT set_config(%s, %s, true), set_config(%s, %s, true), "
-            "set_config(%s, %s, true)",
-            [part for pair in _SCAN_SETTINGS for part in pair],
-        )
+    with scoped_settings(conn, _SCAN_SETTINGS):
         started = clock()
         rows = conn.execute(sql, params, prepare=predicate.prepare_flag).fetchall()
         elapsed_ms = (clock() - started) * 1000.0
-        _restore_settings(conn, names, prior)
     return rows, elapsed_ms
 
-
-def _restore_settings(
-    conn: psycopg.Connection[Any], names: list[str], prior: tuple[Any, ...]
-) -> None:
-    """Put each setting back to the value it had before the leg ran.
-
-    A ``NULL`` prior value means the ``hnsw.*`` variable did not exist yet:
-    pgvector's library is not preloaded, so a fresh session has no ``hnsw.*``
-    settings until its first vector operation. ``set_config(name, NULL, true)``
-    resets a setting to its session default (verified 2026-10-13: a local 777
-    returned to 40), which is the correct restore target in that case.
-    """
-    conn.execute(
-        "SELECT " + ", ".join(["set_config(%s, %s, true)"] * len(names)),
-        [part for pair in zip(names, prior, strict=True) for part in pair],
-    )

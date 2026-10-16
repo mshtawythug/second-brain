@@ -29,6 +29,7 @@ import pytest
 from brain.queries import sync_chunk_search_metadata
 from brain.related import DEFAULT_RELATED_LIMIT, compute_related
 from brain.sensitivity import CONFIDENTIAL
+from tests.ordered_ids import next_chunk_id
 
 VECTOR_DIM = 4096
 
@@ -76,9 +77,9 @@ def _insert_doc(
     for index, content in enumerate(chunk_contents):
         if index < len(vectors):
             conn.execute(
-                "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
-                "VALUES (%s::uuid, %s, %s, %s::vector)",
-                (doc_id, index, content, vectors[index]),
+                "INSERT INTO chunks (id, document_id, chunk_index, content, embedding) "
+                "VALUES (%s::uuid, %s::uuid, %s, %s, %s::vector)",
+                (next_chunk_id(), doc_id, index, content, vectors[index]),
             )
         else:
             conn.execute(
@@ -95,12 +96,19 @@ def _seed_a_b_c(conn: psycopg.Connection[Any]) -> tuple[str, str, str]:
     """Seed the ranking fixture: source ``A``, strong neighbor ``B``, weak
     neighbor ``C``.
 
-    ``B`` and ``C`` are held identical on the vector leg (both get
-    ``near_vec``, cosine ≈ 0.998 with ``A``) and both mention ``ZZQUARK`` in
-    their body, so both clear ``_MIN_RRF_SCORE`` through dual-leg
-    accumulation. The ONLY difference is that ``B`` also carries ``ZZQUARK``
-    in its *title*, which migration 009 stores at tsv weight A. That is what
-    must decide the order.
+    ``B`` and ``C`` share one vector (``near_vec``, cosine ≈ 0.998 with ``A``)
+    and both mention ``ZZQUARK`` in their body, so both clear
+    ``_MIN_RRF_SCORE`` through dual-leg accumulation. ``B`` also carries
+    ``ZZQUARK`` in its *title*, which migration 009 stores at tsv weight A.
+
+    A shared vector is a TIE on the vector leg, not a neutral contribution:
+    rank fusion scores positions, and the leg breaks the tie by chunk id.
+    ``_insert_doc`` assigns chunk ids in insertion order
+    (:mod:`tests.ordered_ids`), so ``B`` (inserted first) takes vector rank 0.
+    Were ``C`` first instead, ``B``'s one-rank FTS lead and ``C``'s one-rank
+    vector lead would cancel exactly (``1/61 + 1/62`` each) and the title sort
+    would put ``C`` first. Until 2026-10-15 the tie fell to physical row order,
+    unstated.
     """
     src_vec = _vector(1.0, 0.0)
     near_vec = _vector(0.99, 0.05)
