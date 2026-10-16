@@ -11,7 +11,8 @@ from typer.testing import CliRunner
 
 import brain.cli as cli
 from brain.config import Config
-from brain.errors import OllamaContextOverflow, OllamaUnavailable
+from brain.embeddings import OllamaEmbedError, VoyageEmbedError
+from brain.errors import EmbedError, OllamaContextOverflow, OllamaUnavailable
 
 runner = CliRunner()
 
@@ -249,3 +250,57 @@ def test_cli_eval_answer_context_overflow_exits_cleanly(
     assert result.exit_code == 1
     assert isinstance(result.exception, SystemExit), result.exception
     assert "BRAIN_OLLAMA_NUM_CTX" in result.output
+
+
+class _QueryEmbedFails:
+    """Protocol-conforming embedder whose QUERY embeds raise ``error``.
+
+    Document embeds delegate, so the same instance could seed a corpus.
+    """
+
+    def __init__(self, inner: Any, error: EmbedError) -> None:
+        self._inner = inner
+        self._error = error
+        self.dim = inner.dim
+
+    def embed(self, texts: list[str], *, input_type: str = "document") -> list[list[float]]:
+        if input_type == "query":
+            raise self._error
+        return self._inner.embed(texts, input_type=input_type)  # type: ignore[no-any-return]
+
+    def count_tokens(self, text: str) -> int:
+        return self._inner.count_tokens(text)  # type: ignore[no-any-return]
+
+
+@pytest.mark.parametrize(
+    ("error", "advice"),
+    [
+        (VoyageEmbedError("synthetic 429", transient=True), "retry when the embedder is healthy"),
+        (OllamaEmbedError("Ollama returned HTTP 404: gone"), "a retry will not fix"),
+    ],
+    ids=["transient", "permanent"],
+)
+def test_cli_eval_answer_embed_failure_exits_cleanly(
+    test_db: psycopg.Connection,  # noqa: ARG001 — schema reset
+    patch_embedder: Callable[[object], None],
+    fake_embedder: object,
+    monkeypatch: pytest.MonkeyPatch,
+    error: EmbedError,
+    advice: str,
+) -> None:
+    """REGRESSION (spec 2026-10-16 section 3.4): each case's retrieval step
+    embeds, and the handler caught only chat errors, so any backend's embed
+    failure escaped as a traceback. It must be a clean exit 1 whose advice
+    matches the kind -- the harness aborts on a transient chat failure too."""
+    patch_embedder(_QueryEmbedFails(fake_embedder, error))
+    monkeypatch.setattr(
+        cli, "_build_chat", lambda cfg: _fake_chat_factory("never reached [1].")
+    )
+
+    result = runner.invoke(cli.app, ["eval", "--answer"])
+
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert "eval --answer: the embedder failed" in result.output
+    assert type(error).__name__ in result.output
+    assert advice in result.output

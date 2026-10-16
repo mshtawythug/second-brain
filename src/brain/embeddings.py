@@ -77,8 +77,10 @@ class EmbedDisabledError(EmbedError):
 
     A sibling of :class:`OllamaEmbedError` / :class:`VoyageEmbedError` — it is an
     :class:`~brain.errors.EmbedError`, so every ``except EmbedError`` handler
-    (the MCP server's ``_wrap_embed_error``, ``brain eval``'s per-query
-    tolerance) catches it uniformly. Distinct from the transport-failure
+    (e.g. the MCP server's ``_wrap_embed_error``) catches it uniformly. It is
+    never ``transient``: ``brain eval`` would abort on it rather than degrade a
+    row, though no eval path reaches it (``hybrid_search`` runs FTS-only under
+    this backend and never calls ``embed``). Distinct from the transport-failure
     siblings because nothing *failed*: the ``NullEmbedder`` never produces
     vectors by design, so any code path that reaches an actual embed call under
     the ``none`` backend (e.g. ``brain ask`` / ``graphrag --mode fuse``) gets a
@@ -101,6 +103,45 @@ class VoyageEmbedError(EmbedError):
     the Ollama backends raise instead of a leaked SDK exception. The originating
     SDK error is preserved as ``__cause__`` (``raise ... from e``).
     """
+
+
+# Transient vs permanent embed failures (``EmbedError.transient``): one rule for
+# both transports, by HTTP meaning rather than by vendor. Transient = the same
+# request may succeed later: a timeout, a transport failure, HTTP 408 / 429 /
+# 5xx (Ollama answers 500 when a model load runs out of memory). Everything else
+# — any other 4xx (a model not pulled, a bad key), an unusable response, a
+# misconfigured host — is permanent. ``brain eval`` degrades a row only on a
+# transient failure. Spec docs/specs/2026-10-16-eval-degraded-all-embedders-design.md.
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 429})
+_OLLAMA_TRANSIENT_TRANSPORT_ERRORS: tuple[type[httpx.HTTPError], ...] = (
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+)
+# Names, not classes: ``voyageai`` is an optional dependency, imported lazily.
+# The SDK's own retry predicate is RateLimitError | ServiceUnavailableError |
+# Timeout; a transport failure, a 500 and ``TryAgain`` complete the HTTP rule.
+_VOYAGE_TRANSIENT_ERROR_NAMES = (
+    "RateLimitError",
+    "ServiceUnavailableError",
+    "Timeout",
+    "APIConnectionError",
+    "ServerError",
+    "TryAgain",
+)
+
+
+def _is_transient_status(status: int) -> bool:
+    """True for an HTTP status a retry may clear: 408, 429 or any 5xx."""
+    return status in _TRANSIENT_HTTP_STATUSES or status >= 500
+
+
+def _is_transient_voyage_error(exc: Exception) -> bool:
+    """True when ``exc`` is one of the Voyage SDK's retryable error classes."""
+    from voyageai import error as voyage_error
+
+    transient = tuple(getattr(voyage_error, name) for name in _VOYAGE_TRANSIENT_ERROR_NAMES)
+    return isinstance(exc, transient)
 
 
 class _OllamaEmbedderBase:
@@ -178,10 +219,14 @@ class _OllamaEmbedderBase:
         except httpx.HTTPStatusError as e:
             body = e.response.text if e.response is not None else "<no body>"
             raise OllamaEmbedError(
-                f"Ollama returned HTTP {e.response.status_code}: {body}"
+                f"Ollama returned HTTP {e.response.status_code}: {body}",
+                transient=_is_transient_status(e.response.status_code),
             ) from e
         except httpx.HTTPError as e:
-            raise OllamaEmbedError(f"Ollama request failed: {e}") from e
+            raise OllamaEmbedError(
+                f"Ollama request failed: {e}",
+                transient=isinstance(e, _OLLAMA_TRANSIENT_TRANSPORT_ERRORS),
+            ) from e
         except ValueError as e:
             # json.JSONDecodeError is a ValueError — a 200 OK with non-JSON
             # body would otherwise leak as a raw decode error to callers
@@ -339,7 +384,10 @@ class VoyageEmbedder:
                     texts=batch, model=_VOYAGE_MODEL, input_type=input_type
                 )
             except VoyageError as e:
-                raise VoyageEmbedError(f"Voyage embed request failed: {e}") from e
+                raise VoyageEmbedError(
+                    f"Voyage embed request failed: {e}",
+                    transient=_is_transient_voyage_error(e),
+                ) from e
             out.extend(response.embeddings)
         return out
 

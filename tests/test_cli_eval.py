@@ -8,10 +8,13 @@ from pathlib import Path
 import psycopg
 import pytest
 import yaml
+from click.testing import Result
 from typer.testing import CliRunner
+from voyageai import error as voyage_error
 
 from brain.cli import app
 from brain.ingest import ExtractedDoc, ingest_document
+from tests.embed_failure_doubles import arctic_failing_on, voyage_failing_on
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -610,3 +613,118 @@ def test_fail_below_refusal_counts_shared_queries_not_the_whole_run(
     assert "cannot evaluate --fail-below (counting shared queries): 1 of 2" in result.stderr
     # The run-wide warning still counts every degraded row in the run.
     assert "warning, no delta is computed for these: 2 of 3" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Every backend, transient vs permanent
+# (spec docs/specs/2026-10-16-eval-degraded-all-embedders-design.md)
+# ---------------------------------------------------------------------------
+
+
+def _rate_limited() -> Exception:
+    return voyage_error.RateLimitError("synthetic 429")
+
+
+def test_record_baseline_refuses_a_voyage_degraded_run(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """Rule-12 regression (PR #33 gap 1): under voyage a rate-limited query
+    escaped run_eval as a VoyageEmbedError traceback. It now degrades the row and
+    gets PR #33's refusal: exit 1, nothing written."""
+    doc_id = _seed_one(test_db, fake_embedder, "Voyage Record Doc")
+    failing = "voyrecord rate limited query"
+    corpus = _degraded_corpus(tmp_path, ["Voyage Record Doc body", failing], doc_id)
+    embedder = voyage_failing_on(fake_embedder, {failing: _rate_limited})  # type: ignore[arg-type]
+    baselines_dir = _wire_flaky(monkeypatch, tmp_path, embedder)
+
+    result = CliRunner().invoke(app, ["eval", "--corpus", str(corpus), "--record-baseline", "ci"])
+
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert not (baselines_dir / "ci.json").exists()
+    assert "1 of 2" in result.stderr
+    assert "refusing to record baseline 'ci'" in result.stderr
+
+
+def test_plain_run_keeps_a_voyage_degraded_run(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """Rule-12 regression (PR #33 gap 1): an ad-hoc voyage run lost every row to
+    one rate limit. It now exits 0 with that one row degraded and a count warning."""
+    doc_id = _seed_one(test_db, fake_embedder, "Voyage Plain Doc")
+    failing = "voyplain rate limited query"
+    corpus = _degraded_corpus(tmp_path, ["Voyage Plain Doc body", failing], doc_id)
+    embedder = voyage_failing_on(fake_embedder, {failing: _rate_limited})  # type: ignore[arg-type]
+    _wire_flaky(monkeypatch, tmp_path, embedder)
+
+    result = CliRunner().invoke(app, ["eval", "--corpus", str(corpus), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert [r["degraded"] for r in payload["results"]] == [False, True]
+    assert "1 of 2" in result.stderr
+    assert "hosted backend's rate limit" in result.stderr
+
+
+def _assert_clean_abort(result: Result, failing: str) -> str:
+    assert result.exit_code == 1, result.output
+    # A clean typer.Exit, not an escaped EmbedError: CliRunner maps an uncaught
+    # exception to exit 1 too, and in production that is a traceback.
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    [line] = [ln for ln in result.stderr.splitlines() if "a retry will not fix" in ln]
+    assert failing not in line
+    return line
+
+
+def test_plain_run_aborts_cleanly_on_an_ollama_model_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """Rule-12 regression (PR #33 gap 2): a missing model (HTTP 404) degraded
+    every row, exited 0 and advised "retry". It is now a clean exit 1 that names
+    the error and prints no report."""
+    doc_id = _seed_one(test_db, fake_embedder, "Ollama Missing Model Doc")
+    failing = "ollmissing model query"
+    corpus = _degraded_corpus(tmp_path, [failing], doc_id)
+    _wire_flaky(monkeypatch, tmp_path, arctic_failing_on(fake_embedder, {failing: 404}))  # type: ignore[arg-type]
+
+    result = CliRunner().invoke(app, ["eval", "--corpus", str(corpus), "--json"])
+
+    line = _assert_clean_abort(result, failing)
+    assert line.startswith("eval: ")
+    assert "OllamaEmbedError" in line and "404" in line
+    assert result.stdout == ""
+
+
+def test_fail_below_aborts_cleanly_on_a_permanent_voyage_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """A bad API key under --diff --fail-below: exit 1 (could not run), never 3
+    (regression) and never 0 (pass)."""
+    failing = "voyauth gate rejected key query"
+    corpus = _degraded_corpus(tmp_path, [failing], "00000000-0000-0000-0000-000000000000")
+    embedder = voyage_failing_on(
+        fake_embedder,  # type: ignore[arg-type]
+        {failing: lambda: voyage_error.AuthenticationError("synthetic 401")},
+    )
+    baselines_dir = _wire_flaky(monkeypatch, tmp_path, embedder)
+    _write_high_baseline(baselines_dir, [failing], "base")
+
+    result = CliRunner().invoke(
+        app,
+        ["eval", "--corpus", str(corpus), "--baseline", "base", "--diff", "--fail-below"],
+    )
+
+    line = _assert_clean_abort(result, failing)
+    assert "VoyageEmbedError" in line and "synthetic 401" in line

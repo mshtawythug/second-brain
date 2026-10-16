@@ -78,6 +78,16 @@ degraded, and every run with a degraded row warns with the count. The policy
 and every message live in ``brain.eval``; what grew here is the mapping and its
 why-comments. Spec: ``docs/specs/2026-10-15-eval-record-degraded-design.md``.
 
+**Sixth growth (degraded runs on every embedder, 2026-10-16).** ``run_eval``
+now degrades a *transient* embed failure from any backend (Voyage included)
+and re-raises a *permanent* one (model not pulled, bad API key). ``eval_cmd``
+maps that re-raise, and ``eval --answer`` maps any embed failure, to a clean
+exit 1 instead of a traceback. The classification lives in the backends
+(``EmbedError.transient``) and the message in
+:func:`brain.eval.runner.embed_failure_message`; what grew here is two
+``except EmbedError`` mappings and their why-comments. Spec:
+``docs/specs/2026-10-16-eval-degraded-all-embedders-design.md``.
+
 The long-deferred split into per-domain command modules is unchanged by any of
 this; ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
@@ -136,6 +146,7 @@ from .errors import (
     AgeBootstrapError,
     AudioError,
     ElicitError,
+    EmbedError,
     EnrichmentError,
     GraphBackendError,
     GraphTenantError,
@@ -3938,6 +3949,7 @@ def _run_answer_eval_cli(
     from .ask import ask_no_loop
     from .eval import (
         answer_eval_report_to_dict,
+        embed_failure_message,
         load_answer_corpus,
         run_answer_eval,
     )
@@ -3982,6 +3994,16 @@ def _run_answer_eval_cli(
             # is permanent, not "Ollama down" -- a clean exit 1 that names
             # BRAIN_OLLAMA_NUM_CTX (in ``exc``), not a traceback.
             typer.secho(f"eval --answer: {exc}", fg="red", err=True)
+            raise typer.Exit(code=1) from exc
+        except EmbedError as exc:
+            # Over-ceiling growth (module docstring, sixth growth): the retrieval
+            # half of each case embeds, and nothing caught that, so any backend's
+            # embed failure escaped as a traceback. Abort-the-run is this
+            # harness's policy for a transient chat failure too (no baseline, no
+            # gate to protect), so it is a clean exit 1 with matching advice.
+            typer.secho(
+                embed_failure_message(exc, command="eval --answer"), fg="red", err=True
+            )
             raise typer.Exit(code=1) from exc
 
     if json_output:
@@ -4053,6 +4075,7 @@ def eval_cmd(
     from .eval import (
         degraded_results,
         diff_reports,
+        embed_failure_message,
         load_baseline,
         load_corpus,
         run_eval,
@@ -4113,15 +4136,23 @@ def eval_cmd(
     cfg = Config.load()
     embedder = _build_embedder(cfg)
     with connect(cfg.database_url) as conn:
-        report = run_eval(
-            conn,
-            embedder=embedder,
-            queries=queries,
-            recency_halflife_days=cfg.recency_halflife_days,
-            snippet_context_tokens=cfg.snippet_context_tokens,
-            vector_sim_floor=cfg.vector_sim_floor,
-            embedder_name=cfg.embedder,
-        )
+        try:
+            report = run_eval(
+                conn,
+                embedder=embedder,
+                queries=queries,
+                recency_halflife_days=cfg.recency_halflife_days,
+                snippet_context_tokens=cfg.snippet_context_tokens,
+                vector_sim_floor=cfg.vector_sim_floor,
+                embedder_name=cfg.embedder,
+            )
+        except EmbedError as exc:
+            # Over-ceiling growth (module docstring, sixth growth): run_eval
+            # degrades a TRANSIENT embed failure and re-raises a permanent one
+            # (model not pulled, bad API key), which would fail every query
+            # alike. Exit 1 before any report or baseline write, not a traceback.
+            typer.secho(embed_failure_message(exc, command="eval"), fg="red", err=True)
+            raise typer.Exit(code=1) from exc
     # Rows whose embed call failed scored 0.0 without measuring retrieval. The
     # policy for them lives in brain.eval; this command only maps it to exit
     # codes and stderr (spec docs/specs/2026-10-15-eval-record-degraded-design.md).

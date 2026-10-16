@@ -190,10 +190,19 @@ dilute the mean; but a re-judged one silently changes what "correct" means.
 
 ## Got `exit 1` with "queries are degraded"? Retry
 
-A query is **degraded** when its embed call raised `OllamaEmbedError` (a
-timeout, usually because another process has a large model loaded in Ollama).
-The runner scores it `0.0` without having measured retrieval and marks the row
-`degraded`.
+A query is **degraded** when its embed call failed *transiently*, on any
+backend: a timeout (usually another process has a large model loaded in
+Ollama), a dropped or refused connection, or HTTP 408 / 429 / 5xx (a Voyage
+rate limit lands here). The runner scores it `0.0` without having measured
+retrieval and marks the row `degraded`.
+
+A *permanent* embed failure is not a degraded row: a model that is not pulled
+(HTTP 404), a bad API key, a response the client cannot use. Every query would
+fail the same way, so the run stops with exit `1` and a message naming the
+error, before any report or baseline is written. Fix the configuration; a retry
+will not help. (Under `BRAIN_EMBEDDER=none` nothing is embedded at all: the run
+is a real FTS-only measurement, not a degraded one, and `config_signature`
+names the backend.)
 
 - **`--record-baseline`** refuses to write a degraded run. It names how many
   queries were degraded (never which: the corpus is personal), writes nothing,

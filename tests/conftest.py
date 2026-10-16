@@ -933,7 +933,7 @@ def counting_embedder(fake_embedder: FakeEmbedder) -> CountingEmbedder:
 
 
 class FlakyEmbedder:
-    """Wrap an embedder so QUERY embeds of named texts raise ``OllamaEmbedError``.
+    """Wrap an embedder so QUERY embeds of named texts raise a transient ``OllamaEmbedError``.
 
     Models the observed eval failure: one query's embed call times out (another
     process holds the GPU) while every other call succeeds. Document embeds
@@ -953,7 +953,7 @@ class FlakyEmbedder:
         self, texts: list[str], *, input_type: str = "document"
     ) -> list[list[float]]:
         if input_type == "query" and any(t in self._fail_texts for t in texts):
-            raise OllamaEmbedError("synthetic embed timeout")
+            raise OllamaEmbedError("synthetic embed timeout", transient=True)
         return self._inner.embed(texts, input_type=input_type)
 
     def count_tokens(self, text: str) -> int:

@@ -13,7 +13,7 @@ from typing import Any
 
 import psycopg
 
-from ..embeddings import OllamaEmbedError
+from ..errors import EmbedError
 from ..ingest import Embedder
 from ..search import hybrid_search
 from .corpus import EvalQuery
@@ -42,8 +42,9 @@ class EvalResult:
     ndcg_at_5: float
     mrr: float
     recall_at_20: float
-    # True when the query's embed call raised OllamaEmbedError: the 0.0 metrics
-    # above then measure an unhealthy embedder, not retrieval. Ad-hoc runs keep
+    # True when the query's embed call failed TRANSIENTLY (any backend's
+    # EmbedError with ``transient=True``): the 0.0 metrics above then measure
+    # an unhealthy embedder, not retrieval. Ad-hoc runs keep
     # scoring the row; ``save_baseline`` refuses it and ``diff_reports``
     # excludes it (spec docs/specs/2026-10-15-eval-record-degraded-design.md).
     # Never serialized into a baseline file, which cannot contain a degraded row.
@@ -140,9 +141,14 @@ def run_eval(
     through to the search function, including the absolute ``after``/``before``
     bounds a pinned ``recency`` query uses in place of ``since_days``.
 
-    Tolerates :exc:`~brain.embeddings.OllamaEmbedError` by skipping the affected
-    query with a warning and recording ``actual_doc_ids=[]`` / metrics=0.0, with
-    ``degraded=True`` on that row so the record and gate paths can refuse it.
+    Tolerates a TRANSIENT :exc:`~brain.errors.EmbedError` from any backend by
+    skipping the affected query with a warning and recording
+    ``actual_doc_ids=[]`` / metrics=0.0, with ``degraded=True`` on that row so
+    the record and gate paths can refuse it. A permanent one (``transient`` is
+    ``False``: a model not pulled, a bad API key, an unusable response) is
+    re-raised and aborts the run, because every later query would fail the same
+    way and "retry" would be the wrong advice (spec
+    docs/specs/2026-10-16-eval-degraded-all-embedders-design.md).
 
     Args:
         conn: Live psycopg connection (test_db or prod).
@@ -177,9 +183,12 @@ def run_eval(
                 snippet_context_tokens=snippet_context_tokens,
             )
             actual_ids = [r.document_id for r in search_results]
-        except OllamaEmbedError as exc:
+        except EmbedError as exc:
+            if not exc.transient:
+                raise
             _logger.warning(
-                "OllamaEmbedError for query %r — recording 0.0 metrics: %s",
+                "%s for query %r — recording 0.0 metrics: %s",
+                type(exc).__name__,
                 q.query,
                 exc,
             )
@@ -255,3 +264,26 @@ def degraded_results(report: EvalReport) -> list[EvalResult]:
     exclusion and the CLI warnings all read, so they cannot disagree.
     """
     return [r for r in report.results if r.degraded]
+
+
+def embed_failure_message(exc: EmbedError, *, command: str) -> str:
+    """One stderr line for a run that an embed failure stopped.
+
+    ``command`` prefixes the line (``"eval"``, ``"eval --answer"``). Names the
+    exception class and carries the backend's own text (built from the HTTP
+    status, the response body or the transport error — never the request input),
+    and gives the advice that matches ``exc.transient``. It is never given query
+    text, so it cannot print any: the golden corpus is personal.
+    """
+    kind = type(exc).__name__
+    if exc.transient:
+        return (
+            f"{command}: the embedder failed with a retryable error ({kind}: {exc}) — "
+            f"the run stopped and no report was written; retry when the embedder is "
+            f"healthy."
+        )
+    return (
+        f"{command}: the embedder failed with an error a retry will not fix "
+        f"({kind}: {exc}) — the run stopped and no report or baseline was written. "
+        f"Check the embedder configuration (model pulled, API key, host URL)."
+    )
