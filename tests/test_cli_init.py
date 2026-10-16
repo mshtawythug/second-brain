@@ -7,8 +7,8 @@ import psycopg
 import pytest
 from typer.testing import CliRunner
 
-from brain import config as config_module
 from brain.cli import app
+from tests.conftest import isolate_config_dotenv
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -23,12 +23,7 @@ pytestmark = pytest.mark.fresh_schema
 @pytest.fixture()
 def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Block .env file sources so delenv tests aren't undone by T1.0 setdefault."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "project.env")
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
-    )
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
+    isolate_config_dotenv(monkeypatch, tmp_path)
 
 
 def test_init_applies_migrations(monkeypatch: pytest.MonkeyPatch) -> None:

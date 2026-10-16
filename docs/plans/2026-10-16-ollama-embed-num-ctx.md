@@ -86,7 +86,7 @@ apply (inline reason, docstring hop, promote the `a977744` hop in CLAUDE.md).
 * Affected tests in brain-ci's env on the sibling DB
   `second_brain_test_embedctx`: embedder, config, ollama_num_ctx, ingest,
   reembed and the docs/CHANGELOG readers. Run the full suite if feasible.
-* Run the mutation catalog (spec §7, E1–E13), all five clauses.
+* Run the mutation catalog (spec §7: E1–E15 and R4b; R4 survives by design, as documented there), all five clauses.
 
 ## Risks
 

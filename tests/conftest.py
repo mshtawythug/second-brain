@@ -19,7 +19,7 @@ stale as soon as written (``wc -l tests/conftest.py``).
 
 import hashlib
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -29,6 +29,7 @@ import pytest
 from dotenv import dotenv_values, load_dotenv
 from psycopg import sql
 
+from brain import config as _config_module
 from brain.config import DEFAULT_OLLAMA_HOST
 from brain.db import connect, migration_lock, run_migrations
 from brain.embeddings import OllamaEmbedError
@@ -119,6 +120,34 @@ def prod_database_url() -> str:
         if value and not value.rstrip("/").endswith("/second_brain_test"):
             return value
     return _DEFAULT_PROD_DB_URL
+
+
+def isolate_config_dotenv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    clear: Iterable[str] = (),
+    project_env: Path | None = None,
+) -> Path:
+    """Block every ``.env`` source so only ``os.environ`` reaches ``Config.load``.
+
+    ``chdir`` neutralises the cwd walk-up, the project and ``BRAIN_HOME``
+    dotenv helpers point into ``tmp_path`` (``project_env`` overrides the
+    project one, e.g. for a test that writes it), ``BRAIN_HOME`` is unset, and
+    every name in ``clear`` is removed from the environment so a developer's
+    shell cannot leak a knob into the test. Returns the project ``.env`` path.
+    The one copy of a block that was pasted into many test modules.
+    """
+    monkeypatch.chdir(tmp_path)
+    project = project_env if project_env is not None else tmp_path / "project.env"
+    monkeypatch.setattr(_config_module, "_project_dotenv", lambda: project)
+    monkeypatch.setattr(
+        _config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
+    )
+    monkeypatch.delenv("BRAIN_HOME", raising=False)
+    for var in clear:
+        monkeypatch.delenv(var, raising=False)
+    return project
 
 
 @pytest.fixture(autouse=True, scope="session")

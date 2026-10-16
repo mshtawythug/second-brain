@@ -117,8 +117,9 @@ MIN_OLLAMA_EMBED_NUM_CTX = (
 #: Ollama's ``DefaultEmbeddingNumBatch``, so an embedding runner's ``n_ubatch``
 #: — already arctic's real per-input ceiling — is unchanged; holds the measured
 #: corpus maximum (1,689 qwen3 tokens, legacy pre-``0d8a97b`` chunks included);
-#: and shrinks qwen3-embedding:8b's q8_0 KV cache from ~3,060 MiB (its 40,960
-#: trained window) to ~153 MiB. Arctic (non-causal BERT) has no KV cache at all.
+#: and, on a server whose ``OLLAMA_CONTEXT_LENGTH`` is >= 40,960, shrinks
+#: qwen3-embedding:8b's q8_0 KV cache from ~3,060 MiB (its 40,960 trained
+#: window) to ~153 MiB. Arctic (non-causal BERT) has no KV cache at all.
 DEFAULT_OLLAMA_EMBED_NUM_CTX = 2048
 
 

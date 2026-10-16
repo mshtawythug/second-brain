@@ -51,9 +51,9 @@ git tag scheme:
 - **The default `arctic` backend loses no capacity and saves no memory.**
   It is a non-causal model with no KV cache, and `2048` is already its
   effective per-input limit, because Ollama's embedding batch size is 2048.
-- **`qwen3` gains the most.** qwen3-embedding:8b used to load at its trained
-  40,960 window, a q8_0 KV cache of about 3 GiB. At `2048` the cache is about
-  153 MiB.
+- **`qwen3` gains the most.** On a server whose `OLLAMA_CONTEXT_LENGTH` is
+  ≥ 40,960, qwen3-embedding:8b used to load at its trained 40,960 window, a
+  q8_0 KV cache of about 3 GiB. At `2048` the cache is about 153 MiB.
 - **An input that does not fit is now an error, never a silent prefix.** The
   brain raises `OllamaEmbedContextOverflow`, which is an `OllamaEmbedError`, so
   existing handlers still catch it. The message names the knob. Every stored

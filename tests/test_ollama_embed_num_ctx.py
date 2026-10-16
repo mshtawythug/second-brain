@@ -18,7 +18,6 @@ import httpx
 import pytest
 
 from brain import chat, ollama_budget
-from brain import config as config_module
 from brain.config import Config, ConfigError
 from brain.embeddings import (
     ArcticEmbedder,
@@ -37,7 +36,7 @@ from brain.ollama_budget import (
     INGEST_CHUNK_TARGET_TOKENS,
     MIN_OLLAMA_EMBED_NUM_CTX,
 )
-from tests.conftest import TEST_DATABASE_URL
+from tests.conftest import TEST_DATABASE_URL, isolate_config_dotenv
 
 # Ollama 0.33.0's wire body for an over-window ``/api/embed`` input under
 # ``truncate: false`` (``server/routes.go:EmbedHandler`` -> ``api.StatusError``,
@@ -63,14 +62,11 @@ def _recording(bodies: list[dict[str, Any]]) -> Any:
 @pytest.fixture()
 def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Block every .env source so only ``os.environ`` reaches ``Config.load``."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "p.env")
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "h.env"
+    isolate_config_dotenv(
+        monkeypatch,
+        tmp_path,
+        clear=("BRAIN_OLLAMA_EMBED_NUM_CTX", "BRAIN_OLLAMA_NUM_CTX", "BRAIN_EMBEDDER"),
     )
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
-    for var in ("BRAIN_OLLAMA_EMBED_NUM_CTX", "BRAIN_OLLAMA_NUM_CTX", "BRAIN_EMBEDDER"):
-        monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
 
 
@@ -92,7 +88,14 @@ def test_default_embed_num_ctx_holds_the_floor() -> None:
 
 
 def test_chunker_defaults_are_the_budgeted_ones() -> None:
-    """``chunk_text``'s defaults ARE the leaf's objects, so the floor cannot drift."""
+    """``chunk_text``'s defaults ARE the leaf's objects, so the floor cannot drift.
+
+    Known blind spot: CPython caches small ints (-5..256), so a LITERAL
+    ``overlap_tokens: int = 100`` is the very object the leaf holds and passes
+    the ``is`` check. That restatement is behaviourally identical when written;
+    a drifted value (any other int) still fails. ``target_tokens`` (600) is
+    outside the cache, so even a literal restatement of it fails here.
+    """
     params = inspect.signature(chunk_text).parameters
     assert params["target_tokens"].default is INGEST_CHUNK_TARGET_TOKENS
     assert params["overlap_tokens"].default is INGEST_CHUNK_OVERLAP_TOKENS

@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 from brain.cli import _check_age, _model_loaded, _ollama_loaded_models, app
 from brain.db import DEFAULT_GRAPH_NAME, bootstrap_age, connect
 from brain.errors import AgeBootstrapError
+from tests.conftest import isolate_config_dotenv
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -182,18 +183,9 @@ def test_doctor_voyage_backend_fails_when_key_missing(
     pointing :func:`brain.config._project_dotenv` at a non-existent file —
     otherwise the project's real ``VOYAGE_API_KEY`` would leak in via dotenv.
     """
-    from brain import config as config_module
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        config_module, "_project_dotenv", lambda: tmp_path / "no.env"
-    )
-    # Block the BRAIN_HOME source so a real ~/.brain/.env with VOYAGE_API_KEY
-    # can't leak in and make this test pass for the wrong reason.
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "no_brain_home.env"
-    )
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
+    # Also blocks the BRAIN_HOME source, so a real ~/.brain/.env with
+    # VOYAGE_API_KEY can't leak in and make this test pass for the wrong reason.
+    isolate_config_dotenv(monkeypatch, tmp_path)
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     monkeypatch.setenv("BRAIN_EMBEDDER", "voyage")
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)

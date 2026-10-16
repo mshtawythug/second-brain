@@ -32,7 +32,12 @@ consequences:
      embedding models (§2.3).
    * **qwen3** (`qwen3-embedding:8b`, non-default): a causal Qwen3 decoder with
      last-token pooling. `max_position_embeddings = 40960` (the model's HF
-     `config.json`), so it would load at 40,960. Per token, its q8_0 KV cache is
+     `config.json`), so on this machine (`OLLAMA_CONTEXT_LENGTH=65536`) it would
+     load at 40,960. Without that variable, Ollama 0.33.0 picks a default by
+     VRAM tier (`server/routes.go`: 4,096 below 23 GiB, 32,768 below 47 GiB,
+     262,144 above), so the inherited window is `min(that, 40,960)`. The
+     figures below are for a server whose `OLLAMA_CONTEXT_LENGTH` is ≥ 40,960.
+     Per token, its q8_0 KV cache is
      36 layers × 8 KV heads × 128 dims × (K+V) × 1.0625 B = 78,336 B
      (76.5 KiB). That is **3,060 MiB at 40,960 and 153 MiB at 2,048.** This is
      *derived* with the same formula PR #32's spec verified against the log for
@@ -90,11 +95,27 @@ special tokens.
 | logged search queries | 178 | 121 | 183 | 122 | — | 0 |
 | community summaries | 132 | 66 | 79 | 69 | 1.23 / 1.11 | 0 |
 
-**The stored corpus exceeds the chunker ceiling.** 326 chunks in 78
-documents are over 700 cl100k tokens, up to 1,596. All of them are
-`krisp`/`gmail` rows ingested in 2026-04, before `0d8a97b` (2026-04-30,
-"fix(chunker): enforce hard ceiling via split fallback chain"). They were never
-re-chunked, and `brain reembed --all` re-embeds stored content verbatim. So
+**The stored corpus exceeds the chunker ceiling.** 397 chunks in 110
+documents are over 700 cl100k tokens, up to 1,596. By `content_type`:
+transcript 308, pdf 68, email 18, docx 1, and two Confluence-import documents
+with one chunk each.
+
+* **395 of them were ingested 2026-04-28/29, before `0d8a97b`** (2026-04-30,
+  "fix(chunker): enforce hard ceiling via split fallback chain"). They were
+  never re-chunked.
+* **The other 2 were ingested 2026-10-08** and are only 702 and 703 cl100k
+  (812/844 arctic, 1,171/966 qwen3). Re-chunking those two documents' current
+  bodies with today's `chunk_text` produces no chunk over 700, and the stored
+  chunks differ from a fresh chunking. So the current chunker holds its
+  ceiling. Why the stored chunks differ is **not established**; it is recorded
+  here, not chased.
+
+*(Corrected 2026-10-16 after audit. The first draft said 326 chunks in 78
+documents, all `krisp`/`gmail`. Its query inner-joined `sources` and silently
+dropped every document with no source row. The per-tokenizer maxima in the
+table above were always measured over **all** chunks, so they do not change.)*
+
+`brain reembed --all` re-embeds stored content verbatim. So
 the bound that matters for re-embedding is **the corpus maximum (1,689 model
 tokens)**, not the 700 the chunker now guarantees. A window sized only to the
 current chunker (for example 1,400) would refuse 49 (arctic) or 50 (qwen3)
@@ -200,7 +221,8 @@ is, and is inert under `voyage` / `none`.
      2,048 is already its effective ceiling today (§2.3), less the one or two
      tokens `adjustTokenLimit` reserves for BOS/EOS, and its compute buffer is
      unchanged.
-  3. qwen3's KV cache drops from 3,060 MiB to 153 MiB (§1).
+  3. On a server whose `OLLAMA_CONTEXT_LENGTH` is ≥ 40,960, qwen3's KV cache
+     drops from 3,060 MiB to 153 MiB (§1).
 
   The default is a constant and does not grow, unlike PR #32's. Its only input
   is the chunker ceiling, which is not configurable, so a test pins
@@ -232,7 +254,8 @@ pointer to it. Justification:
 * **No client-side pre-check.** The server has the exact tokenizer, and a
   cl100k pre-flight would only approximate it (PR #32 §6). The cl100k count in
   the message is a diagnostic only.
-* **The subclass keeps every handler working.** It is an `OllamaEmbedError`,
+* **The subclass keeps every handler working, and could separate permanent from
+  transient failures (no caller does yet).** It is an `OllamaEmbedError`,
   so every existing `except EmbedError` / `except OllamaEmbedError` /
   `except BrainError` site still catches it: the MCP tools' `_wrap_embed_error`,
   `ui/routes_search.py`, `eval/runner.py`, and the CLI. No caller changes.
@@ -243,6 +266,16 @@ stops at the batch holding the oversize chunk, or a search query errors instead
 of matching on its first ~2k tokens. Whether earlier reembed batches stay
 committed, and how the watcher recovers, is unchanged by this work: it is the
 existing `OllamaEmbedError` behaviour, not re-specified here.
+
+**`brain eval`** catches `OllamaEmbedError` per query (`eval/runner.py`), so an
+overflowing query becomes a DEGRADED row that scores 0.0. Classifying it as
+degraded is correct, because it measured no retrieval. The run summary then
+says "retry when the embedder is healthy" (`eval/baseline.py`), which is the
+wrong advice for this case: an overflow is deterministic, and a retry fails the
+same way. The real cause is in that query's per-query `WARNING`, which carries
+the exception text naming `BRAIN_OLLAMA_EMBED_NUM_CTX`. No code change is made
+here. A parallel track is redesigning eval's transient-vs-permanent handling,
+and it can consume this subclass to tell the two apart.
 
 The overflow test is shared with chat, not copied. PR #32's
 `_CONTEXT_OVERFLOW_RE` (`context (length|size)`) already matches the embed
@@ -258,10 +291,10 @@ it would be a wire key that pretends to do something.
 
 | File | Change | Ceiling |
 |---|---|---|
-| `src/brain/ollama_budget.py` | + embed constants (D2), + `CONTEXT_OVERFLOW_RE` (moved from `chat`), docstring | 134 lines, stays far under 800 |
+| `src/brain/ollama_budget.py` | + embed constants (D2), + `CONTEXT_OVERFLOW_RE` (moved from `chat`), docstring | 134 lines at `8900725`; stays under 800 (re-derive with `wc -l`) |
 | `src/brain/ingest/chunker.py` | `chunk_text` defaults bind `INGEST_CHUNK_*` | under 800 |
 | `src/brain/chat.py` | `_CONTEXT_OVERFLOW_RE = CONTEXT_OVERFLOW_RE` | under 800 |
-| `src/brain/embeddings.py` | `num_ctx` kwarg on the base + both Ollama backends; `options.num_ctx` + `truncate:false` on the wire; `OllamaEmbedContextOverflow`; `make_embedder` threads `cfg.ollama_embed_num_ctx` | 460 lines, stays under 800 |
+| `src/brain/embeddings.py` | `num_ctx` kwarg on the base + both Ollama backends; `options.num_ctx` + `truncate:false` on the wire; `OllamaEmbedContextOverflow`; `make_embedder` threads `cfg.ollama_embed_num_ctx` | 460 lines at `8900725`; stays under 800 (re-derive with `wc -l`) |
 | `src/brain/config.py` | field + parse + floor check | **in the over-800 table**: inline reason at the parse, docstring hop, promote `a977744` in the CLAUDE.md row |
 | `.env.example`, `docs/configuration.md`, `CHANGELOG.md` | knob docs; `[Unreleased]` → Changed | n/a |
 | `CLAUDE.md` | layout line for `ollama_budget.py` (now embed too); `config.py` ceiling row | n/a |
@@ -299,7 +332,7 @@ No migration, no schema change, no new module, no re-embed.
 * **Keep `truncate` true:** it preserves the silent-prefix failure (D3).
 * **Client-side cl100k pre-check that raises:** it approximates the server's
   exact tokenizer (PR #32 §6).
-* **Re-chunk the 326 legacy chunks:** they fit at 2,048, and re-chunking is a
+* **Re-chunk the 397 over-ceiling chunks:** they fit at 2,048, and re-chunking is a
   data migration with its own risks. It is out of scope and recorded here.
 
 ## 7. Mutation catalog
@@ -314,6 +347,15 @@ the leaf holds, because `re` caches compiled patterns. The identity test cannot
 see it, but such a copy is also behaviourally identical at the moment it is
 written. The failure mode the test exists for is a copy that later *diverges*,
 which is what E11 injects.
+
+**E10 mutates `target_tokens`, not `overlap_tokens`, on purpose.** CPython
+caches small ints (-5..256). A literal `overlap_tokens: int = 100` is therefore
+the very object the leaf holds, and the identity check in
+`test_chunker_defaults_are_the_budgeted_ones` cannot see it. The reviewer's
+mutation R4 survives for exactly this reason, and the test docstring records
+it. Like E11, that restatement is behaviourally identical when written. A
+*drifted* overlap (any other value) still fails the test. `600` is outside the
+cache, so E10 kills a literal restatement of the target.
 
 **The base class takes `num_ctx` as a required keyword, with no default.** Both
 concrete backends always pass it, so a default on `_OllamaEmbedderBase` could
@@ -337,3 +379,5 @@ reachable defaults.
 | E13 | `embeddings.py`: both backends' `num_ctx` kwarg default → `8192` literal | 2 | `test_embedder_default_num_ctx_is_2048[arctic]` and `[qwen3]` |
 | E14 | `embeddings.py`: the overflow test → `if True:` (every HTTP error misfiled as overflow) | 1 | `test_embed_non_overflow_400_stays_plain` |
 | E15 | `embeddings.py`: overflow search window `body[:200]` → `body[:20]` | 1 | `test_embed_context_overflow_is_typed` (the real 0.33.0 body puts the phrase at about index 38) |
+| R4b | `chunker.py`: `overlap_tokens: int = 101` (a drifted literal) | 1 | `test_chunker_defaults_are_the_budgeted_ones` |
+| R4 | `chunker.py`: `overlap_tokens: int = 100` (an identical literal) | 1 | **survives by design**: small-int cache (see below) |

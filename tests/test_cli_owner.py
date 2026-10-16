@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from brain import config as config_module
 from brain.cli import app
+from tests.conftest import isolate_config_dotenv
 
 
 @pytest.fixture
@@ -36,15 +36,12 @@ def isolated_env(
       from a known state. ``DATABASE_URL`` is left to the session-scope
       fixture in ``conftest.py``.
     """
-    monkeypatch.chdir(tmp_path)
-    fake_env = tmp_path / ".env"
-    monkeypatch.setattr(config_module, "_project_dotenv", lambda: fake_env)
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
+    yield isolate_config_dotenv(
+        monkeypatch,
+        tmp_path,
+        clear=("BRAIN_OWNER_PARTICIPANTS",),
+        project_env=tmp_path / ".env",
     )
-    monkeypatch.delenv("BRAIN_OWNER_PARTICIPANTS", raising=False)
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
-    yield fake_env
 
 
 _RELINK_HINT_FRAGMENT = "Run `brain vault relink-derived`"
