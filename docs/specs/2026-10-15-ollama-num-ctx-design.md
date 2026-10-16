@@ -214,14 +214,32 @@ bare `EnrichmentError`:
   `BRAIN_OLLAMA_NUM_CTX`. A per-case skip would silently change the reported
   means.
 
-Each has a regression test. Every other `except OllamaUnavailable` in `src/`
-is followed by an `except EnrichmentError` that now catches the overflow
-(re-derive with `grep -rn 'except OllamaUnavailable' src/brain`). Those sites:
-`ingest/__init__.py` hook, `graph_rag/extract.py` (skips the one chunk, as it
-does for any `EnrichmentError`), `cli.py` enrich backfill (skips the row), ask,
-tag, gaps, and `mcp_server.py`. `audio.py` re-raises `OllamaUnavailable` and
-wraps every other `EnrichmentError` in `AudioError`. `chat.py`'s own clause
-only re-raises.
+Each has a regression test.
+
+**The complete inventory.** Re-derive it with
+`grep -rn 'except.*OllamaUnavailable' src/brain`, which also catches tuple
+clauses; it is not inherited from here. It has 13 clauses. *(Corrected
+2026-10-15 after the PR #32 re-audit: the first list said every site was
+followed by `except EnrichmentError`, which is false for `brain audio`. It
+named a "gaps" site that is really `elicit`, and it omitted
+`_capture_command.py`.)* Sites are named by function, because line numbers
+drift.
+
+| Site (function) | What catches `OllamaContextOverflow` | Effect |
+|---|---|---|
+| `review/scans.py` `_adjudicate_entity` | its own `except OllamaContextOverflow` (this PR) | skips that pair |
+| `cli.py` `_run_answer_eval_cli` (`eval --answer`) | its own `except OllamaContextOverflow` (this PR) | clean exit 1 |
+| `ingest/__init__.py` `_enrich_post_ingest_hook` | the following `except EnrichmentError` | summary left NULL, ingest commits |
+| `graph_rag/extract.py` `OllamaExtractor.extract` | the following `except EnrichmentError` | skips that chunk |
+| `cli.py` `_enrich_backfill` | the following `except EnrichmentError` | skips that row |
+| `cli.py` `ask` | the following `except EnrichmentError` | exit 1 |
+| `cli.py` `_run_auto_tag` (`tag --auto`) | the following `except EnrichmentError` | exit 1 |
+| `cli.py` `elicit` (the `run_session` call; its `GapDrafter` and `_contradiction()` detector reach Ollama) | the following `except (EnrichmentError, VaultNoteSyncError, ElicitError)`. The detector itself already skips a failing entity on `EnrichmentError` (`elicit/detectors.py`) | exit 1 / per-entity skip |
+| `mcp_server.py` `brain_ask` | the following `except EnrichmentError` | MCP error |
+| `_capture_command.py` `_review_auto` | its tuple clause `except (OllamaUnavailable, EnrichmentError)` | handled in the same clause |
+| `audio.py` `ScriptGenerator._generate_turns` | the following `except EnrichmentError`, which wraps it in `AudioError` | becomes `AudioError` |
+| `cli.py` `audio` (`brain audio`) | **not** an `except EnrichmentError`: the next clause is `except AudioError` | safe only because `_generate_turns` (above) has already wrapped the overflow in `AudioError`, so it reaches this command as one |
+| `chat.py` `chat_json_with_client` | its clause only re-raises `OllamaUnavailable` | n/a: the overflow is raised beneath it, in `_chat_once` |
 
 ## 5. Consequences
 
@@ -277,6 +295,7 @@ line; restored → green). Run with `PYTHONDONTWRITEBYTECODE=1`.
 | M20 | `enrichment.py`: grow `extract_entities`' user label (`TEXT:` + 80 tokens), system prompt untouched | 1 | `test_prompt_frames_fit_frame_reserve` (proves the framing is measured, not only the system prompt) |
 | R3 | `ollama_budget.py`: extract input drops `+ EXTRACT_CHUNK_OVERLAP_TOKENS` | 1 | `test_default_capped_call_requirements_are_pinned` (reviewer's surviving mutation, now killed) |
 | R4 | `chat.py`: overflow search window `exc.response.text[:200]` → `[:60]` | 1 | `test_context_overflow_is_overflow_not_unavailable[…]` real-0.33.0 nested-400 case (reviewer's surviving mutation, now killed) |
+| O5 | `review/scans.py`: the overflow handler's `continue` → `return None` (abandon the entity, not the pair) | 1 | `test_review.py::test_conflict_scan_context_overflow_skips_pair` — the overflowing entity now has three pairs and only its first overflows, so a later pair must still yield its finding (re-auditor's surviving mutation, now killed) |
 
 M6's needle is the exception that escapes under the mutation
 (`EnrichmentError: Ollama returned HTTP 400`), not `OllamaContextOverflow`.
