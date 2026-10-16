@@ -21,8 +21,7 @@ the afternoon re-check, every one of them eligible; pgvector 0.8.2) the planner 
 ## 2. Evidence (measured 2026-10-15)
 
 All prod measurements are read-only: the probe connection had `read_only = True`, ran only
-`SELECT`/`EXPLAIN`, and never ran `brain search` (which writes telemetry). The exact
-reference for each query is the same SQL under `SET LOCAL enable_indexscan = off`.
+`SELECT`/`EXPLAIN`, and never ran `brain search` (which writes telemetry). The exact references were not the legs' own SQL. For related it was the same eligibility and F6 filters with the floor in the `WHERE`, ordered by `(dist) + 0, c.id` with `LIMIT 50`. For `connect` it was the exhaustive `MAX(...) GROUP BY` query. Each ran under `SET LOCAL enable_indexscan = off`. Neither shape can be served from the HNSW index, because the `+ 0` defeats index ordering and the aggregate has no distance order at all, so each is exact on any plan.
 
 ### 2.1 `related._vector_candidates` under-returns
 

@@ -34,6 +34,7 @@ from tests.hnsw_fixtures import (
     apply_planner_pressure,
     build_hnsw_index,
     current_scan_settings,
+    floor_hitting_distance_exactly,
     insert_ineligible_twins,
     plan_text,
     use_hnsw_dimension,
@@ -327,3 +328,43 @@ def _affinity_with_floor(
     return connect_mod.embedding_affinity(
         conn, source_doc_id=source, candidate_limit=_CANDIDATE_LIMIT, vector_sim_floor=floor
     )
+
+
+def test_the_exhaustive_floor_is_inclusive(
+    test_db: psycopg.Connection[Any], fake_embedder: FakeEmbedder
+) -> None:
+    """A doc whose best distance sits EXACTLY on the floor is in; farther ones are out.
+
+    Six docs on the default schema, so every call under-fills into the exhaustive
+    query. The distances come from Postgres with the same query vector production
+    binds (:func:`brain.related._avg_embedding`), and the floor is a float ``f``
+    with ``1 - f`` equal to one doc's distance in float8, checked where it is
+    evaluated. ``<`` instead of ``<=`` drops that doc.
+    """
+    from brain.related import _avg_embedding
+
+    ids = [_make_doc(test_db, fake_embedder, i) for i in range(6)]
+    source = ids[0]
+    src = _avg_embedding(test_db, source)
+    ranked = test_db.execute(
+        "SELECT c.document_id::text, c.embedding <=> %s::vector AS dist FROM chunks c "
+        "WHERE c.document_id <> %s::uuid ORDER BY dist, c.document_id",
+        (src, source),
+    ).fetchall()
+    chosen: tuple[int, float] | None = None
+    for k in range(1, len(ranked)):
+        floor = floor_hitting_distance_exactly(ranked[k - 1][1])
+        if floor is not None and ranked[k][1] > ranked[k - 1][1]:
+            chosen = (k, floor)
+            break
+    assert chosen is not None, "no doc's distance has an exactly representable floor"
+    k, floor = chosen
+    exact = test_db.execute(
+        "SELECT (1 - %s::float8) = %s::float8, (1 - %s::float8) < %s::float8",
+        [floor, ranked[k - 1][1], floor, ranked[k][1]],
+    ).fetchone()
+    assert exact == (True, True), exact  # precondition, evaluated in float8
+
+    got = _affinity_with_floor(test_db, source, floor)
+    assert ranked[k - 1][0] in got  # exactly on the floor: included
+    assert set(got) == {doc for doc, _ in ranked[:k]}  # farther ones: excluded

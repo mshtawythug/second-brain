@@ -103,6 +103,12 @@ every row on 2026-10-15:
 | M32 | `tests/test_sensitivity_reembed_and_search.py` (among the sensitivity files) | `search_predicate.py`: `d.sensitivity = %s` → `d.sensitivity <> %s` (1) | `expected only the confidential doc` |
 | M33 | `test_connect_vector_leg::test_a_zero_norm_chunk_never_scores_on_the_exhaustive_path` | `connect.py` exhaustive SQL: `(dist) <= 1 - floor` → the old `1 - dist >= floor` (1) | `not in {` |
 | M34 | `test_related_fts_leg::test_confidential_document_is_gated_out_of_the_fts_leg` | `related_candidates.py`: drop the F6 clause from `fts_candidates` (1) | `not in [` |
+| M35 | `test_connect_vector_leg::test_the_exhaustive_floor_is_inclusive` | `connect.py` exhaustive SQL: `<= 1 - %(floor)s` → `< 1 - %(floor)s` (1) | ` in {` |
+
+M35 was added in the PR #34 re-audit. The rewritten exhaustive floor's inclusive
+boundary survived all 101 connect tests under `<`. The test puts the floor exactly on
+one doc's distance, computed with the query vector production binds, and checks the
+equality in float8.
 
 M33 and M34 were added in the third review round, from the reviewer's findings.
 - **M33.** Sending every under-fill to the exhaustive query exposed its NaN-admitting
@@ -158,8 +164,7 @@ covered by `tests/test_search_vector_leg.py` (33 tests) plus `tests/test_search_
 ## 4. Read-only prod probe shape (for the revisit in spec §4)
 
 For N source documents sampled by `md5(id)`, use the source's `avg(embedding)` as the
-query vector. Compare each leg's SQL under its settings with the same SQL under
-`SET LOCAL enable_indexscan = off`. Use a `read_only = True` connection and run no
-`brain` command.
+query vector. Compare each leg, under its settings, with an exact reference. Use a
+`read_only = True` connection and run no `brain` command. The exact references were not the legs' own SQL. For related it was the same eligibility and F6 filters with the floor in the `WHERE`, ordered by `(dist) + 0, c.id` with `LIMIT 50`. For `connect` it was the exhaustive `MAX(...) GROUP BY` query. Each ran under `SET LOCAL enable_indexscan = off`. Neither shape can be served from the HNSW index, because the `+ 0` defeats index ordering and the aggregate has no distance order at all, so each is exact on any plan.
 
-**Auto-prepare caveat.** Open the probe connection with `prepare_threshold=None`. psycopg prepares a statement after its 5th execution, and from then on a cached plan can outlive a later `SET LOCAL enable_indexscan = off`, so an "exact" reference silently stops being exact. The 2026-10-15 probes did not set it, but their references could not use the index anyway: they ordered by `(dist) + 0` or took a `GROUP BY ... MAX`, and neither shape can be served from HNSW. Do not rely on that; set the threshold.
+**Auto-prepare caveat.** Open the probe connection with `prepare_threshold=None`. psycopg prepares a statement after its 5th execution, and from then on a cached plan can outlive a later `SET LOCAL enable_indexscan = off`. A reference that relies on that setting alone then silently stops being exact. The 2026-10-15 probes did not set the threshold. Their references were unaffected only because of the index-proof shapes above. A re-run that uses the legs' own SQL as the reference must set it.
