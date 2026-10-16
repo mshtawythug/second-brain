@@ -30,12 +30,18 @@ reason to scatter the knobs.
   its own. The merged file is the UNION of the two sets of knobs above -- the
   six MCP payload ceilings and ``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`` are
   orthogonal and neither replaced the other.
-* perf/ollama-num-ctx (2026-10-15): ONE knob, ``BRAIN_OLLAMA_NUM_CTX``, plus
+* perf/ollama-num-ctx (``a977744``, 2026-10-15): ONE knob, ``BRAIN_OLLAMA_NUM_CTX``, plus
   its load-time check against every capped Ollama call's worst case. The
   arithmetic lives in the leaf ``brain.ollama_budget``, not here; what grew
   here is the field, the parse (unset grows to fit a raised cap), the check,
   and the reason they run after the two caps they read. Reasoned inline at the
   parse.
+* perf/ollama-embed-num-ctx (2026-10-16): ONE knob,
+  ``BRAIN_OLLAMA_EMBED_NUM_CTX``, the embedder's own window -- a separate knob
+  because the embedder is a different model with its own runner, so sharing
+  the chat value would only couple two budgets. The floor arithmetic lives in
+  ``brain.ollama_budget``; what grew here is the field, the parse and the floor
+  check. Reasoned inline at the parse.
 
 Knobs belong beside the other knobs, so the knobs are not the problem. The
 PROSE is. Splitting the rationale into a companion doc, leaving the knobs here,
@@ -52,7 +58,12 @@ from dotenv import dotenv_values, find_dotenv
 
 from .errors import missing_database_url_message
 from .ollama_budget import (
+    DEFAULT_OLLAMA_EMBED_NUM_CTX,
     DEFAULT_OLLAMA_NUM_CTX,
+    EMBED_TOKENIZER_MARGIN_FACTOR,
+    INGEST_CHUNK_OVERLAP_TOKENS,
+    INGEST_CHUNK_TARGET_TOKENS,
+    MIN_OLLAMA_EMBED_NUM_CTX,
     capped_call_budgets,
     num_ctx_violations,
 )
@@ -1102,6 +1113,11 @@ class Config:
     # value for every caller: a differing ``num_ctx`` reloads the runner. Checked
     # at load against every capped call's worst case -- see ``brain.ollama_budget``.
     ollama_num_ctx: int = DEFAULT_OLLAMA_NUM_CTX
+    # Per-request ``options.num_ctx`` on every ``/api/embed`` call from the two
+    # Ollama embedders (``BRAIN_OLLAMA_EMBED_NUM_CTX``). Separate from
+    # ``ollama_num_ctx``: a different model, so a different runner. Inert for
+    # ``voyage`` / ``none``. Floor-checked at load -- see ``brain.ollama_budget``.
+    ollama_embed_num_ctx: int = DEFAULT_OLLAMA_EMBED_NUM_CTX
     # Wave G1-c -- GraphRAG people-aspect incremental sync. ``graph_enabled``
     # gates the post-write/delete reconcile hook; the other four resolve into
     # the single shared :class:`ReconcileConfig`
@@ -2432,6 +2448,23 @@ class Config:
                 "raise it or lower the named input cap: "
                 + "; ".join(num_ctx_problems)
             )
+        # Over-ceiling growth (module docstring): the EMBEDDER's own window, a
+        # separate knob because it sizes a different model's runner (spec
+        # docs/specs/2026-10-16-ollama-embed-num-ctx-design.md D1). An explicit
+        # value below the chunker ceiling x tokenizer margin is refused here, at
+        # startup, rather than by Ollama mid-ingest; above the floor the
+        # server's ``truncate: false`` refusal is the backstop.
+        ollama_embed_num_ctx = _parse_positive_int_env(
+            "BRAIN_OLLAMA_EMBED_NUM_CTX", DEFAULT_OLLAMA_EMBED_NUM_CTX
+        )
+        if ollama_embed_num_ctx < MIN_OLLAMA_EMBED_NUM_CTX:
+            raise ConfigError(
+                f"BRAIN_OLLAMA_EMBED_NUM_CTX={ollama_embed_num_ctx} is too small: "
+                f"it must be >= {MIN_OLLAMA_EMBED_NUM_CTX} (the ingest chunk "
+                f"ceiling {INGEST_CHUNK_TARGET_TOKENS}+{INGEST_CHUNK_OVERLAP_TOKENS} "
+                f"cl100k tokens x{EMBED_TOKENIZER_MARGIN_FACTOR} for the embedding "
+                f"model's own tokenizer); the default is {DEFAULT_OLLAMA_EMBED_NUM_CTX}"
+            )
         # Plan 08 -- `brain gaps` knobs (positive ints).
         gaps_lookback_days = _parse_positive_int_env(
             "BRAIN_GAPS_LOOKBACK_DAYS", DEFAULT_GAPS_LOOKBACK_DAYS
@@ -2570,6 +2603,7 @@ class Config:
             "enrich_timeout_seconds": enrich_timeout_seconds,
             "ollama_keep_alive": ollama_keep_alive,
             "ollama_num_ctx": ollama_num_ctx,
+            "ollama_embed_num_ctx": ollama_embed_num_ctx,
             "graph_enabled": graph_enabled,
             "graph_tenant_id": graph_tenant_id,
             "graph_cooccur_window": graph_cooccur_window,

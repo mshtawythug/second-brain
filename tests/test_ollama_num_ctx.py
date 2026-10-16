@@ -36,7 +36,7 @@ from brain.ollama_budget import (
     capped_call_budgets,
     num_ctx_violations,
 )
-from tests.conftest import TEST_DATABASE_URL
+from tests.conftest import TEST_DATABASE_URL, isolate_config_dotenv
 
 _MESSAGES = [{"role": "user", "content": "q"}]
 
@@ -63,18 +63,15 @@ def _capturing(captured: list[dict[str, Any]], payload: dict[str, Any]) -> Any:
 @pytest.fixture()
 def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Block every .env source so only ``os.environ`` reaches ``Config.load``."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "p.env")
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "h.env"
+    isolate_config_dotenv(
+        monkeypatch,
+        tmp_path,
+        clear=(
+            "BRAIN_OLLAMA_NUM_CTX",
+            "BRAIN_ENRICH_MAX_INPUT_TOKENS",
+            "BRAIN_AUDIO_MAX_INPUT_TOKENS",
+        ),
     )
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
-    for var in (
-        "BRAIN_OLLAMA_NUM_CTX",
-        "BRAIN_ENRICH_MAX_INPUT_TOKENS",
-        "BRAIN_AUDIO_MAX_INPUT_TOKENS",
-    ):
-        monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
 
 

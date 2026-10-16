@@ -30,7 +30,7 @@ git tag scheme:
   `llama3.1:8b` runner used to allocate a 4,352 MiB (~4.25 GiB) KV cache
   (q8_0); at 8192 it is 544 MiB, **3,808 MiB (~3.7 GiB) less wired memory**,
   for prompts that never
-  exceeded ~4k tokens. Embeddings are unchanged.
+  exceeded ~4k tokens. Embeddings have their own window (next section).
 - **The first brain call after upgrading reloads the resident chat model once.**
   Another tool that uses the same model without its own `num_ctx` reloads it
   back, so the two alternate reloads while both are active.
@@ -40,6 +40,28 @@ git tag scheme:
   grows past 8192 only as far as a raised `BRAIN_ENRICH_MAX_INPUT_TOKENS` /
   `BRAIN_AUDIO_MAX_INPUT_TOKENS` needs. An explicit value too small for those
   caps or the GraphRAG extract chunk fails at startup, naming the knob to raise.
+
+### Changed — the embedder sizes its own Ollama context window
+
+- **Every Ollama `/api/embed` call now sends `options.num_ctx`** (a new knob,
+  `BRAIN_OLLAMA_EMBED_NUM_CTX`, default `2048`) and `truncate: false`. Before,
+  the embedder inherited the server's `OLLAMA_CONTEXT_LENGTH`. The knob is
+  separate from `BRAIN_OLLAMA_NUM_CTX` because the embedder is a different
+  model with its own runner.
+- **The default `arctic` backend loses no capacity and saves no memory.**
+  It is a non-causal model with no KV cache, and `2048` is already its
+  effective per-input limit, because Ollama's embedding batch size is 2048.
+- **`qwen3` gains the most.** On a server whose `OLLAMA_CONTEXT_LENGTH` is
+  ≥ 40,960, qwen3-embedding:8b used to load at its trained 40,960 window, a
+  q8_0 KV cache of about 3 GiB. At `2048` the cache is about 153 MiB.
+- **An input that does not fit is now an error, never a silent prefix.** The
+  brain raises `OllamaEmbedContextOverflow`, which is an `OllamaEmbedError`, so
+  existing handlers still catch it. The message names the knob. Every stored
+  chunk fits at `2048`: the measured maximum is 1,689 model tokens. A value
+  below `1400` (the 700-token chunk ceiling ×2) fails at startup.
+- **The first embed after upgrading reloads the embedding model once.** That
+  takes seconds for arctic. Stored vectors are unchanged, so no re-embed is
+  needed.
 
 ### Changed — the wiki is dormant (R2)
 
