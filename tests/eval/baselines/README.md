@@ -168,11 +168,16 @@ The runner scores it `0.0` without having measured retrieval and marks the row
   queries were degraded (never which: the corpus is personal), writes nothing,
   leaves any existing `<NAME>.json` exactly as it was, and exits `1`. Free the
   embedder and run it again.
-- **`--diff`** leaves degraded rows out of the per-query and mean deltas and
-  lists them under `degraded_queries`, with a stderr warning.
-- **`--diff --fail-below`** prints the diff, then exits `1` without judging it.
-  Dropping the rows alone is not enough: if every embed failed, nothing would be
-  compared, every delta would be `0`, and the gate would pass.
+- **`--diff`** leaves a degraded query that is in both runs out of the
+  per-query and mean deltas and lists it under `degraded_queries`. A degraded
+  query that is new since the baseline stays under `added_queries`; it was never
+  in the deltas. Either way, a stderr warning gives the count.
+- **`--diff --fail-below`** prints the diff, then exits `1` without judging it
+  when `degraded_queries` is non-empty, i.e. when a query in both runs is
+  degraded. Dropping those rows alone is not enough: if every embed failed,
+  nothing would be compared, every delta would be `0`, and the gate would pass.
+  A degraded *added* query does not block the gate, because it is outside the
+  comparison anyway; the gate runs as usual and the warning still prints.
 - A plain run still exits `0`, with a stderr warning that gives the count.
 
 A baseline recorded **before** this guard existed (2026-10-15) could already

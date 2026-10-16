@@ -64,8 +64,9 @@ fixed, here.
 | plain run | yes | `0` (unchanged) | report as before; **new:** stderr warning with the count |
 | `--record-baseline NAME` | yes | **`1`** | **nothing written**; stderr names the count and says to retry |
 | `--record-baseline NAME` | no | `0` (unchanged) | file written as before |
-| `--diff` | yes | `0` (unchanged) | degraded rows **excluded** from per-query and aggregate deltas, listed in `degraded_queries`; stderr warning with the count |
-| `--diff --fail-below` | yes | **`1`** | diff report emitted first, then a stderr message: the gate cannot be evaluated |
+| `--diff` | yes | `0` (unchanged) | degraded SHARED rows **excluded** from per-query and aggregate deltas, listed in `degraded_queries` (a degraded ADDED query stays in `added_queries`); stderr warning with the count of every degraded row |
+| `--diff --fail-below` | `degraded_queries` non-empty | **`1`** | diff report emitted first, then a stderr message: the gate cannot be evaluated |
+| `--diff --fail-below` | only degraded ADDED queries | `0` / `3` (unchanged) | normal gate; the stderr warning still prints |
 | `--diff --fail-below` | no | `0` / `3` (unchanged) | unchanged |
 
 ### 3.1 Recording refuses (exit 1)
@@ -115,6 +116,15 @@ regression check. This takes precedence over `3` deliberately: "retry, the
 embedder was unhealthy" is the actionable reading, and a `3` here would send
 the operator to `tests/eval/baselines/README.md` to hunt for a corpus change
 that did not happen.
+
+The refusal is keyed on `degraded_queries`, the shared queries, and not on "any
+degraded row in the current run". A degraded query that is absent from the
+baseline is an *added* query: it was never in the comparison, so it cannot fake
+a regression or a pass, and refusing on it would turn every corpus addition made
+during an Ollama hiccup into an unjudgeable diff. The gate then runs as usual.
+The stderr warning is separate and fires on every degraded row in the run, worded
+so it does not claim those rows were "left out of the deltas" (an added query
+never had one).
 
 ### 3.4 Exit-code contract
 

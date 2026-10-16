@@ -212,6 +212,27 @@ def test_run_eval_flags_only_the_query_whose_embed_failed(
     assert degraded_results(report) == [broken]
 
 
+def test_degraded_flag_does_not_stick_after_a_failed_query(
+    test_db, fake_embedder, make_flaky_embedder
+):
+    """The flag is per query: a healthy query AFTER a failed one is not degraded.
+
+    Ordered [healthy, failing, healthy] so a flag initialised once outside the
+    loop (and never reset) would mark the third row too.
+    """
+    doc_id = _seed(test_db, fake_embedder, "Sticky Flag Doc", "stickyflag content")
+    failing = "stickyflag broken query"
+    queries = [
+        _make_query("stickyflag content first", doc_id),
+        _make_query(failing, doc_id),
+        _make_query("stickyflag content last", doc_id),
+    ]
+
+    report = run_eval(test_db, embedder=make_flaky_embedder({failing}), queries=queries)
+
+    assert [r.degraded for r in report.results] == [False, True, False]
+
+
 def test_degraded_results_empty_for_a_clean_run(test_db, fake_embedder):
     doc_id = _seed(test_db, fake_embedder, "Clean Run Doc", "cleanrun content")
     report = run_eval(

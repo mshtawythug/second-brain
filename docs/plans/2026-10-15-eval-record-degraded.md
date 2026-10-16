@@ -30,7 +30,7 @@ Files: `src/brain/eval/runner.py`, `tests/test_eval_runner.py`.
 ## Task 2 — refuse to save, strip on save (baseline)
 
 Files: `src/brain/eval/errors.py`, `src/brain/eval/baseline.py`,
-`tests/test_eval_baseline_degraded.py` (new).
+`tests/test_eval_baseline.py`.
 
 1. RED: `save_baseline` on a report with one degraded row raises
    `DegradedBaselineError`, the message contains `1 of 2`, does not contain
@@ -44,7 +44,7 @@ Files: `src/brain/eval/errors.py`, `src/brain/eval/baseline.py`,
 
 ## Task 3 — exclude from the diff (baseline)
 
-Files: `src/brain/eval/baseline.py`, `tests/test_eval_baseline_degraded.py`.
+Files: `src/brain/eval/baseline.py`, `tests/test_eval_baseline.py`.
 
 1. RED: `diff_reports(clean_baseline, current_with_one_degraded)` omits the
    degraded query from `per_query`, computes the means over the rest, and lists
@@ -103,4 +103,13 @@ the needle on a `>`/`E` line, and go green on restore.
 | M7 | `cli.py` | delete the `--fail-below` degraded refusal | CLI fail-below exit-1 tests (partial and full) |
 | M8 | `cli.py` | move the degraded refusal after the regression check | CLI partial fail-below test (expects `1`, gets `3`) |
 | M9 | `cli.py` | delete the plain-run warning | CLI plain-run warning test |
-| M10 | `cli.py` | `except EvalBaselineError` around `save_baseline` removed | CLI record-refusal regression test (exit is not `1`) |
+| M10 | `cli.py` | `except EvalBaselineError` around `save_baseline` removed, so `DegradedBaselineError` escapes | BOTH CLI record-refusal tests, via `isinstance(result.exception, SystemExit)`. The exit code cannot catch it: CliRunner maps an uncaught exception to exit `1` as well (in production it is a traceback), so the tests assert the exit was a clean `typer.Exit` |
+| M10b (audit F3) | `cli.py` | the `save_baseline` handler narrowed to `except KeyError`, so the refusal escapes as a traceback | both CLI record-refusal tests, via the same `SystemExit` assertion |
+| M11 (review F1) | `cli.py` | gate keyed on any degraded current row (`degraded_count`) instead of `diff_result.degraded_queries` | CLI "only an added query is degraded" test (expects `0`, gets `1`) |
+| M12 (review X2) | `eval/runner.py` | `degraded = False` hoisted out of the per-query loop, so the flag sticks once set | runner `[healthy, failing, healthy]` flag test |
+| M13 (review X4) | `eval/baseline.py` | `path.parent.mkdir(...)` moved above the degraded guard | save-refusal "creates no directory" test |
+
+M11–M13 were added after review of PR #33, and M10's reason was corrected after its audit: the original row claimed the exit code would change, which it does not. X2 and X4 survived the first
+catalog because every fixture put the failing query last and every refusal test
+wrote into an existing `tmp_path`. The new tests fix the order and the parent
+directory, which is what kills them.

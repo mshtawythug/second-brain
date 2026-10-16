@@ -32,7 +32,7 @@ from psycopg import sql
 from brain.config import DEFAULT_OLLAMA_HOST
 from brain.db import connect, migration_lock, run_migrations
 from brain.embeddings import OllamaEmbedError
-from brain.ingest import ExtractedDoc, ingest_document
+from brain.ingest import Embedder, ExtractedDoc, ingest_document
 from tests.db_lock import concurrent_suite_message, try_acquire_suite_lock
 
 # Fails a hung browser test (see that module). The hook itself lives there, out of
@@ -944,7 +944,7 @@ class FlakyEmbedder:
     from cache and never raise. Use failing texts unique to each test.
     """
 
-    def __init__(self, inner: Any, fail_texts: set[str]) -> None:
+    def __init__(self, inner: Embedder, fail_texts: set[str]) -> None:
         self._inner = inner
         self._fail_texts = frozenset(fail_texts)
         self.dim = inner.dim
@@ -954,10 +954,10 @@ class FlakyEmbedder:
     ) -> list[list[float]]:
         if input_type == "query" and any(t in self._fail_texts for t in texts):
             raise OllamaEmbedError("synthetic embed timeout")
-        return self._inner.embed(texts, input_type=input_type)  # type: ignore[no-any-return]
+        return self._inner.embed(texts, input_type=input_type)
 
     def count_tokens(self, text: str) -> int:
-        return self._inner.count_tokens(text)  # type: ignore[no-any-return]
+        return self._inner.count_tokens(text)
 
 
 @pytest.fixture

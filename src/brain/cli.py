@@ -67,10 +67,10 @@ unchanged by design -- this is reporting, not policy.
 *degraded* run -- a query whose embed call raised ``OllamaEmbedError`` and
 scored ``0.0`` unmeasured -- to exit codes and stderr: ``--record-baseline``
 exits 1 without writing (``save_baseline`` raises), ``--diff --fail-below``
-exits 1 before the regression check, and plain runs / plain ``--diff`` warn
-with the count. The policy and every message live in ``brain.eval``; what grew
-here is the mapping and its four why-comments. Spec:
-``docs/specs/2026-10-15-eval-record-degraded-design.md``.
+exits 1 before the regression check when a query shared with the baseline is
+degraded, and every run with a degraded row warns with the count. The policy
+and every message live in ``brain.eval``; what grew here is the mapping and its
+why-comments. Spec: ``docs/specs/2026-10-15-eval-record-degraded-design.md``.
 
 The long-deferred split into per-domain command modules is unchanged by any of
 this; ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
@@ -4158,31 +4158,38 @@ def eval_cmd(
             for key, before, after in config_changes:
                 typer.secho(f"  {key}: {before!r} -> {after!r}", fg="yellow", err=True)
 
-        # diff_reports already left degraded rows out of the deltas; say so,
-        # by count. With --fail-below, refuse to judge at all, BEFORE the
-        # regression check: a fully degraded run compares nothing and would
-        # pass, and a partial one would send the operator hunting for a corpus
-        # change (exit 3) when the embedder just needs a retry. Exit 1 = the
-        # command could not do what it was asked; the 1/2/3 contract holds.
+        # Warn, by count, on ANY degraded row in this run: no delta is computed
+        # for one, whether diff_reports left it out of the shared set or it was
+        # an added query that never had a delta to begin with.
         if degraded_count:
             typer.secho(
                 degraded_run_message(
                     degraded_count,
                     total_count,
-                    action="warning, left out of the deltas above",
+                    action="warning, no delta is computed for these",
                 ),
                 fg="yellow",
                 err=True,
             )
-            if fail_below:
-                typer.secho(
-                    degraded_run_message(
-                        degraded_count, total_count, action="cannot evaluate --fail-below"
-                    ),
-                    fg="red",
-                    err=True,
-                )
-                raise typer.Exit(code=1)
+        # With --fail-below, refuse to judge when a SHARED query is degraded,
+        # BEFORE the regression check: a fully degraded run compares nothing and
+        # would pass, and a partial one would send the operator hunting for a
+        # corpus change (exit 3) when the embedder just needs a retry. A
+        # degraded ADDED query is outside the comparison, so the gate stays the
+        # normal one (spec 3.3). Exit 1 = the command could not do what it was
+        # asked; the 1/2/3 contract holds.
+        shared_degraded = len(diff_result.degraded_queries)
+        if fail_below and shared_degraded:
+            typer.secho(
+                degraded_run_message(
+                    shared_degraded,
+                    shared_degraded + len(diff_result.per_query),
+                    action="cannot evaluate --fail-below (counting shared queries)",
+                ),
+                fg="red",
+                err=True,
+            )
+            raise typer.Exit(code=1)
 
         # --fail-below runs in BOTH branches (the report is emitted above first):
         # a mean-metric regression flips the exit code to 3, distinct from

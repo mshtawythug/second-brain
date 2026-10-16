@@ -384,6 +384,16 @@ def test_save_baseline_refusal_leaves_an_existing_file_untouched(tmp_path: Path)
     assert path.read_bytes() == before
 
 
+def test_save_baseline_refusal_creates_no_directory(tmp_path: Path) -> None:
+    """The refusal happens before ANY filesystem write, including the mkdir."""
+    path = tmp_path / "new" / "ci.json"
+
+    with pytest.raises(DegradedBaselineError):
+        save_baseline(_make_report([_degraded("fine query")]), path=path)
+
+    assert not path.parent.exists()
+
+
 def test_degraded_baseline_error_is_an_eval_baseline_error() -> None:
     """The CLI maps EvalBaselineError to exit 1; the refusal must ride that path."""
     assert issubclass(DegradedBaselineError, EvalBaselineError)

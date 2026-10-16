@@ -158,10 +158,11 @@ git tag scheme:
   would then have compared against it. Such a row is now marked `degraded`, and
   recording refuses: it writes nothing, leaves any existing baseline untouched,
   names how many queries were degraded (not which), and exits `1`. Under
-  `--diff`, degraded rows are left out of the deltas and listed as
-  `degraded_queries`. `--fail-below` exits `1` instead of judging a degraded
-  run, because a fully degraded run would otherwise compare nothing and pass.
-  Ad-hoc runs still exit `0`, now with a warning that gives the count. Exit codes
+  `--diff`, degraded queries the baseline also has are left out of the deltas
+  and listed as `degraded_queries`. `--fail-below` exits `1` instead of judging
+  a diff with any `degraded_queries`, because a fully degraded run would
+  otherwise compare nothing and pass. Every run with a degraded query warns on
+  stderr with the count, and ad-hoc runs still exit `0`. Exit codes
   `1`/`2`/`3` keep their meanings. See `tests/eval/baselines/README.md`.
 - **A tokened `brain ui` opened a page that could not load anything.** The
   opened URL lacked the `#t=` fragment, and the panel printed it only for

@@ -368,6 +368,9 @@ def test_record_baseline_refuses_a_degraded_run(
     result = CliRunner().invoke(app, ["eval", "--corpus", str(corpus), "--record-baseline", "ci"])
 
     assert result.exit_code == 1, result.output
+    # A clean typer.Exit, not an escaped DegradedBaselineError: CliRunner maps an
+    # uncaught exception to exit 1 too, and in production that is a traceback.
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
     assert not (baselines_dir / "ci.json").exists()
     assert "1 of 2" in result.stderr
     assert "refusing to record baseline 'ci'" in result.stderr
@@ -392,6 +395,9 @@ def test_refused_record_leaves_the_existing_baseline_untouched(
     result = CliRunner().invoke(app, ["eval", "--corpus", str(corpus), "--record-baseline", "ci"])
 
     assert result.exit_code == 1, result.output
+    # A clean typer.Exit, not an escaped DegradedBaselineError: CliRunner maps an
+    # uncaught exception to exit 1 too, and in production that is a traceback.
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
     assert existing.read_text(encoding="utf-8") == '{"sentinel": true}\n'
 
 
@@ -523,3 +529,41 @@ def test_fail_below_refuses_to_judge_a_degraded_run(
     diff = json.loads(result.stdout)  # the report is still emitted first
     assert len(diff["degraded_queries"]) == (2 if fail_all else 1)
     assert "cannot evaluate --fail-below" in result.stderr
+
+
+def test_fail_below_judges_normally_when_only_an_added_query_is_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    make_flaky_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """A degraded ADDED query (absent from the baseline) is outside the
+    comparison: the gate runs its normal regression logic (exit 0 here, nothing
+    regressed) instead of refusing, and the run still warns with the count."""
+    doc_id = _seed_one(test_db, fake_embedder, "Degraded Added Doc")
+    shared = "Degraded Added Doc body"
+    added = "degadded new query times out"
+    _wire_flaky(monkeypatch, tmp_path, fake_embedder)
+    base_dir = tmp_path / "base-corpus"
+    base_dir.mkdir()
+    _record_clean(
+        monkeypatch, fake_embedder, _degraded_corpus(base_dir, [shared], doc_id), "base"
+    )
+    corpus = _degraded_corpus(tmp_path, [shared, added], doc_id)
+    monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: make_flaky_embedder({added}))  # type: ignore[operator]
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "eval", "--corpus", str(corpus),
+            "--baseline", "base", "--diff", "--fail-below", "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    diff = json.loads(result.stdout)
+    assert diff["degraded_queries"] == []
+    assert diff["added_queries"] == [added]
+    assert "1 of 2" in result.stderr
+    assert "cannot evaluate --fail-below" not in result.stderr

@@ -202,11 +202,13 @@ class BaselineDiff:
     # aggregate stays intersection-only; deterministic source order.
     added_queries: list[str]
     removed_queries: list[str]
-    # Shared queries degraded on EITHER side (an embed call failed, so the row
+    # SHARED queries degraded on EITHER side (an embed call failed, so the row
     # measured nothing). Excluded from ``per_query`` and the aggregate exactly
     # like added/removed queries. Never "passed" by the ``--fail-below`` gate:
     # a fully degraded run has an empty intersection and zero deltas, so the CLI
-    # refuses to judge any diff where this is non-empty.
+    # refuses to judge any diff where this is non-empty. A degraded query that
+    # exists in only one report is listed in ``added_queries`` /
+    # ``removed_queries``, not here: it was never part of the comparison.
     degraded_queries: list[str]
 
 
