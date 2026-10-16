@@ -36,7 +36,7 @@ migration table.
    the needle appears on a `>`/`E` line; green again once restored. These are
    the mutations that were actually run:
    * M1a: `restored_environ`'s restore body becomes `pass`. The mechanism test
-     goes red (`> assert ... _SENTINEL ... is None`).
+     goes red (`> assert leaked is None`).
    * M1b: the same mutation turns the boundary test red
      (`> result.assert_outcomes(passed=2)`).
    * M1c: the same mutation turns the original bad-order run red (the chain
@@ -45,16 +45,18 @@ migration table.
      test goes red (`E ... '_restore_os_environ' in [...]`).
    * M2b: the same mutation turns the original bad-order run red again.
    * M3: the restore loop for changed and deleted keys is removed, leaving
-     only the cleanup of added keys. The mechanism test goes red on the
-     `_CHANGED` assertion (`'after'`).
+     only the cleanup of added keys. The mechanism test goes red on
+     `> assert changed == "before"`, with `'after'` on the `E` line.
    * M4: the helper call in migrated `test_config_audio_envvars.py` is
      dropped, with `BRAIN_AUDIO_SCRIPT_MODEL=planted-leak-model` planted in the
-     project `.env`. The test goes red with the planted value on `E` lines. Run
+     project `.env`. The test goes red with `planted-leak-model` on `E` lines. Run
      unmutated with the same planted file, it stays green.
    * M4b: the same for migrated `test_config.py` `isolated_dotenv`, with a
-     planted `OLLAMA_HOST`. 13 tests go red.
+     planted `OLLAMA_HOST=http://planted-leak:1`. 13 tests go red, with
+     `planted-leak` on `E` lines.
    * M5: the helper ignores `brain_home_root=`. Migrated
-     `test_config_new_fields.py` goes red (4 tests).
+     `test_config_new_fields.py` goes red (4 tests). The `E` lines compare the
+     real checkout path against the expected `.../brain_home_root` path.
 
    M4 was first tried on `test_config_enrich_envvars.py`, and it stayed green
    under the mutation. Every test there sets each variable explicitly, so its
