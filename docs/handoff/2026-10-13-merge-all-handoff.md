@@ -76,11 +76,13 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
 
 ## In flight when this was written
 
-- A follow-up on how `brain eval` handles degraded runs.
+- PR #37 (open, branch `fix/eval-degraded-all-embedders`): `brain eval` degrades transient embed
+  failures on every backend and aborts on permanent ones. It is the eval-degraded follow-up below.
 
 ## Recorded follow-ups
 
-Not started, except the first item (fixed by this PR) and the `qwen3` item (addressed by PR #36).
+Not started, except the first item (fixed by this PR), the `qwen3` item (addressed by PR #36), and the
+eval-degraded item (in flight as PR #37).
 
 - **Fixed by the PR that commits this doc** (branch `test/build-watcher-wait-backstop`, plan
   `docs/plans/2026-10-16-build-watcher-wait-backstop.md`). `tests/wiki/test_build_watcher.py` had its own
