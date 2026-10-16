@@ -24,6 +24,13 @@ model is automatically re-enriched on next ingest / next backfill run. The
 behavior is keyed on ``OllamaEnricher.model`` (the property), so callers
 that pass a fake enricher in tests can control the comparison without
 monkey-patching the production module.
+
+Over the 800-line ceiling (CLAUDE.md): it was 808 at the branch base. The one
+growth since is ``num_ctx`` threaded from ``make_enricher`` through
+``OllamaEnricher`` to every ``/api/chat`` call (perf/ollama-num-ctx, reasoned
+inline at the constructor), plus the budget constants now bound from
+``brain.ollama_budget`` instead of restated. Re-derive the size with
+``wc -l src/brain/enrichment.py``.
 """
 from __future__ import annotations
 
@@ -38,6 +45,11 @@ import tiktoken
 from .chat import ChatMessage, chat_json_with_client
 from .config import Config
 from .errors import EnrichmentError
+from .ollama_budget import (
+    CHAT_DEFAULT_NUM_PREDICT,
+    DEFAULT_OLLAMA_NUM_CTX,
+    EXTRACT_NUM_PREDICT,
+)
 from .tags import normalize_tags
 
 _logger = logging.getLogger(__name__)
@@ -266,7 +278,8 @@ _CONTRADICTION_SYSTEM_PROMPT = (
 
 # Token budget for the concept-extraction completion. Larger than the
 # summary/tag budget (256) because a document can yield a long entity list.
-_EXTRACT_NUM_PREDICT = 1024
+# Bound from ``ollama_budget``, where ``num_ctx`` is validated against it.
+_EXTRACT_NUM_PREDICT = EXTRACT_NUM_PREDICT
 
 # Recognized string forms for a boolean ``contradicts`` verdict. The model is
 # instructed to return a JSON boolean, but small local models occasionally
@@ -364,11 +377,17 @@ class OllamaEnricher:
         timeout: float = 60.0,
         max_input_tokens: int = 4000,
         keep_alive: str = _DEFAULT_KEEP_ALIVE,
+        num_ctx: int = DEFAULT_OLLAMA_NUM_CTX,
     ) -> None:
         self._host = host
         self._model = model
         self._max_input_tokens = max_input_tokens
         self._keep_alive = keep_alive
+        # Over-ceiling growth (see module docstring): every chat call sends an
+        # explicit context window rather than inheriting the Ollama server's
+        # global default (65,536 on a machine tuned for other tools = 4,352 MiB
+        # of KV cache for prompts under ~4k). Spec 2026-10-15-ollama-num-ctx.
+        self._num_ctx = num_ctx
         self._tokenizer = tiktoken.get_encoding("cl100k_base")
         if client is not None:
             self._client = client
@@ -658,7 +677,7 @@ class OllamaEnricher:
             system=_ELICIT_SYSTEM_PROMPT,
             user=user,
             schema_keys=("title", "rule"),
-            num_predict=256,
+            num_predict=CHAT_DEFAULT_NUM_PREDICT,
         )
         title = data["title"]
         if not isinstance(title, str) or not title.strip():
@@ -763,7 +782,7 @@ class OllamaEnricher:
         system: str,
         user: str,
         schema_keys: tuple[str, ...],
-        num_predict: int = 256,
+        num_predict: int = CHAT_DEFAULT_NUM_PREDICT,
     ) -> dict[str, Any]:
         """Issue an ``/api/chat`` JSON-mode call with one retry on parse failure.
 
@@ -786,6 +805,7 @@ class OllamaEnricher:
             messages=messages,
             required_keys=schema_keys,
             keep_alive=self._keep_alive,
+            num_ctx=self._num_ctx,
             num_predict=num_predict,
         )
 
@@ -805,4 +825,5 @@ def make_enricher(cfg: Config) -> OllamaEnricher:
         timeout=cfg.enrich_timeout_seconds,
         max_input_tokens=cfg.enrich_max_input_tokens,
         keep_alive=cfg.ollama_keep_alive,
+        num_ctx=cfg.ollama_num_ctx,
     )

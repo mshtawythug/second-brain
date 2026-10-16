@@ -70,6 +70,7 @@ def test_chat_json_with_client_returns_parsed_object() -> None:
         messages=[{"role": "user", "content": "q"}],
         required_keys=("answer",),
         keep_alive="30m",
+        num_ctx=8192,
     )
     assert result == {"answer": "hello", "extra": 1}
     # Request body carries the JSON-mode + temperature=0 contract.
@@ -97,6 +98,7 @@ def test_chat_json_with_client_retries_on_truncated_json() -> None:
         messages=[{"role": "user", "content": "q"}],
         required_keys=("answer",),
         keep_alive="30m",
+        num_ctx=8192,
         num_predict=128,
     )
     assert result == {"answer": "complete"}
@@ -131,6 +133,7 @@ def test_chat_json_with_client_retries_on_mid_object_truncation() -> None:
         messages=[{"role": "user", "content": "q"}],
         required_keys=("answer",),
         keep_alive="30m",
+        num_ctx=8192,
         num_predict=128,
     )
     assert result == {"answer": "complete"}
@@ -148,6 +151,7 @@ def test_chat_json_with_client_raises_after_two_bad_responses() -> None:
             messages=[{"role": "user", "content": "q"}],
             required_keys=("answer",),
             keep_alive="30m",
+            num_ctx=8192,
         )
 
 
@@ -162,6 +166,7 @@ def test_chat_json_with_client_raises_on_missing_required_key() -> None:
             messages=[{"role": "user", "content": "q"}],
             required_keys=("answer",),
             keep_alive="30m",
+            num_ctx=8192,
         )
 
 
@@ -179,6 +184,7 @@ def test_chat_json_with_client_5xx_is_unavailable_no_retry() -> None:
             messages=[{"role": "user", "content": "q"}],
             required_keys=("answer",),
             keep_alive="30m",
+            num_ctx=8192,
         )
     assert calls == [1]  # fail fast, no retry on transport error
 
@@ -194,6 +200,7 @@ def test_chat_json_with_client_4xx_is_enrichment_error() -> None:
             messages=[{"role": "user", "content": "q"}],
             required_keys=("answer",),
             keep_alive="30m",
+            num_ctx=8192,
         )
 
 
@@ -208,6 +215,7 @@ def test_chat_json_with_client_raises_on_non_object_json() -> None:
             messages=[{"role": "user", "content": "q"}],
             required_keys=("answer",),
             keep_alive="30m",
+            num_ctx=8192,
         )
 
 
@@ -222,6 +230,7 @@ def test_chat_json_with_client_missing_message_envelope() -> None:
             messages=[{"role": "user", "content": "q"}],
             required_keys=("answer",),
             keep_alive="30m",
+            num_ctx=8192,
         )
 
 
@@ -238,6 +247,7 @@ def test_chat_json_with_client_non_string_content() -> None:
             messages=[{"role": "user", "content": "q"}],
             required_keys=("answer",),
             keep_alive="30m",
+            num_ctx=8192,
         )
 
 
@@ -399,6 +409,7 @@ def test_chat_keep_alive_sentinels_sent_as_json_numbers(
         messages=[{"role": "user", "content": "hi"}],
         required_keys=frozenset({"ok"}),
         keep_alive=value,
+        num_ctx=8192,
     )
     assert captured["keep_alive"] == expected
     assert isinstance(captured["keep_alive"], int)
@@ -422,5 +433,6 @@ def test_chat_keep_alive_duration_string_passes_through() -> None:
         messages=[{"role": "user", "content": "hi"}],
         required_keys=frozenset({"ok"}),
         keep_alive="30m",
+        num_ctx=8192,
     )
     assert captured["keep_alive"] == "30m"

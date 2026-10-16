@@ -63,6 +63,12 @@ are now named on stderr; (b) every exit 3 points at
 recorded against a different document set, not a worse ranker. Exit codes are
 unchanged by design -- this is reporting, not policy.
 
+**Fourth growth (perf/ollama-num-ctx, PR #32).** ``eval --answer`` maps the
+new ``OllamaContextOverflow`` to a clean exit 1. Ollama used to truncate an
+over-window prompt silently; with ``truncate``/``shift`` off it is an HTTP 400,
+which this handler -- catching only ``OllamaUnavailable`` -- would have let out
+as a traceback. Reason inline at the handler.
+
 The long-deferred split into per-domain command modules is unchanged by any of
 this; ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
@@ -129,6 +135,7 @@ from .errors import (
     IdPrefixNotHex,
     IdPrefixTooShort,
     InteractionError,
+    OllamaContextOverflow,
     OllamaUnavailable,
     PersonAmbiguous,
     PersonNotFound,
@@ -3959,6 +3966,13 @@ def _run_answer_eval_cli(
                 fg="red",
                 err=True,
             )
+            raise typer.Exit(code=1) from exc
+        except OllamaContextOverflow as exc:
+            # Over-ceiling growth (module docstring): with truncate/shift off an
+            # over-window prompt is an error instead of a silent truncation. It
+            # is permanent, not "Ollama down" -- a clean exit 1 that names
+            # BRAIN_OLLAMA_NUM_CTX (in ``exc``), not a traceback.
+            typer.secho(f"eval --answer: {exc}", fg="red", err=True)
             raise typer.Exit(code=1) from exc
 
     if json_output:

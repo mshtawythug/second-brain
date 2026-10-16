@@ -175,6 +175,7 @@ commands.
 
 | Env var | Default | Purpose |
 |---|---|---|
+| `BRAIN_OLLAMA_NUM_CTX` | `8192` (grows to fit raised caps when unset) | Context window every Ollama chat call requests (`options.num_ctx`) — `brain ask`, `brief`, `audio`, `review`, `timeline --synthesize`, `gaps`, enrichment and GraphRAG extraction all share it, so the model loads once. Set explicitly, it must hold every capped call (`BRAIN_ENRICH_MAX_INPUT_TOKENS`, `BRAIN_AUDIO_MAX_INPUT_TOKENS`, the extract chunk) or the brain refuses to start, naming the knob. Full description in the [MCP env table](#environment-variables). |
 | `BRAIN_RESURFACE_LIMIT` | `7` | Default docs surfaced per `brain resurface` run. |
 | `BRAIN_RESURFACE_MIN_AGE_DAYS` | `14` | Exclude docs younger than N days from resurfacing. |
 | `BRAIN_RESURFACE_AGE_HALFLIFE_DAYS` | `180` | Half-life for the age component of the resurface score. |
@@ -206,7 +207,7 @@ commands.
 | `BRAIN_ASK_TIMEOUT_SECONDS` | `90` | Per-LLM-call timeout for `brain ask`. |
 | `BRAIN_AUDIO_SCRIPT_MODEL` | `llama3.1:8b` | Ollama model for the two-host script. |
 | `BRAIN_AUDIO_MAX_TURNS` | `12` | Default dialogue turn cap. |
-| `BRAIN_AUDIO_MAX_INPUT_TOKENS` | `3000` | Max grounding tokens fed to the script model. |
+| `BRAIN_AUDIO_MAX_INPUT_TOKENS` | `3000` | Max grounding tokens fed to the script model. Raising it past `3072` needs a larger context window: automatic when `BRAIN_OLLAMA_NUM_CTX` is unset, a startup error naming the knob when it is set explicitly too small. |
 | `BRAIN_AUDIO_THEME_LIMIT` | `4` | Max themes/communities folded into the overview. |
 | `BRAIN_GAPS_LOOKBACK_DAYS` | `30` | Lookback window for `brain gaps` surfaces. |
 | `BRAIN_GAPS_MIN_CLUSTER_SIZE` | `2` | Min failed-query count before a cluster becomes a gap. |
@@ -728,6 +729,7 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `BRAIN_EMBEDDER` | `arctic` | Embedder backend: `arctic`, `voyage`, or `qwen3`. Must match the dim baked into the database by `brain init`. |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL. Used by `arctic` and `qwen3`; ignored by `voyage`. |
 | `QWEN3_MODEL` | `qwen3-embedding:8b` | Ollama model tag for the qwen3 backend. |
+| `BRAIN_OLLAMA_NUM_CTX` | `8192` | Context window the brain requests on every Ollama chat call (`options.num_ctx`), instead of inheriting the server's `OLLAMA_CONTEXT_LENGTH`. The KV cache scales with it (llama3.1:8b, q8_0: 544 MiB at 8192 vs 4352 MiB at 65536). Unset, it grows past 8192 only as far as a raised `BRAIN_ENRICH_MAX_INPUT_TOKENS` / `BRAIN_AUDIO_MAX_INPUT_TOKENS` needs; an explicit value too small for a capped call (those two caps, or the GraphRAG extract chunk) fails at startup; an over-window prompt is refused by Ollama, never silently truncated. |
 | `VOYAGE_API_KEY` | (required for `voyage`) | Voyage AI key. Ignored by the local backends. |
 | `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault folder for authored notes, ingested mirrors, wiki rendering, and MCP note tools. |
 | `BRAIN_USER_EMAIL` | unset | Owner email used by the rendered Gmail thread view's "Show only my replies" filter. Set it before wiki builds if you use that filter. |

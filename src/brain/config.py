@@ -30,6 +30,12 @@ reason to scatter the knobs.
   its own. The merged file is the UNION of the two sets of knobs above -- the
   six MCP payload ceilings and ``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`` are
   orthogonal and neither replaced the other.
+* perf/ollama-num-ctx (2026-10-15): ONE knob, ``BRAIN_OLLAMA_NUM_CTX``, plus
+  its load-time check against every capped Ollama call's worst case. The
+  arithmetic lives in the leaf ``brain.ollama_budget``, not here; what grew
+  here is the field, the parse (unset grows to fit a raised cap), the check,
+  and the reason they run after the two caps they read. Reasoned inline at the
+  parse.
 
 Knobs belong beside the other knobs, so the knobs are not the problem. The
 PROSE is. Splitting the rationale into a companion doc, leaving the knobs here,
@@ -45,6 +51,11 @@ from typing import Any
 from dotenv import dotenv_values, find_dotenv
 
 from .errors import missing_database_url_message
+from .ollama_budget import (
+    DEFAULT_OLLAMA_NUM_CTX,
+    capped_call_budgets,
+    num_ctx_violations,
+)
 
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_QWEN3_MODEL = "qwen3-embedding:8b"
@@ -56,10 +67,10 @@ DEFAULT_EMBEDDER = "arctic"
 _VALID_EMBEDDERS = {"arctic", "voyage", "qwen3", "none"}
 
 # How long Ollama keeps a model loaded in VRAM between requests. Passed as
-# ``keep_alive`` in every outgoing Ollama HTTP payload (``/api/embed``,
-# ``/api/chat``, ``/api/generate``). "30m" keeps the model hot across bursts of
-# ingest/search; raise to "1h" if your workflow has longer idle gaps, or set
-# "-1" to keep the model loaded indefinitely (never unloaded). Set via
+# ``keep_alive`` in every outgoing Ollama HTTP payload (``/api/embed`` and
+# ``/api/chat`` -- the brain has no ``/api/generate`` call). "30m" keeps the
+# model hot across bursts of ingest/search; raise to "1h" if your workflow has
+# longer idle gaps, or set "-1" to keep the model loaded indefinitely (never unloaded). Set via
 # ``BRAIN_OLLAMA_KEEP_ALIVE``; accepts any format Ollama understands: a positive
 # integer duration string ("30m", "1h", "60s"), a bare positive integer seconds
 # string ("60"), "-1" (keep loaded forever), or "0" (unload immediately after
@@ -1075,7 +1086,7 @@ class Config:
     enrich_max_input_tokens: int = DEFAULT_ENRICH_MAX_INPUT_TOKENS
     enrich_timeout_seconds: float = DEFAULT_ENRICH_TIMEOUT_SECONDS
     # Per-request ``keep_alive`` sent in every outgoing Ollama payload (embedder
-    # ``/api/embed``, enricher ``/api/chat``, extractor ``/api/generate``). Keeps
+    # ``/api/embed``; enricher, extractor and ``chat_json`` ``/api/chat``). Keeps
     # the model loaded in VRAM for this long after the last request, preventing
     # the cold-load latency spike on the next call. Accepts any format Ollama
     # understands: a positive integer duration string ("30m", "1h", "60s"), a
@@ -1085,6 +1096,12 @@ class Config:
     # rejected at load time via ConfigError. Override via
     # ``BRAIN_OLLAMA_KEEP_ALIVE``.
     ollama_keep_alive: str = DEFAULT_OLLAMA_KEEP_ALIVE
+    # Per-request ``options.num_ctx`` on every ``/api/chat`` call
+    # (``BRAIN_OLLAMA_NUM_CTX``), so a brain-loaded runner allocates a KV cache
+    # sized to the brain's prompts instead of the server's global default. One
+    # value for every caller: a differing ``num_ctx`` reloads the runner. Checked
+    # at load against every capped call's worst case -- see ``brain.ollama_budget``.
+    ollama_num_ctx: int = DEFAULT_OLLAMA_NUM_CTX
     # Wave G1-c -- GraphRAG people-aspect incremental sync. ``graph_enabled``
     # gates the post-write/delete reconcile hook; the other four resolve into
     # the single shared :class:`ReconcileConfig`
@@ -2392,6 +2409,29 @@ class Config:
                     "BRAIN_AUDIO_THEME_LIMIT must be a positive integer "
                     f"(got {audio_theme_limit_raw!r})"
                 )
+        # Over-ceiling growth (module docstring): the brain's own Ollama context
+        # window. Parsed HERE, after both caps it is checked against, so a
+        # ``num_ctx`` that cannot hold a capped call fails at startup instead of
+        # the server truncating -- or, with ``truncate: false``, refusing -- the
+        # prompt mid-ingest. Spec: docs/specs/2026-10-15-ollama-num-ctx-design.md.
+        # UNSET grows the default to fit a raised cap (a user who already set
+        # BRAIN_ENRICH_MAX_INPUT_TOKENS=8000 keeps a working brain after the
+        # upgrade); only an EXPLICIT value that cannot hold a call is an error.
+        num_ctx_budgets = capped_call_budgets(
+            enrich_max_input_tokens=enrich_max_input_tokens,
+            audio_max_input_tokens=audio_max_input_tokens,
+        )
+        ollama_num_ctx = _parse_positive_int_env(
+            "BRAIN_OLLAMA_NUM_CTX",
+            max([DEFAULT_OLLAMA_NUM_CTX] + [b.required_num_ctx for b in num_ctx_budgets]),
+        )
+        num_ctx_problems = num_ctx_violations(ollama_num_ctx, num_ctx_budgets)
+        if num_ctx_problems:
+            raise ConfigError(
+                "BRAIN_OLLAMA_NUM_CTX is too small for a capped Ollama call -- "
+                "raise it or lower the named input cap: "
+                + "; ".join(num_ctx_problems)
+            )
         # Plan 08 -- `brain gaps` knobs (positive ints).
         gaps_lookback_days = _parse_positive_int_env(
             "BRAIN_GAPS_LOOKBACK_DAYS", DEFAULT_GAPS_LOOKBACK_DAYS
@@ -2529,6 +2569,7 @@ class Config:
             "enrich_max_input_tokens": enrich_max_input_tokens,
             "enrich_timeout_seconds": enrich_timeout_seconds,
             "ollama_keep_alive": ollama_keep_alive,
+            "ollama_num_ctx": ollama_num_ctx,
             "graph_enabled": graph_enabled,
             "graph_tenant_id": graph_tenant_id,
             "graph_cooccur_window": graph_cooccur_window,
