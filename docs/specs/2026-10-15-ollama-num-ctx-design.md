@@ -217,8 +217,11 @@ bare `EnrichmentError`:
 Each has a regression test.
 
 **The complete inventory.** Re-derive it with
-`grep -rn 'except.*OllamaUnavailable' src/brain`, which also catches tuple
-clauses; it is not inherited from here. It has 13 clauses. *(Corrected
+`grep -rnE --include='*.py' '^\s*except.*OllamaUnavailable' src/brain`, which
+also catches tuple clauses; it is not inherited from here. It has 13 clauses.
+The pattern is anchored to the start of the line so the `errors.py` docstring
+that mentions ``except OllamaUnavailable`` is not counted, which would make 14.
+`--include` keeps `__pycache__` binary matches out of the count. *(Corrected
 2026-10-15 after the PR #32 re-audit: the first list said every site was
 followed by `except EnrichmentError`, which is false for `brain audio`. It
 named a "gaps" site that is really `elicit`, and it omitted
