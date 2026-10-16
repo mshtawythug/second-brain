@@ -16,8 +16,10 @@ The debounce test also swaps the timer, via ``timer_factory=`` and
 sleeping against a real one.
 
 Tests don't sleep blindly; they synchronize on either ``threading.Event``s
-fired from the patched ``build_and_swap`` body, or short bounded waits
-guarded by ``_wait_for(predicate)`` helpers.
+fired from the patched ``build_and_swap`` body, or on ``_wait_for(predicate)``,
+the shared wait in ``tests/thread_wait.py``. Its timeout is a backstop against
+a hung thread, not a latency budget, so no call site passes one (2026-10-16;
+guarded in ``tests/test_thread_wait.py``).
 """
 from __future__ import annotations
 
@@ -42,6 +44,8 @@ from brain.wiki.build_watcher import (
     main,
     run_watcher,
 )
+from tests.thread_wait import WAIT_FOR_BACKSTOP_S
+from tests.thread_wait import wait_for as _wait_for
 from tests.wiki.manual_timer import ManualClock
 
 # ---------------------------------------------------------------------------
@@ -95,16 +99,6 @@ def _reset_fake_observers() -> None:
     _FakeObserver.instances.clear()
 
 
-def _wait_for(predicate: Any, timeout: float = 2.0) -> None:
-    """Block until ``predicate()`` returns truthy or the deadline passes."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.01)
-    raise AssertionError("predicate never became true")
-
-
 def _start_watcher(
     *,
     vault: Path,
@@ -156,9 +150,9 @@ def _start_watcher(
 
     thread = threading.Thread(target=_target, daemon=True)
     thread.start()
-    _wait_for(lambda: bool(_FakeObserver.instances), timeout=2.0)
+    _wait_for(lambda: bool(_FakeObserver.instances))
     observer = _FakeObserver.instances[0]
-    _wait_for(lambda: observer.started, timeout=2.0)
+    _wait_for(lambda: observer.started)
 
     captured_state["thread"] = thread
     captured_state["observer"] = observer
@@ -327,14 +321,15 @@ def test_lock_serializes_concurrent_builds(
     )
     try:
         observer.inject(FileModifiedEvent(str(note)))
-        # Wait until the first build is actually running.
-        assert enter_count.acquire(timeout=2.0)
+        # Wait until the first build is actually running. Both acquires are
+        # backstops on other threads' work, not latency budgets (2026-10-16).
+        assert enter_count.acquire(timeout=WAIT_FOR_BACKSTOP_S)
         # Inject 5 more events while build #1 is in flight.
         for _ in range(5):
             observer.inject(FileModifiedEvent(str(note)))
             time.sleep(0.01)
         # Wait for the follow-up coalesced build to enter.
-        assert enter_count.acquire(timeout=3.0)
+        assert enter_count.acquire(timeout=WAIT_FOR_BACKSTOP_S)
         # No more should be queued — give them a window to fire if they
         # were going to, then assert.
         time.sleep(0.4)
@@ -525,7 +520,7 @@ def test_on_build_hook_invoked(
     )
     try:
         observer.inject(FileModifiedEvent(str(note)))
-        _wait_for(lambda: len(received) >= 1, timeout=2.0)
+        _wait_for(lambda: len(received) >= 1)
     finally:
         handler = observer.handler
         handler._state.stop_event.set()
@@ -558,10 +553,10 @@ def test_build_failure_does_not_kill_watcher(
     )
     try:
         observer.inject(FileModifiedEvent(str(note)))
-        _wait_for(lambda: calls >= 1, timeout=2.0)
+        _wait_for(lambda: calls >= 1)
         # Second event should still trigger — watcher is alive.
         observer.inject(FileModifiedEvent(str(note)))
-        _wait_for(lambda: len(received) >= 1, timeout=2.0)
+        _wait_for(lambda: len(received) >= 1)
     finally:
         handler = observer.handler
         handler._state.stop_event.set()
@@ -602,7 +597,7 @@ def test_refresh_related_skipped_inline_in_watcher(
     )
     try:
         observer.inject(FileModifiedEvent(str(note)))
-        _wait_for(lambda: spy.call_count >= 1, timeout=2.0)
+        _wait_for(lambda: spy.call_count >= 1)
     finally:
         handler = observer.handler
         handler._state.stop_event.set()
@@ -700,7 +695,7 @@ def test_refresh_singleflight_pending(tmp_path: Path) -> None:
     try:
         # Step 1: First schedule → spawns daemon thread → calls fake_runner → blocks.
         handler._schedule_refresh_related()
-        _wait_for(lambda: len(call_log) >= 1, timeout=2.0)
+        _wait_for(lambda: len(call_log) >= 1)
 
         # Step 2: Second schedule while first is in flight → pending, NOT a new thread.
         handler._schedule_refresh_related()
@@ -712,7 +707,7 @@ def test_refresh_singleflight_pending(tmp_path: Path) -> None:
 
         # Step 3: Release the block → first runner returns → loop drains pending → runs once more.
         block_event.set()
-        _wait_for(lambda: len(call_log) >= 2, timeout=2.0)
+        _wait_for(lambda: len(call_log) >= 2)
 
         assert len(call_log) == 2, (
             f"Expected exactly 2 runner invocations (1 in-flight + 1 drained), "
@@ -787,10 +782,7 @@ def test_scoped_polling_does_not_pick_up_new_top_level_dir(tmp_path: Path) -> No
     thread.start()
 
     # Wait until observer.start() fires — all schedule() calls precede it.
-    _wait_for(
-        lambda: bool(observer_holder) and observer_holder[0].started,
-        timeout=2.0,
-    )
+    _wait_for(lambda: bool(observer_holder) and observer_holder[0].started)
     obs = observer_holder[0]
 
     # Startup must have scheduled exactly two paths:

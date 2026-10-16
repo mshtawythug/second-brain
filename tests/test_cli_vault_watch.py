@@ -25,11 +25,13 @@ def _write(path: Path, fields: dict[str, Any], body: str) -> None:
 
 
 # Reuse the FakeObserver from the unit tests to keep the test surface DRY.
+# ``_wait_for`` comes from the shared helper, not through that test module, so
+# the call-site guard in tests/test_thread_wait.py can see this file.
 from tests.test_vault_watcher import (  # noqa: E402
     _FakeObserver,
-    _wait_for,
     _wait_for_observer,
 )
+from tests.thread_wait import wait_for as _wait_for  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -103,7 +105,6 @@ def test_watch_smoke(
                     "SELECT count(*) FROM documents WHERE id = %s", (new_id,)
                 ).fetchone()[0]
                 == 1,
-                timeout=5.0,
             )
             # Trigger graceful shutdown.
             state = observer.handler._state
