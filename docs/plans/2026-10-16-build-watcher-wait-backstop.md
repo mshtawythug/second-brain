@@ -172,3 +172,91 @@ the mutation lands its declared count; red; the needle on an `E`/`>` line; resto
 
 Counter-proof for M6: at base (`8900725`), PR #31's guard **passes** with that exact import and its
 `timeout=5.0` in place, so the hole was real.
+
+## Evidence (2026-10-16)
+
+The probe was not committed. It is a pytest plugin, run against a `git archive 8900725` copy of
+`tests/`. It replaced the base file's `_wait_for` with a twin that had a 30 s cap, and it recorded the
+elapsed time of every wait by call-site line. It ran on a private sibling database
+(`second_brain_test_bwflake_probe`) on the 5434 instance. The burners were 40 tracked `while True: pass`
+processes on a 10-core machine. Each one was killed by PID afterwards, and `ps -p` confirmed 0 survivors.
+
+| Run | Load avg | pytest runs | waits | max wait | median (timer/build sites) | ≥ 1.0 s |
+|---|---|---|---|---|---|---|
+| ambient (other sessions' suites) | 72–84 | 10 | 230 | **0.147 s** (L561, 7 % of 2.0 s) | 0.05–0.07 s | 0 |
+| ambient | 84–116 | 15 | 345 | **0.150 s** (L528, 8 % of 2.0 s) | 0.06 s | 0 |
+| +40 burners | 119–155 | 15 | 345 | 0.089 s | 0.06 s | 0 |
+| +40 burners | 162–194 | 20 | 460 | 0.095 s | 0.06 s | 0 |
+
+**What this shows, and what it does not.**
+
+- **The near-miss distribution is far from the budget on this machine.** The worst wait was 0.150 s, 8 % of
+  2.0 s, across 1,380 waits. The waits on the debounce timer and the build (L528/561/564/605) cluster at the 0.05 s
+  debounce plus a few ms, and the waits on observer start and the refresh thread are ~0. Unlike the
+  vault watcher's racing-edit test (1.945 s of 2.0 s at load ~95, PR #31), nothing on these paths does
+  DB round trips or an embed. `build_and_swap` is mocked. Pure CPU burners at load ~190 did not move
+  the tail. **No `_wait_for` near-miss was observed, and no flake from this file was reproduced.**
+  The change is made on the class argument, not on an observed failure. These are positive waits, a
+  passing run never pays the deadline, and the shared backstop makes "starved enough to miss 2.0 s"
+  impossible rather than merely unlikely. The flake was latent here, not demonstrated.
+- **One unexplained red.** In the first ambient batch, run 10 of 10 (load ~76) ended `1 failed, 22
+  passed`. The probe pinned every `_wait_for` at a 30 s cap, so that failure was **not** a `_wait_for`
+  deadline. Candidates are the two `acquire(timeout=2.0/3.0)` budgets this PR replaces, or an
+  absence-window assertion. The runner kept only pytest's summary line (a probe bug), so the test id
+  was lost. Failure capture was added, and 50 further base runs (15 ambient, 35 with burners, load
+  84–194) did not reproduce it. It is recorded here so the next person does not attribute it to
+  `_wait_for`.
+- **The fixed file, 20/20 green** in 20 separate pytest invocations under the 40 burners, at load
+  162–194.
+
+## Mutation results (2026-10-16)
+
+The harness ran each row with `PYTHONDONTWRITEBYTECODE=1` against `tests/test_thread_wait.py`. It
+checked the five clauses mechanically: unmutated → `7 passed`; the replacement count landed as
+declared; rc ≠ 0; the needle on an `E`/`>` line; `git checkout` → green with `git status` clean.
+**10/10 PASS.** These are the red lines:
+
+- M1, M2, M3: `E  AssertionError: wait_for called with an explicit timeout at ['wiki/test_build_watcher.py:556']; …`
+- M4: `E  AssertionError: wait_for's timeout backstop was lowered to 4.0s; …`
+- M5: `E  AssertionError: a test module defines its own wait helper at ['wiki/test_build_watcher.py:48']; …`
+- M6: `E  AssertionError: wait helper imported from a module other than tests.thread_wait: ['test_cli_vault_watch.py:30 (imports _wait_for from tests.test_vault_watcher)']`
+- M7: `E  AssertionError: wait_for called with an explicit timeout at ['wiki/test_build_watcher.py:557']; …`
+- M8: `E  AssertionError: importers not discovered: ['test_cli_vault_watch.py', 'test_vault_watcher.py', 'wiki/test_build_watcher.py']; …`
+- M9: `E  AssertionError: wait_for's signature default was lowered to 2.0s; …`
+- M10 (added during the run): `_wait_for = functools.partial(wait_for, timeout=2.0)` in place of the
+  import → `E  AssertionError: a test module defines its own wait helper at ['wiki/test_build_watcher.py:49']; …`
+
+**Counter-proof for M6:** in the `8900725` archive, PR #31's
+`test_wait_for_timeout_is_a_backstop_at_every_call_site` → `1 passed`, with
+`tests/test_cli_vault_watch.py:106` carrying `timeout=5.0` through the re-export import.
+
+**Known residue in the guard.** A `functools.partial(wait_for, timeout=…)` bound to any name *other*
+than `wait_for`/`_wait_for` is not caught. The same holds for a wrapper function with a new name that
+forwards a timeout. The guard catches the shapes that have actually occurred (a local copy, a
+re-export, a per-site keyword/positional/splat timeout). Catching a renamed wrapper would mean
+data-flow analysis, which is out of proportion for a test-suite convention.
+
+## Verification
+
+- `ruff check`, `mypy src/`: zero.
+- `tests/test_thread_wait.py`, `tests/wiki/test_build_watcher.py`, `tests/test_cli_vault_watch.py`,
+  `tests/test_vault_watcher.py`, and `tests/test_repo_hygiene_files.py` (it reads `docs/`):
+  **109 passed**, on a sibling database.
+- No test reads `docs/handoff/2026-10-13-merge-all-handoff.md` or this plan.
+- A full suite in `bin/brain-ci`'s environment against the sibling DB was started on the commit that
+  adds this section. Its result goes in the team-lead report, not here, because a section cannot
+  report a run of the commit that contains it. GitHub CI on the PR is the full-suite evidence of
+  record.
+
+## Handoff doc (Deliverable 2)
+
+`docs/handoff/2026-10-13-merge-all-handoff.md` is committed from the main checkout's uncommitted copy,
+with three edits:
+
+- The build-watcher follow-up is marked as fixed by this PR.
+- The absence-window follow-up names the build watcher's tests as the same class.
+- The `#17–#21` date reads 2026-10-12/13 instead of 2026-10-13. `1a1d068` (#17) merged on 2026-10-12.
+
+All 13 merge SHAs in its table were checked against `git log --merges second-brain/master`, and each
+names its own PR. Every referenced repo path exists on master. It contains no PII and no golden-corpus
+query text.
