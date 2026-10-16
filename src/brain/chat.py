@@ -19,18 +19,27 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
 
 from .config import Config, keep_alive_wire_value
-from .errors import EnrichmentError, OllamaUnavailable
+from .errors import EnrichmentError, OllamaContextOverflow, OllamaUnavailable
+from .ollama_budget import CHAT_DEFAULT_NUM_PREDICT, NUM_PREDICT_RETRY_FACTOR
 
 _logger = logging.getLogger(__name__)
 
 # Default completion-length cap. Matches the historical enricher default so the
-# delegated summary/tag calls keep their exact prior budget.
-DEFAULT_NUM_PREDICT = 256
+# delegated summary/tag calls keep their exact prior budget. Bound from
+# ``ollama_budget`` (not restated) because ``num_ctx`` is validated against it.
+DEFAULT_NUM_PREDICT = CHAT_DEFAULT_NUM_PREDICT
+
+# An HTTP error body naming the context window: Ollama's ``promptTooLongMessage``
+# ("... longer than the context length ...") and llama-server's exceed-context
+# error ("... exceeds the available context size ..."). Matched on the body,
+# not the status, because the runner's variant can surface as a 5xx.
+_CONTEXT_OVERFLOW_RE = re.compile(r"context (length|size)", re.IGNORECASE)
 
 # One chat message: ``{"role": ..., "content": ...}``.
 ChatMessage = dict[str, str]
@@ -116,7 +125,8 @@ def chat_json(
             ignored here (they exist for the caller's own documentation of the
             expected shape).
         cfg: Supplies the Ollama host, default model (``cfg.enrich_model``),
-            ``keep_alive``, and default timeout (``cfg.enrich_timeout_seconds``).
+            ``keep_alive``, ``num_ctx`` (``cfg.ollama_num_ctx``), and default
+            timeout (``cfg.enrich_timeout_seconds``).
         model: Per-call model override; defaults to ``cfg.enrich_model``.
         num_predict: Per-call completion-length cap; defaults to
             :data:`DEFAULT_NUM_PREDICT`.
@@ -147,6 +157,7 @@ def chat_json(
             messages=messages,
             required_keys=required_keys,
             keep_alive=cfg.ollama_keep_alive,
+            num_ctx=cfg.ollama_num_ctx,
             num_predict=resolved_num_predict,
         )
 
@@ -158,6 +169,7 @@ def chat_json_with_client(
     messages: list[ChatMessage],
     required_keys: tuple[str, ...],
     keep_alive: str,
+    num_ctx: int,
     num_predict: int = DEFAULT_NUM_PREDICT,
 ) -> dict[str, Any]:
     """Issue an ``/api/chat`` JSON-mode call with one retry on parse failure.
@@ -166,7 +178,9 @@ def chat_json_with_client(
     ``client`` and an explicit ``messages`` list so both the ``Config``-based
     :func:`chat_json` (single user message, per-call client) and
     :class:`brain.enrichment.OllamaEnricher` (system + user messages, persistent
-    injected client) route through one implementation.
+    injected client) route through one implementation. ``num_ctx`` is required
+    (no default) so a new transport caller cannot silently fall back to the
+    Ollama server's global context window.
 
     Returns the parsed JSON object on success. Raises
     :class:`OllamaUnavailable` on transient transport errors (no retry — fail
@@ -182,6 +196,7 @@ def chat_json_with_client(
                 model=model,
                 messages=messages,
                 keep_alive=keep_alive,
+                num_ctx=num_ctx,
                 num_predict=current_num_predict,
             )
         except OllamaUnavailable:
@@ -197,14 +212,16 @@ def chat_json_with_client(
             # OR a decode failure that lands at/after the end of the received text
             # (cut mid-object — e.g. "Expecting ',' delimiter" / "Expecting
             # property name …" at EOF). Either way the SAME budget would
-            # re-truncate deterministically at temperature 0.0, so double
-            # ``num_predict`` for the retry to give the next call room to finish.
+            # re-truncate deterministically at temperature 0.0, so grow
+            # ``num_predict`` by the shared factor for the retry. The factor
+            # lives in ``ollama_budget`` because ``num_ctx`` is validated
+            # against the grown budget, not the first one.
             # A genuinely malformed response (garbage decoded well before EOF, e.g.
             # "Expecting value" at position 0) is NOT truncation and doesn't bump —
             # the retry there is a deliberate best-effort second try. Schema /
             # non-dict failures don't reach this branch.
             if "Unterminated" in exc.msg or exc.pos >= len(response_text):
-                current_num_predict *= 2
+                current_num_predict *= NUM_PREDICT_RETRY_FACTOR
             _logger.debug(
                 "chat attempt %d: JSON decode failed (%s); response=%r",
                 attempt,
@@ -237,6 +254,7 @@ def _chat_once(
     model: str,
     messages: list[ChatMessage],
     keep_alive: str,
+    num_ctx: int,
     num_predict: int = DEFAULT_NUM_PREDICT,
 ) -> str:
     """Single ``/api/chat`` round-trip returning the inner content string.
@@ -246,6 +264,13 @@ def _chat_once(
     :class:`OllamaUnavailable` (CLAUDE.md "no bare except" — only
     ``httpx.HTTPError`` and ``ValueError`` are caught here, matching the
     embedder's pattern). ``num_predict`` caps the completion length.
+
+    ``num_ctx`` sizes the runner's context window to the brain's own work
+    instead of the server default, and ``truncate`` / ``shift`` are both off so
+    a prompt that does not fit is an HTTP error — mapped to
+    :class:`OllamaContextOverflow` — never a silent truncation. Every brain call
+    sends the same ``num_ctx`` and ``shift``: either one differing from the
+    loaded runner's makes Ollama reload the model.
     """
     request_body = {
         "model": model,
@@ -253,7 +278,13 @@ def _chat_once(
         "format": "json",
         "keep_alive": keep_alive_wire_value(keep_alive),
         "messages": messages,
-        "options": {"temperature": 0.0, "num_predict": num_predict},
+        "options": {
+            "temperature": 0.0,
+            "num_predict": num_predict,
+            "num_ctx": num_ctx,
+        },
+        "truncate": False,
+        "shift": False,
     }
     try:
         response = client.post("/api/chat", json=request_body)
@@ -264,6 +295,14 @@ def _chat_once(
         body_preview = (
             exc.response.text[:200] if exc.response is not None else "<no body>"
         )
+        if _CONTEXT_OVERFLOW_RE.search(body_preview):
+            # Checked before the 5xx branch: an over-window prompt is permanent
+            # for this request, not a down server.
+            raise OllamaContextOverflow(
+                f"Ollama refused a prompt larger than num_ctx={num_ctx} "
+                f"(HTTP {status}: {body_preview}); raise BRAIN_OLLAMA_NUM_CTX "
+                "or shrink the input"
+            ) from exc
         if status >= 500:
             raise OllamaUnavailable(
                 f"Ollama returned HTTP {status}: {body_preview}"

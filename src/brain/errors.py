@@ -306,6 +306,19 @@ class OllamaUnavailable(EnrichmentError):
     """
 
 
+class OllamaContextOverflow(EnrichmentError):
+    """Ollama refused a prompt larger than the requested ``num_ctx``.
+
+    The chat transport sends ``truncate: false`` / ``shift: false`` so an
+    over-window prompt is an HTTP error instead of a silent truncation; this is
+    that error. Permanent for the request, so it is deliberately NOT an
+    :class:`OllamaUnavailable` (which callers treat as "server down, stop
+    everything"): a GraphRAG extraction skips the one chunk, an ingest hook
+    leaves that one summary NULL. The fix is a larger ``BRAIN_OLLAMA_NUM_CTX``
+    or a smaller input.
+    """
+
+
 class AudioError(BrainError):
     """Raised when ``brain audio`` script generation fails unrecoverably (Plan 04).
 

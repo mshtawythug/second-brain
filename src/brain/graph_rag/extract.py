@@ -66,6 +66,12 @@ constructed by the G2-c reconcile from this same property.
 **Gating.** Concepts are default-OFF (``BRAIN_GRAPH_CONCEPTS=false``); this
 module is dormant until G2-c wires it behind that flag. G2-b builds and
 unit-tests the extractor in isolation only.
+
+**Over the 800-line ceiling** (885 at the branch base, CLAUDE.md table). The
+one growth since: ``make_extractor`` threads ``BRAIN_OLLAMA_NUM_CTX`` into its
+enricher, and the chunk constants are bound from ``brain.ollama_budget`` (where
+``num_ctx`` is validated against them) instead of restated (perf/ollama-num-ctx,
+reasoned inline). Re-derive the size with ``wc -l``.
 """
 from __future__ import annotations
 
@@ -77,6 +83,7 @@ from typing import Any, Protocol, runtime_checkable
 from ..config import Config
 from ..enrichment import OllamaEnricher
 from ..errors import EnrichmentError, OllamaUnavailable
+from ..ollama_budget import EXTRACT_CHUNK_OVERLAP_TOKENS, EXTRACT_CHUNK_TARGET_TOKENS
 from .cooccur import DEFAULT_MAX_ENTITIES_PER_DOC
 
 _logger = logging.getLogger(__name__)
@@ -322,13 +329,14 @@ _SEPARATOR_RE = re.compile(r"[\W_]+", re.UNICODE)
 # Per-chunk token budget for the LLM extraction calls. A document longer than
 # this is split into multiple chunks (one model call each). Independent of the
 # enrich-summary budget (no enrich<->graph config coupling); not env-tunable in
-# G2 (YAGNI — promote to a knob only if the eval gate needs it).
-_DEFAULT_CHUNK_TARGET_TOKENS = 1500
+# G2 (YAGNI — promote to a knob only if the eval gate needs it). The values live
+# in ``ollama_budget``: one extraction call must fit BRAIN_OLLAMA_NUM_CTX.
+_DEFAULT_CHUNK_TARGET_TOKENS = EXTRACT_CHUNK_TARGET_TOKENS
 
 # Overlap between consecutive extraction chunks. A small overlap reduces the
 # chance an entity straddling a chunk boundary is missed; cross-chunk repeats
 # are harmless (dedup collapses them, positions are computed over the full doc).
-_DEFAULT_CHUNK_OVERLAP_TOKENS = 100
+_DEFAULT_CHUNK_OVERLAP_TOKENS = EXTRACT_CHUNK_OVERLAP_TOKENS
 
 # Raw-text word tokenizer for positions + canonicalization. ``\w+`` over the
 # lower-cased text yields chunker-independent word ordinals (spec §4 D4).
@@ -610,6 +618,9 @@ def make_extractor(cfg: Config) -> OllamaExtractor:
         model=cfg.graph_extract_model,
         timeout=cfg.enrich_timeout_seconds,
         keep_alive=cfg.ollama_keep_alive,
+        # Over-ceiling growth (module docstring): the shared BRAIN_OLLAMA_NUM_CTX,
+        # so extraction and enrichment on one model keep one Ollama runner.
+        num_ctx=cfg.ollama_num_ctx,
     )
     return OllamaExtractor(
         enricher=enricher,

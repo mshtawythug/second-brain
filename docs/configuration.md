@@ -728,6 +728,7 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `BRAIN_EMBEDDER` | `arctic` | Embedder backend: `arctic`, `voyage`, or `qwen3`. Must match the dim baked into the database by `brain init`. |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL. Used by `arctic` and `qwen3`; ignored by `voyage`. |
 | `QWEN3_MODEL` | `qwen3-embedding:8b` | Ollama model tag for the qwen3 backend. |
+| `BRAIN_OLLAMA_NUM_CTX` | `8192` | Context window the brain requests on every Ollama chat call (`options.num_ctx`), instead of inheriting the server's `OLLAMA_CONTEXT_LENGTH`. The KV cache scales with it (llama3.1:8b, q8_0: 544 MiB at 8192 vs 4352 MiB at 65536). Unset, it grows past 8192 only as far as a raised `BRAIN_ENRICH_MAX_INPUT_TOKENS` / `BRAIN_AUDIO_MAX_INPUT_TOKENS` needs; an explicit value too small for a capped call (those two caps, or the GraphRAG extract chunk) fails at startup; an over-window prompt is refused by Ollama, never silently truncated. |
 | `VOYAGE_API_KEY` | (required for `voyage`) | Voyage AI key. Ignored by the local backends. |
 | `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault folder for authored notes, ingested mirrors, wiki rendering, and MCP note tools. |
 | `BRAIN_USER_EMAIL` | unset | Owner email used by the rendered Gmail thread view's "Show only my replies" filter. Set it before wiki builds if you use that filter. |
