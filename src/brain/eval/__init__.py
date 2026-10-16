@@ -80,7 +80,14 @@ from .graph_runner import (
     GraphThemesEvalResult,
     run_graph_eval,
 )
-from .runner import CategorySummary, EvalReport, EvalResult, degraded_results, run_eval
+from .runner import (
+    CategorySummary,
+    EvalReport,
+    EvalResult,
+    degraded_results,
+    embed_failure_message,
+    run_eval,
+)
 
 __all__ = [
     # Corpus
@@ -100,6 +107,7 @@ __all__ = [
     "CategorySummary",
     "run_eval",
     "degraded_results",
+    "embed_failure_message",
     # Baseline I/O
     "BaselineDiff",
     "QueryDiff",

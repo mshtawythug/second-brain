@@ -1,12 +1,17 @@
 """Integration tests for brain.eval.runner — run_eval() and _normalize_ids()."""
 
 import hashlib
+import logging
 import unittest.mock
 from datetime import UTC, date, datetime, timedelta
 
+import httpx
 import psycopg
 import pytest
+from voyageai import error as voyage_error
 
+from brain.embeddings import OllamaEmbedContextOverflow, OllamaEmbedError, VoyageEmbedError
+from brain.errors import EmbedError
 from brain.eval.corpus import EvalQuery
 from brain.eval.errors import EvalCorpusError
 from brain.eval.runner import (
@@ -16,7 +21,8 @@ from brain.eval.runner import (
     degraded_results,
     run_eval,
 )
-from brain.ingest import ExtractedDoc, ingest_document
+from brain.ingest import Embedder, ExtractedDoc, ingest_document
+from tests.embed_failure_doubles import OLLAMA_OVERFLOW, arctic_failing_on, voyage_failing_on
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -168,13 +174,13 @@ def test_run_eval_resolves_8char_prefixes(test_db, fake_embedder):
 
 def test_run_eval_handles_ollama_failure_gracefully(test_db, fake_embedder):
     """When the embedder raises OllamaEmbedError, actual_doc_ids=[] and metrics=0.0."""
-    from brain.embeddings import OllamaEmbedError
-
     _seed(test_db, fake_embedder, "Embed Fail Doc", "embedding failure test document")
     queries = [_make_query("embedding failure test", "00000000")]
 
-    # Patch embed on the fake_embedder to raise OllamaEmbedError for this test.
-    with unittest.mock.patch.object(fake_embedder, "embed", side_effect=OllamaEmbedError("test")):
+    # Patch embed on the fake_embedder to raise a TRANSIENT OllamaEmbedError (a
+    # timeout) for this test; a permanent one aborts the run instead.
+    timeout = OllamaEmbedError("test", transient=True)
+    with unittest.mock.patch.object(fake_embedder, "embed", side_effect=timeout):
         report = run_eval(test_db, embedder=fake_embedder, queries=queries)
 
     assert len(report.results) == 1
@@ -231,6 +237,143 @@ def test_degraded_flag_does_not_stick_after_a_failed_query(
     report = run_eval(test_db, embedder=make_flaky_embedder({failing}), queries=queries)
 
     assert [r.degraded for r in report.results] == [False, True, False]
+
+
+# ---------------------------------------------------------------------------
+# Every backend, transient vs permanent
+# (spec docs/specs/2026-10-16-eval-degraded-all-embedders-design.md)
+#
+# Real ArcticEmbedder / VoyageEmbedder over fake transports, so the backend's
+# own classification and run_eval's handling are exercised together. Failing
+# texts are unique per test: brain.search caches query embeds per embedder.
+# ---------------------------------------------------------------------------
+
+
+def test_run_eval_degrades_a_voyage_rate_limited_query(test_db, fake_embedder, caplog):
+    """Rule-12 regression (PR #33 gap 1): run_eval caught only OllamaEmbedError,
+    so under BRAIN_EMBEDDER=voyage ONE rate-limited query escaped as a
+    VoyageEmbedError and the whole run was lost."""
+    doc_id = _seed(test_db, fake_embedder, "Voyage Degrade Doc", "voyagedeg healthy content")
+    failing = "voyagedeg rate limited query"
+    embedder = voyage_failing_on(
+        fake_embedder, {failing: lambda: voyage_error.RateLimitError("synthetic 429")}
+    )
+    queries = [_make_query("voyagedeg healthy content", doc_id), _make_query(failing, doc_id)]
+
+    with caplog.at_level(logging.WARNING, logger="brain.eval.runner"):
+        report = run_eval(test_db, embedder=embedder, queries=queries)
+
+    # The per-query WARNING names the backend's class, not a hard-coded one.
+    [warning] = [r.getMessage() for r in caplog.records if r.name == "brain.eval.runner"]
+    assert warning.startswith("VoyageEmbedError for query ")
+    healthy, broken = report.results
+    assert healthy.degraded is False
+    assert healthy.actual_doc_ids
+    assert broken.degraded is True
+    assert (broken.ndcg_at_5, broken.mrr, broken.recall_at_20) == (0.0, 0.0, 0.0)
+    assert degraded_results(report) == [broken]
+
+
+def test_run_eval_aborts_on_a_permanent_voyage_failure(test_db, fake_embedder):
+    """A bad API key fails every query the same way: abort, do not degrade."""
+    doc_id = _seed(test_db, fake_embedder, "Voyage Auth Doc", "voyageauth content")
+    failing = "voyageauth rejected key query"
+    embedder = voyage_failing_on(
+        fake_embedder, {failing: lambda: voyage_error.AuthenticationError("synthetic 401")}
+    )
+
+    with pytest.raises(VoyageEmbedError) as caught:
+        run_eval(test_db, embedder=embedder, queries=[_make_query(failing, doc_id)])
+    assert caught.value.transient is False
+
+
+def test_run_eval_degrades_an_ollama_timeout(test_db, fake_embedder):
+    """PR #33's observed case, now at the real-backend level: a read timeout is
+    classified transient by the Ollama transport and degrades only its row."""
+    doc_id = _seed(test_db, fake_embedder, "Ollama Timeout Doc", "ollamatimeout content")
+    failing = "ollamatimeout slow query"
+    embedder = arctic_failing_on(fake_embedder, {failing: httpx.ReadTimeout})
+    queries = [_make_query("ollamatimeout content", doc_id), _make_query(failing, doc_id)]
+
+    report = run_eval(test_db, embedder=embedder, queries=queries)
+
+    assert [r.degraded for r in report.results] == [False, True]
+
+
+def test_run_eval_aborts_on_an_ollama_model_not_found(test_db, fake_embedder):
+    """Rule-12 regression (PR #33 gap 2): HTTP 404 (model not pulled) degraded
+    every row and advised "retry", exiting 0 with every metric 0.0. No retry
+    fixes a missing model; the run aborts with the backend's error instead."""
+    doc_id = _seed(test_db, fake_embedder, "Ollama Missing Doc", "ollamamissing content")
+    failing = "ollamamissing model query"
+    embedder = arctic_failing_on(fake_embedder, {failing: 404})
+
+    with pytest.raises(OllamaEmbedError) as caught:
+        run_eval(test_db, embedder=embedder, queries=[_make_query(failing, doc_id)])
+    assert caught.value.transient is False
+    assert "404" in str(caught.value)
+
+
+def test_run_eval_aborts_on_an_embed_context_overflow(test_db, fake_embedder):
+    """An over-window query (PR #36) overflows the same way on every run, so a
+    degraded row would block --record-baseline forever while advising a retry.
+    run_eval re-raises it (spec 2026-10-16-eval-degraded-all-embedders §3.6)."""
+    doc_id = _seed(test_db, fake_embedder, "Overflow Abort Doc", "overflowabort content")
+    failing = "overflowabort oversize query"
+    embedder = arctic_failing_on(fake_embedder, {failing: OLLAMA_OVERFLOW})
+    queries = [_make_query("overflowabort content", doc_id), _make_query(failing, doc_id)]
+
+    with pytest.raises(OllamaEmbedContextOverflow) as caught:
+        run_eval(test_db, embedder=embedder, queries=queries)
+    assert caught.value.transient is False
+
+
+class _UnclassifiedEmbedError(EmbedError):
+    """An embed error from code that never set ``transient``."""
+
+
+class _UnclassifiedFailingEmbedder:
+    """Protocol-conforming double whose query embeds raise an unclassified error."""
+
+    def __init__(self, inner: Embedder) -> None:
+        self._inner = inner
+        self.dim = inner.dim
+
+    def embed(self, texts: list[str], *, input_type: str = "document") -> list[list[float]]:
+        if input_type == "query":
+            raise _UnclassifiedEmbedError("synthetic unclassified failure")
+        return self._inner.embed(texts, input_type=input_type)
+
+    def count_tokens(self, text: str) -> int:
+        return self._inner.count_tokens(text)
+
+
+def test_run_eval_aborts_on_an_unclassified_embed_error(test_db, fake_embedder):
+    """Degrading is a tolerance and needs positive evidence: an embed error whose
+    raiser never said ``transient=True`` aborts the run."""
+    doc_id = _seed(test_db, fake_embedder, "Unclassified Doc", "unclassified content")
+    embedder = _UnclassifiedFailingEmbedder(fake_embedder)
+
+    with pytest.raises(_UnclassifiedEmbedError):
+        run_eval(
+            test_db, embedder=embedder, queries=[_make_query("unclassified query", doc_id)]
+        )
+
+
+def test_embed_failure_message_wording_by_kind():
+    """Names the class and carries the backend's text; the advice follows the
+    kind. Built without any query text — the function never receives one."""
+    from brain.eval.runner import embed_failure_message
+
+    retry = embed_failure_message(VoyageEmbedError("synthetic 429", transient=True), command="eval")
+    abort = embed_failure_message(OllamaEmbedError("HTTP 404: gone"), command="eval --answer")
+
+    assert retry.startswith("eval: ")
+    assert "VoyageEmbedError" in retry and "synthetic 429" in retry
+    assert "retry" in retry and "a retry will not fix" not in retry
+    assert abort.startswith("eval --answer: ")
+    assert "OllamaEmbedError" in abort and "HTTP 404: gone" in abort
+    assert "a retry will not fix" in abort
 
 
 def test_degraded_results_empty_for_a_clean_run(test_db, fake_embedder):

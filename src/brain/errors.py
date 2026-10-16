@@ -63,7 +63,19 @@ class EmbedError(BrainError):
     EmbedError`` once instead of enumerating concrete backends. Inherits
     :class:`BrainError` so the CLI / MCP layers map it without a
     framework-specific import.
+
+    ``transient`` says whether the SAME request may succeed later (a timeout, a
+    dropped connection, HTTP 408 / 429 / 5xx). The backend sets it at the raise
+    site, because only the backend still holds the cause; ``brain eval``
+    degrades a row on a transient failure and aborts on a permanent one. It
+    defaults to ``False``: a tolerance needs positive evidence, so an error
+    nobody classified aborts loudly rather than reading as "retry". Spec:
+    ``docs/specs/2026-10-16-eval-degraded-all-embedders-design.md``.
     """
+
+    def __init__(self, *args: object, transient: bool = False) -> None:
+        super().__init__(*args)
+        self.transient = transient
 
 
 class AgeBootstrapError(BrainError):

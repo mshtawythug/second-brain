@@ -85,8 +85,10 @@ class EmbedDisabledError(EmbedError):
 
     A sibling of :class:`OllamaEmbedError` / :class:`VoyageEmbedError` — it is an
     :class:`~brain.errors.EmbedError`, so every ``except EmbedError`` handler
-    (the MCP server's ``_wrap_embed_error``, ``brain eval``'s per-query
-    tolerance) catches it uniformly. Distinct from the transport-failure
+    (e.g. the MCP server's ``_wrap_embed_error``) catches it uniformly. It is
+    never ``transient``: ``brain eval`` would abort on it rather than degrade a
+    row, though no eval path reaches it (``hybrid_search`` runs FTS-only under
+    this backend and never calls ``embed``). Distinct from the transport-failure
     siblings because nothing *failed*: the ``NullEmbedder`` never produces
     vectors by design, so any code path that reaches an actual embed call under
     the ``none`` backend (e.g. ``brain ask`` / ``graphrag --mode fuse``) gets a
@@ -108,9 +110,12 @@ class OllamaEmbedContextOverflow(OllamaEmbedError):
     rather than embedding a truncated prefix. A subclass of
     :class:`OllamaEmbedError`, so every existing ``except EmbedError`` /
     ``except OllamaEmbedError`` handler still catches it; the type exists so the
-    message can name the fix (``BRAIN_OLLAMA_EMBED_NUM_CTX``), and a caller
-    could tell a permanent over-window input from a transient transport failure
-    by it (none does yet; ``brain eval`` still files it as a degraded row).
+    message can name the fix (``BRAIN_OLLAMA_EMBED_NUM_CTX``). It is never
+    ``transient`` (constructed with the default): the same input overflows the
+    same window every time. ``brain eval`` uses that distinction through
+    :attr:`~brain.errors.EmbedError.transient`: ``run_eval`` re-raises it
+    instead of degrading the row, and the command exits 1 with this message
+    (spec ``docs/specs/2026-10-16-eval-degraded-all-embedders-design.md`` §3.6).
     """
 
 
@@ -123,6 +128,59 @@ class VoyageEmbedError(EmbedError):
     the Ollama backends raise instead of a leaked SDK exception. The originating
     SDK error is preserved as ``__cause__`` (``raise ... from e``).
     """
+
+
+# Transient vs permanent embed failures (``EmbedError.transient``): one rule for
+# both transports, by HTTP meaning rather than by vendor. Transient = the same
+# request may succeed later: a timeout, a transport failure, HTTP 408 / 429 /
+# 5xx (Ollama answers 500 when a model load runs out of memory). Everything else
+# — any other 4xx (a model not pulled, a bad key), an unusable response, a
+# host URL with no scheme (``UnsupportedProtocol``) — is permanent. A wrong
+# host, port or DNS name is a ``ConnectError``: transient, by design (start
+# the server, or fix the URL, and run again). ``brain eval`` degrades a row only on a
+# transient failure. Spec docs/specs/2026-10-16-eval-degraded-all-embedders-design.md.
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 429})
+_OLLAMA_TRANSIENT_TRANSPORT_ERRORS: tuple[type[httpx.HTTPError], ...] = (
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+)
+# Names, not classes: ``voyageai`` is an optional dependency, imported lazily.
+# The SDK's own retry predicate is RateLimitError | ServiceUnavailableError |
+# Timeout; a transport failure, a 500 and ``TryAgain`` complete the HTTP rule.
+# The class alone is not enough: voyageai 0.5.0 types only 500, 502/503/504 and
+# a 4xx whose body is JSON with ``detail``; any other error response (a 429
+# HTML page, a 408, a 520) arrives as a plain ``APIError`` carrying
+# ``http_status``, which ``_is_transient_voyage_error`` reads too.
+_VOYAGE_TRANSIENT_ERROR_NAMES = (
+    "RateLimitError",
+    "ServiceUnavailableError",
+    "Timeout",
+    "APIConnectionError",
+    "ServerError",
+    "TryAgain",
+)
+
+
+def _is_transient_status(status: int) -> bool:
+    """True for an HTTP status a retry may clear: 408, 429 or any 5xx."""
+    return status in _TRANSIENT_HTTP_STATUSES or status >= 500
+
+
+def _is_transient_voyage_error(exc: Exception) -> bool:
+    """True for a retryable Voyage SDK error: by class, or by its HTTP status.
+
+    The status check covers responses the SDK leaves as a plain ``APIError``
+    (see :data:`_VOYAGE_TRANSIENT_ERROR_NAMES`), so the 408 / 429 / 5xx rule
+    holds whatever body the server sent.
+    """
+    from voyageai import error as voyage_error
+
+    transient = tuple(getattr(voyage_error, name) for name in _VOYAGE_TRANSIENT_ERROR_NAMES)
+    if isinstance(exc, transient):
+        return True
+    status = getattr(exc, "http_status", None)
+    return isinstance(status, int) and _is_transient_status(status)
 
 
 class _OllamaEmbedderBase:
@@ -214,10 +272,14 @@ class _OllamaEmbedderBase:
             if CONTEXT_OVERFLOW_RE.search(body[:200]):
                 raise self._overflow_error(batch, e.response.status_code, body) from e
             raise OllamaEmbedError(
-                f"Ollama returned HTTP {e.response.status_code}: {body}"
+                f"Ollama returned HTTP {e.response.status_code}: {body}",
+                transient=_is_transient_status(e.response.status_code),
             ) from e
         except httpx.HTTPError as e:
-            raise OllamaEmbedError(f"Ollama request failed: {e}") from e
+            raise OllamaEmbedError(
+                f"Ollama request failed: {e}",
+                transient=isinstance(e, _OLLAMA_TRANSIENT_TRANSPORT_ERRORS),
+            ) from e
         except ValueError as e:
             # json.JSONDecodeError is a ValueError — a 200 OK with non-JSON
             # body would otherwise leak as a raw decode error to callers
@@ -396,7 +458,10 @@ class VoyageEmbedder:
                     texts=batch, model=_VOYAGE_MODEL, input_type=input_type
                 )
             except VoyageError as e:
-                raise VoyageEmbedError(f"Voyage embed request failed: {e}") from e
+                raise VoyageEmbedError(
+                    f"Voyage embed request failed: {e}",
+                    transient=_is_transient_voyage_error(e),
+                ) from e
             out.extend(response.embeddings)
         return out
 

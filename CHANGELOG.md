@@ -56,7 +56,9 @@ git tag scheme:
   q8_0 KV cache of about 3 GiB. At `2048` the cache is about 153 MiB.
 - **An input that does not fit is now an error, never a silent prefix.** The
   brain raises `OllamaEmbedContextOverflow`, which is an `OllamaEmbedError`, so
-  existing handlers still catch it. The message names the knob. Every stored
+  existing handlers still catch it. The message names the knob. `brain eval`
+  treats it as permanent: the run stops with exit `1` and that message instead
+  of scoring the query `0.0` (see Fixed). Every stored
   chunk fits at `2048`: the measured maximum is 1,689 model tokens. A value
   below `1400` (the 700-token chunk ceiling ×2) fails at startup.
 - **The first embed after upgrading reloads the embedding model once.** That
@@ -205,6 +207,20 @@ git tag scheme:
   otherwise compare nothing and pass. Every run with a degraded query warns on
   stderr with the count, and ad-hoc runs still exit `0`. Exit codes
   `1`/`2`/`3` keep their meanings. See `tests/eval/baselines/README.md`.
+- **`brain eval` under `BRAIN_EMBEDDER=voyage` lost the whole run to one rate
+  limit.** The degraded-row tolerance above caught only Ollama's embed error, so
+  a Voyage timeout, rate limit or 5xx escaped as a traceback. Each backend now
+  marks its embed failures *transient* (a timeout, a dropped connection, HTTP
+  408/429/5xx) or *permanent*, and a transient failure on any backend degrades
+  its row and gets the same recording and `--fail-below` refusals.
+- **`brain eval` treated a missing Ollama model like a timeout.** An HTTP 404
+  (model not pulled) degraded every row, exited `0` and advised a retry. A
+  permanent embed failure — a model not pulled, a bad Voyage API key, an
+  unusable response — now stops the run with exit `1` and a message naming the
+  error, before any report or baseline is written.
+- **`brain eval --answer` printed a traceback when the embedder failed.** It
+  now exits `1` with a one-line message, as it already did when the chat model
+  was unavailable.
 - **A tokened `brain ui` opened a page that could not load anything.** The
   opened URL lacked the `#t=` fragment, and the panel printed it only for
   non-loopback binds. Both now carry the token, percent-encoded — a `%` in a

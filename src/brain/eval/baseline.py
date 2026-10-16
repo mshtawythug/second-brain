@@ -57,7 +57,8 @@ def degraded_run_message(degraded: int, total: int, *, action: str) -> str:
     return (
         f"{action}: {degraded} of {total} queries are degraded (their embed call "
         f"failed, so they scored 0.0 without measuring retrieval) — retry when "
-        f"the embedder is healthy (e.g. no other large model loaded in Ollama)."
+        f"the embedder is healthy (e.g. no other large model loaded in Ollama, or "
+        f"a hosted backend's rate limit has cleared)."
     )
 
 

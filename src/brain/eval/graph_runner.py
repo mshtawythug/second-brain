@@ -27,6 +27,16 @@ The blocking thresholds live in the synthetic-graph integration test + the
 flag+baseline precedent belongs to a separate roadmap and does not exist here).
 The record/diff baseline (:mod:`brain.eval.graph_baseline`) is a **canary** that
 round-trips in tests.
+
+**No ``degraded`` flag, unlike** :class:`brain.eval.runner.EvalResult` (spec
+``docs/specs/2026-10-16-eval-degraded-all-embedders-design.md`` section 3.5).
+local and themes never embed. fuse does, but its hybrid leg is never-raise by
+design: a failed query embed re-runs that leg FTS-only and the row is scored on
+a real, weaker ranking. With no CLI, no committed baseline and no gate, and a
+single caller whose embedder cannot fail, a flag would protect nothing. If a CLI
+or committed baseline is ever added, the signal already exists: a fuse row is
+degraded when an embedder was passed and
+``ctx.explanation.matched_filters["hybrid_vector_arm_used"]`` is ``False``.
 """
 from __future__ import annotations
 
