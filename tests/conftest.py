@@ -136,7 +136,9 @@ def isolate_config_dotenv(
     project one, e.g. for a test that writes it), ``BRAIN_HOME`` is unset, and
     every name in ``clear`` is removed from the environment so a developer's
     shell cannot leak a knob into the test. Returns the project ``.env`` path.
-    The one copy of a block that was pasted into many test modules.
+    The shared copy of a block that was pasted into many test modules; other
+    modules still inline it -- find them with
+    ``git grep -l '"_brain_home_dotenv"' -- tests``.
     """
     monkeypatch.chdir(tmp_path)
     project = project_env if project_env is not None else tmp_path / "project.env"

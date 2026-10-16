@@ -119,7 +119,11 @@ table above were always measured over **all** chunks, so they do not change.)*
 the bound that matters for re-embedding is **the corpus maximum (1,689 model
 tokens)**, not the 700 the chunker now guarantees. A window sized only to the
 current chunker (for example 1,400) would refuse 49 (arctic) or 50 (qwen3)
-legacy chunks on the next full re-embed.
+legacy chunks on the next full re-embed. Those two counts were measured over
+**all** chunks (the census query reads `chunks` directly, with no join), and
+every one of them is pre-`0d8a97b`. The two over-ceiling chunks from
+2026-10-08 are under 1,400 in both tokenizers (812/844 arctic, 1,171/966
+qwen3).
 
 ### 2.3 What `/api/embed` does with `options.num_ctx` and `truncate`
 
@@ -380,4 +384,4 @@ reachable defaults.
 | E14 | `embeddings.py`: the overflow test → `if True:` (every HTTP error misfiled as overflow) | 1 | `test_embed_non_overflow_400_stays_plain` |
 | E15 | `embeddings.py`: overflow search window `body[:200]` → `body[:20]` | 1 | `test_embed_context_overflow_is_typed` (the real 0.33.0 body puts the phrase at about index 38) |
 | R4b | `chunker.py`: `overlap_tokens: int = 101` (a drifted literal) | 1 | `test_chunker_defaults_are_the_budgeted_ones` |
-| R4 | `chunker.py`: `overlap_tokens: int = 100` (an identical literal) | 1 | **survives by design**: small-int cache (see below) |
+| R4 | `chunker.py`: `overlap_tokens: int = 100` (an identical literal) | 1 | **survives by design**: small-int cache (see the E10 note above) |
