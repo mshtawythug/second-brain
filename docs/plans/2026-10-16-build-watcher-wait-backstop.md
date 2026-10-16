@@ -127,7 +127,9 @@ same name, so a grep for it still finds it) and is widened:
    through a `*`/`**` splat. A call that passes the helper itself as an argument together with a
    timeout (`functools.partial(wait_for, timeout=2.0)`, under any name) is flagged too.
 3. **No mirror.** No file other than `tests/thread_wait.py` may bind `_wait_for` anywhere, or `wait_for`
-   at module level, other than by import. That covers `def`, plain, annotated and walrus assignment,
+   at module level, other than by import. No file other than `tests/test_vault_watcher.py` may bind
+   `_wait_for_observer` (PR #35 re-review 3). A local copy would carry its own default, and the floor
+   pin there inspects only that file's definition. That covers `def`, plain, annotated and walrus assignment,
    and every name inside a tuple, list or starred target. A `def wait_for` METHOD, such as a page
    object's, is not a mirror. This catches a re-introduced local helper that shadows or replaces
    the import, which is the pre-PR state of `test_build_watcher.py`.
@@ -276,6 +278,8 @@ convention:
 - **Dynamic access:** `importlib.import_module("tests.thread_wait").wait_for`, `__import__`,
   `getattr(module, "wait_for")`, `globals()["_wait_for"]`.
 - **A rebinding chain deeper than one level** (`a = _wait_for; b = a; b(p, timeout=1.0)`).
+- **A rebinding through a parameter default** (`def go(w=wait_for): w(p, timeout=1.0)`). This is one
+  level deep, but it binds through a function signature, not an assignment (PR #35 re-review 3).
 - **The helper stored under a new name through a call or a container:** `w = staticmethod(wait_for)`
   in a class body, then `C.w(p, timeout=1.0)`; or `waits = {"w": wait_for}`, then
   `waits["w"](p, timeout=1.0)`.
@@ -382,12 +386,38 @@ raise-path test. This PR changes no browser file, and Playwright is not installe
 venv, so the browser tests themselves were not executed. They are outside the default marker set, and
 nothing here can change their behaviour.
 
+## Re-review 3 (PR #35, reviewer @ `2671f53`)
+
+1. **A local `_wait_for_observer` mirror was not flagged** (LOW). The mirror check now treats every
+   underscore wait as a mirror name. A per-module `defines` set exempts each wait's one legitimate home:
+   the helper file for `wait_for`, and `tests/test_vault_watcher.py` for `_wait_for_observer`. A
+   must-stay-red probe (`observer_mirror`) is added.
+2. **Residue:** a rebinding through a parameter default is now listed, here and in the guard's module
+   docstring. No fix is needed.
+
+**Mutations, round 4: 28/28 PASS on all five clauses** (the full catalog, M1–M28, re-run against the
+edited tree), and FP1/FP2 stay green. These are the new rows:
+
+| # | Mutation | Count | Expected red |
+|---|---|---|---|
+| M26 | `test_cli_vault_watch.py` defines `def _wait_for_observer(timeout: float = 1.0)` | 1 | `defines its own wait helper at ['test_cli_vault_watch.py:` |
+| M27 | guard: the `test_vault_watcher.py` exemption is removed (shows it is load-bearing and precise) | 1 | `defines its own wait helper at ['test_vault_watcher.py:148']` |
+| M28 | guard: the mirror check is narrowed back to `_wait_for` only (shows the new probe can fail) | 1 | `true positive not flagged as mirrors (observer_mirror)` |
+
+Counter-proof: on a `git archive 2671f53` copy, M26 stays green, so the hole was real. These are the red
+lines:
+
+- M26: `E  AssertionError: a test module defines its own wait helper at ['test_cli_vault_watch.py:37']; …`
+- M27: `… at ['test_vault_watcher.py:148']; …`
+- M28: `E  AssertionError: true positive not flagged as mirrors (observer_mirror): …`
+
 ## Verification
 
 - `ruff check`, `mypy src/`: zero.
 - `tests/test_thread_wait.py`, `tests/wiki/test_build_watcher.py`, `tests/test_cli_vault_watch.py`,
   `tests/test_vault_watcher.py`, and `tests/test_repo_hygiene_files.py` (it reads `docs/`):
-  **109 passed** in round 1 and **123 passed** in round 3 (the 14 new probes), on a sibling database.
+  **109 passed** in round 1, **123 passed** in round 3 (the 14 new probes) and **124 passed** in round 4
+  (the `observer_mirror` probe), on a sibling database.
 - No test reads `docs/handoff/2026-10-13-merge-all-handoff.md` or this plan.
 - A full suite in `bin/brain-ci`'s environment against the sibling DB was started on the commit that
   adds this section. Its result goes in the team-lead report, not here, because a section cannot

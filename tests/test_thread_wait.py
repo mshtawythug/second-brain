@@ -16,10 +16,11 @@ What it does NOT see, deliberately: the real helper under its public name
 through a base it cannot recognise (``holder.wait_for``) or a star import —
 the price of not flagging Playwright; dynamic access (``importlib``,
 ``__import__``, ``getattr``, ``globals()``); a rebinding chain deeper than one
-level; a helper stored under a new name inside a container or a class body
+level, or one made through a parameter default (``def go(w=wait_for):``); a
+helper stored under a new name inside a container or a class body
 (``staticmethod(wait_for)``); and a hand-rolled poll loop that never calls the
-helper at all. Each needs data-flow analysis out of proportion for a test-suite
-convention; the plan records them.
+helper at all. Each needs data-flow analysis out of proportion for a
+test-suite convention; the plan records them.
 """
 from __future__ import annotations
 
@@ -36,6 +37,8 @@ from tests.thread_wait import WAIT_FOR_BACKSTOP_S, wait_for
 _TESTS_ROOT = Path(__file__).resolve().parent
 _HELPER_MODULE = "tests.thread_wait"
 _HELPER_FILE = _TESTS_ROOT / "thread_wait.py"
+# ``_wait_for_observer``'s one legitimate definition; anywhere else it is a mirror.
+_OBSERVER_HOME = _TESTS_ROOT / "test_vault_watcher.py"
 # Exempt from the call-site check ONLY: the raise-path test below must pass a
 # short timeout, and this file starts no threads.
 _SELF = Path(__file__).resolve()
@@ -166,10 +169,13 @@ def _is_override(node: ast.Call, direct: dict[str, int], modules: set[str]) -> b
     return False
 
 
-def _mirror_sites(label: str, tree: ast.Module) -> list[str]:
-    """A non-import binding of ``_wait_for`` anywhere, or of ``wait_for`` at module level.
+def _mirror_sites(label: str, tree: ast.Module, defines: frozenset[str]) -> list[str]:
+    """A non-import binding of an underscore wait anywhere, or of ``wait_for`` at module level.
 
-    A ``def wait_for`` METHOD (a page object's, say) is not a mirror, so the
+    ``defines`` names the waits this module legitimately owns. A local
+    ``_wait_for_observer`` would carry its own default, which the floor pin in
+    ``test_vault_watcher.py`` never inspects (PR #35 re-review 3). A
+    ``def wait_for`` METHOD (a page object's, say) is not a mirror, so the
     public name is checked only among top-level statements.
     """
     top_level = {id(node) for node in tree.body}
@@ -180,7 +186,9 @@ def _mirror_sites(label: str, tree: ast.Module) -> list[str]:
         else:
             names = _bound_names(node)
         for name in names:
-            if name == "_wait_for" or (name == _PUBLIC_WAIT and id(node) in top_level):
+            if name in defines:
+                continue
+            if name in _PRIVATE_WAITS or (name == _PUBLIC_WAIT and id(node) in top_level):
                 sites.append(_site(label, node))
     return sites
 
@@ -204,7 +212,13 @@ def _reexport_sites(label: str, tree: ast.Module) -> list[str]:
     return sites
 
 
-def _scan_source(label: str, source: str, *, check_calls: bool = True) -> dict[str, list[str]]:
+def _scan_source(
+    label: str,
+    source: str,
+    *,
+    check_calls: bool = True,
+    defines: frozenset[str] = frozenset(),
+) -> dict[str, list[str]]:
     """Scan one module's source; the unit the probes below exercise directly."""
     tree = ast.parse(source)
     imports_helper, direct, modules = _bindings(tree)
@@ -216,7 +230,7 @@ def _scan_source(label: str, source: str, *, check_calls: bool = True) -> dict[s
         "overrides": [
             _site(label, c) for c in calls if check_calls and _is_override(c, direct, modules)
         ],
-        "mirrors": _mirror_sites(label, tree),
+        "mirrors": _mirror_sites(label, tree, defines),
         "reexports": _reexport_sites(label, tree),
         "importers": [label] if imports_helper and uses_helper else [],
     }
@@ -233,7 +247,12 @@ def _scan() -> dict[str, list[str]]:
     }
     for path in sorted(_TESTS_ROOT.rglob("*.py")):
         label = path.relative_to(_TESTS_ROOT).as_posix()
-        one = _scan_source(label, path.read_text(encoding="utf-8"), check_calls=path != _SELF)
+        one = _scan_source(
+            label,
+            path.read_text(encoding="utf-8"),
+            check_calls=path != _SELF,
+            defines=frozenset({"_wait_for_observer"}) if path == _OBSERVER_HOME else frozenset(),
+        )
         if path == _HELPER_FILE:
             one["mirrors"] = []
             one["reexports"] = []
@@ -303,8 +322,8 @@ def test_no_test_module_defines_its_own_wait_helper() -> None:
     mirrors = _scan()["mirrors"]
 
     assert mirrors == [], (
-        f"a test module defines its own wait helper at {mirrors}; "
-        f"import wait_for from {_HELPER_MODULE} instead"
+        f"a test module defines its own wait helper at {mirrors}; import it from its "
+        f"defining module ({_HELPER_MODULE}, or {_OBSERVER_HOME.stem} for _wait_for_observer)"
     )
 
 
@@ -383,6 +402,10 @@ _TRUE_POSITIVES = {
         "overrides",
     ),
     "observer_rebind": ("obs = _wait_for_observer\nobs(1.0)\n", "overrides"),
+    "observer_mirror": (
+        "def _wait_for_observer(timeout: float = 1.0):\n    return None\n_wait_for_observer()\n",
+        "mirrors",
+    ),
     "top_level_public_mirror": (
         "def wait_for(predicate, timeout=2.0):\n    return None\n",
         "mirrors",
