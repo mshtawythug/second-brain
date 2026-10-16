@@ -187,8 +187,10 @@ policy:
 - transient: "the embedder failed with a retryable error … the run stopped and
   no report was written; retry when the embedder is healthy";
 - permanent: "the embedder failed with an error a retry will not fix … the run
-  stopped and no report or baseline was written. Check the embedder
-  configuration".
+  stopped and no report or baseline was written. Fix the cause it names …".
+  The advice defers to the backend's own message instead of listing one fix,
+  because some permanent errors carry a precise one: section 3.6's overflow
+  names `BRAIN_OLLAMA_EMBED_NUM_CTX`.
 
 Both name the exception class and carry the backend's message. Neither
 interpolates query text: the message has no access to it, and the backend
@@ -222,6 +224,58 @@ added, the signal already exists: mark a fuse row degraded when an embedder was
 passed and `ctx.explanation.matched_filters["hybrid_vector_arm_used"]` is
 `False`. Recorded in `graph_runner.py`'s module docstring so the next author
 finds it there.
+
+### 3.6 `OllamaEmbedContextOverflow` (PR #36): permanent, so the run aborts
+
+PR #36 (branch `perf/ollama-embed-num-ctx`, unmerged when this was written)
+sends `truncate: false` and its own `num_ctx` (`BRAIN_OLLAMA_EMBED_NUM_CTX`) on
+every `/api/embed`. An input longer than that window is then refused with HTTP
+400 ("the input length exceeds the context length") and raised as
+`brain.embeddings.OllamaEmbedContextOverflow(OllamaEmbedError)`. Its message
+already names the knob: "Raise BRAIN_OLLAMA_EMBED_NUM_CTX or shorten the input".
+
+**Decision: abort, not degraded-with-different-advice.**
+
+- **It is deterministic per query.** The same query text overflows the same
+  window on every run. A degraded row would therefore make `--record-baseline`
+  refuse forever and `--fail-below` refuse to judge forever, each time telling
+  the operator to retry, which can never work. "Degraded" means "this
+  measurement was unlucky", and an overflow is not luck.
+- **The fix is a configuration change, and the run should not end without it.**
+  A plain run that degraded the row would exit 0 with that query at `0.0`
+  inside the means. That is the silent mis-measurement PR #33 set out to end;
+  only a stderr count line would distinguish it from a real miss.
+- **A "degraded but not retryable" state would be a third state** across
+  `EvalResult`, `degraded_results`, `save_baseline`, `diff_reports`, the
+  `--fail-below` refusal and every message. Each of them would need a second
+  wording, and the only payoff is keeping the other N-1 rows of a run whose
+  configuration has to change anyway.
+- **The cost is low.** Golden-corpus queries are one-line searches. An overflow
+  means the knob is set below a query's length, which is a misconfiguration to
+  surface at once, not to work around row by row.
+
+**No new code is needed for this.** `OllamaEmbedContextOverflow` is
+constructed without `transient=`, so it takes the default `False`. Its status
+(400) is outside the retryable set, so the generic branch would classify it
+the same way. `run_eval` re-raises it. `eval_cmd` and `eval --answer` print
+`embed_failure_message`, which carries the exception's own text, so the line
+names `BRAIN_OLLAMA_EMBED_NUM_CTX`. That is why the permanent advice says "fix
+the cause it names" and does not list a fixed set of causes (section 3.3).
+
+**After #36 merges** (master merged into this branch before anything
+references the class):
+
+1. Resolve the expected conflict in `_OllamaEmbedderBase._embed_batch`'s
+   `except httpx.HTTPStatusError` block. Keep #36's overflow branch unchanged
+   (no `transient=`, so permanent) ahead of this change's generic raise, which
+   keeps `transient=_is_transient_status(...)`.
+2. Add tests. (a) A real `ArcticEmbedder` answering 400 with the overflow body
+   raises `OllamaEmbedContextOverflow` with `transient is False`. (b)
+   `run_eval` re-raises it rather than degrading the row. (c) `brain eval`
+   exits 1 via `SystemExit`, and the stderr line names
+   `BRAIN_OLLAMA_EMBED_NUM_CTX` and not the query text.
+3. Add a mutation: construct the overflow error with `transient=True`. Tests
+   (a)–(c) must go red.
 
 ## 4. Where the code goes, and the ceiling
 

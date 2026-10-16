@@ -285,5 +285,6 @@ def embed_failure_message(exc: EmbedError, *, command: str) -> str:
     return (
         f"{command}: the embedder failed with an error a retry will not fix "
         f"({kind}: {exc}) — the run stopped and no report or baseline was written. "
-        f"Check the embedder configuration (model pulled, API key, host URL)."
+        f"Fix the cause it names (e.g. a model not pulled, an API key, a host URL, "
+        f"a context window too small for the input) and run again."
     )

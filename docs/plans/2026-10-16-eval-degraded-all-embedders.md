@@ -82,6 +82,13 @@ Files: `src/brain/cli.py`, `tests/test_cli_eval.py`, `tests/test_cli_ask.py`.
 - CLAUDE.md: eval paragraph; the false "Voyage SDK retries handled" line; the
   `cli.py` row — promote `d22c354` (9,336) then add a descriptive hop.
 
+## Task 4b — after PR #36 merges (spec section 3.6)
+
+Merge master in; keep #36's overflow raise (permanent by default) ahead of the
+generic status raise. Add the three overflow tests (classification, `run_eval`
+abort, CLI exit 1 naming `BRAIN_OLLAMA_EMBED_NUM_CTX`) and mutation M15
+(`transient=True` on the overflow error → red).
+
 ## Task 5 — verify
 
 `ruff check`, `mypy src/`, and in brain-ci's env against sibling DB
