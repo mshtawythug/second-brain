@@ -20,6 +20,7 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
 | #32 | brain sends `options.num_ctx` (`BRAIN_OLLAMA_NUM_CTX`, default 8192) on every chat call | `7545ce1` |
 | #33 | `brain eval` refuses to record / gate on a degraded (embed-timeout) run | `293a3b9` |
 | #34 | related + connect vector legs on shared design-D `brain.hnsw_scan`; NaN-proof floors | `8900725` |
+| #36 | embedders send options.num_ctx (BRAIN_OLLAMA_EMBED_NUM_CTX, default 2048) + truncate:false | `69a780d` |
 
 ## Done on 2026-10-16 (machine state; re-checked read-only the same day)
 
@@ -67,10 +68,14 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
    another session. It holds an UNTRACKED copy of this file. Once the PR that commits this file merges,
    that copy will block a `git pull`, so delete or move it first.
 
+8. **Reinstall the daemons' uv tool after the remaining PRs merge.** The uv tool install that the
+   daemons and Claude Desktop run was built from the `daemon-src` worktree at `8900725`. PR #36 and
+   anything merged after it are not live in either until the tool is reinstalled from a newer
+   checkout. The coordinator plans to reinstall once the remaining PRs merge. When that happens, the
+   uv receipt's source moves off `daemon-src`, and only then can that worktree go.
+
 ## In flight when this was written
 
-- An embedder `num_ctx` PR (open as #36, branch `perf/ollama-embed-num-ctx`; it adds
-  `BRAIN_OLLAMA_EMBED_NUM_CTX`). Once merged, it addresses the "`qwen3` inherits 65536" follow-up below.
 - A follow-up on how `brain eval` handles degraded runs.
 
 ## Recorded follow-ups
@@ -86,7 +91,8 @@ Not started, except the first item, which is fixed.
   module and passed `timeout=5.0`.
 - Watcher burst/stale-event tests that `sleep` then assert ABSENCE can false-PASS under load. The
   build watcher's `test_ignores_*` and coalescing tests are in the same class (listed in the 2026-10-16 plan).
-- `qwen3` (non-default embedder) still inherits the server's 65536 context for embeddings.
+- ~~`qwen3` (non-default embedder) still inherits the server's 65536 context for embeddings.~~ Addressed
+  by PR #36 (`69a780d`): every Ollama embed request now sends its own `num_ctx`.
 - Only `OllamaEmbedError` marks an eval row degraded; Voyage errors still propagate; `graph_runner` has no
   equivalent tolerance.
 - Old `.claude/worktrees/agent-*` (July) hold unmerged work — left alone.
