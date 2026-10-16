@@ -56,7 +56,9 @@ git tag scheme:
   q8_0 KV cache of about 3 GiB. At `2048` the cache is about 153 MiB.
 - **An input that does not fit is now an error, never a silent prefix.** The
   brain raises `OllamaEmbedContextOverflow`, which is an `OllamaEmbedError`, so
-  existing handlers still catch it. The message names the knob. Every stored
+  existing handlers still catch it. The message names the knob. `brain eval`
+  treats it as permanent: the run stops with exit `1` and that message instead
+  of scoring the query `0.0` (see Fixed). Every stored
   chunk fits at `2048`: the measured maximum is 1,689 model tokens. A value
   below `1400` (the 700-token chunk ceiling ×2) fails at startup.
 - **The first embed after upgrading reloads the embedding model once.** That

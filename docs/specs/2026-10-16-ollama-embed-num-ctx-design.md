@@ -258,11 +258,13 @@ pointer to it. Justification:
 * **No client-side pre-check.** The server has the exact tokenizer, and a
   cl100k pre-flight would only approximate it (PR #32 §6). The cl100k count in
   the message is a diagnostic only.
-* **The subclass keeps every handler working, and could separate permanent from
-  transient failures (no caller does yet).** It is an `OllamaEmbedError`,
-  so every existing `except EmbedError` / `except OllamaEmbedError` /
-  `except BrainError` site still catches it: the MCP tools' `_wrap_embed_error`,
-  `ui/routes_search.py`, `eval/runner.py`, and the CLI. No caller changes.
+* **The subclass keeps every handler working, and separates permanent from
+  transient failures.** It is an `OllamaEmbedError`, so every existing
+  `except EmbedError` / `except OllamaEmbedError` / `except BrainError` site
+  still catches it: the MCP tools' `_wrap_embed_error`, `ui/routes_search.py`
+  and the CLI. `eval/runner.py` catches it too, and since
+  `fix/eval-degraded-all-embedders` reads its `transient` flag (always `False`
+  for an overflow) and re-raises it (below).
 
 **What a user sees when it fires:** the ingest of that document fails with the
 error (the same path any `OllamaEmbedError` takes today), `brain reembed`
@@ -271,15 +273,16 @@ of matching on its first ~2k tokens. Whether earlier reembed batches stay
 committed, and how the watcher recovers, is unchanged by this work: it is the
 existing `OllamaEmbedError` behaviour, not re-specified here.
 
-**`brain eval`** catches `OllamaEmbedError` per query (`eval/runner.py`), so an
-overflowing query becomes a DEGRADED row that scores 0.0. Classifying it as
-degraded is correct, because it measured no retrieval. The run summary then
-says "retry when the embedder is healthy" (`eval/baseline.py`), which is the
-wrong advice for this case: an overflow is deterministic, and a retry fails the
-same way. The real cause is in that query's per-query `WARNING`, which carries
-the exception text naming `BRAIN_OLLAMA_EMBED_NUM_CTX`. No code change is made
-here. A parallel track is redesigning eval's transient-vs-permanent handling,
-and it can consume this subclass to tell the two apart.
+**`brain eval` aborts.** *(Updated when `fix/eval-degraded-all-embedders`
+merged this branch. As first written, this paragraph said an overflowing query
+became a DEGRADED row with wrong "retry" advice, pending that track.)* Every
+`EmbedError` now carries `transient`, and an overflow is never transient: the
+same query overflows the same window on every run. `run_eval` re-raises it
+instead of scoring the row `0.0`. `brain eval` and `brain eval --answer` then
+exit `1` before any report or baseline is written, with one stderr line that
+carries this error's text, so it names `BRAIN_OLLAMA_EMBED_NUM_CTX`. Why abort
+and not degrade: `docs/specs/2026-10-16-eval-degraded-all-embedders-design.md`
+§3.6.
 
 The overflow test is shared with chat, not copied. PR #32's
 `_CONTEXT_OVERFLOW_RE` (`context (length|size)`) already matches the embed

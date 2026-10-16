@@ -110,9 +110,12 @@ class OllamaEmbedContextOverflow(OllamaEmbedError):
     rather than embedding a truncated prefix. A subclass of
     :class:`OllamaEmbedError`, so every existing ``except EmbedError`` /
     ``except OllamaEmbedError`` handler still catches it; the type exists so the
-    message can name the fix (``BRAIN_OLLAMA_EMBED_NUM_CTX``), and a caller
-    could tell a permanent over-window input from a transient transport failure
-    by it (none does yet; ``brain eval`` still files it as a degraded row).
+    message can name the fix (``BRAIN_OLLAMA_EMBED_NUM_CTX``). It is never
+    ``transient`` (constructed with the default): the same input overflows the
+    same window every time. ``brain eval`` uses that distinction through
+    :attr:`~brain.errors.EmbedError.transient`: ``run_eval`` re-raises it
+    instead of degrading the row, and the command exits 1 with this message
+    (spec ``docs/specs/2026-10-16-eval-degraded-all-embedders-design.md`` §3.6).
     """
 
 

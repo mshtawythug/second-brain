@@ -227,7 +227,8 @@ finds it there.
 
 ### 3.6 `OllamaEmbedContextOverflow` (PR #36): permanent, so the run aborts
 
-PR #36 (branch `perf/ollama-embed-num-ctx`, unmerged when this was written)
+PR #36 (branch `perf/ollama-embed-num-ctx`; unmerged when this was written,
+merged to master as `69a780d` and into this branch afterwards)
 sends `truncate: false` and its own `num_ctx` (`BRAIN_OLLAMA_EMBED_NUM_CTX`) on
 every `/api/embed`. An input longer than that window is then refused with HTTP
 400 ("the input length exceeds the context length") and raised as
@@ -262,8 +263,9 @@ the same way. `run_eval` re-raises it. `eval_cmd` and `eval --answer` print
 names `BRAIN_OLLAMA_EMBED_NUM_CTX`. That is why the permanent advice says "fix
 the cause it names" and does not list a fixed set of causes (section 3.3).
 
-**After #36 merges** (master merged into this branch before anything
-references the class):
+**Once #36 is merged** (done: master merged into this branch before anything
+referenced the class; the `_embed_batch` block merged without a textual
+conflict, overflow raise first):
 
 1. Resolve the expected conflict in `_OllamaEmbedderBase._embed_batch`'s
    `except httpx.HTTPStatusError` block. Keep #36's overflow branch unchanged

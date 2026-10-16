@@ -24,9 +24,13 @@ import httpx
 from brain.embeddings import ArcticEmbedder, VoyageEmbedder
 from brain.ingest import Embedder
 
-# An Ollama failure is either an exception the transport raises or an HTTP
-# status it answers with.
-OllamaFailure = type[httpx.TransportError] | int
+# An Ollama failure is an exception the transport raises, an HTTP status it
+# answers with, or a (status, error text) pair for a body that matters (e.g.
+# the context-overflow refusal, which is recognised by its text).
+OllamaFailure = type[httpx.TransportError] | int | tuple[int, str]
+
+# Ollama's refusal of an over-window input under ``truncate: false``.
+OLLAMA_OVERFLOW = (400, "the input length exceeds the context length")
 
 _ARCTIC_QUERY_PREFIX = "query: "
 
@@ -34,8 +38,9 @@ _ARCTIC_QUERY_PREFIX = "query: "
 def arctic_failing_on(inner: Embedder, failures: Mapping[str, OllamaFailure]) -> ArcticEmbedder:
     """A real ``ArcticEmbedder`` whose transport fails for the named query texts.
 
-    ``failures`` maps a query text to an ``httpx`` transport-error class (raised)
-    or an HTTP status (answered, with a small JSON error body). Every other
+    ``failures`` maps a query text to an ``httpx`` transport-error class (raised),
+    an HTTP status (answered, with a small JSON error body), or a ``(status,
+    error text)`` pair such as :data:`OLLAMA_OVERFLOW`. Every other
     request is answered with ``inner``'s vectors.
     """
 
@@ -47,6 +52,9 @@ def arctic_failing_on(inner: Embedder, failures: Mapping[str, OllamaFailure]) ->
                 continue
             if isinstance(failure, int):
                 return httpx.Response(failure, json={"error": "synthetic failure"})
+            if isinstance(failure, tuple):
+                status, error_text = failure
+                return httpx.Response(status, json={"error": error_text})
             raise failure("synthetic transport failure", request=request)
         return httpx.Response(200, json={"embeddings": inner.embed(texts, input_type="query")})
 

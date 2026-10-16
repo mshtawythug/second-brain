@@ -17,12 +17,18 @@ from voyageai import error as voyage_error
 from brain.embeddings import (
     EmbedDisabledError,
     NullEmbedder,
+    OllamaEmbedContextOverflow,
     OllamaEmbedError,
     VoyageEmbedError,
 )
 from brain.errors import EmbedError
 from tests.conftest import FakeEmbedder
-from tests.embed_failure_doubles import OllamaFailure, arctic_failing_on, voyage_failing_on
+from tests.embed_failure_doubles import (
+    OLLAMA_OVERFLOW,
+    OllamaFailure,
+    arctic_failing_on,
+    voyage_failing_on,
+)
 
 _TEXT = "transience probe"
 
@@ -53,6 +59,15 @@ def test_ollama_non_retryable_failures_are_permanent(failure: OllamaFailure) -> 
     """Model not pulled (404), a bad request, a host URL with no scheme: the same
     request fails the same way every time."""
     assert _ollama_error(failure).transient is False
+
+
+def test_ollama_context_overflow_is_permanent() -> None:
+    """PR #36's over-window refusal (HTTP 400 under ``truncate: false``) is the
+    same for that input on every attempt: permanent, and it names the knob."""
+    error = _ollama_error(OLLAMA_OVERFLOW)
+    assert isinstance(error, OllamaEmbedContextOverflow)
+    assert error.transient is False
+    assert "BRAIN_OLLAMA_EMBED_NUM_CTX" in str(error)
 
 
 @pytest.mark.parametrize(

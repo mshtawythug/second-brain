@@ -14,7 +14,7 @@ from voyageai import error as voyage_error
 
 from brain.cli import app
 from brain.ingest import ExtractedDoc, ingest_document
-from tests.embed_failure_doubles import arctic_failing_on, voyage_failing_on
+from tests.embed_failure_doubles import OLLAMA_OVERFLOW, arctic_failing_on, voyage_failing_on
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -728,3 +728,25 @@ def test_fail_below_aborts_cleanly_on_a_permanent_voyage_failure(
 
     line = _assert_clean_abort(result, failing)
     assert "VoyageEmbedError" in line and "synthetic 401" in line
+
+
+def test_record_baseline_aborts_cleanly_on_an_embed_context_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """PR #36's overflow is permanent: exit 1 before writing, with one stderr
+    line that names the knob to raise and never the query (spec §3.6)."""
+    doc_id = _seed_one(test_db, fake_embedder, "Overflow Record Doc")
+    failing = "ovfrecord oversize query"
+    corpus = _degraded_corpus(tmp_path, ["Overflow Record Doc body", failing], doc_id)
+    embedder = arctic_failing_on(fake_embedder, {failing: OLLAMA_OVERFLOW})  # type: ignore[arg-type]
+    baselines_dir = _wire_flaky(monkeypatch, tmp_path, embedder)
+
+    result = CliRunner().invoke(app, ["eval", "--corpus", str(corpus), "--record-baseline", "ci"])
+
+    line = _assert_clean_abort(result, failing)
+    assert "OllamaEmbedContextOverflow" in line
+    assert "BRAIN_OLLAMA_EMBED_NUM_CTX" in line
+    assert not (baselines_dir / "ci.json").exists()

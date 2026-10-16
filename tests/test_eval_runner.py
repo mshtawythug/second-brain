@@ -9,7 +9,7 @@ import psycopg
 import pytest
 from voyageai import error as voyage_error
 
-from brain.embeddings import OllamaEmbedError, VoyageEmbedError
+from brain.embeddings import OllamaEmbedContextOverflow, OllamaEmbedError, VoyageEmbedError
 from brain.errors import EmbedError
 from brain.eval.corpus import EvalQuery
 from brain.eval.errors import EvalCorpusError
@@ -21,7 +21,7 @@ from brain.eval.runner import (
     run_eval,
 )
 from brain.ingest import Embedder, ExtractedDoc, ingest_document
-from tests.embed_failure_doubles import arctic_failing_on, voyage_failing_on
+from tests.embed_failure_doubles import OLLAMA_OVERFLOW, arctic_failing_on, voyage_failing_on
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -307,6 +307,20 @@ def test_run_eval_aborts_on_an_ollama_model_not_found(test_db, fake_embedder):
         run_eval(test_db, embedder=embedder, queries=[_make_query(failing, doc_id)])
     assert caught.value.transient is False
     assert "404" in str(caught.value)
+
+
+def test_run_eval_aborts_on_an_embed_context_overflow(test_db, fake_embedder):
+    """An over-window query (PR #36) overflows the same way on every run, so a
+    degraded row would block --record-baseline forever while advising a retry.
+    run_eval re-raises it (spec 2026-10-16-eval-degraded-all-embedders §3.6)."""
+    doc_id = _seed(test_db, fake_embedder, "Overflow Abort Doc", "overflowabort content")
+    failing = "overflowabort oversize query"
+    embedder = arctic_failing_on(fake_embedder, {failing: OLLAMA_OVERFLOW})
+    queries = [_make_query("overflowabort content", doc_id), _make_query(failing, doc_id)]
+
+    with pytest.raises(OllamaEmbedContextOverflow) as caught:
+        run_eval(test_db, embedder=embedder, queries=queries)
+    assert caught.value.transient is False
 
 
 class _UnclassifiedEmbedError(EmbedError):
