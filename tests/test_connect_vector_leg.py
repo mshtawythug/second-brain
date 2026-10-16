@@ -205,3 +205,61 @@ def _make_doc(conn: psycopg.Connection[Any], embedder: FakeEmbedder, i: int) -> 
         (row[0], f"chunk {i}", vector_literal(embedder.embed([f"synthetic probe {i}"])[0])),
     )
     return str(row[0])
+
+
+@pytest.mark.fresh_schema
+def test_an_under_filled_scan_falls_back_to_the_exhaustive_query(
+    affinity_corpus: tuple[psycopg.Connection[Any], list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fewer than k rows is NOT proof that every eligible chunk was seen.
+
+    The iterative scan also stops at ``hnsw.max_scan_tuples``. Here
+    ``ef_search`` and the cap are both lowered to 1, so the first batch of
+    k = 400 comes back short (91 rows on this fixture) while 800 eligible chunks
+    exist. Treating that under-fill as "complete" ranks only the chunks the
+    capped walk happened to reach. The loop must concede to the exhaustive
+    query instead, which matches the oracle exactly.
+
+    The cap is approximate: at ``ef_search`` 40 with a cap of 100, pgvector
+    still returned all 400 rows, so a red there measured ef-40 approximation,
+    not an under-fill. That is why the precondition is asserted first.
+    """
+    monkeypatch.setattr(
+        connect_mod,
+        "STRICT_SCAN_SETTINGS",
+        (
+            ("hnsw.ef_search", "1"),
+            ("hnsw.iterative_scan", "strict_order"),
+            ("enable_seqscan", "off"),
+            ("hnsw.max_scan_tuples", "1"),
+        ),
+    )
+    conn, ids = affinity_corpus
+    sources = ids[:3]
+    k = _CANDIDATE_LIMIT * connect_mod._KNN_CANDIDATE_MULTIPLIER
+    for source in sources:  # precondition: the capped KNN really comes back short
+        assert 0 < _capped_knn_row_count(conn, source, k) < k
+    probe = SettingsProbe(conn, marker="ORDER BY c.embedding <=> %(vec)s::vector")
+    for source in sources:
+        got = list(_affinity(probe, source).items())
+        expected = _oracle(conn, source)
+        assert [d for d, _ in got] == [d for d, _ in expected]
+        assert all(abs(g - e) <= 1e-6 for (_, g), (_, e) in zip(got, expected, strict=True))
+    assert probe.seen and set(probe.seen) == {("1", "strict_order", "off")}
+
+
+def _capped_knn_row_count(conn: psycopg.Connection[Any], source: str, k: int) -> int:
+    """Rows the KNN query returns for ``source`` under the patched, capped settings."""
+    from brain.hnsw_scan import scoped_settings
+
+    src = conn.execute(
+        "SELECT avg(embedding)::text FROM chunks WHERE document_id = %s::uuid", (source,)
+    ).fetchone()
+    assert src is not None
+    with scoped_settings(conn, connect_mod.STRICT_SCAN_SETTINGS):
+        rows = conn.execute(
+            connect_mod._KNN_SQL,
+            {"vec": src[0], "source": source, "k": k},
+        ).fetchall()
+    return len(rows)

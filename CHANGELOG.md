@@ -251,6 +251,20 @@ git tag scheme:
   bare `ValueError` that `load_corpus` did not catch. It now exits 1 with a
   corpus parse error naming the file. A quoted `"2026-02-30"` stays a string
   and, in `after:` / `before:`, is refused as not a calendar date.
+- **Related documents missed candidates by meaning.** The vector half of the
+  related-docs ranking (the `brain ui` related panel and `related.json`) asked
+  the index for 50 nearest chunks and got at most 40. Draft, vault-less and
+  confidential chunks were dropped only after that, so they used up slots. On a
+  21k-chunk corpus that left 25–39 candidates where 50 existed. It now runs the
+  same scoped HNSW scan as `brain search`'s vector leg and filters before
+  counting, and it found all 50 for every document sampled. Related lists can
+  change, mostly in their lower half.
+- **`brain connect` embedding scores were documented as exact and were not.**
+  The nearest-neighbour scan ran at pgvector's default `ef_search` of 40 and
+  agreed with an exhaustive scan for 106 of 200 sampled documents. It now runs
+  at 1000 (199 of 200), and a scan that comes back short falls back to the
+  exhaustive query rather than being taken as complete. Suggestions from the
+  next `brain connect refresh` can differ, mostly near the tail.
 
 ### Dependencies
 

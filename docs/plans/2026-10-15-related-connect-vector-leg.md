@@ -73,6 +73,21 @@ every row on 2026-10-15:
 | M17 | `test_hnsw_scan::test_scan_settings_rejects_an_unknown_mode` | `hnsw_scan.py`: the mode check → `if False:` (1) | `DID NOT RAISE` |
 | M18 | `test_hnsw_scan::test_scoped_settings_rejects_an_empty_tuple` | `hnsw_scan.py`: `if not settings:` → `if False:` (1) | `DID NOT RAISE ValueError` |
 | M19 | `test_hnsw_scan::test_scoped_settings_revert_when_the_block_raises` | `hnsw_scan.py`: `with conn.transaction():` → `if True:` (1) | `1000` |
+| M20 | `test_related_vector_leg::test_zero_norm_chunk_never_passes_the_floor` | `related_candidates.py`: `WHERE dist <= 1 - %s` → the old `WHERE 1 - dist >= %s` (1) | `not in ['` |
+| M21 | `test_related_vector_leg::test_floor_boundary_is_inclusive` | `related_candidates.py`: `WHERE dist <= 1 - %s` → `WHERE dist < 1 - %s` (1) | ` in ['` |
+| M22 | `test_connect_vector_leg::test_an_under_filled_scan_falls_back_to_the_exhaustive_query` | `connect.py`: on `len(rows) < k`, `return None` → `return _group_per_doc_max(...)` (the old "under-fill is complete") (1) | `== ['` |
+| M23 | `test_connect::test_embedding_affinity_forced_truncation_converges_to_exhaustive` | `connect.py`: `below_floor = float(rows[-1][1]) < vector_sim_floor` → `below_floor = True` (1) | `assert [` |
+
+M22 and M23 were added in the second review round, with the under-fill fallback. M1b,
+M11, M12 and M14 were re-run after that change, and all still pass all five clauses.
+Not guarded: `below_floor = False`. It only removes an early stop, so the loop
+doubles k and still converges or falls back. That costs time, never correctness.
+
+M20 and M21 were added in the review round. Before them, both floor-semantics changes
+(NaN rejection, and the inclusive boundary) were pinned only by `test_sql_shape`'s
+string check. A zero-norm chunk's `1 - NaN >= 0.25` is TRUE in Postgres, so the old
+form admitted it on any exact plan. The tests run on the default 4096-dim schema,
+where every plan is exact.
 
 M18's needle was first written as `SyntaxError`, predicting that the empty `SELECT `
 would fail in Postgres. It does not: a bare `SELECT` is valid and returns zero columns.

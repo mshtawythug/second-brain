@@ -41,6 +41,7 @@ from brain.search import CANDIDATE_LIMIT, hybrid_search
 from brain.search_predicate import SearchPredicate, build_predicate
 from brain.search_vector_leg import vector_leg_sql
 from tests.conftest import FakeEmbedder
+from tests.hnsw_fixtures import floor_hitting_distance_exactly
 
 # The production HNSW-capable dimensionality (arctic / voyage).
 _DIM = 1024
@@ -449,24 +450,6 @@ def test_vector_ms_stays_none_when_the_leg_does_not_run(
 # ---------------------------------------------------------------------------
 # The floor's boundary is inclusive: a chunk exactly AT the floor is a candidate
 # ---------------------------------------------------------------------------
-def _floor_hitting_distance_exactly(distance: float) -> float | None:
-    """A float ``f`` with ``1.0 - f == distance`` exactly, or ``None`` if none exists.
-
-    The leg evaluates ``(e <=> q) <= 1 - %s`` in float8, and Python floats are
-    the same IEEE-754 doubles, so the search is over the representable
-    neighbours of ``1 - distance``. The caller re-verifies the equality in
-    Postgres; that is the check that counts.
-    """
-    candidate = 1.0 - distance
-    for _ in range(64):
-        if 1.0 - candidate == distance:
-            return candidate
-        candidate = math.nextafter(
-            candidate, math.inf if 1.0 - candidate > distance else -math.inf
-        )
-    return None
-
-
 @pytest.mark.parametrize("tag", [None, _KEEP_TAG], ids=["unfiltered", "filtered"])
 def test_floor_boundary_is_inclusive(
     test_db: psycopg.Connection[Any], fake_embedder: FakeEmbedder, tag: str | None
@@ -509,7 +492,7 @@ def test_floor_boundary_is_inclusive(
     chosen: tuple[int, float] | None = None
     for k in range(20, len(ranked)):
         dist_k, dist_next = ranked[k - 1][1], ranked[k][1]
-        floor = _floor_hitting_distance_exactly(dist_k)
+        floor = floor_hitting_distance_exactly(dist_k)
         if floor is not None and dist_next > dist_k:
             chosen = (k, floor)
             break

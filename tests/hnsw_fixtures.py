@@ -11,6 +11,7 @@ planner will choose the index the way it does on the live corpus.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import psycopg
@@ -107,3 +108,21 @@ def current_scan_settings(conn: psycopg.Connection[Any]) -> tuple[Any, ...]:
     ).fetchone()
     assert row is not None
     return tuple(row)
+
+
+def floor_hitting_distance_exactly(distance: float) -> float | None:
+    """A float ``f`` with ``1.0 - f == distance`` exactly, or ``None`` if none exists.
+
+    The vector legs evaluate ``dist <= 1 - %s`` in float8, and Python floats are
+    the same IEEE-754 doubles, so the search is over the representable
+    neighbours of ``1 - distance``. The caller re-verifies the equality in
+    Postgres; that is the check that counts.
+    """
+    candidate = 1.0 - distance
+    for _ in range(64):
+        if 1.0 - candidate == distance:
+            return candidate
+        candidate = math.nextafter(
+            candidate, math.inf if 1.0 - candidate > distance else -math.inf
+        )
+    return None

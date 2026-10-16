@@ -22,7 +22,7 @@ base and the trail: 925 (``f8c76c0``, branch base) -> 925 (``3b16527``, touched
 but no net change) -> 952 (``ec6afb6``) -> 972 (``56cc984``, the commit that
 wrote this very record -- its +20 lines ARE the ceiling record) -> 993
 (``b7fd0e8``) -> 1,091 (``f4d914d``, promoted 2026-10-15) -> **the commit that
-moved the KNN onto brain.hnsw_scan**, descriptive, no delta; it SHRANK the file.
+moved the KNN onto brain.hnsw_scan**, descriptive, no delta; it did not grow it.
 (A descriptive hop is promotable to a SHA-bound one the moment a later edit can
 see it. That is the maintenance the terminating form requires, and skipping it
 is how a trail keeps arriving one hop short while each author believes they just
@@ -322,8 +322,8 @@ def embedding_affinity(
     ``MAX(...) GROUP BY`` + range-predicate query that seq-scanned every chunk
     (measured ~1.2s/doc on prod → ~40ms). When the adaptive re-query cannot
     converge within :data:`_KNN_MAX_ITERATIONS` (a cold / sparse source whose
-    nearest chunks pile onto a handful of docs) it falls back to the exact
-    :func:`_embedding_affinity_exhaustive` — correctness beats speed. The
+    nearest chunks pile onto a handful of docs), or a batch under-fills, it
+    falls back to the exact :func:`_embedding_affinity_exhaustive`. The
     output contract is identical across both paths.
 
     ``knn_multiplier`` sets the first KNN batch (``candidate_limit`` ×
@@ -405,16 +405,16 @@ def _embedding_affinity_knn(
     Consequently, once the k nearest chunks contain ≥ ``candidate_limit``
     distinct floor-passing docs, the top ``candidate_limit`` by best cosine are
     fully and exactly determined (no unseen doc can outrank them). We also stop
-    early when the batch is provably complete: it under-filled (all eligible
-    chunks seen) or its smallest returned cosine already fell below the floor
+    early when the smallest returned cosine already fell below the floor
     (nothing further can pass). Otherwise we double k and retry, capped at
     :data:`_KNN_MAX_ITERATIONS` before conceding to the exhaustive fallback.
+    A batch with FEWER than k rows also concedes: the iterative scan stops at
+    ``hnsw.max_scan_tuples`` (20,000) visited tuples, so an under-fill proves
+    nothing about exhaustion. On the live corpus k (<= 3,200) never under-fills;
+    on a corpus too small to fill k, the exhaustive query is cheap.
 
     :func:`brain.hnsw_scan.scoped_settings` keeps the settings from leaking past
-    the scan, in autocommit or inside a caller's transaction. (Assumes the
-    eligible chunk count stays within ``hnsw.max_scan_tuples`` so an under-fill
-    means true exhaustion — true for the current corpus; the exhaustive
-    fallback backstops the rest.)
+    the scan, in autocommit or inside a caller's transaction.
     """
     k = candidate_limit * knn_multiplier
     with scoped_settings(conn, STRICT_SCAN_SETTINGS):
@@ -428,15 +428,17 @@ def _embedding_affinity_knn(
                 for r in rows
                 if float(r[1]) >= vector_sim_floor
             ]
+            # An under-fill is NOT proof every eligible chunk was seen: the
+            # scan also stops at hnsw.max_scan_tuples. Concede to the
+            # exhaustive query, which is cheap whenever the corpus cannot fill k.
+            if len(rows) < k:
+                return None
             distinct_docs = {doc_id for doc_id, _ in floor_rows}
-            # Provably complete when the batch under-filled (every eligible
-            # chunk seen) or its smallest returned cosine is already below the
-            # floor (rows are in exact descending-cosine order, so nothing
-            # further can pass).
-            seen_all = len(rows) < k or (
-                len(rows) > 0 and float(rows[-1][1]) < vector_sim_floor
-            )
-            if seen_all or len(distinct_docs) >= candidate_limit:
+            # Complete once the smallest returned cosine is below the floor
+            # (rows arrive in descending-cosine order, so nothing further can
+            # pass), or once candidate_limit distinct docs are in.
+            below_floor = float(rows[-1][1]) < vector_sim_floor
+            if below_floor or len(distinct_docs) >= candidate_limit:
                 return _group_per_doc_max(floor_rows, candidate_limit)
             k *= 2
     return None

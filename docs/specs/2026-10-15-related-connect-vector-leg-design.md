@@ -178,8 +178,25 @@ about 9× at p50 (176 ms against 20 ms per document, so roughly 5.5 minutes agai
 from the tail of one 50-row list in 200, and those are ranking inputs for review
 suggestions, not results anyone reads directly.
 
-`connect.py` must not grow. Its trail hop is promoted: the trailing descriptive hop is
-`f4d914d`, 1,091 lines.
+`connect.py` must not grow. Its trail hops are promoted in two places, which had
+different trailing hops. In the module docstring the trailing descriptive hop was
+`f4d914d` (1,091 lines). In CLAUDE.md's row, `f4d914d` was already SHA-bound and the
+trailing descriptive hop was the 2026-09-02 merge, now promoted to `f0abf64` (1,091,
+no line changed).
+
+**An under-fill now concedes to the exhaustive query (review round).** The shipped
+loop treated a batch of fewer than k rows as "every eligible chunk seen". The
+iterative scan also stops at `hnsw.max_scan_tuples` (20,000 visited tuples, and
+approximate), so a short batch proves nothing about exhaustion. (An earlier draft of
+this round "justified" the premise by saying all eligible chunks fit under the cap.
+That is false: prod has 21,288 eligible chunks.) Now `len(rows) < k` returns "not
+converged", and the caller runs the exact `_embedding_affinity_exhaustive`. This
+costs nothing on the live corpus, where every embedded chunk is eligible and k
+(≤ 400·2³ = 3,200) fills long before the cap. On a corpus too small to fill k (demo,
+tests) the exhaustive query is cheap by definition. The early-stop argument no longer
+depends on `max_scan_tuples` at all. The test forces a real under-fill by lowering
+`ef_search` and the cap to 1 (91 of 400 rows). At ef 40 / cap 100, pgvector still
+returned all 400 rows, so the precondition asserts the short batch first.
 
 ## 4. Revisit
 

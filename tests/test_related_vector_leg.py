@@ -38,6 +38,7 @@ from tests.hnsw_fixtures import (
     apply_planner_pressure,
     build_hnsw_index,
     current_scan_settings,
+    floor_hitting_distance_exactly,
     index_scan_nodes,
     plan_text,
     use_hnsw_dimension,
@@ -362,3 +363,87 @@ def test_settings_do_not_leak_from_the_leg(
     _insert_doc(test_db, fake_embedder, 2)
     _leg(test_db, source)
     assert current_scan_settings(test_db) == ("40", "off", "on")
+
+
+# ---------------------------------------------------------------------------
+# Floor semantics: inclusive at the boundary, and a NaN distance never passes
+# ---------------------------------------------------------------------------
+def test_floor_boundary_is_inclusive(
+    test_db: psycopg.Connection[Any], fake_embedder: FakeEmbedder
+) -> None:
+    """The k-th chunk sits EXACTLY on the floor and is in; the (k+1)-th is out.
+
+    The default 4096-dim schema has no HNSW index, so the plan is exact and the
+    boundary is the floor alone. The threshold comes from Postgres, using the
+    leg's own expression and the same bound query vector, so no Python cosine
+    approximation is involved.
+    """
+    source = _insert_doc(test_db, fake_embedder, 999)
+    for i in range(30):
+        _insert_doc(test_db, fake_embedder, i)
+    src = _src_embedding(test_db, source)
+    ranked = test_db.execute(
+        "SELECT c.id::text, c.embedding <=> %s::vector AS dist FROM chunks c "
+        "WHERE c.document_id <> %s::uuid ORDER BY dist, c.id",
+        (src, source),
+    ).fetchall()
+    chosen: tuple[int, float] | None = None
+    for k in range(10, len(ranked)):
+        floor = floor_hitting_distance_exactly(ranked[k - 1][1])
+        if floor is not None and ranked[k][1] > ranked[k - 1][1]:
+            chosen = (k, floor)
+            break
+    assert chosen is not None, "no rank >= 10 has an exactly representable floor"
+    k, floor = chosen
+    exact = test_db.execute(
+        "SELECT (1 - %s::float8) = %s::float8, (1 - %s::float8) < %s::float8",
+        [floor, ranked[k - 1][1], floor, ranked[k][1]],
+    ).fetchone()
+    assert exact == (True, True), exact  # precondition, evaluated in float8
+
+    got = _leg(test_db, source, floor=floor)
+    assert ranked[k - 1][0] in got  # exactly on the floor: included
+    assert ranked[k][0] not in got  # just past it: excluded
+    assert got == [cid for cid, _ in ranked[:k]]
+
+
+@pytest.mark.parametrize("floor", [-1.0, 0.0, 0.25])
+def test_zero_norm_chunk_never_passes_the_floor(
+    test_db: psycopg.Connection[Any], fake_embedder: FakeEmbedder, floor: float
+) -> None:
+    """A zero vector's cosine distance is NaN; the floor must exclude it.
+
+    Postgres orders NaN above every number and evaluates ``1 - NaN >= x`` as
+    TRUE, so the old floor (``1 - dist >= floor``) admitted such a chunk on any
+    plan that reads it. The default 4096-dim schema has no HNSW index, so the
+    plan here is exact and does read it. ``NaN <= x`` is FALSE. pgvector does
+    not index zero vectors for cosine, so on the HNSW path the row never
+    appears at all; this guards the exact path (an embedder emitting zeros, or
+    a hand-edited row).
+    """
+    source = _insert_doc(test_db, fake_embedder, 999)
+    normal = _insert_doc(test_db, fake_embedder, 1)
+    zero = _insert_doc(test_db, fake_embedder, 2)
+    test_db.execute(
+        "UPDATE chunks SET embedding = array_fill(0, ARRAY[%s])::vector "
+        "WHERE document_id = %s::uuid",
+        [fake_embedder.dim, zero],
+    )
+    nan_rows = test_db.execute(
+        "SELECT count(*) FROM chunks WHERE document_id = %s::uuid "
+        "AND (embedding <=> %s::vector) = 'NaN'::float8",
+        [zero, _src_embedding(test_db, source)],
+    ).fetchone()
+    assert nan_rows is not None and nan_rows[0] == 1  # precondition: NaN distance
+
+    rows = vector_candidates(
+        test_db,
+        src_embedding=_src_embedding(test_db, source),
+        exclude_doc_id=source,
+        vector_sim_floor=floor,
+        exclude_confidential=True,
+    )
+    doc_ids = [doc_id for _, doc_id, _ in rows]
+    assert zero not in doc_ids
+    if floor == -1.0:
+        assert normal in doc_ids  # every real cosine passes -1: the leg is not empty
