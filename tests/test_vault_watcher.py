@@ -2489,6 +2489,7 @@ def test_racing_edit_during_sync_is_not_masked_by_body_cache(
     # the cache has been primed.
     assert embedder.fired, "the racing edit was never staged"
     assert state.errors == 0
+    assert state.processed == 1
     assert note in state.body_cache
     assert note.read_text(encoding="utf-8") == raced_text
     row = test_db.execute(
@@ -2499,9 +2500,14 @@ def test_racing_edit_during_sync_is_not_masked_by_body_cache(
     # Second event: the racing save's own filesystem event, against the SAME
     # watcher state. It must NOT be masked as fence-only — the DB has to catch
     # up to the raced body.
-    _run_events_through_worker(
+    again = _run_events_through_worker(
         test_db, embedder, config, FileModifiedEvent(str(note)), state=state
     )
+    # The second drain must run against the cache the first one primed. A
+    # fresh state would cold-start, sync unconditionally, and pass even with
+    # the pre-fix disk re-read in place — so pin that the state carried over.
+    assert again is state, "second drain did not reuse the primed state"
+    assert state.processed == 2, "both drains must count against one state"
     assert state.errors == 0
     assert state.skipped_fence_only == 0, (
         "the racing edit's event was masked as a fence-only write"
@@ -2611,7 +2617,12 @@ def test_wait_for_timeout_is_a_backstop_at_every_call_site() -> None:
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "_wait_for"
-        and (len(node.args) > 1 or any(k.arg == "timeout" for k in node.keywords))
+        and (
+            len(node.args) > 1
+            # ``k.arg is None`` is a ``**kwargs`` splat, which can carry a
+            # timeout the keyword-name check alone would miss.
+            or any(k.arg in (None, "timeout") for k in node.keywords)
+        )
     ]
     assert overrides == [], (
         f"_wait_for called with an explicit timeout at lines {overrides}; "
