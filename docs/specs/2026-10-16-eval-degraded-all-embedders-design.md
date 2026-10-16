@@ -45,7 +45,11 @@ There are also two neighbouring runners the PR #33 spec named without deciding:
 `AuthenticationError`, 422 `MalformedRequestError`, 429 `RateLimitError`, 500
 `ServerError`, 502/503/504 `ServiceUnavailableError`, a request timeout
 `Timeout`, a transport failure `APIConnectionError`, anything else `APIError`.
-The SDK's own retry predicate (`client._make_retry_controller`) is
+The typed 4xx classes need a JSON body with `detail`. Any other error
+response, such as a 429 HTML page, a 408 with `detail`, or a 429 with
+`message`, becomes a plain `APIError` that carries `http_status`. That is why
+section 2.2 classifies Voyage by status as well as by class. The SDK's own
+retry predicate (`client._make_retry_controller`) is
 `RateLimitError | ServiceUnavailableError | Timeout`.
 
 A vector-dimension mismatch is **not** an embed failure. The embed call
@@ -66,7 +70,9 @@ One rule, applied to both transports by HTTP meaning rather than by vendor:
   retry" is the right advice;
 - HTTP `408`, `429`, or any `5xx` — Ollama's `500` is what an out-of-memory
   model load returns, the observed cause in PR #33; Voyage `RateLimitError`,
-  `ServerError`, `ServiceUnavailableError`, and `TryAgain` (the SDK names it).
+  `ServerError`, `ServiceUnavailableError`, and `TryAgain` (the SDK names it),
+  **and any Voyage error whose `http_status` is 408, 429 or 5xx**, which
+  covers the plain `APIError` the SDK raises for an untyped response.
 
 **Permanent** (the same request will fail the same way — abort the run):
 
@@ -74,7 +80,8 @@ One rule, applied to both transports by HTTP meaning rather than by vendor:
   `AuthenticationError` (bad key), `InvalidRequestError`,
   `MalformedRequestError`;
 - a response the client cannot use — non-JSON body, no `embeddings` list, wrong
-  vector count; Voyage `APIError`;
+  vector count; Voyage `APIError` with no `http_status`, or with a status
+  outside 408 / 429 / 5xx;
 - an `httpx.HTTPError` that is not a timeout or network failure —
   `UnsupportedProtocol` (a host URL with no scheme), `ProxyError`,
   `LocalProtocolError`, decoding errors;
@@ -131,7 +138,8 @@ raise sites from the cause it is wrapping (section 2.2):
   site keeps the default.
 - `VoyageEmbedder.embed`: `transient=True` when the SDK error is one of
   `RateLimitError`, `ServiceUnavailableError`, `Timeout`, `APIConnectionError`,
-  `ServerError`, `TryAgain`.
+  `ServerError`, `TryAgain`, or when its `http_status` is 408, 429 or 5xx (the
+  same `_is_transient_status` the Ollama path uses).
 
 **Why an attribute and not a subclass.** A `TransientEmbedError` mixin would
 need a transient twin of every backend class (`OllamaTransientEmbedError(

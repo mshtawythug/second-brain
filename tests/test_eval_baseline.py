@@ -345,7 +345,7 @@ def test_baseline_name_validator_rejects_space() -> None:
 
 
 def _degraded(query: str, category: str = "semantic") -> EvalResult:
-    """A row as run_eval records it after an OllamaEmbedError."""
+    """A row as run_eval records it after a transient EmbedError."""
     return EvalResult(
         query=query,
         category=category,

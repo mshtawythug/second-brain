@@ -126,6 +126,27 @@ def test_voyage_non_retryable_failures_are_permanent(cls: type[voyage_error.Voya
     assert _voyage_error(cls).transient is False
 
 
+@pytest.mark.parametrize(
+    ("status", "transient"),
+    [(408, True), (429, True), (501, True), (507, True), (520, True),
+     (None, False), (400, False), (404, False)],
+    ids=["408", "429", "501", "507", "520", "no-status", "400", "404"],
+)
+def test_voyage_untyped_api_error_is_classified_by_status(
+    status: int | None, transient: bool
+) -> None:
+    """voyageai 0.5.0 types only 500, 502/503/504 and a 4xx with a JSON
+    ``detail``; a 429 HTML page, a 408 or a 520 arrives as a plain ``APIError``
+    with ``http_status`` set. The 408/429/5xx rule must hold for those too."""
+    make: Callable[[], Exception] = lambda: voyage_error.APIError(  # noqa: E731
+        "synthetic untyped failure", http_status=status
+    )
+    embedder = voyage_failing_on(FakeEmbedder(), {_TEXT: make})
+    with pytest.raises(VoyageEmbedError) as caught:
+        embedder.embed([_TEXT], input_type="query")
+    assert caught.value.transient is transient
+
+
 def test_the_two_voyage_lists_cover_every_sdk_error_class() -> None:
     """A new SDK class must be classified on purpose, not inherit the default by
     omission. (``VideoProcessingError`` is not reachable from a text embed.)"""
@@ -148,6 +169,12 @@ def test_transient_is_keyword_only_and_kept() -> None:
     err = OllamaEmbedError("synthetic", transient=True)
     assert err.transient is True
     assert str(err) == "synthetic"
+    # Keyword-only: a second positional argument is exception args, never the
+    # flag, so ``OllamaEmbedError(msg, True)`` cannot silently mark a failure
+    # retryable.
+    positional = OllamaEmbedError("synthetic", True)
+    assert positional.transient is False
+    assert positional.args == ("synthetic", True)
 
 
 def test_the_disabled_backend_is_permanent() -> None:

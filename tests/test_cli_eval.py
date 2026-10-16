@@ -305,7 +305,7 @@ def test_brain_eval_json_record_baseline_no_stdout_pollution(
 
 
 # ---------------------------------------------------------------------------
-# Degraded runs (an embed call raised OllamaEmbedError)
+# Degraded runs (an embed call raised a transient EmbedError)
 #
 # Every failing query string below is unique to its test: brain.search caches
 # query embeddings per embedder class, and a string that once succeeded through

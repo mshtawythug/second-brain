@@ -1,6 +1,7 @@
 """Integration tests for brain.eval.runner — run_eval() and _normalize_ids()."""
 
 import hashlib
+import logging
 import unittest.mock
 from datetime import UTC, date, datetime, timedelta
 
@@ -248,7 +249,7 @@ def test_degraded_flag_does_not_stick_after_a_failed_query(
 # ---------------------------------------------------------------------------
 
 
-def test_run_eval_degrades_a_voyage_rate_limited_query(test_db, fake_embedder):
+def test_run_eval_degrades_a_voyage_rate_limited_query(test_db, fake_embedder, caplog):
     """Rule-12 regression (PR #33 gap 1): run_eval caught only OllamaEmbedError,
     so under BRAIN_EMBEDDER=voyage ONE rate-limited query escaped as a
     VoyageEmbedError and the whole run was lost."""
@@ -259,8 +260,12 @@ def test_run_eval_degrades_a_voyage_rate_limited_query(test_db, fake_embedder):
     )
     queries = [_make_query("voyagedeg healthy content", doc_id), _make_query(failing, doc_id)]
 
-    report = run_eval(test_db, embedder=embedder, queries=queries)
+    with caplog.at_level(logging.WARNING, logger="brain.eval.runner"):
+        report = run_eval(test_db, embedder=embedder, queries=queries)
 
+    # The per-query WARNING names the backend's class, not a hard-coded one.
+    [warning] = [r.getMessage() for r in caplog.records if r.name == "brain.eval.runner"]
+    assert warning.startswith("VoyageEmbedError for query ")
     healthy, broken = report.results
     assert healthy.degraded is False
     assert healthy.actual_doc_ids

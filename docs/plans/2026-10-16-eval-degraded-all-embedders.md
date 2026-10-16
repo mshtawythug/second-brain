@@ -92,8 +92,56 @@ abort, CLI exit 1 naming `BRAIN_OLLAMA_EMBED_NUM_CTX`) and mutation M15
 ## Task 5 — verify
 
 `ruff check`, `mypy src/`, and in brain-ci's env against sibling DB
-`second_brain_test_evaldeg`: `tests/test_eval_*.py tests/test_cli_eval.py
-tests/test_cli_ask.py tests/test_embed_error_transience.py
-tests/test_embeddings*.py tests/test_arctic_embedder.py
-tests/test_qwen3_embedder.py tests/test_graphrag_retrieval_eval.py`.
+`second_brain_test_evaldeg`:
+
+- **plan set:** `tests/test_eval_*.py tests/test_embeddings*.py
+  tests/test_cli_eval.py tests/test_cli_ask.py tests/test_embed_error_transience.py
+  tests/test_arctic_embedder.py tests/test_qwen3_embedder.py
+  tests/test_graphrag_retrieval_eval.py`;
+- **extended set:** the plan set plus `tests/test_make_embedder.py
+  tests/test_import_hygiene.py tests/test_mcp_server.py` (other `EmbedError`
+  raisers and consumers) and, after the PR #36 merge,
+  `tests/test_ollama_embed_num_ctx.py tests/test_ollama_num_ctx.py`.
+
+The report states which set a count belongs to.
 Mutation catalog: every new guard, five clauses.
+
+### Mutation catalog
+
+Each mutation replaces one exact text, which must occur exactly the declared
+number of times, and is run against the selected tests: the classification
+file, the new `test_eval_runner` tests, and the new `test_cli_eval` /
+`test_cli_ask` tests. Five clauses per mutation:
+
+1. the tests pass unmutated;
+2. the mutation lands its declared count;
+3. the tests go red;
+4. the needle appears on a `>` / `E` / `FAILED` line;
+5. restored → green.
+
+The harness runs on a copy of the tree, with `PYTHONPATH` pointed at it and
+`PYTHONDONTWRITEBYTECODE=1`.
+
+| ID | Target (file: guard) | Mutation | Count | Expected red (at least) |
+|---|---|---|---|---|
+| M1 | `eval/runner.py`: permanent re-raise | delete `if not exc.transient: raise` | 1 | runner aborts on Voyage 401 / Ollama 404 / unclassified / overflow; CLI 404 and Voyage-401 aborts |
+| M2 | `eval/runner.py`: catch the base | `EmbedError` → `OllamaEmbedError` | 1 | runner and CLI Voyage rate-limit degrade tests |
+| M3 | `errors.py`: default permanent | `transient: bool = False` → `True` | 1 | unclassified-is-permanent, unusable-response, disabled-backend, overflow |
+| M4 | `embeddings.py`: Ollama timeout transient | drop `httpx.TimeoutException` | 1 | `[ReadTimeout]`, `[ConnectTimeout]`, runner Ollama timeout |
+| M5 | `embeddings.py`: Ollama network error transient | drop `httpx.NetworkError` | 1 | `[ConnectError]`, `[ReadError]` |
+| M6 | `embeddings.py`: 5xx boundary | `>= 500` → `> 500` | 1 | `test_ollama_retryable_failures_are_transient[500]` |
+| M7 | `embeddings.py`: 429 transient | `{408, 429}` → `{408}` | 1 | `test_ollama_retryable_failures_are_transient[429]` |
+| M8 | `embeddings.py`: Voyage rate limit by class | drop `"RateLimitError"` | 1 | Voyage RateLimitError classification; runner and CLI Voyage degrade tests |
+| M9 | `embeddings.py`: Ollama status classification wired | `transient=_is_transient_status(...)` → `False` | 1 | Ollama 408/429/5xx classification |
+| M10 | `embeddings.py`: Voyage classification wired | `transient=_is_transient_voyage_error(e)` → `False` | 1 | every Voyage transient classification; runner and CLI Voyage degrade |
+| M11 | `cli.py`: `eval_cmd` maps a permanent failure | `except EmbedError` → `except ZeroDivisionError` | 1 | CLI Ollama 404, Voyage 401, overflow abort tests |
+| M12 | `cli.py`: `eval --answer` maps an embed failure | `except EmbedError` → `except ZeroDivisionError` | 1 | `test_cli_eval_answer_embed_failure_exits_cleanly[*]` |
+| M13 | `eval/runner.py`: advice follows the kind | `if exc.transient:` → `if not exc.transient:` | 1 | message wording test; answer-eval test; CLI abort tests |
+| M14 | `eval/baseline.py`: backend-neutral advice | delete the "hosted backend's rate limit" clause | 1 | `test_plain_run_keeps_a_voyage_degraded_run` |
+| M15 | `embeddings.py`: overflow is permanent | add `transient=True` to the `OllamaEmbedContextOverflow(...)` call | 1 | overflow classification, runner abort, CLI abort |
+| M16 | `embeddings.py`: Voyage untyped status | delete the `http_status` fallback in `_is_transient_voyage_error` | 1 | `test_voyage_untyped_api_error_is_classified_by_status[408/429/501/507/520]` |
+| M17 | `eval/runner.py`: the WARNING names the backend class | `"%s for query …", type(exc).__name__` → hard-coded `"OllamaEmbedError for query …"` | 1 | `test_run_eval_degrades_a_voyage_rate_limited_query` (caplog) |
+| M18 | `errors.py`: `transient` is keyword-only | `(self, *args, transient=False)` → `(self, msg=None, transient=False)` | 1 | `test_transient_is_keyword_only_and_kept` |
+
+Harness: `mut.py` in the author's session scratchpad. It is not checked in;
+this table is its specification.

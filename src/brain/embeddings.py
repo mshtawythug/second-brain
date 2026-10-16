@@ -135,7 +135,9 @@ class VoyageEmbedError(EmbedError):
 # request may succeed later: a timeout, a transport failure, HTTP 408 / 429 /
 # 5xx (Ollama answers 500 when a model load runs out of memory). Everything else
 # — any other 4xx (a model not pulled, a bad key), an unusable response, a
-# misconfigured host — is permanent. ``brain eval`` degrades a row only on a
+# host URL with no scheme (``UnsupportedProtocol``) — is permanent. A wrong
+# host, port or DNS name is a ``ConnectError``: transient, by design (start
+# the server, or fix the URL, and run again). ``brain eval`` degrades a row only on a
 # transient failure. Spec docs/specs/2026-10-16-eval-degraded-all-embedders-design.md.
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 429})
 _OLLAMA_TRANSIENT_TRANSPORT_ERRORS: tuple[type[httpx.HTTPError], ...] = (
@@ -146,6 +148,10 @@ _OLLAMA_TRANSIENT_TRANSPORT_ERRORS: tuple[type[httpx.HTTPError], ...] = (
 # Names, not classes: ``voyageai`` is an optional dependency, imported lazily.
 # The SDK's own retry predicate is RateLimitError | ServiceUnavailableError |
 # Timeout; a transport failure, a 500 and ``TryAgain`` complete the HTTP rule.
+# The class alone is not enough: voyageai 0.5.0 types only 500, 502/503/504 and
+# a 4xx whose body is JSON with ``detail``; any other error response (a 429
+# HTML page, a 408, a 520) arrives as a plain ``APIError`` carrying
+# ``http_status``, which ``_is_transient_voyage_error`` reads too.
 _VOYAGE_TRANSIENT_ERROR_NAMES = (
     "RateLimitError",
     "ServiceUnavailableError",
@@ -162,11 +168,19 @@ def _is_transient_status(status: int) -> bool:
 
 
 def _is_transient_voyage_error(exc: Exception) -> bool:
-    """True when ``exc`` is one of the Voyage SDK's retryable error classes."""
+    """True for a retryable Voyage SDK error: by class, or by its HTTP status.
+
+    The status check covers responses the SDK leaves as a plain ``APIError``
+    (see :data:`_VOYAGE_TRANSIENT_ERROR_NAMES`), so the 408 / 429 / 5xx rule
+    holds whatever body the server sent.
+    """
     from voyageai import error as voyage_error
 
     transient = tuple(getattr(voyage_error, name) for name in _VOYAGE_TRANSIENT_ERROR_NAMES)
-    return isinstance(exc, transient)
+    if isinstance(exc, transient):
+        return True
+    status = getattr(exc, "http_status", None)
+    return isinstance(status, int) and _is_transient_status(status)
 
 
 class _OllamaEmbedderBase:
