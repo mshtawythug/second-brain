@@ -94,13 +94,13 @@ docstring and failure message carried over verbatim in substance.
   file would have no guard until someone remembered to write one. That gap is exactly what the
   `test_cli_vault_watch.py` finding shows.
 
-**Coupling check.** The helper is stateless, with no module globals other than the constant, and it
-imports only `time` and `collections.abc.Callable`. Nothing about one importer can affect another.
+**Coupling check.** The helper is stateless. Its only module globals are two constants (the backstop and
+the poll interval), and it imports only `time` and `collections.abc.Callable`. Nothing about one importer can affect another.
 
 **Importers bind it as `_wait_for`** (`from tests.thread_wait import wait_for as _wait_for`). This keeps
-the 36 call sites in the 2,630-line `tests/test_vault_watcher.py` byte-identical, which avoids merge
-conflicts with parallel tracks that touch that file. The guard resolves aliases, so the local name
-does not matter to it.
+the 36 call sites in `tests/test_vault_watcher.py` (2,630 lines at `8900725`) byte-identical, which
+avoids merge conflicts with parallel tracks that touch that file. The guard resolves import aliases and
+one level of rebinding, so the local name does not matter to it.
 
 ## Guard: `tests/test_thread_wait.py`
 
@@ -109,14 +109,23 @@ same name, so a grep for it still finds it) and is widened:
 
 1. **Floor.** `WAIT_FOR_BACKSTOP_S >= 5.0`, and `wait_for`'s signature default `>= 5.0`. The default is
    checked separately, so a hard-coded literal default can't slip past.
-2. **Every importer, discovered rather than listed.** The guard parses every `tests/**/*.py`. In each
-   file it finds the names bound to the shared `wait_for`: `from tests.thread_wait import wait_for [as
-   X]`, `import tests.thread_wait [as M]` → `M.wait_for`, and `from tests import thread_wait [as M]`.
-   It then flags any call through those names that has a positional timeout, a `timeout=` keyword, or
-   a `**` splat.
-3. **No mirror.** No file other than `tests/thread_wait.py` may `def wait_for` or `def _wait_for`. This
-   catches a re-introduced local helper that shadows or replaces the import, which is the pre-PR state
-   of `test_build_watcher.py`.
+2. **Every call site, in every test module.** The guard parses every `tests/**/*.py`. A call counts as
+   a guarded wait when its callee is any of these:
+   - a name bound to the shared `wait_for` (`from tests.thread_wait import wait_for [as X]`), plus one
+     level of rebinding (`w = _wait_for`);
+   - the bare names `wait_for` or `_wait_for`;
+   - an attribute named `wait_for` or `_wait_for` on ANY base. That covers `M.wait_for` through the
+     helper module, `tvw._wait_for` through a test module, and `self._wait_for`;
+   - `_wait_for_observer`, by name or attribute. That is `test_vault_watcher.py`'s observer-start wait;
+     its floor is pinned in that file, and its `timeout` is the FIRST parameter.
+
+   A guarded wait is flagged if it passes a timeout in any form: positionally, as `timeout=`, or
+   through a `*`/`**` splat. A call that passes the helper itself as an argument together with a
+   timeout (`functools.partial(wait_for, timeout=2.0)`, under any name) is flagged too.
+3. **No mirror.** No file other than `tests/thread_wait.py` may bind `wait_for` or `_wait_for` other
+   than by import. That covers `def`, plain, annotated and walrus assignment, and every name inside a
+   tuple, list or starred target. This catches a re-introduced local helper that shadows or replaces
+   the import, which is the pre-PR state of `test_build_watcher.py`.
 4. **No re-export path.** No file may import a name `wait_for` or `_wait_for` from any module other than
    `tests.thread_wait`. This catches the pre-PR `from tests.test_vault_watcher import _wait_for`, which
    is how the 5.0 got past PR #31's guard.
@@ -169,6 +178,15 @@ the mutation lands its declared count; red; the needle on an `E`/`>` line; resto
 | M7 (own) | `test_build_watcher.py` calls `thread_wait.wait_for(..., timeout=1.0)` via `from tests import thread_wait` | 2 | `explicit timeout at` |
 | M8 (own) | guard's module-name constant typo'd → discovery finds nothing | 1 | `importers not discovered` |
 | M9 (own) | `thread_wait.py`: default becomes literal `2.0` with the constant left at 10.0 | 1 | `default was lowered to 2.0s` |
+| M10 (own) | `test_build_watcher.py`: `_wait_for = functools.partial(wait_for, timeout=2.0)` in place of the import | 1 | `defines its own` |
+| M11 (review 1a) | after the import, annotated: `_wait_for: Any = functools.partial(wait_for, timeout=2.0)` | 1 | `defines its own` |
+| M12 (review 1a) | after the import, tuple target: `_wait_for, _spare = functools.partial(…), None` | 1 | `defines its own` |
+| M13 (review 1b) | `w = _wait_for` after the import, and a site calls `w(…, timeout=1.0)` | 2 | `explicit timeout at` |
+| M14 (review 1c) | `from tests import test_vault_watcher as tvw`, and a site calls `tvw._wait_for(…, timeout=1.0)` | 2 | `explicit timeout at` |
+| M15 (review 1c) | a site calls `observer._wait_for(…, timeout=1.0)` (the `self` form: an attribute on an object) | 1 | `explicit timeout at` |
+| M16 (own) | `quick = functools.partial(_wait_for, timeout=2.0)`, and a site calls `quick(…)` | 2 | `explicit timeout at` |
+| M17 (review 3) | `test_cli_vault_watch.py`: `_wait_for_observer(timeout=5.0)` back at one site | 1 | `explicit timeout at ['test_cli_vault_watch.py:` |
+| M18 (review 3) | same, positional: `_wait_for_observer(5.0)` | 1 | `explicit timeout at ['test_cli_vault_watch.py:` |
 
 Counter-proof for M6: at base (`8900725`), PR #31's guard **passes** with that exact import and its
 `timeout=5.0` in place, so the hole was real.
@@ -230,11 +248,61 @@ declared; rc ≠ 0; the needle on an `E`/`>` line; `git checkout` → green with
 `test_wait_for_timeout_is_a_backstop_at_every_call_site` → `1 passed`, with
 `tests/test_cli_vault_watch.py:106` carrying `timeout=5.0` through the re-export import.
 
-**Known residue in the guard.** A `functools.partial(wait_for, timeout=…)` bound to any name *other*
-than `wait_for`/`_wait_for` is not caught. The same holds for a wrapper function with a new name that
-forwards a timeout. The guard catches the shapes that have actually occurred (a local copy, a
-re-export, a per-site keyword/positional/splat timeout). Catching a renamed wrapper would mean
-data-flow analysis, which is out of proportion for a test-suite convention.
+**Known residue in the guard.** *(Rewritten in the PR #35 review round. The earlier paragraph listed
+the wrong gaps: it said a renamed wrapper that forwards a timeout is not caught. It is caught, because
+the wrapper's inner `wait_for(p, t)` passes a timeout. It also said a renamed `partial` is not caught,
+and that is now closed.)* These are the real gaps, each needing data-flow analysis that is out of
+proportion for a test-suite convention:
+
+- **Dynamic access:** `importlib.import_module("tests.thread_wait").wait_for`, `__import__`,
+  `getattr(module, "wait_for")`, `globals()["_wait_for"]`.
+- **A rebinding chain deeper than one level** (`a = _wait_for; b = a; b(p, timeout=1.0)`).
+- **The helper stored under a new name through a call or a container:** `w = staticmethod(wait_for)`
+  in a class body, then `C.w(p, timeout=1.0)`; or `waits = {"w": wait_for}`, then
+  `waits["w"](p, timeout=1.0)`.
+- **A wrapper that hard-codes a short deadline without calling the helper,** i.e. a new hand-rolled
+  poll loop. That is the original disease, and no call-site guard can see it.
+- **A timeout reaching the helper through `threading.Thread(target=wait_for, kwargs={...})`**, where
+  the timeout is a dict key rather than a keyword.
+- **Other blocking primitives** (`acquire`, `Event.wait`, `Queue.get`), as recorded above.
+
+## Review round (PR #35, reviewer @ `8e9e921`)
+
+There were seven findings. All are fixed in the commit that adds this section.
+
+1. **Guard evasions** (MEDIUM):
+   - an annotated or tuple-target `partial` mirror;
+   - a plain rebind `w = _wait_for`;
+   - an attribute call through a test module (`tvw._wait_for`) or an object (`self._wait_for`);
+   - dynamic access.
+
+   The first three are closed (clauses 2 and 3 above). Dynamic access is recorded as residue.
+2. **Wrong residue paragraph** (LOW). It is rewritten under "Known residue in the guard".
+3. **`_wait_for_observer(timeout=5.0)` ×2 in `tests/test_cli_vault_watch.py`** (LOW). Both are positive
+   waits for the watcher thread to start its observer. The overrides are dropped, and the guard now
+   covers `_wait_for_observer` by name. That costs one extra name and one positional index, and it uses
+   the same rule.
+4. **Nits:** the live "2,630-line" digit is now bound to `8900725`; the coupling sentence names both
+   constants; the catalog table gains the M10 row; the handoff title date is corrected.
+
+**Mutation results, round 2: 18/18 PASS on all five clauses** (M1–M18; the M1–M10 needles are unchanged
+from round 1). The harness restores from in-memory backups and checks that the tree is byte-identical,
+not that git is clean, because the fixes were uncommitted when it ran. These are the new red lines:
+
+- M11, M12: `E  AssertionError: a test module defines its own wait helper at ['wiki/test_build_watcher.py:49']; …`
+- M13, M14: `E  AssertionError: wait_for called with an explicit timeout at ['wiki/test_build_watcher.py:557']; …`
+- M15: `… explicit timeout at ['wiki/test_build_watcher.py:556']`
+- M16: `… explicit timeout at ['wiki/test_build_watcher.py:49']`. The `partial` line is flagged.
+- M17: `… explicit timeout at ['test_cli_vault_watch.py:98']`
+- M18: `… explicit timeout at ['test_cli_vault_watch.py:169']`
+
+**Counter-proofs** ran on a `git archive 8e9e921` copy, with the two observer overrides pre-dropped so
+that M17/M18 have a site to land on. **M11–M18 each stay GREEN under the old guard**, so every hole the
+review named was real.
+
+One correction from the run: the first M11/M12 form *replaced* the import line. That tripped the old
+guard's non-vacuity clause and made it go red for an unrelated reason. Re-formed to keep the import
+(the reviewer's shape), both stay green at `8e9e921` and go red at the fix.
 
 ## Verification
 
@@ -250,8 +318,13 @@ data-flow analysis, which is out of proportion for a test-suite convention.
 
 ## Handoff doc (Deliverable 2)
 
-`docs/handoff/2026-10-13-merge-all-handoff.md` is committed from the main checkout's uncommitted copy,
-with three edits:
+`docs/handoff/2026-10-13-merge-all-handoff.md` is committed from the main checkout's uncommitted copy.
+In the PR #35 audit round, its "Needs the user" section was rewritten to match the machine state an ops
+agent produced on 2026-10-16: S4 done, the daemon upgrade to 0.3.0, sibling DBs and merged branches
+cleaned up, and migration 028 on prod. Each fact was re-checked read-only (`launchctl list`, the uv
+receipt, `ps`, `ls -l`, `git ls-remote`, `gh pr view`, `SELECT` on `schema_migrations`). The two counts
+that can't be re-checked after the fact (95 DBs, 24 branches) are attributed to the ops record. The
+disk figure is the measured 93 %. The title date is now 2026-10-16. The round-1 edits:
 
 - The build-watcher follow-up is marked as fixed by this PR.
 - The absence-window follow-up names the build watcher's tests as the same class.

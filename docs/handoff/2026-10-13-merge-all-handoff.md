@@ -1,4 +1,4 @@
-# Session handoff — "merge all, keep going until all is done, down to 0 issues" (updated 2026-10-15)
+# Session handoff — "merge all, keep going until all is done, down to 0 issues" (updated 2026-10-16)
 
 ## Status: DONE except items that need the user
 
@@ -21,22 +21,50 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
 | #33 | `brain eval` refuses to record / gate on a degraded (embed-timeout) run | `293a3b9` |
 | #34 | related + connect vector legs on shared design-D `brain.hnsw_scan`; NaN-proof floors | `8900725` |
 
-## Needs the user
+## Done on 2026-10-16 (machine state; re-checked read-only the same day)
 
-1. **S4 — live launchd migration.** The user's next `brain-up` runs `brain-install-launchd`, which boots
-   out and DELETES `com.brain.build`. Nothing has touched launchd on this machine.
-2. **Phase 9 (delete the wiki)** — gated on the user's word (spec Q12) + RA-8.
-3. **Ollama RAM.** `.env` now has `BRAIN_OLLAMA_KEEP_ALIVE=30m` (was `-1`, never unload). The vault
-   watcher must be restarted to pick it up (launchd — the user's action). PR #32 makes brain chat calls
-   request an 8192 context (KV ~544 MiB instead of ~4352 MiB at 65536); the first call after the restart
-   reloads the model once. Optional: lower `OLLAMA_CONTEXT_LENGTH` in
-   `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist` so other clients stop forcing 65536 reloads.
-4. **Golden corpus:** the two pinned recency rows reach only 10/28 and 0/5 judged docs — re-judge by hand.
-5. **Remote branch cleanup:** merged branches on `second-brain` (`git branch -r --merged second-brain/master`).
-6. **Leftover sibling test DBs on 5434** created by earlier agents (never dropped by the coordinator —
-   `DROP DATABASE` is the user's call): list with
-   `psql -h localhost -p 5434 -U brain -lqt | cut -d'|' -f1 | grep -v '^ *second_brain_test *$'`.
-   The 5434 data disk is nearly full and logged an fsync I/O error on 2026-10-13.
+1. **S4: `com.brain.build` is retired.** Its plist is deleted and the job is booted out. This was done by
+   running master's `brain-install-launchd` logic directly, not `brain-up`. `launchctl list` now shows
+   only `com.brain.watcher` and `com.brain.brief`. **Trap:** running `brain-up` or
+   `brain-install-launchd` from a STALE install re-creates `com.brain.build`. The main checkout's editable
+   `.venv` is still at `6a82db2`, and so was the pre-upgrade uv tool.
+2. **The daemons and the uv tool `secondbrain-py` were upgraded from v0.2.1 to 0.3.0.** The install came
+   from the detached worktree `.claude/worktrees/daemon-src` at `8900725`. **Do not delete that worktree**
+   until the tool is reinstalled from somewhere else: the uv receipt's source `directory` points at it.
+3. **`com.brain.watcher` was restarted on 0.3.0.** It reads `.env` through the `~/.brain/.env` symlink,
+   so `BRAIN_OLLAMA_KEEP_ALIVE=30m` applies, and PR #32's chat `num_ctx` (default 8192) is live.
+4. **The Homebrew shims `/opt/homebrew/bin/brain{,-mcp}` now point at `~/.local/bin/brain{,-mcp}`**
+   (the uv tool). To revert one, run
+   `ln -sfn ~/workspace/second-brain/.venv/bin/<name> /opt/homebrew/bin/<name>`.
+5. **Prod has migration 028.** It was applied with `brain.db.run_migrations` only, not `brain init`. The
+   backup taken first is `~/.brain/backups/pre-028-second_brain-20261016T190652Z.dump`.
+6. **The leftover sibling test DBs on 5434 were dropped:** 95 of them, per the ops record. Listing
+   whatever siblings exist now is read-only:
+   `psql -h localhost -p 5434 -U brain -d postgres -Atc "select datname from pg_database where datname like 'second_brain%' and datname not in ('second_brain_test','second_brain_test_sbx')"`.
+   Expect live teammates' DBs in that list while agents are running.
+7. **The merged remote branches on `second-brain` were deleted:** 24 of them, per the ops record. Of the
+   pre-existing branches, only `chore/eval-ci-baseline` remains. It is unmerged (PR #11 closed and was
+   superseded by #13), so deleting it is the user's call.
+
+## Still needs the user
+
+1. **Phase 9 (delete the wiki).** Gated on the user's word (spec Q12) and RA-8.
+2. **Golden corpus.** The two pinned recency rows reach only 10/28 and 0/5 judged docs; re-judge them
+   by hand.
+3. **Optional: lower `OLLAMA_CONTEXT_LENGTH`** in `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`, so
+   other clients stop forcing 65536-context reloads. Brew may regenerate that plist.
+4. **Restart open Claude Code sessions,** so their `brain-mcp` respawns on 0.3.0.
+5. **After the next ingest, confirm that `ollama ps` shows CONTEXT 8192.**
+6. **Host disk:** the data volume was 93% full when measured on 2026-10-16.
+7. **The main checkout** is 157 commits behind `second-brain/master` (measured 2026-10-16) and belongs to
+   another session. It holds an UNTRACKED copy of this file. Once the PR that commits this file merges,
+   that copy will block a `git pull`, so delete or move it first.
+
+## In flight when this was written
+
+- An embedder `num_ctx` PR (open as #36, branch `perf/ollama-embed-num-ctx`; it adds
+  `BRAIN_OLLAMA_EMBED_NUM_CTX`). Once merged, it addresses the "`qwen3` inherits 65536" follow-up below.
+- A follow-up on how `brain eval` handles degraded runs.
 
 ## Recorded follow-ups
 
