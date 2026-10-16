@@ -528,7 +528,9 @@ def test_fail_below_refuses_to_judge_a_degraded_run(
     assert result.exit_code == 1, result.output
     diff = json.loads(result.stdout)  # the report is still emitted first
     assert len(diff["degraded_queries"]) == (2 if fail_all else 1)
-    assert "cannot evaluate --fail-below" in result.stderr
+    # Pin N AND M: the denominator is the shared query count, not the run's.
+    expected = "2 of 2" if fail_all else "1 of 2"
+    assert f"cannot evaluate --fail-below (counting shared queries): {expected}" in result.stderr
 
 
 def test_fail_below_judges_normally_when_only_an_added_query_is_degraded(

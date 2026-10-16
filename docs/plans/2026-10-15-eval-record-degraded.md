@@ -105,6 +105,8 @@ the needle on a `>`/`E` line, and go green on restore.
 | M9 | `cli.py` | delete the plain-run warning | CLI plain-run warning test |
 | M10 | `cli.py` | `except EvalBaselineError` around `save_baseline` removed, so `DegradedBaselineError` escapes | BOTH CLI record-refusal tests, via `isinstance(result.exception, SystemExit)`. The exit code cannot catch it: CliRunner maps an uncaught exception to exit `1` as well (in production it is a traceback), so the tests assert the exit was a clean `typer.Exit` |
 | M10b (audit F3) | `cli.py` | the `save_baseline` handler narrowed to `except KeyError`, so the refusal escapes as a traceback | both CLI record-refusal tests, via the same `SystemExit` assertion |
+| M14 (re-review X5) | `cli.py` | refusal denominator `shared_degraded + len(diff_result.per_query)` replaced with `total_count + 7` | CLI fail-below refusal test, both params, via the pinned `(counting shared queries): N of M` text |
+| M15 (audit G1) | `cli.py` | refusal numerator `shared_degraded` replaced with `degraded_count + 7` | CLI fail-below refusal test, both params, via the same pinned `N of M` text |
 | M11 (review F1) | `cli.py` | gate keyed on any degraded current row (`degraded_count`) instead of `diff_result.degraded_queries` | CLI "only an added query is degraded" test (expects `0`, gets `1`) |
 | M12 (review X2) | `eval/runner.py` | `degraded = False` hoisted out of the per-query loop, so the flag sticks once set | runner `[healthy, failing, healthy]` flag test |
 | M13 (review X4) | `eval/baseline.py` | `path.parent.mkdir(...)` moved above the degraded guard | save-refusal "creates no directory" test |
