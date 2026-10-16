@@ -48,6 +48,7 @@ def _diff(*, ndcg: float, mrr: float, recall: float) -> BaselineDiff:
         current_signature={},
         added_queries=[],
         removed_queries=[],
+        degraded_queries=[],
     )
 
 
@@ -259,6 +260,7 @@ def _diff_with_config(baseline_sig: dict, current_sig: dict) -> BaselineDiff:
         current_signature=current_sig,
         added_queries=[],
         removed_queries=[],
+        degraded_queries=[],
     )
 
 

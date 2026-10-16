@@ -38,6 +38,7 @@ from .baseline import (
     BaselineDiff,
     QueryDiff,
     changed_config_keys,
+    degraded_run_message,
     diff_reports,
     load_baseline,
     mean_metrics_regressed,
@@ -52,7 +53,13 @@ from .concept_extraction import (
     normalize_concept_pairs,
 )
 from .corpus import EvalQuery, load_corpus
-from .errors import EvalBaselineError, EvalCorpusError, EvalError, EvalMetricError
+from .errors import (
+    DegradedBaselineError,
+    EvalBaselineError,
+    EvalCorpusError,
+    EvalError,
+    EvalMetricError,
+)
 from .graph_baseline import (
     GraphBaselineDiff,
     GraphDocDiff,
@@ -73,7 +80,7 @@ from .graph_runner import (
     GraphThemesEvalResult,
     run_graph_eval,
 )
-from .runner import CategorySummary, EvalReport, EvalResult, run_eval
+from .runner import CategorySummary, EvalReport, EvalResult, degraded_results, run_eval
 
 __all__ = [
     # Corpus
@@ -92,6 +99,7 @@ __all__ = [
     "EvalReport",
     "CategorySummary",
     "run_eval",
+    "degraded_results",
     # Baseline I/O
     "BaselineDiff",
     "QueryDiff",
@@ -100,6 +108,7 @@ __all__ = [
     "diff_reports",
     "changed_config_keys",
     "mean_metrics_regressed",
+    "degraded_run_message",
     # GraphRAG concept-extractor eval gate (G2-j)
     "ConceptF1Report",
     "ConceptFixtureDoc",
@@ -129,4 +138,5 @@ __all__ = [
     "EvalMetricError",
     "EvalCorpusError",
     "EvalBaselineError",
+    "DegradedBaselineError",
 ]

@@ -69,6 +69,15 @@ over-window prompt silently; with ``truncate``/``shift`` off it is an HTTP 400,
 which this handler -- catching only ``OllamaUnavailable`` -- would have let out
 as a traceback. Reason inline at the handler.
 
+**Fifth growth (degraded eval runs, 2026-10-15, PR #33).** ``eval_cmd`` maps a
+*degraded* run -- a query whose embed call raised ``OllamaEmbedError`` and
+scored ``0.0`` unmeasured -- to exit codes and stderr: ``--record-baseline``
+exits 1 without writing (``save_baseline`` raises), ``--diff --fail-below``
+exits 1 before the regression check when a query shared with the baseline is
+degraded, and every run with a degraded row warns with the count. The policy
+and every message live in ``brain.eval``; what grew here is the mapping and its
+why-comments. Spec: ``docs/specs/2026-10-15-eval-record-degraded-design.md``.
+
 The long-deferred split into per-domain command modules is unchanged by any of
 this; ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
@@ -4042,6 +4051,7 @@ def eval_cmd(
     # Lazy-imported here (not at module top) so the graph-eval chain / networkx
     # stays off the hot `brain` startup path — see tests/test_import_hygiene.py.
     from .eval import (
+        degraded_results,
         diff_reports,
         load_baseline,
         load_corpus,
@@ -4051,6 +4061,7 @@ def eval_cmd(
     from .eval.baseline import (
         _assert_baseline_name,
         changed_config_keys,
+        degraded_run_message,
         mean_metrics_regressed,
     )
     from .eval.corpus import _DEFAULT_CORPUS_PATH, _VALID_CATEGORIES
@@ -4111,11 +4122,24 @@ def eval_cmd(
             vector_sim_floor=cfg.vector_sim_floor,
             embedder_name=cfg.embedder,
         )
+    # Rows whose embed call failed scored 0.0 without measuring retrieval. The
+    # policy for them lives in brain.eval; this command only maps it to exit
+    # codes and stderr (spec docs/specs/2026-10-15-eval-record-degraded-design.md).
+    degraded_count = len(degraded_results(report))
+    total_count = len(report.results)
 
     # Persist baseline if requested.
     if record_baseline is not None:
         baseline_file = _BASELINES_DIR / f"{record_baseline}.json"
-        save_baseline(report, path=baseline_file)
+        # save_baseline refuses a degraded run (DegradedBaselineError) before it
+        # touches the file: saved, a timed-out query's 0.0 would become the
+        # reference every later --fail-below judges against. Exit 1, the same
+        # mapping a load_baseline failure gets below.
+        try:
+            save_baseline(report, path=baseline_file)
+        except EvalBaselineError as exc:
+            typer.secho(str(exc), fg="red", err=True)
+            raise typer.Exit(code=1) from exc
         typer.echo(f"baseline saved: {baseline_file}", err=True)
 
     # Diff mode: compare against a saved baseline.
@@ -4148,6 +4172,39 @@ def eval_cmd(
             for key, before, after in config_changes:
                 typer.secho(f"  {key}: {before!r} -> {after!r}", fg="yellow", err=True)
 
+        # Warn, by count, on ANY degraded row in this run: no delta is computed
+        # for one, whether diff_reports left it out of the shared set or it was
+        # an added query that never had a delta to begin with.
+        if degraded_count:
+            typer.secho(
+                degraded_run_message(
+                    degraded_count,
+                    total_count,
+                    action="warning, no delta is computed for these",
+                ),
+                fg="yellow",
+                err=True,
+            )
+        # With --fail-below, refuse to judge when a SHARED query is degraded,
+        # BEFORE the regression check: a fully degraded run compares nothing and
+        # would pass, and a partial one would send the operator hunting for a
+        # corpus change (exit 3) when the embedder just needs a retry. A
+        # degraded ADDED query is outside the comparison, so the gate stays the
+        # normal one (spec 3.3). Exit 1 = the command could not do what it was
+        # asked; the 1/2/3 contract holds.
+        shared_degraded = len(diff_result.degraded_queries)
+        if fail_below and shared_degraded:
+            typer.secho(
+                degraded_run_message(
+                    shared_degraded,
+                    shared_degraded + len(diff_result.per_query),
+                    action="cannot evaluate --fail-below (counting shared queries)",
+                ),
+                fg="red",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
         # --fail-below runs in BOTH branches (the report is emitted above first):
         # a mean-metric regression flips the exit code to 3, distinct from
         # 1 (generic error) and 2 (Typer BadParameter).
@@ -4178,6 +4235,16 @@ def eval_cmd(
         emit_json(dataclasses.asdict(report))
     else:
         console.print(eval_report_table(report))
+    # Ad-hoc runs keep the runner's tolerance (exit 0) but stop being silent:
+    # the means above include degraded rows' 0.0. stderr, so --json stays clean.
+    if degraded_count:
+        typer.secho(
+            degraded_run_message(
+                degraded_count, total_count, action="warning, counted as 0.0 in the means above"
+            ),
+            fg="yellow",
+            err=True,
+        )
 
 
 def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:

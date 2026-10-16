@@ -17,3 +17,12 @@ class EvalCorpusError(EvalError):
 
 class EvalBaselineError(EvalError):
     """Raised when a baseline file is missing, unreadable, or malformed."""
+
+
+class DegradedBaselineError(EvalBaselineError):
+    """Raised when asked to save a baseline from a run whose embed calls failed.
+
+    A degraded row scores 0.0 because the embedder was unhealthy, not because
+    retrieval missed; saved, it would become the reference every later
+    ``--fail-below`` run is judged against.
+    """
