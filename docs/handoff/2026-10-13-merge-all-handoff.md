@@ -1,6 +1,6 @@
 # Session handoff — "merge all, keep going until all is done, down to 0 issues" (updated 2026-10-16)
 
-## Status: DONE except items that need the user
+## Status on 2026-10-16: DONE except items that need the user
 
 Merged to `second-brain/master` (all through the rule-14 review + audit loop at zero issues, CI green):
 
@@ -24,8 +24,8 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
 
 ## Done on 2026-10-16 (machine state; re-checked read-only the same day)
 
-1. **S4: `com.brain.build` is retired.** Its plist is deleted and the job is booted out. This was done by
-   running master's `brain-install-launchd` logic directly, not `brain-up`. On 2026-10-16, `launchctl list`
+1. **S4: `com.brain.build` was retired on 2026-10-16.** Its plist was deleted and the job booted out,
+   by running master's `brain-install-launchd` logic directly, not `brain-up`. On 2026-10-16, `launchctl list`
    showed only `com.brain.watcher` and `com.brain.brief`; re-check with `launchctl list | grep com.brain`.
    **Trap:** running `brain-up` or `brain-install-launchd` from a STALE install re-creates
    `com.brain.build`. On 2026-10-16 the main checkout's editable `.venv` was at `6a82db2` (whose
@@ -41,8 +41,8 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
    `~/.local/bin/brain{,-mcp}`** (the uv tool). Check with `ls -l /opt/homebrew/bin/brain*`.
    To revert one, run
    `ln -sfn ~/workspace/second-brain/.venv/bin/<name> /opt/homebrew/bin/<name>`.
-5. **Prod got migration 028 on 2026-10-16.** It was applied with `brain.db.run_migrations` only, not `brain init`. The
-   backup taken first is `~/.brain/backups/pre-028-second_brain-20261016T190652Z.dump`.
+5. **Prod got migration 028 on 2026-10-16.** It was applied with `brain.db.run_migrations` only, not
+   `brain init`. The backup taken first is `~/.brain/backups/pre-028-second_brain-20261016T190652Z.dump`.
 6. **The leftover sibling test DBs on 5434 were dropped:** 95 of them, per the ops record. Listing
    whatever siblings exist now is read-only:
    `psql -h localhost -p 5434 -U brain -d postgres -Atc "select datname from pg_database where datname like 'second_brain%' and datname not in ('second_brain_test','second_brain_test_sbx')"`.
@@ -54,8 +54,8 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
 8. **Claude Desktop's `brain` MCP server was repointed on 2026-10-16 to launch the uv tool.** In
    `~/Library/Application Support/Claude/claude_desktop_config.json`, the `brain` server's `command` was
    repointed from the main checkout's `.venv/bin/brain-mcp`, which is editable, was at `6a82db2` and
-   bypassed the Homebrew shims, to `~/.local/bin/brain-mcp`. This is the only brain MCP config on the
-   machine; no Claude Code config launches `brain-mcp`. **To revert,** restore
+   bypassed the Homebrew shims, to `~/.local/bin/brain-mcp`. On 2026-10-16 this was the only brain MCP
+   config on the machine, and no Claude Code config launched `brain-mcp`. **To revert,** restore
    `claude_desktop_config.json.bak-20261016T161548` from the same directory.
 
 ## Still needs the user
@@ -66,32 +66,33 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
    and re-derive the counts with the read-only SQL check in that README.
 3. **Optional: lower `OLLAMA_CONTEXT_LENGTH`** in `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`, so
    other clients stop forcing 65536-context reloads. Brew may regenerate that plist.
-4. **Restart Claude Desktop,** so its `brain-mcp` respawns on the upgraded install (see Done #8).
+4. **Restart Claude Desktop,** so its `brain-mcp` respawns on the upgraded install (see Done #8). Restart
+   it again after the coordinator's planned reinstall (see "In flight").
 5. **After the next ingest,** `ollama ps` should show the chat model (`llama3.1:8b`) at CONTEXT 8192
    and, once the reinstall picks up PR #36, the embed model at 2048.
-6. **Host disk** is nearly full; check with `df -h /System/Volumes/Data`.
-7. **The main checkout** is far behind master (re-derive with
-   `git -C <main> rev-list --count HEAD..second-brain/master`), and it belongs to another session. On
-   2026-10-16 it held an UNTRACKED copy of this file. Once the PR that commits this file merges, that
-   copy will block a `git pull`, so delete or move it first.
+6. **Host disk:** on 2026-10-16 the data volume was nearly full; check with
+   `df -h /System/Volumes/Data`.
+7. **The main checkout:** on 2026-10-16 it was far behind master (re-derive with
+   `git -C <main> rev-list --count HEAD..second-brain/master`), belonged to another session, and held an
+   UNTRACKED copy of this file. Once the PR that commits this file merges, that copy will block a
+   `git pull`, so delete or move it first.
 
-8. **Reinstall the daemons' uv tool after the remaining PRs merge.** The uv tool install that the
-   daemons and Claude Desktop run was built from the `daemon-src` worktree at `8900725`. PR #36 and
-   anything merged after it are not live in either until the tool is reinstalled from a newer
-   checkout. The coordinator plans to reinstall once the remaining PRs merge. When that happens, the
-   uv receipt's source moves off `daemon-src`, and only then can that worktree go.
+## In flight on 2026-10-16
 
-## In flight when this was written
-
-- PR #37 (open, branch `fix/eval-degraded-all-embedders`): `brain eval` degrades transient embed
-  failures on every backend and aborts on permanent ones. It covers the Ollama/Voyage clauses of the
-  eval-degraded follow-up below, not the `graph_runner` one.
+- **Planned: the coordinator reinstalls the uv tool from the final master after the open PRs merge,
+  and then `daemon-src` can be deleted.** As of 2026-10-16, the install that the daemons and Claude
+  Desktop run was built at `8900725`, so PR #36 and later merges were not live in either. The
+  reinstall moves the uv receipt's source off `daemon-src`, which is what makes that worktree safe to
+  delete. Restarting Claude Desktop afterwards stays a user item (see above).
+- PR #37 (open on 2026-10-16, branch `fix/eval-degraded-all-embedders`): `brain eval` degrades
+  transient embed failures on every backend and aborts on permanent ones. It covers the Ollama/Voyage
+  clauses of the eval-degraded follow-up below, not the `graph_runner` one.
 
 ## Recorded follow-ups
 
-Not started, except: the first item (fixed by this PR); the `qwen3` item (addressed by PR #36); and the
-Ollama/Voyage eval-degraded item (in flight as PR #37). The `graph_runner` item is left out of #37 on
-purpose.
+As of 2026-10-16, not started, except: the first item (fixed by this PR); the `qwen3` item (addressed
+by PR #36); and the Ollama/Voyage eval-degraded item (in flight as PR #37). The `graph_runner` item is
+left out of #37 on purpose.
 
 - **Fixed by the PR that commits this doc** (branch `test/build-watcher-wait-backstop`, plan
   `docs/plans/2026-10-16-build-watcher-wait-backstop.md`). `tests/wiki/test_build_watcher.py` had its own
@@ -105,11 +106,12 @@ purpose.
   2026-10-16 plan).
 - ~~`qwen3` (non-default embedder) still inherits the server's 65536 context for embeddings.~~ Addressed
   by PR #36 (`69a780d`), which makes every Ollama embed request send its own `num_ctx`.
-- At `69a780d`, only `OllamaEmbedError` marks an eval row degraded, and Voyage errors propagate. These
-  two clauses are in flight as PR #37.
-- `graph_runner` has no equivalent `degraded` tolerance. This is deliberately out of scope of PR #37, and
+- At `69a780d`, only `OllamaEmbedError` marks an eval row degraded, and Voyage errors propagate. On
+  2026-10-16 these two clauses were in flight as PR #37.
+- At `69a780d`, `graph_runner` has no equivalent `degraded` tolerance. This is deliberately out of scope of PR #37, and
   the reason is in `graph_runner`'s module docstring on PR #37's branch.
-- Old `.claude/worktrees/agent-*` (July) hold unmerged work — left alone.
+- On 2026-10-16, old `.claude/worktrees/agent-*` worktrees (from July) held unmerged work. They were
+  left alone.
 
 ## Traps learned (also in memory)
 
