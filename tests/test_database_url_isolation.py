@@ -37,8 +37,11 @@ def test_database_url_env_var_points_at_test_db() -> None:
     If this fails, the autouse fixture in conftest didn't run. Any
     ``Config.load()`` call from inside a CLI test would then talk to prod.
     """
-    assert os.environ.get("DATABASE_URL") == TEST_DATABASE_URL, (
-        f"DATABASE_URL is {os.environ.get('DATABASE_URL')!r}; "
+    # Bound to a local first: asserting on ``os.environ...`` directly makes
+    # pytest print the whole environment (tokens included) on failure.
+    database_url = os.environ.get("DATABASE_URL")
+    assert database_url == TEST_DATABASE_URL, (
+        f"DATABASE_URL is {database_url!r}; "
         f"expected {TEST_DATABASE_URL!r}. Did the autouse fixture in "
         "tests/conftest.py run?"
     )

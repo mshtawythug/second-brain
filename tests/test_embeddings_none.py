@@ -22,12 +22,12 @@ from pathlib import Path
 import psycopg
 import pytest
 
-from brain import config as config_module
 from brain.config import Config
 from brain.embeddings import ArcticEmbedder, NullEmbedder, make_embedder
 from brain.errors import EmbedError
 from brain.ingest import ExtractedDoc, ingest_document, update_document
 from brain.search import hybrid_search
+from tests.conftest import isolate_config_dotenv
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -57,22 +57,15 @@ def _cfg(**overrides: object) -> Config:
 def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Isolate ``Config.load()`` from any real .env discovery.
 
-    Copies the pattern from ``tests/test_config.py`` so an env-driven
+    Uses the shared ``isolate_config_dotenv`` helper so an env-driven
     ``BRAIN_EMBEDDER`` value under test cannot be clobbered by the repo ``.env``.
     """
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "project.env")
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
+    isolate_config_dotenv(
+        monkeypatch,
+        tmp_path,
+        clear=("BRAIN_EMBEDDER", "VOYAGE_API_KEY"),
+        brain_home_root=tmp_path / "brain_home_root",
     )
-    monkeypatch.setattr(
-        config_module,
-        "_brain_home_root",
-        lambda _config_file=None: tmp_path / "brain_home_root",
-    )
-    monkeypatch.delenv("BRAIN_EMBEDDER", raising=False)
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
     return tmp_path
 
 

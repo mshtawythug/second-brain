@@ -17,33 +17,24 @@ from pathlib import Path
 
 import pytest
 
-from brain import config as config_module
 from brain.config import DEFAULT_SNIPPET_MAX_CHARS, Config, ConfigError
 from brain.search import SNIPPET_LENGTH
 from brain.snippet_context import (
     DEFAULT_SNIPPET_MAX_CHARS as HELPER_DEFAULT_SNIPPET_MAX_CHARS,
 )
-from tests.conftest import TEST_DATABASE_URL
+from tests.conftest import TEST_DATABASE_URL, isolate_config_dotenv
 
 
 @pytest.fixture()
 def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Block all .env file sources so only os.environ reaches Config.load()."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        config_module, "_project_dotenv", lambda: tmp_path / "project.env"
+    isolate_config_dotenv(
+        monkeypatch,
+        tmp_path,
+        clear=("BRAIN_SNIPPET_MAX_CHARS",),
+        brain_home_root=tmp_path / "brain_home_root",
     )
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
-    )
-    monkeypatch.setattr(
-        config_module,
-        "_brain_home_root",
-        lambda _config_file=None: tmp_path / "brain_home_root",
-    )
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.delenv("BRAIN_SNIPPET_MAX_CHARS", raising=False)
     return tmp_path
 
 
