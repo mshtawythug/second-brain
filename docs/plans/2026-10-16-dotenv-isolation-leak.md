@@ -36,7 +36,8 @@ migration table.
    the needle appears on a `>`/`E` line; green again once restored. These are
    the mutations that were actually run:
    * M1a: `restored_environ`'s restore body becomes `pass`. The mechanism test
-     goes red (`> assert leaked is None`).
+     goes red (`> assert leaked is None`;
+     `E AssertionError: assert 'published' is None`).
    * M1b: the same mutation turns the boundary test red
      (`> result.assert_outcomes(passed=2)`).
    * M1c: the same mutation turns the original bad-order run red (the chain
