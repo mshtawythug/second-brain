@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from brain import config as config_module
 from brain.config import (
     DEFAULT_AUDIO_MAX_INPUT_TOKENS,
     DEFAULT_AUDIO_MAX_TURNS,
@@ -20,7 +19,7 @@ from brain.config import (
     Config,
     ConfigError,
 )
-from tests.conftest import TEST_DATABASE_URL
+from tests.conftest import TEST_DATABASE_URL, isolate_config_dotenv
 
 # Resolved from the environment via conftest — a pinned literal here
 # diverges from the database the test_db fixture actually uses the
@@ -31,22 +30,17 @@ _TEST_DATABASE_URL = TEST_DATABASE_URL
 @pytest.fixture()
 def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Block all .env file sources so only os.environ reaches Config.load()."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        config_module, "_project_dotenv", lambda: tmp_path / "project.env"
+    isolate_config_dotenv(
+        monkeypatch,
+        tmp_path,
+        clear=(
+            "BRAIN_AUDIO_SCRIPT_MODEL",
+            "BRAIN_AUDIO_MAX_TURNS",
+            "BRAIN_AUDIO_MAX_INPUT_TOKENS",
+            "BRAIN_AUDIO_THEME_LIMIT",
+        ),
     )
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
-    )
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
     monkeypatch.setenv("DATABASE_URL", _TEST_DATABASE_URL)
-    for key in (
-        "BRAIN_AUDIO_SCRIPT_MODEL",
-        "BRAIN_AUDIO_MAX_TURNS",
-        "BRAIN_AUDIO_MAX_INPUT_TOKENS",
-        "BRAIN_AUDIO_THEME_LIMIT",
-    ):
-        monkeypatch.delenv(key, raising=False)
 
 
 def test_audio_defaults(

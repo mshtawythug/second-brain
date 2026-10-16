@@ -26,7 +26,7 @@ from brain.config import (
     Config,
     ConfigError,
 )
-from tests.conftest import TEST_DATABASE_URL
+from tests.conftest import TEST_DATABASE_URL, isolate_config_dotenv
 
 # Resolved from the environment via conftest — a pinned literal here
 # diverges from the database the test_db fixture actually uses the
@@ -51,21 +51,11 @@ def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     resolves to, so the ``backup_dir`` default can be asserted against it
     without touching the developer's real home directory.
     """
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        config_module, "_project_dotenv", lambda: tmp_path / "project.env"
-    )
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
-    )
     brain_home_root = tmp_path / "brain_home_root"
-    monkeypatch.setattr(
-        config_module, "_brain_home_root", lambda _config_file=None: brain_home_root
+    isolate_config_dotenv(
+        monkeypatch, tmp_path, clear=_NEW_ENV_VARS, brain_home_root=brain_home_root
     )
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
     monkeypatch.setenv("DATABASE_URL", _TEST_DATABASE_URL)
-    for key in _NEW_ENV_VARS:
-        monkeypatch.delenv(key, raising=False)
     return brain_home_root
 
 

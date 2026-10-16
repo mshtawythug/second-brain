@@ -17,7 +17,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-from brain import config as config_module
 from brain.config import (
     DEFAULT_ENRICH_MAX_INPUT_TOKENS,
     DEFAULT_OLLAMA_KEEP_ALIVE,
@@ -26,7 +25,7 @@ from brain.config import (
 )
 from brain.embeddings import ArcticEmbedder, Qwen3Embedder, make_embedder
 from brain.enrichment import OllamaEnricher, make_enricher
-from tests.conftest import TEST_DATABASE_URL
+from tests.conftest import TEST_DATABASE_URL, isolate_config_dotenv
 
 # Resolved from the environment via conftest — a pinned literal here
 # diverges from the database the test_db fixture actually uses the
@@ -42,12 +41,7 @@ _TEST_DB_URL = TEST_DATABASE_URL
 @pytest.fixture()
 def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Block all .env file sources so only os.environ values reach Config.load()."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "project.env")
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
-    )
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
+    isolate_config_dotenv(monkeypatch, tmp_path)
 
 
 def _embed_client(transport: httpx.MockTransport) -> httpx.Client:

@@ -30,7 +30,7 @@ from brain.config import (
     Config,
     ConfigError,
 )
-from tests.conftest import TEST_DATABASE_URL
+from tests.conftest import TEST_DATABASE_URL, isolate_config_dotenv
 
 _CEILING_ENV_VARS = (
     "BRAIN_SHOW_MAX_CONTENT_TOKENS",
@@ -122,22 +122,13 @@ def _measured_recall_overshoot() -> tuple[float, int, Path]:
 @pytest.fixture()
 def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Block all .env file sources so only os.environ reaches Config.load()."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        config_module, "_project_dotenv", lambda: tmp_path / "project.env"
+    isolate_config_dotenv(
+        monkeypatch,
+        tmp_path,
+        clear=_CEILING_ENV_VARS,
+        brain_home_root=tmp_path / "brain_home_root",
     )
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
-    )
-    monkeypatch.setattr(
-        config_module,
-        "_brain_home_root",
-        lambda _config_file=None: tmp_path / "brain_home_root",
-    )
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    for key in _CEILING_ENV_VARS:
-        monkeypatch.delenv(key, raising=False)
     return tmp_path
 
 

@@ -27,11 +27,10 @@ from pathlib import Path
 import psycopg
 import pytest
 
-from brain import config as config_module
 from brain.config import DEFAULT_VECTOR_SIM_FLOOR, Config
 from brain.db import connect
 from brain.embeddings import OllamaEmbedError, make_embedder
-from tests.conftest import prod_database_url
+from tests.conftest import isolate_config_dotenv, prod_database_url
 
 # The known-bad doc surfaced by the Phase 0 baseline as a top-5 false
 # positive for ``person-x``. Doc title: ``cheatsheet-numbers``.
@@ -58,12 +57,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 @pytest.fixture()
 def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Block .env file sources so delenv tests aren't undone by T1.0 setdefault."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "project.env")
-    monkeypatch.setattr(
-        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
-    )
-    monkeypatch.delenv("BRAIN_HOME", raising=False)
+    isolate_config_dotenv(monkeypatch, tmp_path)
 
 
 @pytest.mark.live_db
