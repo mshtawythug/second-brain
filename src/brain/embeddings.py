@@ -15,6 +15,13 @@ Token counting is via tiktoken (cl100k_base) — offline and good enough for
 chunker budgeting. Each backend's :meth:`embed` accepts ``input_type`` to
 dispatch query vs document prompt formatting; the formatting is per-backend
 because each model is trained with a different convention (see comments).
+
+The two Ollama backends send their own context window (``options.num_ctx`` =
+``BRAIN_OLLAMA_EMBED_NUM_CTX``, default 2,048) and ``truncate: false`` on every
+``/api/embed`` request, so the runner is sized to the brain's inputs instead of
+the server-wide default, and an over-window input raises
+:class:`OllamaEmbedContextOverflow` instead of being silently embedded as its
+prefix. Spec: ``docs/specs/2026-10-16-ollama-embed-num-ctx-design.md``.
 """
 from typing import Any, NoReturn
 
@@ -24,6 +31,7 @@ import tiktoken
 from .config import Config, ConfigError, keep_alive_wire_value
 from .errors import EmbedError
 from .ingest import Embedder
+from .ollama_budget import CONTEXT_OVERFLOW_RE, DEFAULT_OLLAMA_EMBED_NUM_CTX
 
 # Shared Ollama transport defaults — both Ollama-backed embedders use these.
 _DEFAULT_OLLAMA_BATCH = 32
@@ -92,6 +100,20 @@ class EmbedDisabledError(EmbedError):
 
 class OllamaEmbedError(EmbedError):
     """Raised when an Ollama-backed embed call fails (network / 4xx / 5xx / shape)."""
+
+
+class OllamaEmbedContextOverflow(OllamaEmbedError):
+    """An input exceeded the embed runner's ``num_ctx`` and Ollama refused it.
+
+    Only possible because the transport sends ``truncate: false``: Ollama
+    measures each input with the model's real tokenizer and answers HTTP 400
+    rather than embedding a truncated prefix. A subclass of
+    :class:`OllamaEmbedError`, so every existing ``except EmbedError`` /
+    ``except OllamaEmbedError`` handler still catches it; the type exists so the
+    message can name the fix (``BRAIN_OLLAMA_EMBED_NUM_CTX``), and a caller
+    could tell a permanent over-window input from a transient transport failure
+    by it (none does yet; ``brain eval`` still files it as a degraded row).
+    """
 
 
 class VoyageEmbedError(EmbedError):
@@ -163,11 +185,15 @@ class _OllamaEmbedderBase:
         batch_size: int = _DEFAULT_OLLAMA_BATCH,
         timeout: float = _DEFAULT_OLLAMA_TIMEOUT_S,
         keep_alive: str = _DEFAULT_OLLAMA_KEEP_ALIVE,
+        num_ctx: int,
     ) -> None:
+        # ``num_ctx`` is required HERE (not defaulted): both concrete backends
+        # always pass it, so a base default would be unreachable and untested.
         self._host = host
         self._model = model
         self._batch_size = batch_size
         self._keep_alive = keep_alive
+        self._num_ctx = num_ctx
         self._tokenizer = tiktoken.get_encoding("cl100k_base")
         if client is not None:
             self._client = client
@@ -204,7 +230,13 @@ class _OllamaEmbedderBase:
         return out
 
     def _embed_batch(self, batch: list[str]) -> list[list[float]]:
-        """Send one /api/embed request and return its vectors."""
+        """Send one /api/embed request and return its vectors.
+
+        ``options.num_ctx`` bounds ONE input (Ollama embeds each input of a
+        batch separately, and embedding runners load with ``num_parallel=1``).
+        Every request sends the same value, so the runner never reloads between
+        brain calls. No ``shift`` key: ``api.EmbedRequest`` has no such field.
+        """
         try:
             response = self._client.post(
                 "/api/embed",
@@ -212,12 +244,16 @@ class _OllamaEmbedderBase:
                     "model": self._model,
                     "input": batch,
                     "keep_alive": _keep_alive_payload(self._keep_alive),
+                    "options": {"num_ctx": self._num_ctx},
+                    "truncate": False,
                 },
             )
             response.raise_for_status()
             payload = response.json()
         except httpx.HTTPStatusError as e:
             body = e.response.text if e.response is not None else "<no body>"
+            if CONTEXT_OVERFLOW_RE.search(body[:200]):
+                raise self._overflow_error(batch, e.response.status_code, body) from e
             raise OllamaEmbedError(
                 f"Ollama returned HTTP {e.response.status_code}: {body}",
                 transient=_is_transient_status(e.response.status_code),
@@ -242,6 +278,23 @@ class _OllamaEmbedderBase:
                 f"Ollama returned {len(embeddings)} embeddings for {len(batch)} inputs"
             )
         return [list(v) for v in embeddings]
+
+    def _overflow_error(
+        self, batch: list[str], status: int, body: str
+    ) -> OllamaEmbedContextOverflow:
+        """Build the actionable error for an over-window refusal of ``batch``.
+
+        Ollama fails the whole batch without saying which input overflowed, so
+        the message carries the largest input's cl100k count as the nearest
+        pointer — a proxy for the model tokenizer, a diagnostic only.
+        """
+        largest = max(self.count_tokens(text) for text in batch)
+        return OllamaEmbedContextOverflow(
+            f"Ollama refused an embed input larger than num_ctx={self._num_ctx} "
+            f"(HTTP {status}: {body[:200]}); the largest of the {len(batch)} "
+            f"inputs in this batch is {largest} cl100k tokens. Raise "
+            "BRAIN_OLLAMA_EMBED_NUM_CTX or shorten the input"
+        )
 
     def count_tokens(self, text: str) -> int:
         """Return the number of tokens in ``text`` per the local tiktoken tokenizer."""
@@ -268,6 +321,7 @@ class Qwen3Embedder(_OllamaEmbedderBase):
         batch_size: int = _DEFAULT_OLLAMA_BATCH,
         timeout: float = _DEFAULT_OLLAMA_TIMEOUT_S,
         keep_alive: str = _DEFAULT_OLLAMA_KEEP_ALIVE,
+        num_ctx: int = DEFAULT_OLLAMA_EMBED_NUM_CTX,
     ) -> None:
         super().__init__(
             host=host,
@@ -276,6 +330,7 @@ class Qwen3Embedder(_OllamaEmbedderBase):
             batch_size=batch_size,
             timeout=timeout,
             keep_alive=keep_alive,
+            num_ctx=num_ctx,
         )
 
     def _format_query(self, text: str) -> str:
@@ -303,6 +358,7 @@ class ArcticEmbedder(_OllamaEmbedderBase):
         batch_size: int = _DEFAULT_OLLAMA_BATCH,
         timeout: float = _DEFAULT_OLLAMA_TIMEOUT_S,
         keep_alive: str = _DEFAULT_OLLAMA_KEEP_ALIVE,
+        num_ctx: int = DEFAULT_OLLAMA_EMBED_NUM_CTX,
     ) -> None:
         super().__init__(
             host=host,
@@ -311,6 +367,7 @@ class ArcticEmbedder(_OllamaEmbedderBase):
             batch_size=batch_size,
             timeout=timeout,
             keep_alive=keep_alive,
+            num_ctx=num_ctx,
         )
 
     def _format_query(self, text: str) -> str:
@@ -489,12 +546,17 @@ def make_embedder(cfg: Config) -> Embedder:
     if cfg.embedder == "none":
         return NullEmbedder()
     if cfg.embedder == "arctic":
-        return ArcticEmbedder(host=cfg.ollama_host, keep_alive=cfg.ollama_keep_alive)
+        return ArcticEmbedder(
+            host=cfg.ollama_host,
+            keep_alive=cfg.ollama_keep_alive,
+            num_ctx=cfg.ollama_embed_num_ctx,
+        )
     if cfg.embedder == "qwen3":
         return Qwen3Embedder(
             host=cfg.ollama_host,
             model=cfg.qwen3_model,
             keep_alive=cfg.ollama_keep_alive,
+            num_ctx=cfg.ollama_embed_num_ctx,
         )
     if cfg.embedder == "voyage":
         if cfg.voyage_api_key is None:

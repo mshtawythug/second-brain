@@ -19,14 +19,17 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 
 import httpx
 
 from .config import Config, keep_alive_wire_value
 from .errors import EnrichmentError, OllamaContextOverflow, OllamaUnavailable
-from .ollama_budget import CHAT_DEFAULT_NUM_PREDICT, NUM_PREDICT_RETRY_FACTOR
+from .ollama_budget import (
+    CHAT_DEFAULT_NUM_PREDICT,
+    CONTEXT_OVERFLOW_RE,
+    NUM_PREDICT_RETRY_FACTOR,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -35,15 +38,11 @@ _logger = logging.getLogger(__name__)
 # ``ollama_budget`` (not restated) because ``num_ctx`` is validated against it.
 DEFAULT_NUM_PREDICT = CHAT_DEFAULT_NUM_PREDICT
 
-# An HTTP error body naming the context window. With ``truncate: false`` Ollama
-# 0.33.0 relays llama-server's exceed-context error ("... exceeds the available
-# context size ...") as an HTTP 400 whose ``error`` is the runner's raw JSON
-# body as an escaped string -- the phrase sits ~83 characters in, inside the
-# 200-character preview searched below. Ollama's own ``promptTooLongMessage``
-# ("... longer than the context length ...") is the truncate:true wording, kept
-# in the pattern. Matched on the body, not the status, so the classification
-# does not depend on which side refused or what code it chose.
-_CONTEXT_OVERFLOW_RE = re.compile(r"context (length|size)", re.IGNORECASE)
+# An HTTP error body naming the context window -- the chat wording, the embed
+# wording and why it is matched on the body are documented at the definition.
+# Bound from ``ollama_budget`` (not restated) so chat and ``/api/embed`` share
+# ONE overflow classifier.
+_CONTEXT_OVERFLOW_RE = CONTEXT_OVERFLOW_RE
 
 # One chat message: ``{"role": ..., "content": ...}``.
 ChatMessage = dict[str, str]

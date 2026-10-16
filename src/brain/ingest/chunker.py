@@ -4,6 +4,8 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ..ollama_budget import INGEST_CHUNK_OVERLAP_TOKENS, INGEST_CHUNK_TARGET_TOKENS
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,8 +26,10 @@ _WHITESPACE_SPLIT = re.compile(r"\s+")
 def chunk_text(
     text: str,
     *,
-    target_tokens: int = 600,
-    overlap_tokens: int = 100,
+    # Bound from ``ollama_budget`` (not restated): the embedder's num_ctx floor
+    # is validated against this ceiling, so the two cannot drift apart.
+    target_tokens: int = INGEST_CHUNK_TARGET_TOKENS,
+    overlap_tokens: int = INGEST_CHUNK_OVERLAP_TOKENS,
     count_tokens: Callable[[str], int],
 ) -> list[Chunk]:
     """Split text into paragraph-aware chunks under a token budget.
