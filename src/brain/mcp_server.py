@@ -200,6 +200,13 @@ enforced -- and every F6 lens the branch added is still passed at every call
 site it was added to. Per the rule at the top of this docstring: re-derive the
 net, never inherit it.
 
+**And 2026-10-16 (``BRAIN_MCP_LOG_LEVEL`` from ``.env``).** ``main()`` now
+starts through ``_load_config``, which runs ``Config.load`` BEFORE
+``_configure_logging``. The old order read the knob before the dotenv chain was
+published into ``os.environ``, so a level set in a ``.env`` was silently
+ignored. No tool and no code path beyond that ordering; the reason is inline in
+``_load_config``'s docstring. Re-derive the net, never inherit it.
+
 **Hazard this file has already been bitten by.** Every tool is a bare ``def``
 under a lone ``@mcp_app.tool()`` line, so inserting a helper between a decorator
 and the function it was written for silently moves the registration onto the
@@ -4897,11 +4904,33 @@ def _configure_logging() -> None:
         )
 
 
+def _load_config() -> Config:
+    """Load the config, THEN configure logging from the env it published.
+
+    The order is the fix. ``Config.load`` is what setdefaults the dotenv chain
+    into ``os.environ``; configuring logging first read ``BRAIN_MCP_LOG_LEVEL``
+    before any ``.env`` had been applied, so the knob worked only from the real
+    process env.
+
+    How the level takes effect: importing this module builds the FastMCP server
+    (``make_server`` at module scope), which installs a stderr ``RichHandler``
+    on the root logger at INFO. So ``_configure_logging``'s ``basicConfig`` is a
+    no-op here and the level lands through ``logger.setLevel`` on ``brain.mcp``.
+    That handler is already in place during the load, so python-dotenv's
+    unparseable-line WARNING -- the only record the load can emit -- reaches
+    stderr under either order, and stdout stays clean for JSON-RPC. A
+    ``ConfigError`` is never logged: it propagates out of ``main()`` as a stderr
+    traceback, as before.
+    """
+    cfg = Config.load()
+    _configure_logging()
+    return cfg
+
+
 def main() -> None:
     """Initialize shared state and run the brain-mcp server over stdio."""
     global _state
-    _configure_logging()
-    cfg = Config.load()
+    cfg = _load_config()
     embedder = make_embedder(cfg)
     # Wave Q2-SUMMARY-WIKI: build the long-lived enricher so the
     # ``brain_edit`` MCP tool can refresh ``documents.summary`` on

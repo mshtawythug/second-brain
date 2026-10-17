@@ -2,7 +2,10 @@
 
 Over the 800-line ceiling (CLAUDE.md table). Phase-7 growth, reasoned inline in
 ``_print_final_report``: the closing report names ``brain ui`` as the reading
-surface (spec R1), ahead of the legacy wiki URL.
+surface (spec R1), ahead of the legacy wiki URL. 2026-10-16 growth, reasoned
+inline at ``_brain_home_dotenv_value`` and at both of its reads: a re-run now
+honours ``BRAIN_VAULT_PATH`` / ``VOYAGE_API_KEY`` from an existing
+``$BRAIN_HOME/.env`` (setup never calls ``Config.load``, so nothing published it).
 """
 import enum
 import os
@@ -14,9 +17,11 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.resources import files as resource_files
+from io import StringIO
 from pathlib import Path
 
 import typer
+from dotenv import dotenv_values
 
 from . import config as _config_module
 from ._compose import compose_cmd, compose_project_name, postgres_container_name
@@ -938,6 +943,24 @@ def _print_final_report(
 # ---------------------------------------------------------------------------
 
 
+def _brain_home_dotenv_value(brain_home: Path, name: str) -> str | None:
+    """*name* from an existing ``$BRAIN_HOME/.env``, or ``None``.
+
+    Setup never calls ``Config.load``, so nothing publishes the dotenv chain
+    into ``os.environ``: a knob read only from the process env ignores the file
+    an earlier ``brain setup`` wrote. This is the fallback below the process
+    env. Only ``$BRAIN_HOME/.env`` is read, not the whole chain -- it is the
+    file setup provisions and appends to, and the one the launchd daemons
+    (``BRAIN_HOME`` set, cwd walk-up off) resolve; in a dev checkout it is the
+    repo ``.env`` by symlink or identity. Unreadable or missing reads as unset.
+    """
+    try:
+        text = (brain_home / ".env").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return dotenv_values(stream=StringIO(text)).get(name) or None
+
+
 def run_setup(
     *,
     profile: str = "standard",
@@ -972,11 +995,17 @@ def run_setup(
     else:
         brain_home = _brain_home_root()
 
-    # Vault: explicit override > env var > DEFAULT_VAULT_PATH.
+    # Vault: explicit override > env var > existing $BRAIN_HOME/.env >
+    # DEFAULT_VAULT_PATH. The .env leg is what a RE-RUN needs: without it a
+    # re-run without --vault resolved the default and handed it to the export,
+    # the wiki install and the launchd plists while .env still named another.
+    env_vault = os.environ.get("BRAIN_VAULT_PATH") or _brain_home_dotenv_value(
+        brain_home, "BRAIN_VAULT_PATH"
+    )
     if vault_override is not None:
         vault_path: Path = vault_override
-    elif os.environ.get("BRAIN_VAULT_PATH"):
-        vault_path = Path(os.environ["BRAIN_VAULT_PATH"]).expanduser()
+    elif env_vault:
+        vault_path = Path(env_vault).expanduser()
     else:
         vault_path = DEFAULT_VAULT_PATH
 
@@ -1196,8 +1225,13 @@ def run_setup(
                 err=True,
             )
 
-    # 5. Voyage API key prompt
-    if effective_embedder == "voyage" and not os.environ.get("VOYAGE_API_KEY"):
+    # 5. Voyage API key prompt. The .env leg: a key an earlier run appended was
+    # invisible here, so a re-run refused (--non-interactive) or re-prompted and
+    # appended a duplicate line. Checked only under voyage, so no other run
+    # reads the secret or parses .env a second time.
+    if effective_embedder == "voyage" and not (
+        os.environ.get("VOYAGE_API_KEY") or _brain_home_dotenv_value(brain_home, "VOYAGE_API_KEY")
+    ):
         if non_interactive:
             typer.secho(
                 "error: --embedder voyage requires VOYAGE_API_KEY to be set "
