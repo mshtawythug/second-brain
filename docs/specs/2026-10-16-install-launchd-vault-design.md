@@ -101,8 +101,20 @@ and `brain.config.DEFAULT_VAULT_PATH`.
   vault still wins.
 - `test_a_tilde_vault_is_expanded_before_it_reaches_the_plist[dotenv|process-env]`
   checks that `~/…` is expanded against the fenced `HOME` before it is baked in
-  (added in review). launchd does not expand `~`, so a literal `~/Notes` in a
-  plist makes the watcher exit 2 ("not a directory") and respawn every 10s.
+  (added in review). The plist should carry the absolute path `brain setup`
+  always baked (setup did `Path(env).expanduser()`), so the baked value does not
+  depend on every consumer remembering to expand it. The daemons do today:
+  `vault sync` calls `vault.expanduser()` before its `is_dir()` check, and the
+  brief resolves through `config._default_vault_path`, which expands too. A raw
+  reader such as `bin/monitor.py`'s `_vault` would not.
+
+  *(Corrected in the re-audit. The first version of this bullet, the test's
+  docstring and the message of commit `f2441d0` said a literal `~` in the plist
+  makes the watcher exit 2 ("not a directory") and respawn every 10s. That is
+  false: every plist sets `HOME` and both daemon consumers expand `~`
+  themselves. Measured with `HOME` fenced, `brain vault sync --dry-run --vault
+  '~/custom-vault'` exits 0, and only a genuinely missing directory exits 2. The
+  test stays, for the reason above.)*
 
 The tests read `BRAIN_VAULT_PATH` from each installed plist with `plistlib`.
 `tests/test_setup_dotenv_knobs.py` is repointed at the moved helper and the

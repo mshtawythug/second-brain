@@ -108,11 +108,14 @@ def test_explicit_vault_path_beats_env_and_dotenv(
 def test_a_tilde_vault_is_expanded_before_it_reaches_the_plist(
     fenced: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, leg: str
 ) -> None:
-    """``~/…`` must be expanded here: launchd does not expand it.
+    """``~/…`` is expanded before it is baked into the plist.
 
-    A literal ``~/custom-vault`` baked into a plist makes the watcher exit 2
-    ("not a directory") and respawn every 10s. ``HOME`` is fenced, so the
-    expansion lands in ``tmp_path``.
+    The plist should carry the absolute path, as ``brain setup`` always baked
+    (it did ``Path(env).expanduser()``), so the baked value does not depend on
+    every consumer remembering to expand it. The daemons do today (``vault
+    sync`` and ``_default_vault_path`` both call ``expanduser``); a raw reader
+    such as ``bin/monitor.py``'s ``_vault`` would not. ``HOME`` is fenced, so
+    the expansion lands in ``tmp_path``.
     """
     if leg == "dotenv":
         (fenced / ".env").write_text("BRAIN_VAULT_PATH=~/custom-vault\n", encoding="utf-8")
