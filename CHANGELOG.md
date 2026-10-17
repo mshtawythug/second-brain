@@ -194,6 +194,14 @@ git tag scheme:
 
 ### Fixed
 
+- **`brain-up` repointed the background daemons at `~/brain-vault`.**
+  `brain-install-launchd`, which every `brain-up` runs, wrote the launchd
+  plists with `~/brain-vault` no matter what vault was configured. It ignored
+  both an exported `BRAIN_VAULT_PATH` and the one in `$BRAIN_HOME/.env`. So an
+  install with a custom vault got correct daemons from `brain setup`, and the
+  next `brain-up` switched the vault-sync watcher and the daily brief to the
+  default. It now resolves the vault the way `brain setup` does: an exported
+  `BRAIN_VAULT_PATH`, then `$BRAIN_HOME/.env`, then `~/brain-vault`.
 - **`BRAIN_MCP_LOG_LEVEL` was ignored when set in a `.env`.** `brain-mcp`
   configured logging before it loaded the config, and loading the config is
   what applies the `.env` files. So the knob worked only from the real process

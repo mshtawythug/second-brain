@@ -24,6 +24,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from ..config import _brain_home_root
 from ..errors import BrainError
+from ..install_config import resolve_install_vault
 from ._launcher import ensure_shim
 
 # The launchd labels brain installs. watcher is the KeepAlive vault-sync daemon;
@@ -158,7 +159,13 @@ def install_plists(
     3. ``launchctl bootout`` (suppress errors — idempotent).
     4. ``launchctl bootstrap`` (fail loudly on error).
 
-    ``launchctl`` defaults to :func:`resolve_launchctl`, never a literal.
+    ``launchctl`` defaults to :func:`resolve_launchctl`, never a literal. So
+    does ``vault_path``: it defaults to
+    :func:`brain.install_config.resolve_install_vault` (process env, then
+    ``$BRAIN_HOME/.env``, then the default) -- the precedence ``brain setup``
+    uses. The literal ``~/brain-vault`` it replaced read no config at all, and
+    ``install_main`` (run by every ``brain-up``) passes no vault, so a custom
+    vault was rewritten to the default on the next ``brain-up``.
     """
     launchctl = launchctl if launchctl is not None else resolve_launchctl()
     launchd_dir.mkdir(parents=True, exist_ok=True)
@@ -168,7 +175,7 @@ def install_plists(
     for wrapper in ("_brain-watcher-fg", "_brain-brief-fg"):
         ensure_shim(wrapper, brain_home)
 
-    effective_vault_path = vault_path if vault_path is not None else Path.home() / "brain-vault"
+    effective_vault_path = resolve_install_vault(brain_home, override=vault_path)
     pipx_bin_dir = resolve_pipx_bin_dir()
     brain_py = resolve_brain_py()
     uid: int = os.getuid()

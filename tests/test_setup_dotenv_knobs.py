@@ -18,7 +18,8 @@ import pytest
 import typer
 from dotenv import dotenv_values
 
-from brain.setup import _brain_home_dotenv_value, run_setup
+from brain.install_config import brain_home_dotenv_value
+from brain.setup import run_setup
 
 
 def _existing_brain_home(tmp_path: Path, env_body: str) -> Path:
@@ -186,7 +187,7 @@ def test_real_reset_writes_the_old_dotenv_vault_into_the_fresh_dotenv(
     after it would find no ``.env`` and render the default into the fresh one.
 
     Every path is under ``tmp_path``: ``$BRAIN_HOME``, the vault, ``HOME``, and
-    the module's ``DEFAULT_VAULT_PATH``. So even a regressed order resolves a
+    ``brain.config.DEFAULT_VAULT_PATH``. So even a regressed order resolves a
     throwaway directory, never the real ``~/brain-vault``. External commands
     are stubbed as ``tests/test_setup.py`` stubs a non-dry run. The minimal
     profile offers no daemons, and ``BRAIN_LAUNCHD_DIR`` points into
@@ -196,7 +197,7 @@ def test_real_reset_writes_the_old_dotenv_vault_into_the_fresh_dotenv(
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     tmp_default_vault = tmp_path / "default-vault"
-    monkeypatch.setattr("brain.setup.DEFAULT_VAULT_PATH", tmp_default_vault)
+    monkeypatch.setattr("brain.config.DEFAULT_VAULT_PATH", tmp_default_vault)
     monkeypatch.delenv("BRAIN_VAULT_PATH", raising=False)
     monkeypatch.delenv("BRAIN_HOME", raising=False)
     monkeypatch.setenv("BRAIN_LAUNCHD_DIR", str(tmp_path / "LaunchAgents"))
@@ -269,6 +270,6 @@ def test_unusable_brain_home_dotenv_reads_as_unset(
     brain_home.mkdir()
     make_bad_dotenv(brain_home)
     try:
-        assert _brain_home_dotenv_value(brain_home, "BRAIN_VAULT_PATH") is None
+        assert brain_home_dotenv_value(brain_home, "BRAIN_VAULT_PATH") is None
     finally:
         (brain_home / ".env").chmod(0o700)
