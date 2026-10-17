@@ -69,7 +69,7 @@ the startup-failure path.
 Every new guard passes all five clauses: green unmutated; the mutation lands its
 declared count; red; the needle appears on a `>`/`E` line; restored → green,
 with the file's sha256 unchanged. Run with `PYTHONDONTWRITEBYTECODE=1`.
-M10–M14 were added in the PR #39 review.
+M10–M14 were added in the PR #39 review. R / ORD came from the re-review and the re-audit: M14's dry-run pin stayed green under R, because a dry run never deletes `$BRAIN_HOME`, so a non-dry test was added. The harness also snapshots the top-level mtimes of the real `~/.brain` and `~/brain-vault` before and after the whole catalog, and requires them unchanged.
 
 Tests: **mcp** = `tests/test_mcp_server.py`, **setup** =
 `tests/test_setup_dotenv_knobs.py`.
@@ -90,6 +90,7 @@ Tests: **mcp** = `tests/test_mcp_server.py`, **setup** =
 | M12 | `setup._brain_home_dotenv_value` | → `except OSError` | 1 | setup `test_unusable_brain_home_dotenv_reads_as_unset[not-utf8]` | `UnicodeDecodeError` |
 | M13 | `setup.run_setup` Voyage | evaluate the key lookup eagerly on every run | 1 | setup `test_voyage_key_is_not_looked_up_for_other_embedders` | `assert 2 == 1` |
 | M14 | `setup.run_setup` `--reset` | re-resolve `vault_override or DEFAULT_VAULT_PATH` inside the reset branch | 1 | setup `test_reset_keeps_the_vault_named_in_the_old_brain_home_dotenv` | `custom-vault` |
+| R / ORD | `setup.run_setup` `--reset` ordering | MOVE the 13-line vault-resolution block from before the reset branch to just below it (the reviewer's R and the auditor's ORD are the same move) | 1 | setup `test_real_reset_writes_the_old_dotenv_vault_into_the_fresh_dotenv` | `default-vault` |
 
 M4's first draft caught `ConfigError`, which `mcp_server` does not import, so it
 went red on a `NameError`. Clause 4 (the needle) caught that; the row above

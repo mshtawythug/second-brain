@@ -164,7 +164,18 @@ different home than the one setup is installing into.
   reads the key. A malformed line makes each parse observable as one
   python-dotenv warning, and a non-voyage run must parse exactly once.
 - `test_reset_keeps_the_vault_named_in_the_old_brain_home_dotenv`: §3's
-  `--reset` decision.
+  `--reset` decision, as a dry run.
+- `test_real_reset_writes_the_old_dotenv_vault_into_the_fresh_dotenv`: the
+  same decision in a NON-dry run, which is the only kind that pins the
+  ORDERING. A dry run never deletes `$BRAIN_HOME`, so resolving the vault after
+  the reset still found the old `.env` and the dry-run pin stayed green
+  (the reviewer's mutation R, the auditor's ORD). The real run deletes `$BRAIN_HOME` and renders a fresh
+  `.env`, and the test asserts that its `BRAIN_VAULT_PATH` is the old one.
+  Every path is under `tmp_path`: `$BRAIN_HOME`, the vault, `HOME`, and
+  `brain.setup.DEFAULT_VAULT_PATH`, which is patched so a regressed order still
+  cannot resolve the real `~/brain-vault`. External commands and `time.sleep`
+  are stubbed, the profile is `minimal` (which offers no daemons), and
+  `BRAIN_LAUNCHD_DIR` points into `tmp_path`.
 - `test_unusable_brain_home_dotenv_reads_as_unset` (a directory, mode 000, or
   not UTF-8): the helper falls back to `None` and never raises.
 

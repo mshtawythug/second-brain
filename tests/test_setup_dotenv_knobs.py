@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 import typer
+from dotenv import dotenv_values
 
 from brain.setup import _brain_home_dotenv_value, run_setup
 
@@ -176,6 +178,66 @@ def test_reset_keeps_the_vault_named_in_the_old_brain_home_dotenv(
     assert f"vault:      {custom_vault}" in out
 
 
+def test_real_reset_writes_the_old_dotenv_vault_into_the_fresh_dotenv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A NON-dry ``--reset`` must read the old ``.env`` BEFORE deleting it.
+
+    The dry-run pin above cannot see the ordering: a dry run never deletes
+    ``$BRAIN_HOME``, so the old ``.env`` is still there whenever the vault is
+    resolved. Here the reset really runs ``shutil.rmtree``; resolving the vault
+    after it would find no ``.env`` and render the default into the fresh one.
+
+    Every path is under ``tmp_path``: ``$BRAIN_HOME``, the vault, ``HOME``, and
+    the module's ``DEFAULT_VAULT_PATH``. So even a regressed order resolves a
+    throwaway directory, never the real ``~/brain-vault``. External commands
+    are stubbed as ``tests/test_setup.py`` stubs a non-dry run. The minimal
+    profile offers no daemons, and ``BRAIN_LAUNCHD_DIR`` points into
+    ``tmp_path`` as a second fence in case it ever does.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    tmp_default_vault = tmp_path / "default-vault"
+    monkeypatch.setattr("brain.setup.DEFAULT_VAULT_PATH", tmp_default_vault)
+    monkeypatch.delenv("BRAIN_VAULT_PATH", raising=False)
+    monkeypatch.delenv("BRAIN_HOME", raising=False)
+    monkeypatch.setenv("BRAIN_LAUNCHD_DIR", str(tmp_path / "LaunchAgents"))
+    custom_vault = tmp_path / "custom-vault"
+    brain_home = _existing_brain_home(
+        tmp_path, f"BRAIN_VAULT_PATH={custom_vault}\nOLD_DOTENV_MARKER=1\n"
+    )
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/fake"),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
+        patch("brain.setup.ensure_shim"),
+        patch(
+            "brain.config._project_dotenv",
+            return_value=tmp_path / "no-such-project.env",
+        ),
+        patch("typer.prompt", return_value="yes, delete my data"),
+        patch("time.sleep"),
+    ):
+        run_setup(
+            profile="minimal",
+            dry_run=False,
+            non_interactive=True,
+            reset=True,
+            brain_home_override=brain_home,
+            pg_port=0,
+            embedder_choice="none",
+            skip_wiki=True,
+            skip_skill=True,
+        )
+
+    fresh = (brain_home / ".env").read_text(encoding="utf-8")
+    assert "OLD_DOTENV_MARKER" not in fresh  # the reset really deleted it
+    assert dotenv_values(brain_home / ".env").get("BRAIN_VAULT_PATH") == str(custom_vault)
+    assert os.environ["BRAIN_VAULT_PATH"] == str(custom_vault)
+    assert Path(os.environ["BRAIN_HOME"]).is_relative_to(tmp_path)
+    assert not tmp_default_vault.exists()
+
 def _dotenv_as_directory(brain_home: Path) -> None:
     (brain_home / ".env").mkdir()
 
@@ -196,7 +258,7 @@ def _dotenv_not_utf8(brain_home: Path) -> None:
     ids=["directory", "unreadable", "not-utf8"],
 )
 def test_unusable_brain_home_dotenv_reads_as_unset(
-    tmp_path: Path, make_bad_dotenv: object
+    tmp_path: Path, make_bad_dotenv: Callable[[Path], None]
 ) -> None:
     """A ``.env`` that cannot be read falls back (``None``); it never raises.
 
@@ -207,7 +269,7 @@ def test_unusable_brain_home_dotenv_reads_as_unset(
         pytest.skip("root reads a mode-000 file")
     brain_home = tmp_path / ".brain"
     brain_home.mkdir()
-    make_bad_dotenv(brain_home)  # type: ignore[operator]
+    make_bad_dotenv(brain_home)
     try:
         assert _brain_home_dotenv_value(brain_home, "BRAIN_VAULT_PATH") is None
     finally:
