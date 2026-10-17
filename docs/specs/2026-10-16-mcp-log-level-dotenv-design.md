@@ -124,8 +124,12 @@ keeps the vault the old `.env` named; it used to fall back to `~/brain-vault`.
 shims) but never the vault, so pointing the fresh config back at the user's
 existing vault is the right outcome. The alternative silently orphans their
 notes behind a default path. `--vault` and the process env still override it.
-Pinned by `test_reset_keeps_the_vault_named_in_the_old_brain_home_dotenv`, which
-is a dry run on tmp paths.
+The ORDERING is pinned by
+`test_real_reset_writes_the_old_dotenv_vault_into_the_fresh_dotenv`, a non-dry
+reset on tmp paths (§4). Only a real reset deletes the old `.env`, so only it can
+see the vault being resolved too late.
+`test_reset_keeps_the_vault_named_in_the_old_brain_home_dotenv` stays as the
+report-level check: a dry run, asserting the `vault:` line of the final report.
 
 ### Setup fix shape
 
@@ -197,6 +201,8 @@ already SHA-bound through `2475d11` / `120934a`, and nothing touched either file
 from there through `1cd136a`. Each row gains a SHA-bound hop at `8669e8b`, the
 commit that grew both files (4,960 and 1,390 lines, measured with `git show`).
 The merge of master changes neither file. The PR #39 review-fix commit after it
-touches both, and each row gets a descriptive hop for it: `mcp_server.py` grows
-by the corrected `_load_config` docstring (§2), and `setup.py` changes at net
-zero (the Voyage short-circuit).
+touches both, and its hop is SHA-bound to `db1b60e`: `mcp_server.py` grows to
+4,967 lines by the corrected `_load_config` docstring (§2), and `setup.py`
+changes at net zero (the Voyage short-circuit). The re-review format fix after
+it touches only `setup.py` (one condition joined onto one line, which shrinks
+the file) and gets a descriptive hop.

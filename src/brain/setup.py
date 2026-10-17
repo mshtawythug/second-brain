@@ -1230,8 +1230,7 @@ def run_setup(
     # appended a duplicate line. Checked only under voyage, so no other run
     # reads the secret or parses .env a second time.
     if effective_embedder == "voyage" and not (
-        os.environ.get("VOYAGE_API_KEY")
-        or _brain_home_dotenv_value(brain_home, "VOYAGE_API_KEY")
+        os.environ.get("VOYAGE_API_KEY") or _brain_home_dotenv_value(brain_home, "VOYAGE_API_KEY")
     ):
         if non_interactive:
             typer.secho(

@@ -5,6 +5,7 @@ Same bug class as ``brain-mcp``'s log level: setup never calls
 a knob read only from ``os.environ`` ignores the ``.env`` setup itself wrote on
 the first run. Every test is a dry run: no file is written, nothing is exported.
 """
+
 from __future__ import annotations
 
 import logging
@@ -73,9 +74,7 @@ def test_vault_process_env_beats_brain_home_dotenv(
 ) -> None:
     """Precedence is unchanged above the new fallback: process env still wins."""
     from_env = tmp_path / "from-env"
-    brain_home = _existing_brain_home(
-        tmp_path, f"BRAIN_VAULT_PATH={tmp_path / 'from-file'}\n"
-    )
+    brain_home = _existing_brain_home(tmp_path, f"BRAIN_VAULT_PATH={tmp_path / 'from-file'}\n")
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(from_env))
 
     _dry_run_setup(brain_home)
@@ -90,9 +89,7 @@ def test_vault_override_beats_brain_home_dotenv(
 ) -> None:
     """``--vault`` still outranks everything, the ``.env`` included."""
     override = tmp_path / "override"
-    brain_home = _existing_brain_home(
-        tmp_path, f"BRAIN_VAULT_PATH={tmp_path / 'from-file'}\n"
-    )
+    brain_home = _existing_brain_home(tmp_path, f"BRAIN_VAULT_PATH={tmp_path / 'from-file'}\n")
     monkeypatch.delenv("BRAIN_VAULT_PATH", raising=False)
 
     _dry_run_setup(brain_home, vault_override=override)
@@ -237,6 +234,7 @@ def test_real_reset_writes_the_old_dotenv_vault_into_the_fresh_dotenv(
     assert os.environ["BRAIN_VAULT_PATH"] == str(custom_vault)
     assert Path(os.environ["BRAIN_HOME"]).is_relative_to(tmp_path)
     assert not tmp_default_vault.exists()
+
 
 def _dotenv_as_directory(brain_home: Path) -> None:
     (brain_home / ".env").mkdir()

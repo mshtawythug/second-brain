@@ -1170,7 +1170,6 @@ def _restore_mcp_logger_level() -> Iterator[None]:
     mcp_logger.setLevel(saved)
 
 
-
 @pytest.mark.usefixtures("_restore_mcp_logger_level")
 def test_load_config_honours_log_level_from_dotenv(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
