@@ -187,7 +187,7 @@ def test_real_reset_writes_the_old_dotenv_vault_into_the_fresh_dotenv(
     after it would find no ``.env`` and render the default into the fresh one.
 
     Every path is under ``tmp_path``: ``$BRAIN_HOME``, the vault, ``HOME``, and
-    the module's ``DEFAULT_VAULT_PATH``. So even a regressed order resolves a
+    ``brain.config.DEFAULT_VAULT_PATH``. So even a regressed order resolves a
     throwaway directory, never the real ``~/brain-vault``. External commands
     are stubbed as ``tests/test_setup.py`` stubs a non-dry run. The minimal
     profile offers no daemons, and ``BRAIN_LAUNCHD_DIR`` points into

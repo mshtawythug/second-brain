@@ -79,6 +79,8 @@ still bite after the helper moved.
 | L3 | `install_config.resolve_install_vault` | `.env` leg ahead of the process env | 1 | L `test_install_main_process_env_beats_brain_home_dotenv` | `from-file` |
 | L4 | `install_config.resolve_install_vault` | drop `if override is not None: return override` | 1 | L `test_explicit_vault_path_beats_env_and_dotenv` | `explicit` |
 | L5 | `install_config.resolve_install_vault` | default → literal `Path.home() / "brain-vault"` instead of `brain.config.DEFAULT_VAULT_PATH` | 1 | L `test_install_main_without_any_vault_config_uses_the_default` | `default-vault` |
+| R1 | `install_config.resolve_install_vault` | `Path(raw).expanduser()` → `Path(raw)` (added in review) | 1 | L `test_a_tilde_vault_is_expanded_before_it_reaches_the_plist[dotenv]` | `~/custom-vault` |
+| R1 | same | same, proved separately on the process-env leg | 1 | L `test_a_tilde_vault_is_expanded_before_it_reaches_the_plist[process-env]` | `~/custom-vault` |
 | S1 | `setup.run_setup` | stop passing `override=vault_override` | 1 | S `test_vault_override_beats_brain_home_dotenv` | `override` |
 | S2 | `setup.run_setup` | MOVE the resolve line (and its comment) below the reset block (ORD) | 1 | S `test_real_reset_writes_the_old_dotenv_vault_into_the_fresh_dotenv` | `default-vault` |
 | S3 | `install_config.brain_home_dotenv_value` | `except (OSError, UnicodeDecodeError)` → `except FileNotFoundError` | 1 | S `test_unusable_brain_home_dotenv_reads_as_unset[directory]` | `IsADirectoryError` |

@@ -70,11 +70,19 @@ and never needs a vault.
 
 ## 3. Scope left alone
 
-- **The shell tooling** (`brain-up.sh`, `brain-status.sh`, the `_brain-*-fg`
-  wrappers, `brain-monitor`) still reads `BRAIN_VAULT_PATH` from the process env
-  only, for its own purposes such as the wiki build and status output. That is
-  the separate "shell-tooling family" follow-up recorded in PR #39's spec §3.
-  The daemons' vault comes from the plist, which this change fixes.
+- **The shell tooling still reads only the exported value — FOLLOW-UP.**
+  `brain-up.sh` sets its own `VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"`
+  (`templates/bin/brain-up.sh:51`) for the opt-in `BRAIN_WIKI_BUILD=1` overlay
+  and cold-start build, and `brain-status.sh` and `brain-monitor` do the same.
+  After this change, a `.env`-only custom vault therefore gives a real split: the
+  plists (and so the daemons) get the custom vault, while
+  `BRAIN_WIKI_BUILD=1 brain-up` builds `~/brain-vault` and `brain-status`
+  reports on it. The `_brain-*-fg` wrappers are not affected: they run under the
+  plist's env, which now carries the right vault. The workaround is to export
+  `BRAIN_VAULT_PATH`, and `docs/vault-and-wiki.md` says so at the env-overrides
+  row. The fix is the "shell-tooling family" follow-up from PR #39's spec §3 —
+  the shell scripts would need to ask Python for the vault, e.g. through
+  `resolve_install_vault` — and it stays out of this change.
 - **No `--vault` flag on `brain-install-launchd`**, as above.
 
 ## 4. Tests
@@ -91,6 +99,10 @@ and `brain.config.DEFAULT_VAULT_PATH`.
   default is still the default.
 - `test_explicit_vault_path_beats_env_and_dotenv` checks that setup's explicit
   vault still wins.
+- `test_a_tilde_vault_is_expanded_before_it_reaches_the_plist[dotenv|process-env]`
+  checks that `~/…` is expanded against the fenced `HOME` before it is baked in
+  (added in review). launchd does not expand `~`, so a literal `~/Notes` in a
+  plist makes the watcher exit 2 ("not a directory") and respawn every 10s.
 
 The tests read `BRAIN_VAULT_PATH` from each installed plist with `plistlib`.
 `tests/test_setup_dotenv_knobs.py` is repointed at the moved helper and the

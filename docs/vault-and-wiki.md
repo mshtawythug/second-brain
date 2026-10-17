@@ -376,7 +376,7 @@ Env overrides:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault directory the watchers + builds operate against. `brain-install-launchd` (which `brain-up` runs) bakes it into the daemon plists, and when it is not exported it uses the value in `$BRAIN_HOME/.env`, the same precedence as `brain setup`. |
+| `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault directory the watchers + builds operate against. `brain-install-launchd` (which `brain-up` runs) bakes it into the daemon plists, and when it is not exported it uses the value in `$BRAIN_HOME/.env`, the same precedence as `brain setup`. `brain-up`'s opt-in wiki build (`BRAIN_WIKI_BUILD=1`) and `brain-status` still read only the exported value (follow-up); export `BRAIN_VAULT_PATH` to make them agree. |
 | `BRAIN_WIKI_PORT` | `8080` | Port the wiki URL uses: `brain-up` opens it (only with `BRAIN_OPEN_BROWSER=1`), `brain-status` curls it. Caddy must be configured to listen on it (see [Serve locally](#serve-locally)). |
 | `BRAIN_OPEN_BROWSER` | `0` | Set `1` to open the wiki after `brain-up`. Opt-in since the wiki became a legacy view; `brain ui` is the reading surface. |
 | `BRAIN_WIKI_BUILD` | `0` | Set `1` to have `brain-up` apply the Quartz overlay and run the cold-start wiki build. Off since R2, when the wiki went dormant; `brain-rebuild --only quartz` rebuilds it on request. |

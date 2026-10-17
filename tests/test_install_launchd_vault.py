@@ -102,3 +102,24 @@ def test_explicit_vault_path_beats_env_and_dotenv(
     )
 
     assert _baked_vaults(tmp_path) == dict.fromkeys(_INSTALLED_LABELS, str(explicit))
+
+
+@pytest.mark.parametrize("leg", ["dotenv", "process-env"])
+def test_a_tilde_vault_is_expanded_before_it_reaches_the_plist(
+    fenced: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, leg: str
+) -> None:
+    """``~/…`` must be expanded here: launchd does not expand it.
+
+    A literal ``~/custom-vault`` baked into a plist makes the watcher exit 2
+    ("not a directory") and respawn every 10s. ``HOME`` is fenced, so the
+    expansion lands in ``tmp_path``.
+    """
+    if leg == "dotenv":
+        (fenced / ".env").write_text("BRAIN_VAULT_PATH=~/custom-vault\n", encoding="utf-8")
+    else:
+        monkeypatch.setenv("BRAIN_VAULT_PATH", "~/custom-vault")
+
+    install_main()
+
+    expected = str(tmp_path / "home" / "custom-vault")
+    assert _baked_vaults(tmp_path) == dict.fromkeys(_INSTALLED_LABELS, expected)
