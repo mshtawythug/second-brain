@@ -169,9 +169,10 @@ def _para(word: str, n: int) -> str:
 
 
 def test_split_in_half_cuts_at_the_paragraph_boundary_nearest_the_midpoint() -> None:
-    # 10 / 50 / 20 words: the paragraph cuts sit at 10 and 60 of 80; 60 is nearer
-    # the midpoint (40) and leaves each side >= 25%, so it wins over a word cut.
-    first, second, third = _para("a", 10), _para("b", 50), _para("c", 20)
+    # 10 / 50 / 20 words: the paragraph cuts sit at 10 and 60 of 80. 60 leaves
+    # each side >= 25%, so it wins over the LINE break at 35 (inside the middle
+    # paragraph) and any word cut, though both sit nearer the midpoint (40).
+    first, second, third = _para("a", 10), f"{_para('b', 25)}\n{_para('b', 25)}", _para("c", 20)
     text = f"{first}\n\n{second}\n\n{third}"
     assert split_in_half(text, count_tokens=_words) == [f"{first}\n\n{second}\n\n", third]
 
