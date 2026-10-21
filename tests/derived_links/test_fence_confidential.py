@@ -15,23 +15,15 @@ never looks at the partner named inside it. Before this module,
 ``grep -rn 'sensitivity\\|confidential' src/brain/vault/derived_links/`` returned
 nothing at all: the package had no gate to be inconsistent with.
 
-**Two downstream surfaces, one upstream.** The fence is not stripped at publish
-time — ``quartz_overrides/quartz/plugins/transformers/derivedFenceMark.ts``
-STAMPS ``data-brain-*`` attributes onto those links and leaves them in place,
-and ``plugins/emitters/contentIndex.ts`` reads the attributes back to emit link
-records into ``static/contentIndex.json``. So the leak reaches both the rendered
-HTML (via the anchor TEXT) and the public JSON index (via the link TARGET).
-
-*What this module can and cannot measure, stated rather than implied:* there is
-no JavaScript test harness in this repo (``find src/brain/quartz_overrides -name
-'*.test.ts'`` is empty), so contentIndex.json cannot be asserted from pytest.
-What is asserted instead is the sole INPUT to both surfaces — the markdown
-bullet — and both of its halves separately: the title (which becomes the anchor
-text) and the vault-path stem (which becomes the link target and the
-contentIndex record). A gate that scrubbed only the alias and left the stem
-would still feed the JSON index, and the stem assertions are what catch that.
-The JS half remains unpinned and is named here so it is not mistaken for
-covered.
+**Two halves of one bullet.** When this module was written the fence fed two
+downstream surfaces of the Quartz wiki: the rendered HTML (via the anchor TEXT)
+and its public JSON index (via the link TARGET). Both were deleted with the wiki
+at R3 (wiki-to-ui phase 9), but the bullet itself still lands in a vault file
+that is read in Obsidian or any editor, synced, and possibly published by some
+other tool. So both halves are still asserted separately: the title (the anchor
+text) and the vault-path stem (the link target). A gate that scrubbed only the
+alias and left the stem would still name the confidential document, and the
+stem assertions are what catch that.
 
 All fixture data is synthetic.
 """

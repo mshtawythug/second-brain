@@ -252,10 +252,11 @@ def source_kind_buckets(
 # Discovery — the recent rail and the tag index.
 # ---------------------------------------------------------------------------
 
-#: What counts as *browseable* for the discovery surfaces. Ported from
-#: ``brain.wiki.build_homepage._fetch_recent_docs``, whose docstring is the
-#: authority on why each clause exists — plus ONE clause that is not from the
-#: wiki at all (sensitivity, below); in short:
+#: What counts as *browseable* for the discovery surfaces. Ported from the
+#: retired wiki's recent-rail query (``brain.wiki.build_homepage``, deleted at
+#: R3); its docstring's reasoning for each clause is carried here, below, which
+#: is now the authority — plus ONE clause that is not from the wiki at all
+#: (sensitivity, below):
 #:
 #: - ``draft = FALSE`` — drafts are quarantined from public surfaces (P1.6).
 #: - ``vault_path IS NOT NULL`` — un-exported rows have nothing to open.
@@ -266,7 +267,7 @@ def source_kind_buckets(
 #:   the clause that keeps the guarantee if those two are ever narrowed — and
 #:   as the one that states the intent. What *is* proven is the trio: drop all
 #:   three and ``…excludes_unexported_documents`` goes red.
-#: - ``ingested_at IS NOT NULL`` — defensive parity with the wiki query. It is
+#: - ``ingested_at IS NOT NULL`` — defensive parity with the ported query. It is
 #:   *vacuous*: the column is ``NOT NULL`` in ``001_init.sql``, so no mutation
 #:   of it can fail a test. ``test_ui_queries_discovery`` pins that constraint
 #:   so the day a migration relaxes it — the day this clause starts to matter —
@@ -497,9 +498,8 @@ def recent_documents(
 ) -> list[dict[str, Any]]:
     """The most recently *dated* browseable documents, newest first.
 
-    A port of the wiki's P4.7 recent rail
-    (``brain.wiki.build_homepage._fetch_recent_docs``) that returns document
-    **ids**: the wiki links by vault path, the UI navigates by id.
+    A port of the retired wiki's P4.7 recent rail (deleted at R3) that returns
+    document **ids**: the wiki linked by vault path, the UI navigates by id.
 
     Filtering is :data:`_DISCOVERABLE` and ranking is :data:`_DISCOVERY_DATE`
     — see both for the reasoning. Read-only.

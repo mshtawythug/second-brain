@@ -53,7 +53,7 @@ scratchpad/
 # Plans / audits / QA — local-only working docs (may contain personal
 # references). docs/ is private-by-subdir: the publishable reference docs
 # (docs/README.md, docs/cli-reference.md, docs/graphrag.md,
-# docs/vault-and-wiki.md, docs/configuration.md), docs/guides/, docs/assets/,
+# docs/vault.md, docs/configuration.md), docs/guides/, docs/assets/,
 # docs/specs/, docs/plans/, and docs/handoff/ stay trackable; everything below
 # is ignored. Add any NEW private subdir/file to this list before it can leak.
 #
