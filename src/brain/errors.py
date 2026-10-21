@@ -331,6 +331,27 @@ class OllamaContextOverflow(EnrichmentError):
     """
 
 
+class ChatOutputTruncated(EnrichmentError):
+    """A JSON-mode chat reply was cut off at ``num_predict`` on both attempts.
+
+    Raised by :func:`brain.chat.chat_json_with_client` instead of a plain
+    :class:`EnrichmentError` when the FINAL attempt's decode failure was a
+    truncation (an unterminated string, or the decoder running out of input) --
+    the retry at a doubled budget was cut off too. A subclass, so every
+    ``except EnrichmentError`` caller is unaffected; a caller that can recover
+    catches it specifically (GraphRAG concept extraction splits the chunk and,
+    at the split bound, salvages the complete entities from the prefix).
+    ``partial`` is the last reply's raw text: it is derived from document
+    content, so it is deliberately NOT part of ``str(self)`` and must never be
+    logged.
+    """
+
+    def __init__(self, message: str, *, partial: str, num_predict: int) -> None:
+        super().__init__(message)
+        self.partial = partial
+        self.num_predict = num_predict
+
+
 class AudioError(BrainError):
     """Raised when ``brain audio`` script generation fails unrecoverably (Plan 04).
 

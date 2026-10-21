@@ -479,6 +479,117 @@ def test_extract_invalid_json_twice_returns_empty(
     assert "skipping chunk" in caplog.text
 
 
+def _truncated(partial: str) -> httpx.Response:
+    """A reply cut off at ``num_predict`` (the shape Ollama returns)."""
+    return httpx.Response(
+        200,
+        json={
+            "message": {"role": "assistant", "content": partial},
+            "done": True,
+            "done_reason": "length",
+        },
+    )
+
+
+def _sent_text(request: httpx.Request) -> str:
+    return str(json.loads(request.read())["messages"][-1]["content"])
+
+
+# ~140 cl100k tokens of synthetic filler per paragraph: two paragraphs make a
+# chunk over ``MIN_SPLIT_TOKENS`` (200) whose halves are each under it.
+_FILLER = " ".join(["the quarterly review covered routine operational follow-ups"] * 18)
+
+
+def test_extract_salvages_complete_entities_from_output_truncated_twice(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """REGRESSION (2026-10-21, docs/plans/2026-10-21-concept-extract-output-budget.md):
+    on an entity-dense chunk the model lists one entry per mention and runs out
+    of ``num_predict`` on BOTH attempts ("Unterminated string starting at …").
+    The chunk used to be skipped whole. A chunk too small to split
+    (under ``MIN_SPLIT_TOKENS``) has its complete entries salvaged through the
+    normal validation path; the cut-off last entry is dropped."""
+    truncated = (
+        '{"entities": [{"name": "Zorvex", "type": "tool"}, '
+        '{"name": "Lumkai Corp", "type": "org"}, '
+        '{"name": "Nobody Here", "type": "tool"}, '
+        '{"name": "Fenyar'
+    )
+    handler = _const_handler(_truncated(truncated))
+    text = "We moved billing to Zorvex; Lumkai Corp hosts it. Fenyar comes later."
+    with caplog.at_level(logging.WARNING, logger="brain.graph_rag.extract"):
+        out = _extractor(handler).extract(text)
+    # "Nobody Here" is complete but absent from the text → the unchanged
+    # presence check drops it; "Fenyar" was cut mid-entry → never salvaged.
+    assert {(e.entity_type, e.display_name) for e in out} == {
+        ("tool", "Zorvex"),
+        ("org", "Lumkai Corp"),
+    }
+    assert "split 0 piece(s), salvaged 3 entries from 1 piece(s)" in caplog.text
+    assert "skipping chunk" not in caplog.text
+    # The WARN names counts only — never the (document-derived) model output.
+    assert "Zorvex" not in caplog.text
+
+
+def test_extract_splits_a_truncated_chunk_and_keeps_its_tail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A truncated chunk big enough to split is re-extracted in halves, so the
+    entities AFTER the cut point (the chunk's tail) are found too — a prefix
+    salvage of the whole chunk's reply would only ever have kept the head."""
+    text = f"Zorvex handles billing. {_FILLER}\n\nLumkai Corp hosts it. {_FILLER}"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent = _sent_text(request)
+        if "Zorvex" in sent and "Lumkai" in sent:
+            return _truncated('{"entities": [{"name": "Zorvex", "type": "tool"}, {"na')
+        if "Zorvex" in sent:
+            return _ok_entities([{"name": "Zorvex", "type": "tool"}])
+        if "Lumkai" in sent:
+            return _ok_entities([{"name": "Lumkai Corp", "type": "org"}])
+        return _ok_entities([])
+
+    with caplog.at_level(logging.WARNING, logger="brain.graph_rag.extract"):
+        out = _extractor(handler).extract(text)
+    assert {(e.entity_type, e.display_name) for e in out} == {
+        ("tool", "Zorvex"),
+        ("org", "Lumkai Corp"),
+    }
+    assert "split 1 piece(s), salvaged 0 entries from 0 piece(s)" in caplog.text
+    assert "Zorvex" not in caplog.text
+
+
+def test_extract_split_then_salvages_a_half_still_truncated_at_the_floor(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A half that still truncates and is under ``MIN_SPLIT_TOKENS`` is not split
+    again: its complete prefix is salvaged, and the other half's full reply is
+    kept."""
+    text = f"Zorvex handles billing. {_FILLER}\n\nLumkai Corp hosts it. {_FILLER}"
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent = _sent_text(request)
+        calls.append(sent)
+        if "Zorvex" in sent and "Lumkai" in sent:
+            return _truncated('{"entities": [{"name": "Zorvex", "type": "tool"}, {"na')
+        if "Zorvex" in sent:
+            return _ok_entities([{"name": "Zorvex", "type": "tool"}])
+        return _truncated(
+            '{"entities": [{"name": "Lumkai Corp", "type": "org"}, {"name": "Pemr'
+        )
+
+    with caplog.at_level(logging.WARNING, logger="brain.graph_rag.extract"):
+        out = _extractor(handler).extract(text)
+    assert {(e.entity_type, e.display_name) for e in out} == {
+        ("tool", "Zorvex"),
+        ("org", "Lumkai Corp"),
+    }
+    assert "split 1 piece(s), salvaged 1 entries from 1 piece(s)" in caplog.text
+    # whole chunk x2 attempts + Zorvex half x1 + Lumkai half x2 — never split again.
+    assert len(calls) == 5
+
+
 # --------------------------------------------------------------------------- #
 # Never-raise on Ollama unavailable
 # --------------------------------------------------------------------------- #

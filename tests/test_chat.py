@@ -17,7 +17,7 @@ import pytest
 from brain import chat
 from brain.chat import chat_json, chat_json_with_client, coerce_bool
 from brain.config import Config
-from brain.errors import EnrichmentError, OllamaUnavailable
+from brain.errors import ChatOutputTruncated, EnrichmentError, OllamaUnavailable
 
 
 def _client(transport: httpx.MockTransport) -> httpx.Client:
@@ -153,6 +153,75 @@ def test_chat_json_with_client_raises_after_two_bad_responses() -> None:
             keep_alive="30m",
             num_ctx=8192,
         )
+
+
+def test_chat_json_with_client_truncated_twice_raises_typed_error_with_partial() -> None:
+    """REGRESSION (concept-extract output budget, 2026-10-21): a reply cut off at
+    ``num_predict`` on BOTH attempts must surface as :class:`ChatOutputTruncated`
+    carrying the last partial reply and the budget it hit, so a caller that can
+    use a prefix (GraphRAG concept extraction) is not left with nothing."""
+    replies = ['{"answer": "trunc', '{"answer": "still trunc']
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return _raw(replies[len(calls) - 1])
+
+    with pytest.raises(ChatOutputTruncated) as excinfo:
+        chat_json_with_client(
+            _client(httpx.MockTransport(handler)),
+            model="m",
+            messages=[{"role": "user", "content": "q"}],
+            required_keys=("answer",),
+            keep_alive="30m",
+            num_ctx=8192,
+            num_predict=128,
+        )
+    assert excinfo.value.partial == '{"answer": "still trunc'
+    assert excinfo.value.num_predict == 256
+    # The partial reply is document-derived: it must never reach str()/a log line.
+    assert "still trunc" not in str(excinfo.value)
+    assert str(excinfo.value).startswith("chat failed after 2 attempts: Unterminated")
+
+
+def test_chat_json_with_client_malformed_twice_is_not_truncation() -> None:
+    """Garbage from the first character is NOT truncation: plain EnrichmentError."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _raw("not json at all")
+
+    with pytest.raises(EnrichmentError) as excinfo:
+        chat_json_with_client(
+            _client(httpx.MockTransport(handler)),
+            model="m",
+            messages=[{"role": "user", "content": "q"}],
+            required_keys=("answer",),
+            keep_alive="30m",
+            num_ctx=8192,
+        )
+    assert not isinstance(excinfo.value, ChatOutputTruncated)
+
+
+def test_chat_json_with_client_truncation_then_malformed_is_not_truncation() -> None:
+    """Only the FINAL attempt's failure decides the type: a truncated first reply
+    followed by a malformed-from-the-start retry is a plain EnrichmentError."""
+    replies = ['{"answer": "trunc', "not json at all"]
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return _raw(replies[len(calls) - 1])
+
+    with pytest.raises(EnrichmentError) as excinfo:
+        chat_json_with_client(
+            _client(httpx.MockTransport(handler)),
+            model="m",
+            messages=[{"role": "user", "content": "q"}],
+            required_keys=("answer",),
+            keep_alive="30m",
+            num_ctx=8192,
+        )
+    assert not isinstance(excinfo.value, ChatOutputTruncated)
 
 
 def test_chat_json_with_client_raises_on_missing_required_key() -> None:
