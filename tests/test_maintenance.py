@@ -152,17 +152,16 @@ def test_mirror_stage_is_exactly_the_three_vault_steps() -> None:
     derived from ``brain_argv``.
     """
     py = sys.executable
-    got = [(s.argv, s.fatal, s.env) for s in _stage("mirror").steps]
+    got = [(s.argv, s.fatal) for s in _stage("mirror").steps]
     assert got == [
-        ((py, "-m", "brain", "vault", "export", "--to", "/tmp/v"), True, ()),
-        ((py, "-m", "brain", "vault", "sync-summaries", "--vault", "/tmp/v"), False, ()),
+        ((py, "-m", "brain", "vault", "export", "--to", "/tmp/v"), True),
+        ((py, "-m", "brain", "vault", "sync-summaries", "--vault", "/tmp/v"), False),
         (
             (
                 py, "-m", "brain", "vault", "prune-orphans", "--apply", "--include-stale",
                 "--vault", "/tmp/v",
             ),
             False,
-            (),
         ),
     ]
 
@@ -171,7 +170,7 @@ def test_default_plan_spawns_no_quartz_step() -> None:
     """E1: running the default selection never spawns ``vault render`` or ``build_swap``."""
     calls: list[tuple[str, ...]] = []
 
-    def fake_run(argv: tuple[str, ...], env: dict[str, str] | None = None) -> int:
+    def fake_run(argv: tuple[str, ...]) -> int:
         calls.append(tuple(argv))
         return 0
 
@@ -254,7 +253,7 @@ def test_run_stages_fail_fast_stops_after_first_fatal() -> None:
     selected = m.select_stages(_stages(), only=["embeddings", "summaries", "search"], skip=None)
     calls: list[tuple[str, ...]] = []
 
-    def fake_run(argv: tuple[str, ...], env: dict[str, str] | None = None) -> int:
+    def fake_run(argv: tuple[str, ...]) -> int:
         calls.append(tuple(argv))
         return 7 if tuple(argv) == m.brain_argv("enrich", "--backfill") else 0
 
@@ -271,7 +270,7 @@ def test_run_stages_nonfatal_step_continues_to_prune_orphans() -> None:
     selected = m.select_stages(_stages(), only=["mirror"], skip=None)
     calls: list[tuple[str, ...]] = []
 
-    def fake_run(argv: tuple[str, ...], env: dict[str, str] | None = None) -> int:
+    def fake_run(argv: tuple[str, ...]) -> int:
         calls.append(tuple(argv))
         return 1 if "sync-summaries" in argv else 0
 

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import sys
@@ -24,7 +23,6 @@ class Step:
 
     argv: tuple[str, ...]
     fatal: bool = True
-    env: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -242,10 +240,13 @@ class StageFailed(BrainError):
         self.exit_code = exit_code
 
 
-def _default_runner(argv: Sequence[str], env: dict[str, str] | None = None) -> int:
-    """Run a subprocess and return its exit code."""
-    full_env = {**os.environ, **(env or {})}
-    proc = subprocess.run(list(argv), env=full_env, check=False)  # noqa: S603
+def _default_runner(argv: Sequence[str]) -> int:
+    """Run a subprocess, inheriting this process's environment, and return its exit code.
+
+    (A per-step ``env`` overlay existed only for the Quartz ``build_swap`` step's
+    ``BRAIN_WIKI_RELOAD=1``; it went with that step at R3, wiki-to-ui phase 9.)
+    """
+    proc = subprocess.run(list(argv), check=False)  # noqa: S603
     return proc.returncode
 
 
@@ -258,8 +259,7 @@ def run_stages(
     for stage in stages:
         typer.echo(f"▶ {stage.stage_id}: {stage.description}")
         for step in stage.steps:
-            env = dict(step.env) if step.env else None
-            code = runner(step.argv, env=env)
+            code = runner(step.argv)
             if code != 0:
                 if step.fatal:
                     raise StageFailed(stage.stage_id, code)
