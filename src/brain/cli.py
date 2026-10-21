@@ -1926,11 +1926,11 @@ def doctor(
         # the connection block above. Self-contained WARN, like _check_age.
         report.record_all(backup_doctor_checks(cfg))
 
-        # Runtime health OUTSIDE this process (C4): $BRAIN_HOME/.env, the
-        # launchd daemons, and wiki-build freshness. Every check above stops at
+        # Runtime health OUTSIDE this process (C4): $BRAIN_HOME/.env and the
+        # launchd daemons. Every check above stops at
         # the process boundary, which is how a broken .env silently killed all
         # three daemons for twelve days while doctor stayed green and exited 0.
-        report.record_all(runtime_doctor_checks(cfg))
+        report.record_all(runtime_doctor_checks())
 
     if json_output:
         emit_json(report.to_payload())

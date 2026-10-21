@@ -1,11 +1,11 @@
-"""Runtime-health `brain doctor` checks: dotenv, launchd daemons, the dormant wiki.
+"""Runtime-health `brain doctor` checks: dotenv, launchd daemons, the vault watcher.
 
 Doctor's original checks all stop at the process boundary: they confirm that
 *this* invocation can reach Postgres, Ollama and the vault. That left a whole
 class of outage invisible — a missing ``$BRAIN_HOME/.env`` broke all three
 launchd daemons for twelve days while `brain doctor`, run from a shell that
 happened to have the environment loaded, reported everything green and exited
-0. The wiki served stale content the entire time and looked alive.
+0. The (since-deleted) wiki served stale content the entire time and looked alive.
 
 The checks here close that gap by asking about state OUTSIDE the current
 process:
@@ -22,9 +22,9 @@ process:
     Composed in from :mod:`brain.doctor_watcher` (wiki-to-ui phase 8): is the
     vault-sync watcher installed or running (A9), and is the retired
     ``com.brain.build`` still installed?
-``wiki build``
-    The Quartz wiki is dormant since R2, so this reports its newest COMPLETED
-    build and how to rebuild on request. It never FAILs on age.
+
+The ``wiki build`` check that followed was deleted with the Quartz wiki at R3
+(phase 9).
 
 Like :func:`brain.cli_backup.backup_doctor_checks` this module never imports
 ``brain.cli`` at module scope — ``cli.py`` imports *it*. The doctor value types
@@ -36,7 +36,6 @@ import os
 import plistlib
 import subprocess
 import sys
-import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -45,8 +44,7 @@ from dotenv import dotenv_values
 
 from .bin.launchd import _INSTALLED_LABELS as DAEMON_LABELS
 from .bin.launchd import resolve_launchctl
-from .config import Config, _brain_home_dotenv, _brain_home_root, dotenv_chain
-from .wiki.build_swap import EXIT_CONFIG_ERROR
+from .config import _brain_home_dotenv, _brain_home_root, dotenv_chain
 
 if TYPE_CHECKING:  # pragma: no cover — typing only; the real import is deferred
     from .cli import _DoctorCheck
@@ -57,25 +55,12 @@ if TYPE_CHECKING:  # pragma: no cover — typing only; the real import is deferr
 #: twelve-day outage stayed invisible to an interactive `brain doctor`.
 REQUIRED_DOTENV_KEYS = ("DATABASE_URL",)
 
-#: How a dormant wiki is rebuilt on request (R2; ``brain-rebuild``'s opt-in stage).
-WIKI_REBUILD_REMEDY = "brain-rebuild --only quartz"
-
-#: Marker file written into a build directory only after Quartz exits 0, just
-#: before the atomic ``current`` symlink swap (see
-#: :func:`brain.wiki.build_swap.build_and_swap`). Its presence is what makes a
-#: build "completed"; its mtime is the completion timestamp. A build that
-#: crashed or is still being written has no marker and must not count as fresh.
-BUILD_COMPLETE_MARKER = ".build-id"
-
 #: `launchctl list` is a local IPC round-trip; it should answer instantly.
 _LAUNCHCTL_TIMEOUT_SECONDS = 5
 
 #: Probing the daemons' interpreter costs one Python startup (~200ms). Bounded
 #: generously so a cold filesystem cache degrades to a WARN, never a hang.
 _INTERPRETER_PROBE_TIMEOUT_SECONDS = 20
-
-_SECONDS_PER_DAY = 86400.0
-
 
 def _default_launchd_dir() -> Path:
     """The LaunchAgents directory, honouring the ``BRAIN_LAUNCHD_DIR`` seam.
@@ -89,20 +74,21 @@ def _default_launchd_dir() -> Path:
 
 
 def runtime_doctor_checks(
-    cfg: Config,
     *,
     launchd_dir: Path | None = None,
     launchctl: str | None = None,
     platform: str | None = None,
-    now: float | None = None,
     processes: Sequence[str] | None = None,
 ) -> list[_DoctorCheck]:
-    """Build the ``config`` / ``daemons`` / ``vault watcher`` / ``wiki build`` checks.
+    """Build the ``config`` / ``daemons`` / ``vault watcher`` / ``daemon code`` checks.
 
-    Every keyword argument is a test seam with a production default resolved
-    lazily, so tests never shell out to the real ``launchctl`` or ``ps``, nor
-    read the real ``~/.brain`` / ``~/brain-vault``. ``processes`` feeds the
-    off-macOS watcher scan, the same seam ``maintenance.ingest_in_flight`` has.
+    Takes no ``Config``: the one check that read it (the dormant wiki's build
+    freshness, from ``cfg.vault_path``) was deleted with the wiki at R3, and
+    with it the ``now`` seam it needed. Every keyword argument is a test seam
+    with a production default resolved lazily, so tests never shell out to the
+    real ``launchctl`` or ``ps``, nor read the real ``~/.brain``. ``processes``
+    feeds the off-macOS watcher scan, the same seam
+    ``maintenance.ingest_in_flight`` has.
     """
     # Deferred: doctor_watcher imports this module's _check.
     from .doctor_watcher import retired_daemon_doctor_check, watcher_doctor_check
@@ -123,9 +109,6 @@ def runtime_doctor_checks(
         *retired_daemon_doctor_check(launchd_dir=resolved_dir, platform=resolved_platform),
         *daemon_code_doctor_check(
             launchd_dir=resolved_dir, platform=resolved_platform
-        ),
-        *wiki_freshness_doctor_check(
-            cfg.vault_path, now=now if now is not None else time.time()
         ),
     ]
 
@@ -355,9 +338,11 @@ def daemon_doctor_check(
 
     * **positive last exit** → FAIL. A job that exits non-zero is broken, and
       for the two ``KeepAlive`` daemons it means a crash loop. This is the exact
-      signature of the twelve-day outage, so it must move the exit code.
-      :data:`~brain.wiki.build_swap.EXIT_CONFIG_ERROR` gets its own wording and
-      remedy — a reload cannot clear a misconfiguration.
+      signature of the twelve-day outage, so it must move the exit code. Every
+      positive code is treated alike. (Exit 3 used to get a "MISCONFIGURED"
+      wording of its own; that was the deleted ``brain.wiki.build_swap``'s
+      contract, and no surviving daemon emits it, so it went with the wiki at
+      R3.)
     * **installed but not loaded** → FAIL. The plist is on disk but launchd
       does not have it; nothing is running.
     * **negative last exit** (killed by a signal) → it depends, and the earlier
@@ -374,8 +359,7 @@ def daemon_doctor_check(
         calendar job — not running is its normal state, so it is exempt.)
       - **running** → WARN. The restart recovered; the message still names the
         likely cause and the log. (Until phase 8 a stale wiki turned this into
-        a FAIL. At R2 the wiki is dormant, so its age says nothing about a
-        daemon, and that coupling is gone.)
+        a FAIL; that coupling went at R2, and the wiki itself at R3.)
     * **no plists installed** → OK, "not installed". A fresh install that never
       opted into the daemons is not broken.
     * **non-macOS** → OK, not applicable. launchd is macOS-only; a Linux user
@@ -428,7 +412,6 @@ def daemon_doctor_check(
     statuses = _parse_launchctl_list(result.stdout)
     failures: list[tuple[str, str]] = []
     warnings: list[tuple[str, str]] = []
-    config_faults: list[str] = []
     for label in installed:
         if label not in statuses:
             failures.append((label, "installed but NOT LOADED"))
@@ -454,16 +437,6 @@ def daemon_doctor_check(
                         f"here means a self-inflicted kill — check the log)",
                     )
                 )
-        elif status == EXIT_CONFIG_ERROR:
-            # w-failloud's contract: 3 means "this box is misconfigured, a human
-            # must act" — categorically different from 1 ("the build broke, a
-            # retry might help"), and it deserves a config remedy rather than a
-            # reload. Imported, never hardcoded, so the two surfaces cannot
-            # drift apart.
-            failures.append(
-                (label, f"last exit {status} — MISCONFIGURED (not a transient)")
-            )
-            config_faults.append(label)
         elif status > 0:
             failures.append((label, f"last exit {status}"))
 
@@ -475,14 +448,7 @@ def daemon_doctor_check(
             f"{label}: {_daemon_error_log(launchd_dir, label)}"
             for label, _why in failures
         )
-        # A misconfiguration will not survive a reload, so pointing at
-        # brain-install-launchd there would be another no-op remedy.
-        remedy = (
-            "brain doctor  # fix the config FAIL above first — exit "
-            f"{EXIT_CONFIG_ERROR} will not clear on a reload"
-            if config_faults
-            else "brain-install-launchd  # reload once the log above is addressed"
-        )
+        remedy = "brain-install-launchd  # reload once the log above is addressed"
         return [_check("daemons", "fail", detail, remedy, notes=notes)]
     if warnings:
         return [
@@ -593,87 +559,5 @@ def daemon_code_doctor_check(
             f"THIS CLI's install, not the daemons'",
             "brain-install-launchd  # re-pin the daemons at this install, "
             "or run the CLI from the daemons' install",
-        )
-    ]
-
-
-# ---------------------------------------------------------------------------
-# wiki build — is the newest COMPLETED build recent?
-# ---------------------------------------------------------------------------
-
-
-def newest_completed_build(builds_root: Path) -> tuple[Path, float] | None:
-    """Newest ``(build_dir, completed_at)`` under *builds_root*, or ``None``.
-
-    "Completed" means the directory holds a :data:`BUILD_COMPLETE_MARKER`, which
-    Quartz's build-and-swap writes only after the build subprocess exits 0. A
-    half-written or crashed build directory therefore never counts as fresh —
-    otherwise a stream of failing builds would keep the wiki looking healthy,
-    which is the failure this check exists to catch.
-
-    The marker's mtime is the completion time. The DIRECTORY mtime is not used:
-    it moves whenever anything inside is touched, so it can report a crashed
-    build as recent.
-    """
-    newest: tuple[Path, float] | None = None
-    try:
-        entries = list(builds_root.iterdir())
-    except OSError:
-        return None
-    for entry in entries:
-        marker = entry / BUILD_COMPLETE_MARKER
-        try:
-            if not entry.is_dir() or not marker.is_file():
-                continue
-            completed_at = marker.stat().st_mtime
-        except OSError:  # pragma: no cover — build GC'd mid-scan
-            continue
-        if newest is None or completed_at > newest[1]:
-            newest = (entry, completed_at)
-    return newest
-
-
-def wiki_freshness_doctor_check(
-    vault_path: Path, *, now: float
-) -> list[_DoctorCheck]:
-    """Report the dormant Quartz wiki's newest completed build. Never FAILs (R8-4).
-
-    Until phase 8 this FAILed past a staleness threshold, because a stale wiki
-    was the user-visible symptom of a broken rebuild chain. At R2 nothing
-    rebuilds the wiki by default (``com.brain.build`` is retired and
-    ``brain-rebuild`` skips the opt-in ``quartz`` stage), so age is expected and
-    a permanently red doctor would be a defect. Both former FAIL branches (an
-    old build and no completed build) are OK, and both name
-    :data:`WIKI_REBUILD_REMEDY`. A vault with no ``.quartz`` workspace is OK as
-    before: plenty of installs never render one.
-    """
-    workspace = vault_path / ".quartz"
-    if not workspace.is_dir():
-        return [
-            _check("wiki build", "ok", f"not configured — no {workspace}")
-        ]
-
-    builds_root = workspace / "builds"
-    newest = newest_completed_build(builds_root) if builds_root.is_dir() else None
-    if newest is None:
-        return [
-            _check(
-                "wiki build",
-                "ok",
-                f"dormant since R2, never built; `{WIKI_REBUILD_REMEDY}` builds it",
-                WIKI_REBUILD_REMEDY,
-            )
-        ]
-
-    build_dir, completed_at = newest
-    age_days = max(0.0, (now - completed_at) / _SECONDS_PER_DAY)
-    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(completed_at))
-    return [
-        _check(
-            "wiki build",
-            "ok",
-            f"dormant since R2, last built {when} ({build_dir.name}, "
-            f"{age_days:.1f} days ago); `{WIKI_REBUILD_REMEDY}` rebuilds it",
-            WIKI_REBUILD_REMEDY,
         )
     ]

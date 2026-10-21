@@ -9,24 +9,18 @@ Every seam is injected: no test shells out to the real ``launchctl``, reads the
 real ``~/.brain`` or ``~/brain-vault``, or touches ``~/Library/LaunchAgents``.
 All fixture values are synthetic (CLAUDE.md Rule 15).
 """
-import os
 import plistlib
-import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from brain.config import Config
 from brain.doctor_runtime import (
-    BUILD_COMPLETE_MARKER,
     _default_launchd_dir,
     daemon_code_doctor_check,
     daemon_doctor_check,
     dotenv_doctor_check,
-    newest_completed_build,
     runtime_doctor_checks,
-    wiki_freshness_doctor_check,
 )
 
 # The labels the daemon checks cover (phase 8: com.brain.build is retired and
@@ -89,19 +83,6 @@ def _daemons(launchd_dir: Path, stdout: str, *, returncode: int = 0):
             launchctl="launchctl",
             platform="darwin",
         )
-
-
-def _write_build(builds_root: Path, name: str, *, age_days: float, complete: bool):
-    """Create a build dir, marking it completed by writing the ``.build-id``."""
-    build = builds_root / name
-    build.mkdir(parents=True)
-    (build / "index.html").write_text("<html></html>", encoding="utf-8")
-    if complete:
-        marker = build / BUILD_COMPLETE_MARKER
-        marker.write_text(f"{name}\n", encoding="utf-8")
-        when = time.time() - age_days * 86400
-        os.utime(marker, (when, when))
-    return build
 
 
 # ---------------------------------------------------------------------------
@@ -273,40 +254,30 @@ def test_daemon_error_log_path_comes_from_the_installed_plist(tmp_path: Path) ->
     assert "/synthetic/logs/com.brain.brief.err.log" in rendered
 
 
-def test_config_error_exit_is_distinguished_from_a_transient_build_failure(
-    tmp_path: Path,
-) -> None:
-    """``build_swap.EXIT_CONFIG_ERROR`` means "a human must act", not "retry".
+def test_exit_3_is_an_ordinary_failure_now_that_build_swap_is_gone(tmp_path: Path) -> None:
+    """R9-4 (phase 9): exit 3 gets no "MISCONFIGURED" special case any more.
 
-    Reloading the agent cannot clear a misconfiguration, so the remedy must NOT
-    be brain-install-launchd — that would be another no-op remedy.
+    Exit 3 was the deleted ``brain.wiki.build_swap``'s "a human must act"
+    contract, and the check used to word it specially and withhold the reload
+    remedy. No surviving daemon emits it — the watcher's ``ConfigError`` exits 2
+    through the Typer group — so a 3 from one is a plain non-zero exit: FAIL,
+    named with its code, with the ordinary reload remedy.
     """
-    from brain.wiki.build_swap import EXIT_BUILD_ERROR, EXIT_CONFIG_ERROR
-
     _install_plists(tmp_path, *_LABELS)
-    stdout = _statuses(
-        **{
-            "com.brain.watcher": EXIT_CONFIG_ERROR,
-            "com.brain.brief": EXIT_BUILD_ERROR,
-        }
-    )
+    stdout = _statuses(**{"com.brain.watcher": 3, "com.brain.brief": 0})
 
     (check,) = _daemons(tmp_path, stdout)
 
     assert check.status == "fail"
-    assert "MISCONFIGURED" in check.detail
-    assert "brain-install-launchd" not in (check.remedy or "")
-    # The plain build failure keeps the ordinary wording.
-    assert f"com.brain.brief last exit {EXIT_BUILD_ERROR}" in check.detail
-    assert "com.brain.brief last exit 1 — MISCONFIGURED" not in check.detail
+    assert "com.brain.watcher last exit 3" in check.detail
+    assert "MISCONFIGURED" not in check.detail
+    assert "brain-install-launchd" in (check.remedy or "")
 
 
-def test_transient_build_failure_still_suggests_a_reload(tmp_path: Path) -> None:
-    """Exit 1 alone is retryable — the reload remedy is right there."""
-    from brain.wiki.build_swap import EXIT_BUILD_ERROR
-
+def test_nonzero_exit_suggests_a_reload(tmp_path: Path) -> None:
+    """A plain non-zero exit is retryable — the reload remedy is right there."""
     _install_plists(tmp_path, *_LABELS)
-    stdout = _statuses(**dict.fromkeys(_LABELS, EXIT_BUILD_ERROR))
+    stdout = _statuses(**dict.fromkeys(_LABELS, 1))
 
     (check,) = _daemons(tmp_path, stdout)
 
@@ -483,8 +454,7 @@ def test_doctor_cli_daemons_line_is_host_independent(
     """
     from brain.doctor_runtime import runtime_doctor_checks
 
-    cfg = Config(database_url="postgresql://synthetic/x", vault_path=Path("/nonexistent"))
-    checks = {c.check: c for c in runtime_doctor_checks(cfg, platform="darwin")}
+    checks = {c.check: c for c in runtime_doctor_checks(platform="darwin")}
 
     assert checks["daemons"].status == "ok"
     assert "not installed" in checks["daemons"].detail
@@ -549,51 +519,6 @@ def test_daemon_code_check_is_silent_when_there_is_nothing_to_compare(
 
 
 # ---------------------------------------------------------------------------
-# wiki build freshness
-# ---------------------------------------------------------------------------
-
-
-def test_fresh_wiki_build_passes(tmp_path: Path) -> None:
-    builds = tmp_path / ".quartz" / "builds"
-    _write_build(builds, "20260807-090000-bbbbbb", age_days=0.1, complete=True)
-
-    (check,) = wiki_freshness_doctor_check(tmp_path, now=time.time())
-
-    assert check.status == "ok"
-
-
-def test_half_written_build_is_not_reported_as_the_last_build(tmp_path: Path) -> None:
-    """A build dir without ``.build-id`` never completed, so it is not "last built"."""
-    builds = tmp_path / ".quartz" / "builds"
-    _write_build(builds, "20260726-090000-aaaaaa", age_days=12, complete=True)
-    _write_build(builds, "20260807-093000-cccccc", age_days=0.0, complete=False)
-
-    (check,) = wiki_freshness_doctor_check(tmp_path, now=time.time())
-
-    assert "20260726-090000-aaaaaa" in check.detail
-    assert "20260807-093000-cccccc" not in check.detail
-
-
-def test_newest_completed_build_ignores_incomplete_dirs(tmp_path: Path) -> None:
-    builds = tmp_path / ".quartz" / "builds"
-    good = _write_build(builds, "20260801-090000-dddddd", age_days=6, complete=True)
-    _write_build(builds, "20260807-090000-eeeeee", age_days=0, complete=False)
-
-    found = newest_completed_build(builds)
-
-    assert found is not None
-    assert found[0] == good
-
-
-def test_vault_without_quartz_workspace_is_not_broken(tmp_path: Path) -> None:
-    """The wiki is optional; plenty of installs never render one."""
-    (check,) = wiki_freshness_doctor_check(tmp_path, now=time.time())
-
-    assert check.status == "ok"
-    assert "not configured" in check.detail
-
-
-# ---------------------------------------------------------------------------
 # aggregate — the positive control
 # ---------------------------------------------------------------------------
 
@@ -615,25 +540,21 @@ def test_all_healthy_yields_no_failures(
     monkeypatch.setenv("BRAIN_HOME", str(home))
     monkeypatch.chdir(tmp_path)
 
-    vault = tmp_path / "vault"
-    _write_build(
-        vault / ".quartz" / "builds", "20260807-090000-333333", age_days=0.2, complete=True
-    )
     launchd_dir = tmp_path / "agents"
     launchd_dir.mkdir()
     _install_plists(launchd_dir, *_LABELS)
 
-    cfg = Config(database_url="postgresql://synthetic/x", vault_path=vault)
     with patch(
         "brain.doctor_runtime.subprocess.run",
         return_value=_FakeCompleted(_statuses(**dict.fromkeys(_LABELS, 0))),
     ):
         checks = runtime_doctor_checks(
-            cfg, launchd_dir=launchd_dir, launchctl="launchctl", platform="darwin"
+            launchd_dir=launchd_dir, launchctl="launchctl", platform="darwin"
         )
 
-    assert [c.check for c in checks] == ["config", "daemons", "vault watcher", "wiki build"]
-    assert [c.status for c in checks] == ["ok", "ok", "ok", "ok"]
+    # R3 (phase 9): the dormant wiki's "wiki build" check is gone from the set.
+    assert [c.check for c in checks] == ["config", "daemons", "vault watcher"]
+    assert [c.status for c in checks] == ["ok", "ok", "ok"]
 
 
 def test_every_failing_check_names_a_remedy(
@@ -641,27 +562,22 @@ def test_every_failing_check_names_a_remedy(
 ) -> None:
     """A red or yellow line the user cannot act on is only marginally better than silence.
 
-    The 30-day-old build no longer FAILs (R8-4: the wiki is dormant at R2), and
-    the leftover ``com.brain.build`` plist adds the retired-daemon WARN.
+    The leftover ``com.brain.build`` plist adds the retired-daemon WARN, which
+    survives the wiki's deletion (R9-1: legacy cleanup stays).
     """
     monkeypatch.setenv("BRAIN_HOME", str(tmp_path / "absent"))
     monkeypatch.chdir(tmp_path)
 
-    vault = tmp_path / "vault"
-    _write_build(
-        vault / ".quartz" / "builds", "20260726-090000-444444", age_days=30, complete=True
-    )
     launchd_dir = tmp_path / "agents"
     launchd_dir.mkdir()
     _install_plists(launchd_dir, *_LABELS, "com.brain.build")
 
-    cfg = Config(database_url="postgresql://synthetic/x", vault_path=vault)
     with patch(
         "brain.doctor_runtime.subprocess.run",
         return_value=_FakeCompleted(_statuses(**dict.fromkeys(_LABELS, 1))),
     ):
         checks = runtime_doctor_checks(
-            cfg, launchd_dir=launchd_dir, launchctl="launchctl", platform="darwin"
+            launchd_dir=launchd_dir, launchctl="launchctl", platform="darwin"
         )
 
     flagged = {c.check: c.status for c in checks if c.status != "ok"}
