@@ -253,8 +253,9 @@ def mark_confidential(id: str = typer.Argument(...)) -> None:
     Raises the document's trust tier. A confidential document still lives in
     the DB and is fully reachable from the local CLI — the boundary is at
     *egress*: MCP ``brain_show`` withholds the body unless explicitly asked,
-    the hosted-embedder path refuses to ship it, and the wiki drops it from
-    the published index.
+    the hosted-embedder path refuses to ship it, ``brain ui`` keeps it out of
+    its unprompted listings, and the vault pages the brain generates (People
+    Hub, weekly review, brief) leave it out.
 
     Idempotent — running it twice prints ``<short-id> is already confidential``
     and exits 0. Use ``brain mark-normal`` to reverse it.
