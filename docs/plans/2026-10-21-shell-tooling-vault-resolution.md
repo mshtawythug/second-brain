@@ -82,7 +82,10 @@ Re-derive with `grep -rn 'BRAIN_VAULT_PATH\|brain-vault' bin scripts src/brain/t
   PR should not conflict beyond `brain-status.sh`'s Quartz `current` block,
   which this change only moves below the new resolution.
 - **Behaviour change** for `brain-status` / `brain-monitor`: they now report
-  the vault the daemons watch rather than `~/brain-vault`. That is the fix.
+  the vault the installers resolve — the one `brain-up` bakes into the plists —
+  rather than `~/brain-vault`. That is the fix. It is resolved at the moment
+  they run, so after a config change and before the next `brain-up` it can
+  differ from the value the running daemons were started with.
 
 ## Mutation proofs (five clauses)
 

@@ -64,12 +64,13 @@ if [[ -f "$WIKI_PID" ]]; then
     fi
 fi
 
-# The vault the daemons watch. brain-install-launchd baked it into the plists
-# from brain.install_config's precedence (exported BRAIN_VAULT_PATH, else
-# $BRAIN_HOME/.env, else the default); ask that resolver rather than restate it
-# here, so this script cannot inspect a different vault than the daemons use.
-# Resolved after the daemon rows on purpose: a broken interpreter costs the
-# vault rows, never the daemon report.
+# The vault the installers resolve, and the one brain-up bakes into the plists
+# (brain.install_config: exported BRAIN_VAULT_PATH, else $BRAIN_HOME/.env, else
+# the default). Ask that resolver rather than restate it here. It is resolved
+# NOW: if the config changed since the last brain-up, the daemons still watch
+# the value baked then, until the next brain-up re-bakes it. Resolved after the
+# daemon rows on purpose: a broken interpreter costs the vault rows, never the
+# daemon report.
 if VAULT="$("$PY" -m brain.install_config "$BRAIN_HOME_RESOLVED")" && [[ -n "$VAULT" ]]; then
     printf '  vault     %s\n' "$VAULT"
     # Current build pointer — what Caddy is serving right now.

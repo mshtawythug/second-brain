@@ -24,7 +24,10 @@ from ..install_config import resolve_install_vault
 
 
 def _vault() -> Path:
-    """The vault the daemons watch: the installers' precedence, not the env alone.
+    """The vault the installers resolve (and ``brain-up`` bakes into the plists).
+
+    Resolved now, so after a config change it can lead the running daemons
+    until the next ``brain-up`` re-bakes the plists.
 
     Reading only ``BRAIN_VAULT_PATH`` inspected ``~/brain-vault`` whenever the
     vault was configured in ``$BRAIN_HOME/.env`` (nothing exports it into an

@@ -57,6 +57,24 @@ def test_main_prints_the_brain_home_dotenv_vault(
     assert capsys.readouterr().out == f"{tmp_path / 'home' / 'from-file'}\n"
 
 
+def test_main_expands_a_tilde_brain_home(
+    fenced_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A ``~/…`` ``BRAIN_HOME`` argument is expanded, as ``_brain_home_root`` does.
+
+    Unexpanded, ``Path("~/brain-home") / ".env"`` is a relative path under the
+    cwd, the ``.env`` is never found and the default is printed instead.
+    """
+    tilde_home = tmp_path / "home" / "brain-home"
+    tilde_home.mkdir()
+    (tilde_home / ".env").write_text("BRAIN_VAULT_PATH=/synthetic/tilde-vault\n", encoding="utf-8")
+
+    code = main(["~/brain-home"])
+
+    assert code == 0
+    assert capsys.readouterr().out == "/synthetic/tilde-vault\n"
+
+
 def test_main_prints_the_default_when_nothing_is_configured(
     fenced_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

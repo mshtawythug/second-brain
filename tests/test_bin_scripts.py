@@ -773,14 +773,25 @@ def test_brain_status_inspects_the_brain_home_dotenv_vault(
     assert f"  build-id  {build_dir.name}\n" in result.stdout, result.stdout
 
 
+# Two ways the resolver call can yield no vault: the interpreter fails, or it
+# exits 0 and prints nothing. The second is what the empty-output guards
+# (`[[ -n "$VAULT" ]]` / `[[ -z "$VAULT" ]]`) exist for.
+_UNRESOLVING_PYTHONS = pytest.mark.parametrize(
+    "python_body",
+    [
+        pytest.param("#!/usr/bin/env bash\necho boom >&2\nexit 1\n", id="fails"),
+        pytest.param("#!/usr/bin/env bash\nexit 0\n", id="prints-nothing"),
+    ],
+)
+
+
+@_UNRESOLVING_PYTHONS
 def test_brain_status_still_reports_daemons_when_the_vault_cannot_be_resolved(
-    stub_dir: Path, hermetic_pids: HermeticPids, tmp_path: Path
+    stub_dir: Path, hermetic_pids: HermeticPids, tmp_path: Path, python_body: str
 ) -> None:
     """A broken interpreter costs the vault rows only, never the daemon rows."""
     brain_home, _ = _dotenv_only_vault(tmp_path)
-    _write_stub(
-        stub_dir, "python", body="#!/usr/bin/env bash\necho boom >&2\nexit 1\n"
-    )
+    _write_stub(stub_dir, "python", body=python_body)
     env = _status_env(tmp_path, brain_home, hermetic_pids)
     env["BRAIN_PY"] = str(stub_dir / "python")
 
@@ -1030,15 +1041,14 @@ def test_brain_watcher_fg_resolves_the_brain_home_dotenv_vault_when_unexported(
     ]
 
 
+@_UNRESOLVING_PYTHONS
 def test_brain_watcher_fg_aborts_when_the_vault_cannot_be_resolved(
-    stub_dir: Path, hermetic_pids: HermeticPids, tmp_path: Path
+    stub_dir: Path, hermetic_pids: HermeticPids, tmp_path: Path, python_body: str
 ) -> None:
     """No vault → no watcher and no pid file, rather than watching a guessed path."""
     brain_home, _ = _dotenv_only_vault(tmp_path)
     _write_stub(stub_dir, "brain")
-    _write_stub(
-        stub_dir, "python", body="#!/usr/bin/env bash\necho boom >&2\nexit 1\n"
-    )
+    _write_stub(stub_dir, "python", body=python_body)
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=tmp_path / "unused",

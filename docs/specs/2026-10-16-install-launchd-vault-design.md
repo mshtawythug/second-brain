@@ -83,6 +83,10 @@ and never needs a vault.
   row. The fix is the "shell-tooling family" follow-up from PR #39's spec §3 —
   the shell scripts would need to ask Python for the vault, e.g. through
   `resolve_install_vault` — and it stays out of this change.
+  *(Status 2026-10-21: done for `brain-status`, `brain-monitor` and a manual
+  `_brain-watcher-fg` run on `fix/shell-tooling-vault-resolution` — see
+  `docs/plans/2026-10-21-shell-tooling-vault-resolution.md`. `brain-up`'s wiki
+  build is left for the phase-9 wiki removal.)*
 - **No `--vault` flag on `brain-install-launchd`**, as above.
 
 ## 4. Tests

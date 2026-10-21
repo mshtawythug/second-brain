@@ -442,7 +442,7 @@ def test_snapshot_reports_the_dotenv_vault(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The snapshot banner names the vault the daemons watch, not the default."""
+    """The snapshot banner names the configured vault, not the default."""
     monkeypatch.setenv("BRAIN_WIKI_PORT", "18080")
     monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
     monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
