@@ -183,7 +183,13 @@ range, plus the hybrid top 20 recorded in `ci.json`. Each was read.
   documents are dated 2026-08-27. Rather than judge off-topic documents
   relevant, it moved to `after: 2026-07-24` / `before: 2026-09-02`. That is
   the 40-day `since_days` window of the first recording (2026-09-02), the one
-  its judgments were made against. Pooling the new range (raw FTS, plus the
+  its judgments were made against. The window is placed on the column the
+  pinned filter actually reads: `after`/`before` bind
+  `coalesce(sent_at, ingested_at)` (`build_predicate` in
+  `src/brain/search_predicate.py`); only `since_days` reads `ingested_at`.
+  All five judged documents have a NULL `sent_at`, so the two columns agree
+  for them: 2026-08-27 on both, and 5 of 5 in range under either one
+  (measured 2026-10-21). Pooling the new range (raw FTS, plus the
   hybrid top 20 of the re-recorded run) kept the same five judgments. The
   sixth, excluded probe document is in range and stays excluded.
 
