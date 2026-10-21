@@ -50,9 +50,9 @@ four decimals.)*
 **The gap protects only the trailing edge.** The SQL below finds when old
 documents cross the 40-day boundary. It says nothing about the leading edge:
 every newly ingested document lands inside the window at once. That mattered for
-one query in particular. "Daily brief digest of recent captures and action
-items" has 28 judged documents, all of them daily briefs, and on 2026-10-14 its
-top 20 was all daily briefs too. The vault watcher syncs a brief note
+one query in particular. The daily-brief query's judged documents are all daily
+briefs (28 then; 27 since the 2026-10-21 re-judge), and on 2026-10-14 its top
+20 was all daily briefs too. The vault watcher syncs a brief note
 (`daily/<year>/<date>-brief.md`) on most days, and while that query was on
 `since_days` each one was an unjudged competitor for it. Re-recorded
 **2026-10-14** for this reason: after a restart the watcher synced 7 notes (6
@@ -61,8 +61,7 @@ Recall@20 0.2857 → 0.2143) and the means by −0.0055 nDCG@5 / −0.0023 Recal
 with every other row at ±0.0000. In the `since_days` era (until 2026-10-15) the
 same happened on most days a brief landed, and an exit 3 in which only that
 `recency` row moved was this drift, not a regression. The other `recency` query
-("quarterly planning review …") had 3 briefs in its top 20 and was not moved by
-those 6.
+(the planning query) had 3 briefs in its top 20 and was not moved by those 6.
 
 **Since the pin, that reading is wrong.** Both `recency` queries now end at a
 `before` that is already past (`2026-10-15` for the daily-brief query; since
