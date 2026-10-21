@@ -187,8 +187,8 @@ def test_split_in_half_picks_the_nearer_of_the_two_neighbouring_cuts() -> None:
 def test_split_in_half_a_lopsided_paragraph_cut_falls_through_to_a_word_cut() -> None:
     # The only paragraph cut (5 of 80) leaves one side under 25%: cut mid-words.
     text = f"{_para('a', 5)}\n\n{_para('b', 75)}"
-    head, _tail = split_in_half(text, count_tokens=_words)
-    assert _words(head) == 40
+    pieces = split_in_half(text, count_tokens=_words)
+    assert _words(pieces[0]) == 40
 
 
 def test_split_in_half_falls_back_to_the_token_midpoint_without_whitespace() -> None:
