@@ -22,6 +22,35 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Removed — the Quartz wiki (wiki-to-ui phase 9, R3)
+
+`brain ui` is the reading surface; the rendered Quartz wiki, dormant since the
+previous release, is deleted. The vault is untouched and still readable in
+Obsidian or any editor, which is also what to use while Postgres is down (the
+wiki-as-fallback option, RA-8, was declined).
+
+- **Commands removed:** `brain vault render`, `brain wiki install`,
+  `brain setup --skip-wiki` / `--wiki-port` (the `full` profile no longer offers
+  a wiki or preflights Caddy/Quartz), `brain-rebuild --only quartz` and
+  `--clean-cache` (both now exit 2; `--wiki-only` still exits 2 and names
+  `--only mirror`), and `brain-monitor probe`.
+- **`brain-up` no longer builds, serves or opens a wiki.** `BRAIN_WIKI_BUILD`,
+  `BRAIN_OPEN_BROWSER`, `BRAIN_NO_OVERLAY`, `BRAIN_WIKI_PORT`,
+  `BRAIN_WIKI_KEEP_BUILDS`, `BRAIN_WIKI_RELOAD` and `BRAIN_WIKI_BUILD_TIMEOUT_S`
+  are no longer read. `brain-status` and `brain-monitor` report only the
+  vault-sync watcher. `brain doctor` drops its `wiki build` and `quartz/npx`
+  lines; a non-zero daemon exit is now reported the same way whatever its code.
+- **Unchanged:** the vault mirror (`brain-rebuild --only mirror`), the People
+  Hub pages, `brain vault relink-derived`, `brain daily`, `brain brief --wiki`
+  (it writes to `<vault>/daily/`), and the `com.brain.watcher` /
+  `com.brain.brief` daemons. `brain-install-launchd` still removes a leftover
+  `com.brain.build`, and `brain doctor` still warns while one is installed.
+- **Leftovers you can delete by hand.** Nothing on your machine is removed for
+  you: `<vault>/.quartz/` (the Quartz workspace and its builds),
+  `$BRAIN_HOME/Caddyfile` and any `caddy` you started to serve it, and
+  `$BRAIN_HOME/build/`. The vault watcher keeps skipping `.quartz/` until it is
+  gone.
+
 ### Changed — the brain sizes its own Ollama context window
 
 - **Every Ollama chat call now sends `options.num_ctx`** (new knob

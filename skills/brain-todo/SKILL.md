@@ -132,7 +132,7 @@ The body change re-chunks + re-embeds; the next `brain todo` run reflects it.
 
 - `brain todo` is read-only. It never modifies docs.
 - Items are matched by line — a single action-item doc can yield many rows.
-- The parser does NOT promote items into the wiki's "Related" fence or the
+- The parser does NOT promote items into the vault's "Related" fence or the
   graph — those are derived from `[[wiki-links]]` and metadata, not
   checklist markers.
 - If the user asks "what action items came out of yesterday's calls" and

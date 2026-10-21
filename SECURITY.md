@@ -45,7 +45,7 @@ routes through GitHub, which needs no address published in order to work.
 
 Useful things to include, when you have them: affected version
 (`brain --version`), affected component (CLI, `brain-mcp`, ingest, vault sync,
-the Quartz wiki), a minimal reproduction, and the impact you believe it has.
+`brain ui`), a minimal reproduction, and the impact you believe it has.
 
 ## What to expect
 
@@ -61,8 +61,8 @@ paid triage.
 ## Security model — what this project actually is
 
 Second Brain is a **local-first** tool. It runs a database on your machine,
-ingests your personal documents into it, and optionally serves a rendered wiki
-over a local HTTP port. The interesting boundaries are therefore local ones, and
+ingests your personal documents into it, and optionally serves a web reading
+surface (`brain ui`) over a local HTTP port. The interesting boundaries are therefore local ones, and
 knowing where they sit is what makes a report actionable.
 
 - **The corpus is a local Postgres container.** `docker-compose.yml` binds it to
@@ -72,13 +72,19 @@ knowing where they sit is what makes a report actionable.
   `0.0.0.0`, the container is published to a LAN, or the host is shared — at
   that point the credentials protect nothing. Keep it on loopback.
 
-- **The optional wiki has no authentication.** `brain wiki install` renders the
-  vault with Quartz and serves it through Caddy (see `docs/vault-and-wiki.md`).
-  There is no login, no session, and no per-document access control: **anyone who
-  can reach that port reads the entire personal corpus**, including ingested
-  email, meeting transcripts, and chat threads. Bind it to loopback, or put your
-  own authenticating proxy in front of it. Do not expose it to a LAN or to the
-  internet.
+- **`brain ui` binds loopback by default and needs a token anywhere else.** It
+  runs in the foreground, single-user. It refuses to bind a non-loopback address
+  without `--token` (`--lan` always has one), checks every request's `Host`
+  header against an allowlist to defeat DNS rebinding, and withholds confidential
+  bodies off loopback unless started with `--include-confidential`. Over the LAN
+  it is plain HTTP, so **anyone who holds the printed URL, or can see the traffic,
+  reads the corpus**. See `docs/guides/brain-ui-on-your-phone.md`. Do not expose
+  it to the internet.
+
+- **The rendered Quartz wiki was retired, but an old Caddy may still serve it.**
+  It had no authentication. Upgrading does not stop a Caddy started for it, which
+  may still serve the last build on `:8080` to anyone who can reach that port.
+  Stop it and delete `<vault>/.quartz/` (see `docs/vault.md`).
 
 - **`brain-mcp` is a stdio server, not a network listener.** It speaks MCP over
   stdin/stdout to whichever process spawns it, so its trust boundary is that
@@ -99,14 +105,15 @@ knowing where they sit is what makes a report actionable.
 
 - SQL injection, or any path where untrusted input reaches a query
   unparameterized.
-- Path traversal in ingest, vault writes, or wiki export — anything that writes
+- Path traversal in ingest, vault writes, or vault export — anything that writes
   outside the vault or reads outside the configured roots.
 - Arbitrary code execution triggered by ingesting a crafted PDF, DOCX, or
   Markdown document.
 - Secrets (API keys, `.env` contents, credentials) leaked into logs, the vault,
-  the wiki output, or an error message.
-- The MCP server or the wiki exposing documents that are marked draft or are
-  otherwise excluded from publication.
+  `brain ui` responses, or an error message.
+- The MCP server or `brain ui` exposing documents that are marked draft or
+  confidential where that marking should withhold them, or `brain ui` serving a
+  non-loopback request without a valid token.
 - Privilege or tenancy escalation across the GraphRAG tenant boundary.
 
 ### Out of scope
@@ -115,8 +122,8 @@ knowing where they sit is what makes a report actionable.
   Documented, intentional, and not a finding on their own.
 - Anything requiring the attacker to already have shell access as your user — at
   that point they can read the vault directly.
-- User-initiated exposure of the wiki port, or of the database port, to a
-  network. That is a deployment choice, documented above.
+- User-initiated exposure of the database port, or of a leftover Caddy serving
+  the retired wiki, to a network. That is a deployment choice, documented above.
 - Supply-chain issues in third-party models, base images, or PyPI dependencies.
   Report those upstream; we will pick up the fix. (Dependabot watches our
   dependency manifests — see `.github/dependabot.yml`.)

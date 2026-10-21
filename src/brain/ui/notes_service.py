@@ -565,8 +565,8 @@ def set_draft(
     """Toggle draft ↔ published.
 
     ``draft`` gates every reading surface, and the vault mirror's ``draft:``
-    frontmatter is regenerated so the files agree with the database (a
-    ``brain-rebuild --only quartz`` honours it too). Idempotent: setting the
+    frontmatter is regenerated so the files agree with the database.
+    Idempotent: setting the
     value it already has is a no-op, matching ``cli._set_draft``.
     """
     from ..ingest import update_document

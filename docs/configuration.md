@@ -40,7 +40,6 @@ Caveats:
 | Chunking | Paragraph-aware, budgeted with `tiktoken` | Keeps semantic boundaries intact while staying under the embedder's token limit. |
 | LLM enrichment | Local-by-default [Ollama](https://ollama.com/) (`llama3.1:8b` defaults for `BRAIN_ENRICH_MODEL` and `BRAIN_GRAPH_EXTRACT_MODEL`) | Auto-summary writes `documents.summary` after ingest; GraphRAG concept extraction uses a separate Ollama extractor. `--no-enrich` disables auto-summary for an ingest run; `BRAIN_GRAPH_CONCEPTS=false` disables the concept aspect. |
 | Output | [Rich](https://rich.readthedocs.io/) tables + `--json` mode | Human-readable in a terminal, machine-parsable when an agent shells out. |
-| Wiki rendering | [Quartz](https://quartz.jzhao.xyz/) (static site from Markdown + `[[wiki-links]]`) + [Caddy](https://caddyserver.com/) (blue/green serve from the `current` symlink) | Optional rendered vault view: graph view, backlinks, full-text search, dark mode. Body-only edits take the per-file fastpath, reaching the UI in ~2s including reload. Start it with `brain-up` in dev; installer users opt out with `--skip-wiki`. |
 | Tests | `pytest` against a real Postgres test DB, fake embedder fixture | Real-DB integration catches schema/migration drift that mocks would hide. |
 | Lint / type | `ruff`, `mypy` | Cheap to run, catches real bugs. |
 
@@ -81,7 +80,7 @@ brain init
 #    first, then finalizes.
 brain reembed
 
-# 8. Sanity check. Optional integrations (gws, npx) print warnings when absent.
+# 8. Sanity check. Optional integrations (gws) print warnings when absent.
 brain doctor
 ```
 
@@ -90,8 +89,7 @@ container hasn't finished starting yet (give it ~10 seconds and retry), Ollama
 isn't running (`brew services start ollama`), the configured embedding model
 isn't pulled (`ollama pull snowflake-arctic-embed2`), or — only when
 `BRAIN_EMBEDDER=voyage` — `VOYAGE_API_KEY` is missing from `.env`. Missing
-`gws` only disables Gmail ingest and Google directory refreshes; missing `npx`
-only disables `brain vault render`. GraphRAG health (AGE extension presence,
+`gws` only disables Gmail ingest and Google directory refreshes. GraphRAG health (AGE extension presence,
 graph-drift counters, community-materialization staleness) is a soft check — a
 stock pgvector DB is reported as a warning, not a failure, and doesn't flip the
 exit code.
@@ -102,7 +100,7 @@ By default, `brain` and `brain-mcp` only work inside the repo folder with the
 venv activated, and the `bin/brain-up` / `bin/brain-down` / `bin/brain-rebuild`
 / `bin/brain-status` scripts have to be invoked by full path. `brain setup`
 installs shims automatically; if you set up from source, two small one-time
-edits fix the CLI and wiki scripts (the MCP symlink is optional but useful for
+edits fix the CLI and `bin/` scripts (the MCP symlink is optional but useful for
 debugging).
 
 **1. Symlink the `brain` launcher onto your PATH** so `brain` works from any
@@ -160,11 +158,11 @@ which brain          # → /opt/homebrew/bin/brain (or ~/.local/bin/brain)
 which brain-mcp      # optional; same prefix if you created the symlink
 which brain-up       # → /Users/<you>/workspace/second-brain/bin/brain-up
 brain doctor         # → required components OK; optional ones may warn
-brain-status         # → watcher status (stopped initially); the build row reads dormant
+brain-status         # → watcher status (stopped initially)
 ```
 
 Once both are on PATH, the daily flow is just `brain-up` / `brain-down` —
-no need to remember Quartz or watcher invocations.
+no need to remember watcher invocations.
 
 ## Feature config knobs
 
@@ -448,7 +446,8 @@ between you and your own corpus:
 |---|---|---|
 | CLI | serves everything | You are reading your own notes on your own machine. Hiding them from you protects nobody and makes the tier unusable. |
 | MCP | withholds by default | It feeds a model that may be hosted. This is the egress point F6 exists for. |
-| Wiki | drops from the published index | The rendered site can be served to others. |
+| Generated vault pages | gated (People Hub, `brief --wiki`, the weekly review) | The vault is plain files that sync and get shared; a confidential body or title should not land in a page brain writes unprompted. |
+| `brain ui` | serves everything on loopback; withholds bodies on a LAN bind unless started with `--include-confidential` | A LAN bind can be reached by other devices. |
 
 `brain search --sensitivity confidential` is therefore a **lens, not an access
 control** — it answers "show me only what I've marked", the same way `--kind`
@@ -462,7 +461,7 @@ itself.
 
 ### `BRAIN_AGENT_ID` — who is doing the work
 
-Records the **actor**, as opposed to `source` (`cli` / `mcp` / `wiki`), which
+Records the **actor**, as opposed to `source` (`cli` / `mcp` / `ui`), which
 records the **surface**. Two agents both working over MCP are indistinguishable
 by `source`; this is what tells them apart in `brain usage`.
 
@@ -522,10 +521,10 @@ opposite — the document is wrong and the code follows the measurement. If you
 construct a `MarkdownIt` anywhere else, pass the option.
 
 **`confidential` and `draft` share a seam but not a guarantee.** Both are
-frontmatter flags that the Quartz `contentIndex` emitter drops, so they look
-interchangeable at the publish boundary. They are not. `draft` is a *publish
+frontmatter flags that `brain ui`'s browseable views gate on, so they look
+interchangeable at that boundary. They are not. `draft` is a *publish
 quarantine* — the document is still fully readable everywhere else, including
-over MCP. `confidential` is an *egress control*: it additionally keeps the
+over MCP and in `brain ui` search. `confidential` is an *egress control*: it additionally keeps the
 body off a hosted embedder and withholds it from every MCP retrieval surface.
 Treating one as a substitute for the other is a security mistake in one
 direction and a usability annoyance in the other.
@@ -545,39 +544,6 @@ of its own.
 | 2 | `<repo>/.env` | Source checkouts only — resolved relative to the installed `brain/config.py`. |
 | 3 | `<cwd>/.env` | Walk-up from the current directory. Only works while you stand in the right place. Drop it with `BRAIN_IGNORE_CWD_DOTENV=1`. |
 | 4 | `$BRAIN_HOME/.env` | The canonical location. Honors `$BRAIN_HOME`; defaults to `~/.brain`. |
-
-### `<vault>/.brain-fastpath-ignore` — the one config file that is not `.env`
-
-Not an environment variable, and the only per-vault config file `brain` reads,
-which is why it is easy to miss.
-
-Body-only edits normally take the per-file fastpath (~2s to the UI). Whether an
-edit qualifies is decided by a fingerprint over the document's *structural*
-frontmatter keys; every other key has to be classified first. A key `brain`
-does not recognise **fails closed** — the edit is forced down the full-build
-path, which is correct but slow. Generic keys ship in the package. Keys
-specific to your own vault do not, deliberately: they used to, and shipping one
-vault's namespaced identifiers inside a public PyPI wheel served nobody else.
-
-So a vault with its own frontmatter conventions silently loses the fastpath
-until its owner declares those keys. Add a `.brain-fastpath-ignore` file at the
-**vault root** — not in `.quartz/`, which `brain wiki install --force` deletes:
-
-```
-# one frontmatter key per line; '#' starts a comment
-acme_ledger_id          # a literal key
-acme_sweep_*            # a glob covers a whole namespaced family
-```
-
-Globs (`*`, `?`, `[...]`) match case-sensitively. The file **adds to** the
-shipped defaults and never replaces them. An absent file is the documented
-zero-config state, not an error; a present-but-unreadable one forces a full
-build rather than trusting a stale fingerprint. Only list keys that genuinely
-cannot change rendered HTML — that is the promise the fastpath is keeping on
-your behalf.
-
-Implementation: `src/brain/wiki/ignored_fields.py`. Design rationale:
-`docs/specs/2026-05-09-fastpath-fingerprint.md`.
 
 ### `BRAIN_IGNORE_CWD_DOTENV`
 
@@ -733,8 +699,8 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `BRAIN_OLLAMA_NUM_CTX` | `8192` | Context window the brain requests on every Ollama chat call (`options.num_ctx`), instead of inheriting the server's `OLLAMA_CONTEXT_LENGTH`. The KV cache scales with it (llama3.1:8b, q8_0: 544 MiB at 8192 vs 4352 MiB at 65536). Unset, it grows past 8192 only as far as a raised `BRAIN_ENRICH_MAX_INPUT_TOKENS` / `BRAIN_AUDIO_MAX_INPUT_TOKENS` needs; an explicit value too small for a capped call (those two caps, or the GraphRAG extract chunk) fails at startup; an over-window prompt is refused by Ollama, never silently truncated. |
 | `BRAIN_OLLAMA_EMBED_NUM_CTX` | `2048` | Context window the Ollama embedders (`arctic`, `qwen3`) request on every `/api/embed` call (`options.num_ctx`), instead of inheriting `OLLAMA_CONTEXT_LENGTH`. It is independent of `BRAIN_OLLAMA_NUM_CTX` because the embedder is a different model and runner. The default `2048` holds the largest stored chunk (1,689 model tokens, measured) and equals Ollama's embedding batch size, so arctic keeps its per-input capacity. arctic has no KV cache, so the window costs it nothing. On a server whose `OLLAMA_CONTEXT_LENGTH` is ≥ 40,960, qwen3-embedding:8b loaded at its trained 40,960, a ~3 GiB q8_0 KV cache; at `2048` it is ~153 MiB. Values below `1400` fail at startup, under every backend (the knob has no effect under `voyage` / `none`). An over-window input is refused by Ollama, never silently truncated. |
 | `VOYAGE_API_KEY` | (required for `voyage`) | Voyage AI key. Ignored by the local backends. |
-| `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault folder for authored notes, ingested mirrors, wiki rendering, and MCP note tools. |
-| `BRAIN_USER_EMAIL` | unset | Owner email used by the rendered Gmail thread view's "Show only my replies" filter. Set it before wiki builds if you use that filter. |
+| `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault folder for authored notes, ingested mirrors, and MCP note tools. |
+| `BRAIN_USER_EMAIL` | unset | Owner email read by `brain ui`'s email-thread mode for its "Only my replies" filter. Unset, the filter is not offered. Takes effect on the next page load. |
 | `BRAIN_MCP_LOG_LEVEL` | `INFO` | Stderr log level. Accepts `DEBUG`, `INFO`, `WARNING`, `ERROR`. Unknown values fall back to `INFO`. Set it in the `env` block above or in any `.env` the CLI reads (see [Where config lives](#where-config-lives-env-resolution-order)). The `env` block wins. |
 | `BRAIN_GRAPH_ENABLED` | `true` | Enable people-aspect graph sync at ingest. On a stock pgvector DB the sync is a best-effort no-op (never raises). |
 | `BRAIN_GRAPH_CONCEPTS` | `true` | Enable concept-aspect extraction (LLM entity extraction over topics/projects/orgs/tools). Requires `BRAIN_GRAPH_EXTRACT_MODEL` to be pullable via Ollama. |

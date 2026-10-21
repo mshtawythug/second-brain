@@ -74,8 +74,8 @@ brain daily --no-edit             # just resolve / create, no editor
 Idempotent — opens the existing file if today's daily already exists. New
 files render `_templates/daily.md`. The file lands at
 `<vault>/daily/<YYYY>/<YYYY-MM-DD>.md`. Every invocation also refreshes
-`<vault>/daily/index.md` (reverse-chrono autogen) so the wiki's daily index
-stays current.
+`<vault>/daily/index.md` (reverse-chrono autogen) so the daily index stays
+current.
 
 ## Renaming notes
 
@@ -90,7 +90,7 @@ Renames a vault note, including:
   - User-aliased `[[Old Title|user alias]]` → `[[New Title|user alias]]` (alias preserved verbatim)
   - Headings `[[Old Title#section]]` → `[[New Title#section]]` (heading preserved)
   - Synthetic `[[Old Title|Old Title]]` form (where display equals old title) collapses to bare `[[New Title]]`
-  - A subsequent `brain vault sync` may further rewrite to path-form `[[<vault-rel-path>|New Title]]` for Quartz
+  - A subsequent `brain vault sync` may further rewrite to path-form `[[<vault-rel-path>|New Title]]`
 - Atomic — every file we touch is snapshotted to `tempfile.mkdtemp(prefix="brain-rename-")` first. On any error the snapshots are restored byte-for-byte and the snapshot dir path is logged.
 
 ```bash
@@ -183,7 +183,7 @@ can't add format-tier tags. If Ollama is unavailable, exits 1.
 
 ## Draft toggle
 
-Quarantine and un-quarantine notes from the wiki without deleting them.
+Quarantine and un-quarantine notes from `brain ui`'s browseable views without deleting them.
 
 ```bash
 brain mark-draft <id-prefix>          # documents.draft = TRUE; frontmatter `draft: true` added
@@ -192,11 +192,11 @@ brain mark-published <id-prefix>      # documents.draft = FALSE; frontmatter `dr
 
 Both are idempotent (`<short-id> is already draft` / `is already published`).
 The doc stays in the DB and remains visible to `brain search` / `brain recall`
-/ `brain show` / `brain list` — only the wiki's Quartz contentIndex filters drafts out of
-Explorer / Graph / Search.
+/ `brain show` / `brain list` — only `brain ui`'s browseable views (tree,
+discovery rails) leave drafts out.
 
 Use `mark-draft` when a note is half-finished, a Gmail draft thread shouldn't
-surface on the rendered site, or a note is being held for review.
+surface while browsing, or a note is being held for review.
 
 ### `brain rm <id-prefix>` — delete, irreversibly
 
@@ -205,7 +205,7 @@ brain rm 7a3f9c
 ```
 
 Deletes the document and its chunks. **No undo.** `mark-draft` is almost always
-what the user actually wants — it hides the note from the wiki while leaving it
+what the user actually wants — it hides the note from browsing while leaving it
 searchable. Reach for `rm` only when the user explicitly says delete/remove and
 confirms they mean permanently; echo the title back first. Never infer `rm` from
 "get rid of", "hide", "archive", or "clean up".

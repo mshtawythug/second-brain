@@ -1013,13 +1013,11 @@ class Config:
     be ``None``.
 
     ``user_email`` (P4.4) is the owner's primary email address, optionally
-    set via ``BRAIN_USER_EMAIL``. Consumed by the email-thread reading
-    mode in the rendered wiki -- the Quartz transformer reads
-    ``process.env.BRAIN_USER_EMAIL`` at build time and bakes it into a
-    ``window.BRAIN_USER_EMAIL`` global so the runtime "Show only my
-    replies" filter knows whose ``From:`` address counts as the user's.
-    Empty string / ``None`` disables the filter (button still renders;
-    matching no-ops).
+    set via ``BRAIN_USER_EMAIL``. Consumed by ``brain ui``'s email-thread
+    reading mode (projected by ``GET /api/health``) so the "Only my replies"
+    filter knows whose ``From:`` address counts as the user's. (The retired
+    Quartz wiki baked it into its pages at build time.) Empty string /
+    ``None`` means the filter is not offered.
     """
 
     database_url: str
@@ -1286,8 +1284,8 @@ class Config:
     def load_minimal(cls) -> "Config":
         """Same as load() but doesn't require DATABASE_URL.
 
-        Used by purely-filesystem commands (brain vault render --overlay,
-        brain wiki install, brain claude install-skill) that run BEFORE
+        Used by purely-filesystem commands (e.g. brain claude install-skill;
+        before R3 also the wiki's render/install commands) that run BEFORE
         brain setup writes .env. The brain_home field still resolves, but
         database_url defaults to an empty string sentinel and any caller
         that tries to actually USE database_url on this config will fail

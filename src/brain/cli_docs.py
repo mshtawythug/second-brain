@@ -184,9 +184,9 @@ def mark_draft(id: str = typer.Argument(...)) -> None:
 
     A draft doc still lives in the DB and is reachable via ``brain search`` /
     ``brain show`` / ``brain list`` (the CLI is local — the user wants to
-    see drafts). Only the wiki hides it: the Quartz contentIndex emitter
-    skips ``draft: true`` entries entirely, so the doc disappears from the
-    explorer tree, the graph view, and full-text search on the rendered site.
+    see drafts). The reading surfaces hide it: ``brain ui`` gates every
+    browseable read on ``draft`` (as the retired Quartz wiki's contentIndex
+    emitter did), and the mirror's ``draft:`` frontmatter says so on disk.
 
     Idempotent — running it twice on an already-draft doc is a no-op and
     prints ``<short-id> is already draft``. Use ``brain mark-published`` to

@@ -1,4 +1,4 @@
-"""brain-down — stop the wiki + supervised watchers."""
+"""brain-down — stop the supervised watcher (and legacy wiki leftovers)."""
 import sys
 
 from ._launcher import exec_shim

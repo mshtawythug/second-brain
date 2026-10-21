@@ -1,9 +1,11 @@
-"""Phase 7 (R1, "Demoted"): every daily-loop surface points at `brain ui`.
+"""Every daily-loop surface points at `brain ui`, and none at the deleted wiki.
 
-Spec §1.3: at R1 "`brain ui` is primary. The wiki still builds and serves;
-nothing in the daily loop points at it." Each test below pins one surface the
-phase-7 inventory (``docs/plans/2026-10-12-wiki-to-ui-phase7.md`` §2) repointed,
-so a revert to the wiki fails here. ``brain-up``'s pins live with the other
+Phase 7 (R1, "Demoted") repointed each surface the phase-7 inventory
+(``docs/plans/2026-10-12-wiki-to-ui-phase7.md`` §2) named at `brain ui`; phase 8
+(R2) made the wiki dormant; phase 9 (R3) deleted it. The doc pins below were
+"points at brain ui / calls the wiki legacy or dormant" until R3; they are now
+"points at brain ui and names no removed wiki surface", so a doc that regresses
+to documenting the wiki fails here. ``brain-up``'s pins live with the other
 bin-script tests in ``tests/test_bin_scripts.py``.
 """
 from __future__ import annotations
@@ -19,7 +21,8 @@ README = REPO_ROOT / "README.md"
 CLI_REFERENCE = REPO_ROOT / "docs" / "cli-reference.md"
 PHONE_GUIDE = REPO_ROOT / "docs" / "guides" / "brain-ui-on-your-phone.md"
 DOCS_INDEX = REPO_ROOT / "docs" / "README.md"
-VAULT_AND_WIKI = REPO_ROOT / "docs" / "vault-and-wiki.md"
+VAULT_DOC = REPO_ROOT / "docs" / "vault.md"
+CONFIGURATION = REPO_ROOT / "docs" / "configuration.md"
 
 #: The recipe the docs shipped for reading from another device. It cannot work:
 #: a wildcard bind gets the loopback Host allowlist (pinned in
@@ -161,7 +164,11 @@ def test_docs_point_at_the_phone_guide_and_lan(doc: Path) -> None:
 
 
 def test_phone_guide_covers_the_q1_contract() -> None:
-    """Spec Q1: how the token is supplied, the caveats, and that the wiki stays."""
+    """Spec Q1: how the token is supplied and the caveats.
+
+    Q1 also required the guide to say the wiki stays; R3 deleted it, so that
+    needle moved to :func:`test_phone_guide_warns_about_a_leftover_wiki_caddy`.
+    """
     text = PHONE_GUIDE.read_text(encoding="utf-8")
     for needle in (
         "brain ui --lan",
@@ -172,7 +179,6 @@ def test_phone_guide_covers_the_q1_contract() -> None:
         "--read-only",
         "--include-confidential",
         "trust",
-        "wiki",
         "it is the token that keeps other clients out",
         "judged by the address it will bind",
         "Zones are refused even on link-local addresses",
@@ -197,38 +203,102 @@ def test_readme_names_brain_ui_as_the_reading_surface() -> None:
     assert "primary" in section.lower(), section
 
 
-def test_readme_intro_names_the_wiki_legacy_not_an_equal_reader() -> None:
-    """F16 (phase-7 audit): inventory row #5 repointed README's opening sentence,
-    and nothing pinned it — reverting to "the same corpus through the CLI, a
-    local web UI, or a rendered wiki" stayed green."""
-    text = README.read_text(encoding="utf-8")
-    assert "or a [rendered wiki]" not in text, (
-        "README's intro lists the wiki as an equal reading surface again"
-    )
-    assert re.search(r"\[rendered wiki\]\([^)]*\)[^\n.]*legacy", text), (
-        "README's intro must call the rendered wiki legacy"
-    )
+#: Every user-facing surface R3 (phase 9) deleted. A doc naming one of these is
+#: documenting something that no longer exists.
+_REMOVED_WIKI_SURFACES = (
+    "brain vault render",
+    "brain wiki install",
+    "--only quartz",
+    "--clean-cache",
+    "--skip-wiki",
+    "--wiki-port",
+    "BRAIN_OPEN_BROWSER",
+    "BRAIN_WIKI_BUILD",
+    "BRAIN_WIKI_PORT",
+    "BRAIN_WIKI_KEEP_BUILDS",
+    "BRAIN_WIKI_RELOAD",
+    "BRAIN_NO_OVERLAY",
+    "BRAIN_FASTPATH_ENABLED",
+    "brain-verify-fastpath",
+    "quartz.config.ts",
+    "brain.test",
+)
 
 
-def test_vault_and_wiki_marks_the_wiki_as_legacy() -> None:
-    text = VAULT_AND_WIKI.read_text(encoding="utf-8")
+def _removed_surfaces_in(text: str) -> list[str]:
+    return [needle for needle in _REMOVED_WIKI_SURFACES if needle in text]
+
+
+def _vault_doc_body() -> str:
+    """The vault doc after its intro — the intro's retirement callout may NAME
+    the removed commands to say they are gone; nothing after it may."""
+    text = VAULT_DOC.read_text(encoding="utf-8")
+    return text[text.index("## Vault model"):]
+
+
+def test_readme_intro_names_no_rendered_wiki() -> None:
+    """F16 (phase-7 audit) pinned the intro calling the wiki legacy; R3 deleted
+    it, so the intro must not offer it as a reading surface at all."""
+    intro = README.read_text(encoding="utf-8").split("\n## ", 1)[0]
+    assert "rendered wiki" not in intro, intro
+    assert "brain ui" in intro or "(#local-web-ui)" in intro, intro
+    assert "(docs/vault.md)" in intro, intro
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [README, CLI_REFERENCE, PHONE_GUIDE, DOCS_INDEX, CONFIGURATION],
+    ids=lambda p: p.name,
+)
+def test_reading_docs_name_no_removed_wiki_surface(doc: Path) -> None:
+    text = doc.read_text(encoding="utf-8")
+    assert not _removed_surfaces_in(text), (doc.name, _removed_surfaces_in(text))
+
+
+@pytest.mark.parametrize(
+    "skill",
+    sorted((REPO_ROOT / "skills").glob("*/SKILL.md")),
+    ids=lambda p: p.parent.name,
+)
+def test_skills_name_no_removed_wiki_surface(skill: Path) -> None:
+    text = skill.read_text(encoding="utf-8")
+    assert not _removed_surfaces_in(text), (skill.parent.name, _removed_surfaces_in(text))
+
+
+def test_cli_reference_setup_and_doctor_name_no_wiki_dependency() -> None:
+    """R3 dropped the setup wiki offer and doctor's ``quartz/npx`` line; the
+    reference said "optionally wires the wiki (Caddy + Quartz)" and listed npx."""
+    text = CLI_REFERENCE.read_text(encoding="utf-8")
+    assert "Quartz" not in text, "cli-reference still describes the Quartz wiki"
+    assert "npx" not in text, "cli-reference still lists the deleted npx doctor check"
+
+
+def test_vault_doc_points_at_brain_ui_and_names_the_retirement() -> None:
+    text = VAULT_DOC.read_text(encoding="utf-8")
     intro = text[: text.index("## Vault model")]
-    assert "brain ui" in intro and "legacy" in intro.lower(), intro
+    assert "brain ui" in intro and "retired" in intro, intro
+    # Spec R3: the upgrade leftovers are removed by hand, and the doc says which.
+    for leftover in ("<vault>/.quartz/", "$BRAIN_HOME/Caddyfile", "$BRAIN_HOME/build/"):
+        assert leftover in intro, leftover
+    assert "Wiki (rendered view" not in text
+    assert not _removed_surfaces_in(_vault_doc_body()), _removed_surfaces_in(_vault_doc_body())
 
 
-def test_vault_and_wiki_documents_the_brain_up_default_truthfully() -> None:
-    """M-4 (phase-7 audit): the default flipped to 0, and the doc said so in one
-    place while two others still described brain-up opening the browser.
-
-    The table row is pinned exactly, because a row stating the old default
-    reads as authoritative and survived the first round unpinned.
-    """
-    text = VAULT_AND_WIKI.read_text(encoding="utf-8")
-    assert re.search(r"^\| `BRAIN_OPEN_BROWSER` \| `0` \|", text, re.MULTILINE), (
-        "the env table must state BRAIN_OPEN_BROWSER's default as `0`"
-    )
-    assert "and opens the browser" not in text
-    assert "→ open browser" not in text
+def test_no_live_doc_links_the_renamed_vault_doc() -> None:
+    """Spec §9.5: ``docs/vault-and-wiki.md`` became ``docs/vault.md``. A link to
+    the old name is a 404. Historical docs (specs/plans/handoff/audits) keep it."""
+    docs = REPO_ROOT / "docs"
+    live = [README, *docs.glob("*.md"), *(docs / "guides").glob("*.md")]
+    live += [REPO_ROOT / name for name in ("CONTRIBUTING.md", "SECURITY.md", "AGENTS.md")]
+    live += sorted((REPO_ROOT / "skills").glob("*/SKILL.md"))
+    stale = re.compile(r"(?:docs/|\]\()vault-and-wiki\.md")
+    hits = [
+        str(p.relative_to(REPO_ROOT))
+        for p in live
+        if stale.search(p.read_text(encoding="utf-8"))
+    ]
+    assert not hits, hits
+    assert not (REPO_ROOT / "docs" / "vault-and-wiki.md").exists()
 
 
 def _section(text: str, heading: str) -> str:
@@ -271,15 +341,15 @@ def test_phone_guide_says_a_loopback_alias_withholds_bodies() -> None:
     assert "guarded like a LAN bind" in text, text
 
 
-def test_docs_index_calls_the_rendered_wiki_legacy() -> None:
-    """S20 (phase-7 audit): the docs index row for vault-and-wiki.md was
-    repointed to call the wiki legacy, and nothing pinned it."""
+def test_docs_index_row_points_at_the_vault_doc() -> None:
+    """S20 (phase-7 audit) pinned this row calling the wiki legacy; R3 renamed
+    the doc and deleted the wiki, so the row must name ``brain ui`` and no wiki."""
     row = next(
         line for line in DOCS_INDEX.read_text(encoding="utf-8").splitlines()
-        if line.startswith("| [vault-and-wiki.md]")
+        if line.startswith("| [vault.md](vault.md)")
     )
-    assert "the legacy Quartz + Caddy rendered wiki" in row, row
-    assert "`brain ui` is the primary reading surface" in row, row
+    assert "`brain ui` is the reading surface" in row, row
+    assert "Caddy" not in row and "legacy Quartz" not in row, row
 
 
 # --------------------------------------------------------------------------
@@ -292,41 +362,29 @@ CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 _REBUILD_ON_REQUEST = "brain-rebuild --only quartz"
 
 
-def test_readme_intro_calls_the_wiki_dormant() -> None:
-    intro = README.read_text(encoding="utf-8").split("\n## ", 1)[0]
-    assert "still builds" not in intro
-    assert re.search(r"\[rendered wiki\]\([^)]*\)[^\n.]*dormant", intro), intro
-
-
-def test_vault_and_wiki_callout_says_the_wiki_is_dormant() -> None:
-    text = VAULT_AND_WIKI.read_text(encoding="utf-8")
-    intro = text[: text.index("## Vault model")]
-    assert "dormant" in intro and _REBUILD_ON_REQUEST in intro, intro
-    assert "still builds and serves" not in intro
-
-
-def test_vault_and_wiki_documents_the_r2_rebuild_flags() -> None:
-    section = _section(VAULT_AND_WIKI.read_text(encoding="utf-8"), "### Daily use — `bin/` scripts")
-    assert "--wiki-only     run only the wiki stage" not in section
-    assert "--only quartz" in section and "requires --only quartz" in section
+def test_vault_doc_documents_the_r3_rebuild_flags() -> None:
+    """R2 pinned ``--only quartz`` here; R3 deleted that stage, leaving ``mirror``."""
+    section = _section(VAULT_DOC.read_text(encoding="utf-8"), "## Daily use — `bin/` scripts")
+    assert "--only mirror" in section, section
+    assert "quartz" not in section.lower(), section
     assert "start build watcher" not in section
-    assert re.search(r"^\| `BRAIN_WIKI_BUILD` \| `0` \|", section, re.MULTILINE), section
 
 
-def test_phone_guide_says_the_wiki_is_dormant() -> None:
+def test_phone_guide_warns_about_a_leftover_wiki_caddy() -> None:
+    """R2 pinned "the wiki is dormant" here. R3 deleted the wiki but not a Caddy
+    the user started for it, which serves the LAN with no token — say so."""
     text = PHONE_GUIDE.read_text(encoding="utf-8")
-    assert "Until phase 8" not in text and "keeps building" not in text
-    section = _section(text, "## The wiki is dormant")
-    assert _REBUILD_ON_REQUEST in section, section
+    section = " ".join(_section(text, "## The wiki is gone").split())
+    for needle in ("brain ui", "Caddy", ":8080", "no token", "<vault>/.quartz/"):
+        assert needle in section, needle
+    assert "fallback" not in section, "RA-8 was rejected: the wiki is not a fallback"
 
 
-def test_maintenance_skill_rebuilds_the_wiki_only_on_request() -> None:
+def test_maintenance_skill_names_no_wiki_rebuild() -> None:
     text = MAINTENANCE_SKILL.read_text(encoding="utf-8")
-    assert "dormant since R2" in text
+    assert "--only mirror" in text
+    assert "dormant since R2" not in text
     assert "watcher B (vault→Quartz)" not in text
-    for line in text.splitlines():
-        if "--clean-cache" in line and line.lstrip().startswith("bin/brain-rebuild"):
-            assert "--only quartz" in line, line
 
 
 def test_changelog_warns_that_the_next_brain_up_removes_the_build_daemon() -> None:
