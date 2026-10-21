@@ -97,7 +97,7 @@ def test_the_daemon_prompt_names_the_vault_watcher_and_the_brief(tmp_path: Path)
 
 
 def test_setup_no_longer_installs_the_build_wrapper_shim(tmp_path: Path) -> None:
-    """Nothing installed at R2 runs ``_brain-build-fg``; the template stays until R3."""
+    """Nothing installed runs ``_brain-build-fg``; it was deleted with the wiki at R3."""
     out = _interactive_full_dry_run(tmp_path, answer=False)
 
     assert "_brain-build-fg" not in setup._SHIM_NAMES

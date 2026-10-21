@@ -27,7 +27,6 @@ from brain.bin.launchd import (
 # ---------------------------------------------------------------------------
 
 _WATCHER = "com.brain.watcher"
-_BUILD = "com.brain.build"
 _BRIEF = "com.brain.brief"
 
 _FAKE_BRAIN_HOME = Path("/fake/brain/home")
@@ -97,13 +96,17 @@ def test_render_plist_xml_escapes_values(raw: str, escaped: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — render_plist produces valid XML for both labels
+# Test 3 — render_plist produces valid XML for every installed label
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("label", [_WATCHER, _BUILD, _BRIEF])
+@pytest.mark.parametrize("label", _INSTALLED_LABELS)
 def test_render_plist_is_valid_xml(label: str) -> None:
-    """Each rendered plist is well-formed XML."""
+    """Each installed label's rendered plist is well-formed XML.
+
+    The retired ``com.brain.build`` has no template since R3 (phase 9): it is
+    never rendered, only swept (``tests/test_bin_launchd_retired.py``).
+    """
     text = _render(
         label=label,
         brain_home=Path("/home/user/.brain"),
@@ -264,8 +267,9 @@ def test_install_plists_installs_foreground_wrappers(
 ) -> None:
     """install_plists writes the installed jobs' wrappers into brain_home/.shims/.
 
-    ``_brain-build-fg`` is not among them at R2: nothing installed runs it
-    (``tests/test_bin_launchd_retired.py`` pins its absence).
+    ``_brain-build-fg`` is not among them: nothing installed ran it after R2,
+    and it was deleted at R3 (``tests/test_bin_launchd_retired.py`` pins its
+    absence).
     """
     brain_home = tmp_path / "brain"
     launchd_dir = tmp_path / "agents"
