@@ -16,6 +16,7 @@ from pathlib import Path
 from types import FrameType
 
 from ..config import _brain_home_root
+from ..install_config import resolve_install_vault
 
 # ---------------------------------------------------------------------------
 # Env defaults
@@ -23,7 +24,17 @@ from ..config import _brain_home_root
 
 
 def _vault() -> Path:
-    return Path(os.environ.get("BRAIN_VAULT_PATH", str(Path.home() / "brain-vault")))
+    """The vault the installers resolve (and ``brain-up`` bakes into the plists).
+
+    Resolved now, so after a config change it can lead the running daemons
+    until the next ``brain-up`` re-bakes the plists.
+
+    Reading only ``BRAIN_VAULT_PATH`` inspected ``~/brain-vault`` whenever the
+    vault was configured in ``$BRAIN_HOME/.env`` (nothing exports it into an
+    interactive shell), while ``brain-install-launchd`` baked the configured
+    one into the plists.
+    """
+    return resolve_install_vault(_brain_home_root())
 
 
 def _port() -> int:
@@ -475,7 +486,7 @@ def _make_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Env vars:\n"
-            "  BRAIN_VAULT_PATH   default ~/brain-vault\n"
+            "  BRAIN_VAULT_PATH   else $BRAIN_HOME/.env, else ~/brain-vault\n"
             "  BRAIN_WIKI_PORT    default 8080"
         ),
     )

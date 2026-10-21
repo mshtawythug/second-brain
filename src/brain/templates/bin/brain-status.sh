@@ -3,8 +3,6 @@
 
 set -euo pipefail
 
-VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
-QUARTZ_DIR="$VAULT/.quartz"
 PORT="${BRAIN_WIKI_PORT:-8080}"
 URL="http://localhost:$PORT"
 
@@ -13,6 +11,9 @@ URL="http://localhost:$PORT"
 # BRAIN_HOME override if the launcher set one.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BRAIN_HOME_RESOLVED="${BRAIN_HOME:-$( cd "$SCRIPT_DIR/.." && pwd )}"
+# BRAIN_PY is exported by the console-script launcher (src/brain/bin/_launcher.py)
+# and is by construction an interpreter with `brain` importable.
+PY="${BRAIN_PY:-python3}"
 
 # Pid paths default to $BRAIN_HOME/run/ — NOT /tmp. macOS's tmp_cleaner reaps
 # files left untouched for 3 days; the build/watch daemons write their pid file
@@ -63,23 +64,35 @@ if [[ -f "$WIKI_PID" ]]; then
     fi
 fi
 
-# Current build pointer — what Caddy is serving right now.
-CURRENT="$QUARTZ_DIR/current"
-if [[ -L "$CURRENT" ]]; then
-    target="$(readlink "$CURRENT")"
-    if resolved="$(cd "$CURRENT" 2>/dev/null && pwd -P)"; then
-        if [[ -f "$resolved/.build-id" ]]; then
-            build_id="$(cat "$resolved/.build-id")"
+# The vault the installers resolve, and the one brain-up bakes into the plists
+# (brain.install_config: exported BRAIN_VAULT_PATH, else $BRAIN_HOME/.env, else
+# the default). Ask that resolver rather than restate it here. It is resolved
+# NOW: if the config changed since the last brain-up, the daemons still watch
+# the value baked then, until the next brain-up re-bakes it. Resolved after the
+# daemon rows on purpose: a broken interpreter costs the vault rows, never the
+# daemon report.
+if VAULT="$("$PY" -m brain.install_config "$BRAIN_HOME_RESOLVED")" && [[ -n "$VAULT" ]]; then
+    printf '  vault     %s\n' "$VAULT"
+    # Current build pointer — what Caddy is serving right now.
+    CURRENT="$VAULT/.quartz/current"
+    if [[ -L "$CURRENT" ]]; then
+        target="$(readlink "$CURRENT")"
+        if resolved="$(cd "$CURRENT" 2>/dev/null && pwd -P)"; then
+            if [[ -f "$resolved/.build-id" ]]; then
+                build_id="$(cat "$resolved/.build-id")"
+            else
+                build_id='(no .build-id)'
+            fi
+            printf '  current   → %s\n' "$target"
+            printf '  build-id  %s\n' "$build_id"
         else
-            build_id='(no .build-id)'
+            printf '  current   ⚠️  symlink dangles → %s\n' "$target"
         fi
-        printf '  current   → %s\n' "$target"
-        printf '  build-id  %s\n' "$build_id"
     else
-        printf '  current   ⚠️  symlink dangles → %s\n' "$target"
+        printf '  current   ⛔ no symlink at %s (run brain-up to bootstrap)\n' "$CURRENT"
     fi
 else
-    printf '  current   ⛔ no symlink at %s (run brain-up to bootstrap)\n' "$CURRENT"
+    printf '  vault     ⚠️  unresolved — %s -m brain.install_config failed\n' "$PY"
 fi
 
 # Quick health check on the wiki socket — Caddy now answers, not Quartz.

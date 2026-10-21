@@ -24,14 +24,15 @@
 #   `kill -0` check fails and the row flips to "stopped".
 #
 # Env contract:
-#   BRAIN_VAULT_PATH  (default: $HOME/brain-vault) — passed to `--vault`.
+#   BRAIN_VAULT_PATH  passed to `--vault`. The plist always exports it (baked
+#                     by brain-install-launchd); unset — a manual run — it is
+#                     resolved by brain.install_config: $BRAIN_HOME/.env, else
+#                     the default.
 #   PATH must include the pipx bin dir (or wherever `brain` is installed)
 #   so `brain` resolves; the LaunchAgent plist's EnvironmentVariables block
 #   sets this explicitly.
 
 set -euo pipefail
-
-VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
@@ -57,6 +58,20 @@ fi
 
 if ! command -v brain >/dev/null 2>&1; then
     echo "brain CLI not on PATH (expected via launchd PATH or local .venv)" >&2
+    exit 1
+fi
+
+# Under launchd BRAIN_VAULT_PATH is the value brain-install-launchd resolved and
+# baked into the plist, so it is used as-is and the daemon's start path needs no
+# extra interpreter call. A manual run has nothing exported: ask the same
+# resolver the plist value came from instead of guessing ~/brain-vault, and
+# refuse to start (no pid file) rather than watch a vault nobody configured.
+# Resolved after the venv autoload so `python3` is the checkout's venv here.
+if [[ -n "${BRAIN_VAULT_PATH:-}" ]]; then
+    VAULT="$BRAIN_VAULT_PATH"
+elif ! VAULT="$("${BRAIN_PY:-python3}" -m brain.install_config "${BRAIN_HOME:-$PROJECT_ROOT}")" \
+        || [[ -z "$VAULT" ]]; then
+    echo "could not resolve the vault (set BRAIN_VAULT_PATH, or BRAIN_PY to a python with brain)" >&2
     exit 1
 fi
 
