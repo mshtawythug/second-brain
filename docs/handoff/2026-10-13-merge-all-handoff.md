@@ -42,15 +42,37 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
 5. **Clean-up:** 18 merged worktrees and 20 merged local branches were removed. The remote
    `chore/eval-ci-baseline` was deleted; its tip was `a6c4acf` (PR #11, superseded by #13). Re-check with
    `git worktree list` and `git ls-remote --heads second-brain`.
-6. **A user-level Caddy LaunchAgent that was crash-looping was stopped.** Its plist backup is
+6. **A user-level brew Caddy LaunchAgent was stopped.** It had been crash-looping, with 61,603 runs
+   counted by ops on 2026-10-21. Its plist backup is
    `~/.brain/backups/homebrew.mxcl.caddy.user-plist.20261021-151507.plist`. The ROOT Caddy is a different
    job; see "Remains the user's".
 7. **`ollama ps` was checked.** It showed `llama3.1:8b` at CONTEXT 8192 and `snowflake-arctic-embed2` at
    2048. That is PR #32 and PR #36 live on the daemons.
-8. **The uv tool reinstall from master `c9f6408` is not yet confirmed.** This line stays a placeholder
-   until the coordinator confirms the reinstall. Until then, check
-   `~/.local/share/uv/tools/secondbrain-py/uv-receipt.toml`: its source `directory` is still
-   `.claude/worktrees/daemon-src`, which was detached at `c9f6408` on 2026-10-21.
+8. **The uv tool `secondbrain-py` was reinstalled from master `c9f6408` on Python 3.12.** The source
+   was the `.claude/worktrees/daemon-src` worktree, detached at `c9f6408`. **Trap:** the first attempt
+   shipped the deleted `brain/wiki` package. The cause was a gitignored setuptools `build/lib` and a
+   `src/secondbrain_py.egg-info` left in `daemon-src` by an earlier build: setuptools copies `build/lib`
+   into the wheel. Both were deleted and the tool was reinstalled. Before every
+   `uv tool install --force <daemon-src>`, delete `daemon-src/build` and the egg-info. Verify by diffing
+   the installed dist-info `RECORD` (its `brain/` entries) against `git ls-files src/brain`, not by the
+   version string, which still reads 0.3.0. After the reinstall:
+   - the `RECORD` matched git;
+   - launchd held only `com.brain.watcher` and `com.brain.brief`;
+   - the baked vault path was unchanged;
+   - the watcher was running clean;
+   - `brain doctor` reported 18/18 OK.
+
+   Re-check with `launchctl list | grep com.brain` and `brain doctor`.
+9. **The skills were re-synced** with `bin/brain-skills-sync`. PR #43 had changed 4 of them; afterwards
+   all 11 installed copies matched master. Re-check with
+   `cmp skills/<s>/SKILL.md ~/.claude/skills/<s>/SKILL.md`.
+10. **Claude Desktop was relaunched.** Its `brain` MCP config points at `~/.local/bin/brain-mcp`, which is
+    the reinstalled code. Desktop starts local MCP servers lazily, and had started none since 2026-09-23,
+    so a missing `brain-mcp` process right after a relaunch is not a failure by itself.
+11. **A DB-only backup was taken:** `~/.brain/backups/brain-backup-20261021-192017-db-only.tar.gz`
+    (138.7 MiB, sha256 verified). A full backup was skipped on purpose. `brain backup` tars the vault
+    unfiltered, so it would have included `<vault>/.quartz`, which held about 11 GB of dead build output
+    on 2026-10-21. See "Remains the user's" item 2 and "Follow-ups still open".
 
 ### The 2026-10-16 "Still needs the user" list, item by item
 
@@ -59,19 +81,22 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
 | 1 | Phase 9 (delete the wiki) | **DONE:** PR #43, merge `cf0d209`. The user gave the word on 2026-10-21, and RA-8 was rejected (plan `docs/plans/2026-10-21-wiki-to-ui-phase9.md` §0). |
 | 2 | Golden corpus re-judge | **PARTLY DONE:** PR #41 (`eec002f`) re-judged the two pinned recency rows and re-pinned the planning row to `after: 2026-07-24` / `before: 2026-09-02`. The means at `eec002f` were 0.3253/0.4310/0.7581 (nDCG@5/MRR/Recall@20; re-derive from `tests/eval/baselines/ci.json` at that commit). **The other 29 rows remain the user's.** |
 | 3 | Lower `OLLAMA_CONTEXT_LENGTH` | **DONE:** "Done on 2026-10-21" item 1. |
-| 4 | Restart Claude Desktop | **Remains the user's,** once the reinstall in item 8 above is confirmed. |
+| 4 | Restart Claude Desktop | **DONE:** "Done on 2026-10-21" item 10, after the `c9f6408` reinstall (item 8). |
 | 5 | Check `ollama ps` after an ingest | **DONE:** "Done on 2026-10-21" item 7. |
 | 6 | Host disk | **Remains the user's.** On 2026-10-21, `df -h /System/Volumes/Data` showed 94% used. See "Remains the user's". |
 | 7 | Main checkout behind master; untracked copy of this file | **DONE:** "Done on 2026-10-21" item 4. |
 
 ### Remains the user's (as of 2026-10-21)
 
-1. **Delete `<vault>/.quartz` by hand.** R3 deliberately touched nothing on the machine (plan §6).
+1. **Stop the ROOT Caddy that still serves the retired wiki on :8080.** It is a system LaunchDaemon
+   reading `/opt/homebrew/etc/Caddyfile`, so stopping it needs the user's
+   `sudo brew services stop caddy`. Optionally delete that `Caddyfile` afterwards. Re-check with
+   `curl -sI http://localhost:8080`; `lsof` without sudo cannot see root's listener.
+2. **Delete `<vault>/.quartz` by hand** (about 11 GB on 2026-10-21; re-derive with
+   `du -sh <vault>/.quartz`), then **run a full `brain backup`**. Only a DB-only backup exists from
+   2026-10-21 ("Done on 2026-10-21" item 11). R3 deliberately touched nothing on the machine (plan §6).
    `docs/vault.md` lists the leftovers. Vault sync and watch keep skipping `.quartz/` until it is gone
    (ruling R9-8).
-2. **Stop the ROOT Caddy that still serves the last wiki build on :8080.** It needs the user's
-   `sudo brew services stop caddy`. Re-check with `curl -sI http://localhost:8080`; `lsof` without sudo
-   cannot see root's listener.
 3. **Re-judge the other 29 golden rows.** Only the two recency rows were re-judged (PR #41). The
    re-judging procedure and the read-only range check are in `tests/eval/baselines/README.md`.
 4. **Optional: reboot to release swap.** macOS swap grew to roughly 30 GB under parallel-agent memory
@@ -82,11 +107,16 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
    unmerged work: `d0377a2`, `4a507c4` and `36c8a58`, which are 1, 5 and 3 commits outside `c9f6408`
    respectively. The fourth, `e813140`, is merged. Re-derive with `git worktree list` and
    `git rev-list --count c9f6408..<sha>`.
-7. **Keep `.claude/worktrees/daemon-src`.** It is still the uv receipt's source (item 8 above). Delete it
-   only after the tool has been reinstalled from somewhere else.
+7. **Keep `.claude/worktrees/daemon-src`.** After the `c9f6408` reinstall it is still the uv receipt's
+   source ("Done on 2026-10-21" item 8; check
+   `~/.local/share/uv/tools/secondbrain-py/uv-receipt.toml`). Delete it only after the tool has been
+   reinstalled from somewhere else.
 
 ### Follow-ups still open (as of 2026-10-21)
 
+- `brain backup`'s `tar_vault` (`src/brain/backup/create.py`) archives the whole vault with no skip
+  list, unlike vault sync and watch, which skip `.quartz/` (R9-8). Until `<vault>/.quartz` is deleted, a
+  full backup carries about 11 GB of dead build output (measured 2026-10-21).
 - `graph_runner` has no `degraded` tolerance. This is deliberate, and the reason is in its module
   docstring (PR #37 left it out on purpose).
 - Watcher burst/stale-event tests that `sleep` and then assert ABSENCE can false-PASS under load. The
@@ -131,7 +161,7 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
    from the detached worktree `.claude/worktrees/daemon-src` at `8900725`. **Do not delete that worktree**
    until the tool is reinstalled from somewhere else. On 2026-10-16 the uv receipt's source `directory`
    pointed at it; check `~/.local/share/uv/tools/secondbrain-py/uv-receipt.toml`.
-   *(2026-10-21: still the receipt's source, now detached at `c9f6408`. See "Done on 2026-10-21" item 8.)*
+   *(2026-10-21: reinstalled from it at `c9f6408`, so it is still the receipt's source. See "Done on 2026-10-21" item 8.)*
 3. **`com.brain.watcher` was restarted on 0.3.0 on 2026-10-16.** It reads `.env` through the
    `~/.brain/.env` symlink, so from that restart `BRAIN_OLLAMA_KEEP_ALIVE=30m` applied and PR #32's chat
    `num_ctx` (default 8192) took effect.
@@ -167,11 +197,11 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
    and re-derive the counts with the read-only SQL check in that README.
 3. *[DONE 2026-10-21: lowered to 8192; backup `~/.brain/backups/launchagents_20261021T164217Z/`.]* **Optional: lower `OLLAMA_CONTEXT_LENGTH`** in `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`, so
    other clients stop forcing 65536-context reloads. Brew may regenerate that plist.
-4. *[Remains the user's on 2026-10-21, after the `c9f6408` reinstall is confirmed.]* **Restart Claude Desktop,** so its `brain-mcp` respawns on the upgraded install (see Done #8). Restart
+4. *[DONE 2026-10-21: relaunched after the `c9f6408` reinstall.]* **Restart Claude Desktop,** so its `brain-mcp` respawns on the upgraded install (see Done #8). Restart
    it again after the coordinator's planned reinstall (see "In flight").
 5. *[DONE 2026-10-21: `ollama ps` showed 8192 and 2048.]* **After the next ingest,** `ollama ps` should show the chat model (`llama3.1:8b`) at CONTEXT 8192
    and, once the reinstall picks up PR #36, the embed model at 2048.
-6. *[Remains the user's on 2026-10-21. See "Remains the user's" items 4–5.]* **Host disk:** on 2026-10-16 the data volume was nearly full; check with
+6. *[Remains the user's on 2026-10-21. See "Remains the user's" items 2, 4 and 5.]* **Host disk:** on 2026-10-16 the data volume was nearly full; check with
    `df -h /System/Volumes/Data`.
 7. *[DONE 2026-10-21: fast-forwarded to master, and the untracked copy moved to `~/.brain/backups/`.]* **The main checkout:** on 2026-10-16 it was far behind master (re-derive with
    `git -C <main> rev-list --count HEAD..second-brain/master`), belonged to another session, and held an
@@ -182,7 +212,7 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
 
 *(History. Nothing below is in flight on 2026-10-21.)*
 
-- *[The reinstall was done at `6948c6f` on 2026-10-16 and again from `c9f6408` on 2026-10-21; the second is pending confirmation, see "Done on 2026-10-21" item 8. `daemon-src` is still the receipt's source, so do not delete it.]* **Planned: the coordinator reinstalls the uv tool from the final master after the open PRs merge,
+- *[DONE: reinstalled from `6948c6f` on 2026-10-16, and again from `c9f6408` (Python 3.12) on 2026-10-21, after deleting the stale `build/` and egg-info. See "Done on 2026-10-21" item 8. `daemon-src` is still the receipt's source, so do not delete it yet.]* **Planned: the coordinator reinstalls the uv tool from the final master after the open PRs merge,
   and then `daemon-src` can be deleted.** As of 2026-10-16, the install that the daemons and Claude
   Desktop run was built at `8900725`, so PR #36 and later merges were not live in either. The
   reinstall moves the uv receipt's source off `daemon-src`, which is what makes that worktree safe to
