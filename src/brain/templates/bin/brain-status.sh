@@ -1,33 +1,34 @@
 #!/usr/bin/env bash
-# Report on what the brain is currently running (blue/green serve edition).
+# Report on what the brain is currently running.
+#
+# The Quartz build-watcher row, the `<vault>/.quartz/current` build pointer and
+# the wiki-URL probe were deleted with the wiki at R3 (wiki-to-ui phase 9). The
+# legacy `quartz --serve` row stays: it only appears when an old install left
+# its pid file behind (ruling R9-1, legacy cleanup survives).
 
 set -euo pipefail
-
-VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
-QUARTZ_DIR="$VAULT/.quartz"
-PORT="${BRAIN_WIKI_PORT:-8080}"
-URL="http://localhost:$PORT"
 
 # Shim is installed at $BRAIN_HOME/.shims/brain-status, so $BRAIN_HOME is
 # two parent-traversals up (.shims/ → $BRAIN_HOME). Honor an explicit
 # BRAIN_HOME override if the launcher set one.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BRAIN_HOME_RESOLVED="${BRAIN_HOME:-$( cd "$SCRIPT_DIR/.." && pwd )}"
+# BRAIN_PY is exported by the console-script launcher (src/brain/bin/_launcher.py)
+# and is by construction an interpreter with `brain` importable.
+PY="${BRAIN_PY:-python3}"
 
 # Pid paths default to $BRAIN_HOME/run/ — NOT /tmp. macOS's tmp_cleaner reaps
-# files left untouched for 3 days; the build/watch daemons write their pid file
-# once at launch and then run for weeks, so a /tmp pid file silently vanishes
+# files left untouched for 3 days; the watch daemon writes its pid file
+# once at launch and then runs for weeks, so a /tmp pid file silently vanishes
 # and this very script misreports a live daemon as "stopped". $BRAIN_HOME/run/
 # is not reaped. Overridable (unset = unchanged) so the test suite can run this
 # shim hermetically against a tmp pid dir, never colliding with a live
 # brain-up install on a dev machine.
 WATCH_PID="${BRAIN_WATCH_PID:-$BRAIN_HOME_RESOLVED/run/brain-watch.pid}"
-BUILD_PID="${BRAIN_BUILD_PID:-$BRAIN_HOME_RESOLVED/run/brain-build.pid}"
 WIKI_PID="${BRAIN_WIKI_PID:-$BRAIN_HOME_RESOLVED/run/brain-wiki.pid}"   # legacy quartz --serve install
 # T1.7 plist templates redirect StandardOut to $BRAIN_HOME/logs/com.brain.*.out.log,
 # not the legacy /tmp paths the pre-launchd nohup era used.
 WATCH_LOG="$BRAIN_HOME_RESOLVED/logs/com.brain.watcher.out.log"
-BUILD_LOG="$BRAIN_HOME_RESOLVED/logs/com.brain.build.out.log"
 
 check_one() {
     local pid_file="$1"
@@ -42,14 +43,6 @@ check_one() {
 
 echo '🧠 brain status'
 check_one "$WATCH_PID" 'watcher' "(logs: $WATCH_LOG)"
-# The Quartz build watcher is dormant since R2 (phase 8): stopped is its normal
-# state, so it is labelled rather than reported as an outage. A build watcher
-# someone started by hand still shows as running.
-if [[ -f "$BUILD_PID" ]] && kill -0 "$(cat "$BUILD_PID")" 2>/dev/null; then
-    check_one "$BUILD_PID" 'build' "(logs: $BUILD_LOG)"
-else
-    printf '  %-9s ⏸  dormant since R2 — brain-rebuild --only quartz rebuilds the wiki\n' 'build:'
-fi
 
 # Legacy row — only show if a stale pid file from the pre-blue/green
 # install is still on disk. Helps diagnose half-migrated machines.
@@ -63,28 +56,15 @@ if [[ -f "$WIKI_PID" ]]; then
     fi
 fi
 
-# Current build pointer — what Caddy is serving right now.
-CURRENT="$QUARTZ_DIR/current"
-if [[ -L "$CURRENT" ]]; then
-    target="$(readlink "$CURRENT")"
-    if resolved="$(cd "$CURRENT" 2>/dev/null && pwd -P)"; then
-        if [[ -f "$resolved/.build-id" ]]; then
-            build_id="$(cat "$resolved/.build-id")"
-        else
-            build_id='(no .build-id)'
-        fi
-        printf '  current   → %s\n' "$target"
-        printf '  build-id  %s\n' "$build_id"
-    else
-        printf '  current   ⚠️  symlink dangles → %s\n' "$target"
-    fi
+# The vault the installers resolve, and the one brain-up bakes into the plists
+# (brain.install_config: exported BRAIN_VAULT_PATH, else $BRAIN_HOME/.env, else
+# the default). Ask that resolver rather than restate it here. It is resolved
+# NOW: if the config changed since the last brain-up, the daemons still watch
+# the value baked then, until the next brain-up re-bakes it. Resolved after the
+# daemon rows on purpose: a broken interpreter costs the vault row, never the
+# daemon report.
+if VAULT="$("$PY" -m brain.install_config "$BRAIN_HOME_RESOLVED")" && [[ -n "$VAULT" ]]; then
+    printf '  vault     %s\n' "$VAULT"
 else
-    printf '  current   ⛔ no symlink at %s (run brain-up to bootstrap)\n' "$CURRENT"
-fi
-
-# Quick health check on the wiki socket — Caddy now answers, not Quartz.
-if curl -fsS -o /dev/null --max-time 2 "$URL/" 2>/dev/null; then
-    echo '  wiki url  reachable ✅'
-else
-    echo '  wiki url  unreachable ⚠️ '
+    printf '  vault     ⚠️  unresolved — %s -m brain.install_config failed\n' "$PY"
 fi

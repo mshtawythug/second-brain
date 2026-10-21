@@ -21,8 +21,9 @@ Facts for the pre-write gate:
 ---
 
 This is the one F6 boundary that stops bytes from leaving the machine. The other
-two (MCP ``brain_show``, the published wiki) keep bytes inside a process or off
-an index; this one is about a live HTTPS POST to a third party:
+two (MCP ``brain_show``; ``brain ui`` and the generated vault pages, which
+replaced the wiki deleted at R3) keep bytes inside a process or off a page;
+this one is about a live HTTPS POST to a third party:
 ``VoyageEmbedder.embed`` sends raw chunk text to Voyage AI, and before 026 the
 ingest pipeline had no per-document veto over it.
 

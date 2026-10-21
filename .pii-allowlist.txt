@@ -57,12 +57,6 @@ Larkspur
 Vendra
 Meridian
 
-# --- bin/brain-wiki-gif synthetic corpus (rendered-wiki GIF) -------------
-# The wiki-GIF demo vault is 100% fictional (Larkspur compliance universe,
-# same cast as `brain demo`; emails use the synthetic example.com domain).
-# Jordan Alvarez / Sam Rivera / Larkspur are already listed above.
-Priya Chandra
-
 # --- Synthetic credential fixtures (tests/secret_fixtures.py) ------------
 # The ingest secret guard (F4) needs credential-SHAPED strings to test against.
 # Every value below is fake and non-resolving: the AWS pair are Amazon's own

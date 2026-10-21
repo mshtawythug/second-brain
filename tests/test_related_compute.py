@@ -3,7 +3,7 @@
 ``compute_related`` is the per-document public entry point into the hybrid
 Related-docs signal — the one ``brain ui``'s related-docs panel calls live,
 in place of reading a precomputed ``static/related/<slug>.json``. The
-corpus-wide driver (:func:`brain.related._iter_hybrid_neighbors`) is covered
+corpus-wide driver (``tests/related_harness.iter_hybrid_neighbors``) is covered
 by :mod:`tests.test_build_related_signal`; these tests pin the *per-document*
 contract that driver does not exercise:
 

@@ -86,8 +86,8 @@ class DocRef:
     ``_ingested/krisp/2026-05-06-3508c63e-ai-cos-jam-session``). Phase B
     feeds this into a wiki-link of the form ``[[<vault_target>|<title>]]``
     so :func:`brain.vault.link_rewrite.rewrite_wiki_links` resolves it
-    in one shot via ``_resolve_by_vault_path`` (matching the recent-rail
-    homepage precedent in :func:`brain.wiki.build_homepage._render_bullets`).
+    in one shot via ``_resolve_by_vault_path`` (the same path-form shape
+    :mod:`brain.review.render` and :mod:`brain.vault.daily_index` emit).
 
     ``None`` for docs that have not been mirrored to the vault yet (rare
     — should resolve on the next ``brain vault export`` / sync).
@@ -352,8 +352,8 @@ def _vault_target(vault_path: str | None) -> str | None:
     against ``documents.vault_path`` during ``brain vault sync`` —
     bare-basename inner text would only resolve in Quartz, leaving every
     person-page wiki-link recorded in ``unresolved_links`` on the brain
-    side. Mirrors the canonical wiki-link target shape emitted by
-    :func:`brain.wiki.build_homepage._render_bullets` for the recent rail.
+    side. Mirrors the canonical wiki-link target shape :mod:`brain.review.render`
+    and :mod:`brain.vault.daily_index` emit.
 
     Delegates the ``.md``-stripping + POSIX normalization to
     :func:`brain.vault.paths.strip_md_extension` so the three vault
@@ -779,8 +779,8 @@ def render_index_md(records: list[PersonRecord]) -> str:
     ``\\|`` escaping breaks the wiki-link parser). A bullet list
     preserves every signal the table would have carried — name,
     doc count, primary email, curated indicator — without the
-    syntactic conflict, and matches the recent-rail bullets in
-    :func:`brain.wiki.build_homepage._render_bullets`.
+    syntactic conflict, and matches the bullets :mod:`brain.review.render`
+    emits.
 
     Each line is shaped:
 

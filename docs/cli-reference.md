@@ -6,17 +6,17 @@
 
 `brain setup` is the one-command installer for the runtime: it creates
 `$BRAIN_HOME`, installs the `brain` shims, starts the Postgres container via
-Docker, and optionally wires the wiki (Caddy + Quartz) and the Claude Code
-skill. How much it stands up is chosen with `--profile` — `minimal` (Postgres +
-FTS only, `BRAIN_EMBEDDER=none`), `standard` (default; adds Ollama hybrid
-search), or `full` (adds GraphRAG, the wiki, and opt-in daemons). The
+Docker, and optionally installs the Claude Code skill. How much it stands up
+is chosen with `--profile` — `minimal` (Postgres + FTS only,
+`BRAIN_EMBEDDER=none`), `standard` (default; adds Ollama hybrid search), or
+`full` (adds GraphRAG and opt-in daemons). The
 [README profiles table](../README.md#quick-start) is the canonical description
 of what each profile pulls in.
 
 ```bash
 brain setup                              # standard profile, interactive prompts
 brain setup --profile minimal            # Postgres + FTS only (no Ollama, no models)
-brain setup --profile full --daemons     # + graph/wiki + launchd background daemons
+brain setup --profile full --daemons     # + graph + launchd background daemons
 brain setup --non-interactive            # take the default for every prompt
 brain setup --dry-run                    # print planned actions; touch nothing
 brain setup --embedder none              # non-interactive backend: arctic|voyage|qwen3|none
@@ -89,8 +89,8 @@ echo "<transcript>" | brain ingest-stdin \
 ```
 
 All ingest paths write rows + chunks to Postgres and, when `BRAIN_VAULT_PATH`
-exists, mirror ingested documents into `_ingested/<source>/` so the wiki can
-show them. Re-running unchanged content is a no-op unless you pass `--force`.
+exists, mirror ingested documents into `_ingested/<source>/` so the vault holds the
+whole corpus as Markdown. Re-running unchanged content is a no-op unless you pass `--force`.
 
 ## Search diagnostics and filters
 
@@ -297,7 +297,7 @@ brain usage --limit 20
 ```
 
 Searches, opens, feedback events and ingests over the trailing window, broken
-down by day, by surface (`cli` / `mcp` / `wiki`) and by agent, plus
+down by day, by surface (`cli` / `mcp` / `ui`) and by agent, plus
 search-latency p50/p95.
 
 **`--json` withholds raw query strings by default.** A query log records what
@@ -364,8 +364,10 @@ brain ingest notes.md --sensitivity confidential
 stays fully readable from the local CLI — that is inside the trust boundary.
 What changes is what leaves the machine: the body is kept off a hosted
 embedder, withheld from MCP `brain_show` / `brain_search` / `brain_recall` /
-`brain_resurface` unless `include_confidential=true`, and dropped from the
-published wiki index.
+`brain_resurface` unless `include_confidential=true`, kept out of the pages
+brain generates into the vault (People Hub, `brief --wiki`, the weekly review),
+and withheld from `brain ui` on a LAN bind unless it is started with
+`--include-confidential`.
 
 Both commands are idempotent. **`mark-normal` is the only sanctioned
 downgrade**: re-ingest is escalate-only, so it can raise a document's tier but
@@ -390,7 +392,7 @@ brain search "roadmap"                              # BOTH tiers — the default
 the ranked results by default**: an unfiltered `brain search` still returns
 confidential documents and their bodies. That is deliberate — the local CLI is
 inside the trust boundary, and the tier governs *egress* (hosted embedders, MCP
-responses, the published wiki), not local reads.
+responses, generated vault pages, a LAN-bound `brain ui`), not local reads.
 
 The practical consequence: `--sensitivity normal` is a convenience lens for
 narrowing what you are looking at, **not** a way to make a local session safe to
@@ -437,7 +439,7 @@ brain edit <id-prefix>                                      # opens $EDITOR
 # Markdown file directly; mutating flags are rejected for vault docs.
 brain edit <vault-id-prefix>
 
-# Hide a doc from the rendered wiki without removing it from local CLI search.
+# Hide a doc from brain ui's browseable views without removing it from local CLI search.
 brain mark-draft <id-prefix>
 brain mark-published <id-prefix>
 
@@ -469,7 +471,7 @@ passed through and can use any Gmail search syntax.
 ```bash
 brain status          # counts and last-ingest time
 brain status --json   # machine-readable: {documents, chunks, sources, by_source, last_ingest}
-brain doctor          # env, Postgres/pgvector, embedder, gws, npx, mirror drift, AGE + graph health
+brain doctor          # env, Postgres/pgvector, embedder, gws, mirror drift, AGE + graph health
 brain doctor --json   # machine-readable [{check, status, detail, remedy}]; still exits non-zero on FAIL
 
 # Refresh Postgres planner statistics. Fixes the "chunks stats — never analyzed"
@@ -480,7 +482,7 @@ brain analyze --all   # ANALYZE every table in the database
 ```
 
 `brain doctor` exits non-zero only for required failures: config, database, or
-active embedder. Optional integrations (`gws`, `npx`, the AGE extension, the
+active embedder. Optional integrations (`gws`, the AGE extension, the
 concept-extractor model, community materialization staleness) are warnings.
 `brain status --json` and `brain doctor --json` are the scripting-friendly
 paths; `doctor --json` preserves the same non-zero exit on any FAIL check.
@@ -683,7 +685,8 @@ It defaults to vault-tier only: ingested-tier mirrors legitimately have no
 them in.
 
 `brain uninstall` removes launchd plists, stops the Docker compose stack and
-deletes the `$BRAIN_HOME` runtime files (`.env`, `.shims/`, `Caddyfile`).
+deletes the `$BRAIN_HOME` runtime files (`.env`, `.shims/`, and a legacy
+`Caddyfile` an older install may have left).
 **Your database and vault are kept by default** — read its `--help` before
 passing anything that widens the blast radius.
 

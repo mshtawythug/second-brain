@@ -6,8 +6,8 @@ exposing one over HTTP forces a background-task subsystem — job store, progres
 channel, cancellation — larger than the entire Notes tab. Those two tabs render
 a one-line redirect to the CLI command that does the job today. This is a
 decision (release plan R-8), not an oversight. A third deferred tab, for the
-Quartz wiki build, was deleted at R2 (spec Q10): the wiki is dormant, and a tab
-describing a retired subsystem is worse than no tab.
+Quartz wiki build, was deleted at R2 (spec Q10), and the wiki itself at R3: a
+tab describing a retired subsystem is worse than no tab.
 
 Layering, and the review rule that protects it:
 

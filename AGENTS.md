@@ -111,8 +111,8 @@ src/brain/
   edit_session.py   Editor flow for `brain edit`
   mcp_server.py     stdio MCP server
   ingest/           Extractors, chunking, and ingest/update pipeline
-  vault/            Vault sync, links, graph, rendering, and derived links
-  wiki/             Quartz build watcher and atomic build swap
+  vault/            Vault sync, links, graph, export, and derived links
+  ui/               `brain ui` web reading surface (Starlette app + static assets)
   migrations/       Numbered SQL migrations (packaged inside the brain package)
 
 tests/              Unit and integration tests
@@ -178,7 +178,7 @@ Codex memory is separate from Claude memory. Codex agents must use the Codex-own
 
 Claude memory under `~/.claude/projects/<claude-project-slug-for-this-repo>/memory/` is Claude-owned. Do not read or update Claude memory as the target for a Codex memory update unless the user explicitly asks to inspect Claude memory.
 
-When a task changes CLI commands, database schema, Python value types, extractors, search behavior, vault/wiki behavior, or operating rules, update the corresponding Codex memory file and `~/.codex/memories/second-brain/MEMORY.md` index. When asked to "update memory", audit the Codex memory files against the current codebase and update drifted content plus the Codex memory index.
+When a task changes CLI commands, database schema, Python value types, extractors, search behavior, vault or `brain ui` behavior, or operating rules, update the corresponding Codex memory file and `~/.codex/memories/second-brain/MEMORY.md` index. When asked to "update memory", audit the Codex memory files against the current codebase and update drifted content plus the Codex memory index.
 
 Topic → file map (Codex memory):
 
@@ -190,8 +190,7 @@ Topic → file map (Codex memory):
 | File extractors, ingest pipeline, source hooks, dedup rules | `ingest-and-types.md` |
 | Search ranking, RRF weights, filter surface, `SearchExplanation`, eval harness | `search.md` |
 | Auto-summary, auto-tag, action items, `brain rate` / `brain todo` | `enrichment-and-feedback.md` |
-| Vault mirror writeback, wiki build, Quartz overlays, fences, People Hub | `vault-and-wiki.md` |
-| `quartz_overrides/` build/reload pipeline + edit-to-UI latency work | `quartz-latency.md` |
+| Vault mirror writeback, fences, People Hub, `brain ui` | `vault-and-wiki.md` (memory file name predates the wiki's removal at R3) |
 | `_people.yml`, People Hub emit thresholds, `brain people` | `people-hub.md` |
 | Hard rules, workflow contracts, banned actions | `operational-rules.md` |
 | Shipped-wave summaries, project-level decisions, plan/audit references | `project.md` |

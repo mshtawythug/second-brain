@@ -1,9 +1,10 @@
 """Tests for ``tests/thread_wait.py`` and the backstop guard over every test module.
 
-``wait_for`` is shared by the vault-watcher, the ``brain vault sync --watch``
-CLI and the wiki build-watcher tests (2026-10-16). One guard here covers all
-of them, and ``_wait_for_observer`` too. It parses every ``tests/**/*.py``
-rather than a list of files, because PR #31's per-file guard (2026-10-15) never
+``wait_for`` is shared by the vault-watcher and the ``brain vault sync --watch``
+CLI tests (2026-10-16; the wiki build-watcher tests that also used it were
+deleted with the wiki at R3). One guard here covers all of them, and
+``_wait_for_observer`` too. It parses every ``tests/**/*.py`` rather than a
+list of files, because PR #31's per-file guard (2026-10-15) never
 saw ``test_cli_vault_watch.py``, which imported the helper from another test
 module and passed ``timeout=5.0``.
 
@@ -59,7 +60,6 @@ _KNOWN_IMPORTERS = frozenset(
     {
         "test_vault_watcher.py",
         "test_cli_vault_watch.py",
-        "wiki/test_build_watcher.py",
     }
 )
 

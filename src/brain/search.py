@@ -486,8 +486,8 @@ def hybrid_search(
       trust boundary by design (identical posture to ``draft``), so an
       unfiltered search still returns confidential bodies in full. It
       answers "show me only what I've marked". The boundaries that
-      actually withhold a body are the hosted-embedder veto at ingest,
-      MCP ``brain_show``, and the published wiki.
+      actually withhold a body are the hosted-embedder veto at ingest, MCP
+      ``brain_show``, ``brain ui``'s gates, and the generated vault pages.
     """
     # Wall clock starts before any work; ``sql_seconds`` accumulates each leg.
     # ``perf_counter()`` costs nanoseconds, so these run unconditionally rather

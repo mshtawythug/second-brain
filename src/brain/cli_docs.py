@@ -184,9 +184,9 @@ def mark_draft(id: str = typer.Argument(...)) -> None:
 
     A draft doc still lives in the DB and is reachable via ``brain search`` /
     ``brain show`` / ``brain list`` (the CLI is local — the user wants to
-    see drafts). Only the wiki hides it: the Quartz contentIndex emitter
-    skips ``draft: true`` entries entirely, so the doc disappears from the
-    explorer tree, the graph view, and full-text search on the rendered site.
+    see drafts). The reading surfaces hide it: ``brain ui`` gates every
+    browseable read on ``draft`` (as the retired Quartz wiki's contentIndex
+    emitter did), and the mirror's ``draft:`` frontmatter says so on disk.
 
     Idempotent — running it twice on an already-draft doc is a no-op and
     prints ``<short-id> is already draft``. Use ``brain mark-published`` to
@@ -253,8 +253,9 @@ def mark_confidential(id: str = typer.Argument(...)) -> None:
     Raises the document's trust tier. A confidential document still lives in
     the DB and is fully reachable from the local CLI — the boundary is at
     *egress*: MCP ``brain_show`` withholds the body unless explicitly asked,
-    the hosted-embedder path refuses to ship it, and the wiki drops it from
-    the published index.
+    the hosted-embedder path refuses to ship it, ``brain ui`` keeps it out of
+    its unprompted listings, and the vault pages the brain generates (People
+    Hub, weekly review, brief) leave it out.
 
     Idempotent — running it twice prints ``<short-id> is already confidential``
     and exits 0. Use ``brain mark-normal`` to reverse it.

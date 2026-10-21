@@ -75,7 +75,7 @@ def test_doctor_passes_when_env_and_db_ok(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 # ---------------------------------------------------------------------------
-# Parallel external probes (Task 4.2) — the embedder HTTP/API, gws, and npx
+# Parallel external probes (Task 4.2) — the embedder HTTP/API and gws
 # probes run concurrently with the serial DB block. Two invariants matter:
 # (1) one probe's failure must not suppress the others, and (2) the printed
 # order is fixed regardless of which probe finishes first.
@@ -88,8 +88,8 @@ def test_doctor_failing_probe_does_not_suppress_other_checks(
     """An unexpected crash in one external probe surfaces as that check's FAIL
     without crashing doctor or hiding the other checks."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    boom = RuntimeError("simulated npx probe crash")
-    with patch("brain.cli._probe_npx", side_effect=boom), _patch_httpx_client(
+    boom = RuntimeError("simulated gws probe crash")
+    with patch("brain.cli._probe_gws", side_effect=boom), _patch_httpx_client(
         _ok_ollama_transport()
     ):
         result = CliRunner().invoke(app, ["doctor"])
@@ -97,9 +97,9 @@ def test_doctor_failing_probe_does_not_suppress_other_checks(
     # The crashed probe is isolated: doctor still ran the survivors.
     assert "postgres" in combined
     assert "ollama" in combined
+    # The crash is surfaced as the gws check's own FAIL, non-zero exit.
+    assert "simulated gws probe crash" in combined
     assert "gws CLI" in combined
-    # The crash is surfaced as the npx check's own FAIL, non-zero exit.
-    assert "quartz/npx" in combined
     assert "FAIL" in combined
     assert result.exit_code != 0
 
@@ -107,7 +107,7 @@ def test_doctor_failing_probe_does_not_suppress_other_checks(
 def test_doctor_external_probe_output_order_is_deterministic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Parallelism must not reorder output: postgres → embedder → gws → npx."""
+    """Parallelism must not reorder output: postgres → embedder → gws."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     with _patch_httpx_client(_ok_ollama_transport()):
         result = CliRunner().invoke(app, ["doctor"])
@@ -117,7 +117,6 @@ def test_doctor_external_probe_output_order_is_deterministic(
         out.index("postgres")
         < out.index("ollama")
         < out.index("gws CLI")
-        < out.index("quartz/npx")
     )
 
 
@@ -249,9 +248,8 @@ def test_doctor_reports_missing_gws(monkeypatch: pytest.MonkeyPatch) -> None:
     """When gws is not on PATH, doctor should note Gmail ingestion is disabled but still exit 0."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
 
-    # ``shutil.which`` is consulted for both ``gws`` and ``npx``; both
-    # missing keeps doctor at exit 0 (gws warns, npx soft-warns) and
-    # avoids accidentally matching the npx side of the new doctor flow.
+    # ``shutil.which`` returning None for every binary keeps doctor at exit 0
+    # (a missing gws only warns).
     with patch("brain.cli.shutil.which", return_value=None), _patch_httpx_client(
         _ok_ollama_transport()
     ):
@@ -292,9 +290,7 @@ def test_doctor_reports_gws_found(monkeypatch: pytest.MonkeyPatch) -> None:
     """When gws IS on PATH, doctor should print the OK line for it."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
 
-    # ``shutil.which`` is called for gws AND npx — return a path for
-    # gws and ``None`` for npx so the new Quartz check soft-warns
-    # without trying to subprocess-run ``gws --version``.
+    # Return a path for gws and ``None`` for anything else.
     def _which(binary: str) -> str | None:
         if binary == "gws":
             return "/usr/local/bin/gws"

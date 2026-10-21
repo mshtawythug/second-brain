@@ -3,28 +3,32 @@
 The hybrid Related-docs signal, extracted from the wiki emitter so the
 scoring can be reused (and tested) without importing the wiki package.
 
-For a source document, :func:`_iter_hybrid_neighbors` mirrors
+For a source document, :func:`_neighbors_for_source` mirrors
 :func:`brain.search.hybrid_search` structurally — the source document acts
 as the query. Weighted multi-field FTS (title weight A, tags B, content C)
 is per-document-capped to ``PER_DOC_CHUNK_CAP`` chunks and blended via
 Reciprocal Rank Fusion with a vector leg gated by ``vector_sim_floor``,
-so the precompute can never silently diverge from the user-facing ranking.
+so related-docs ranking can never silently diverge from the user-facing one.
 
 Pure ranking only: this module reads the database and returns ranked rows.
-Writing those rows out as ``<vault>/static/related/<slug>.json`` is the
-emitter's job and lives in :mod:`brain.wiki.build_related`, which imports
-from here. :mod:`brain.connect` reuses the eligibility + embedding helpers
-for its own auto-link scoring.
+:func:`compute_related` is the entry point (``brain ui``'s related-notes rail);
+:mod:`brain.connect` reuses the eligibility + embedding helpers for its own
+auto-link scoring. The corpus-wide driver that fed the Quartz
+``static/related/<slug>.json`` emitter (``_iter_hybrid_neighbors``) had no
+production caller once the emitter was deleted with the wiki at R3 (phase 9);
+it moved to ``tests/related_harness.py``, which composes the same helpers.
 
 **File-size ceiling (CLAUDE.md): back UNDER, by extraction.** Re-derive with
 ``wc -l src/brain/related.py``. The trail is 714 (``3b16527``, where the wiki/ui
 split created it) -> 720 (``0473b5f``) -> 726 (``7b5579e``) -> 851 (``b7fd0e8``,
 the F6 gate, which crossed the ceiling: a recorded rule violation) -> 851
 (``f0abf64``, the merge; no line changed) -> 851 (``0af7353``) -> 851
-(``7536c4f``, promoted 2026-10-15) -> **the commit that moved both candidate legs
-to brain.related_candidates**, descriptive, no delta: a hop cannot name its own
-SHA (see ``connect.py``). Read it as authoritative only THROUGH THE LAST SHA IT
-NAMES; for anything after it use
+(``7536c4f``, promoted 2026-10-15) -> 730 (``7dfa9e8``, which moved both
+candidate legs to brain.related_candidates; promoted 2026-10-21) -> **the
+phase-9 commit that moved ``_iter_hybrid_neighbors`` to the test harness**,
+descriptive, no delta: a hop cannot name its own SHA (see ``connect.py``).
+Read it as authoritative only THROUGH THE LAST SHA IT NAMES; for anything after
+it use
 ``git log --oneline f8c76c0..HEAD -- src/brain/related.py``. Being under is a
 live condition, not a settled one: a commit that pushes it back over needs its
 CLAUDE.md row back. The next clean seam, if one is needed, is the lexeme/tsquery
@@ -49,12 +53,6 @@ __all__ = [
     "DEFAULT_RELATED_LIMIT",
     "SNIPPET_LENGTH",
     "RelatedDoc",
-    # Underscore-prefixed but deliberately exported: brain.wiki.build_related
-    # imports it across the module boundary. Listing it here is the difference
-    # between a documented cross-module contract and a private name somebody
-    # reached into — the name is kept (renaming it would churn every call site)
-    # and the export is made explicit instead.
-    "_iter_hybrid_neighbors",
     "compute_related",
 ]
 
@@ -144,10 +142,10 @@ def compute_related(
 ) -> list[RelatedDoc]:
     """Return the ``limit`` documents most related to ``doc_id``, best first.
 
-    The per-document entry point into the same signal
-    :func:`_iter_hybrid_neighbors` runs corpus-wide. Both delegate to
-    :func:`_neighbors_for_source`, so a live call here and a precomputed
-    ``static/related/<slug>.json`` row rank identically for the same doc.
+    The per-document entry point into the ranking. It delegates to
+    :func:`_neighbors_for_source`, the same function the corpus-wide driver in
+    ``tests/related_harness.py`` loops over, so the two rank identically for
+    the same doc.
 
     ``exclude_confidential`` DEFAULTS TO ``True`` -- fail-closed, and gated now
     rather than in phase 5 because :class:`RelatedDoc` carries ``snippet``, a
@@ -167,15 +165,15 @@ def compute_related(
     a panel that did not exist yet -- and that panel now ships. The route also
     gates the SOURCE, which this function does not (see the comment below).
 
-    ``vector_sim_floor`` is required, with no default, for the reason
-    :func:`brain.wiki.build_related.regenerate_related_json` states: the
-    cosine floor is shared with runtime ``brain search`` and must not
-    silently diverge from it. Callers plumb ``cfg.vector_sim_floor`` through.
+    ``vector_sim_floor`` is required, with no default: the cosine floor is
+    shared with runtime ``brain search`` and must not silently diverge from
+    it. Callers plumb ``cfg.vector_sim_floor`` through.
 
     **Source eligibility is deliberately wider here.**
-    :func:`_eligible_source_docs` restricts the *precompute* to non-draft docs
-    with a ``vault_path`` and at least one embedded chunk, because those are
-    the docs it writes files for. A reader can open a document that meets none
+    :func:`_eligible_source_docs` restricts the corpus-wide source set to
+    non-draft docs with a ``vault_path`` and at least one embedded chunk (the
+    docs the deleted JSON emitter wrote files for; ``brain connect`` scores
+    the same set). A reader can open a document that meets none
     of those conditions, so this function accepts any document row and lets
     the legs degrade on their own — no embedded chunks means vector-only drops
     out (:func:`_avg_embedding` returns ``None``), and an empty self-tsquery
@@ -237,94 +235,9 @@ def compute_related(
     ]
 
 
-def _iter_hybrid_neighbors(
-    conn: psycopg.Connection[Any],
-    *,
-    k: int,
-    vector_sim_floor: float,
-    exclude_confidential: bool = True,
-) -> list[tuple[Any, ...]]:
-    """Yield (source_vault_path, related_vault_path, related_title,
-    related_source, related_score, related_snippet) rows under the new
-    hybrid Related-docs signal.
-
-    Mirrors :func:`brain.search.hybrid_search` structurally — the source
-    document acts as the query. Per the plan's "Algorithm in pseudocode"
-    section (``docs/plans/2026-05-06-related-docs-rebuild.md``):
-
-    1. Compute ``tsquery_str`` via :func:`_build_self_tsquery` (title with
-       optional body-keyword fallback for short/generic titles).
-    2. Compute ``src_embedding = avg(c.embedding)`` over the source doc's
-       embedded chunks.
-    3. **FTS leg** (when ``tsquery_str`` is non-empty): per-doc-cap CTE
-       (``PER_DOC_CHUNK_CAP=3`` chunks per candidate doc, ranked by
-       ``ts_rank``) filtered to non-draft docs with non-NULL ``vault_path``
-       and excluding self; global LIMIT ``CANDIDATE_LIMIT``.
-    4. **Vector leg** (when ``src_embedding`` is non-NULL): cosine distance
-       gated by ``vector_sim_floor``; ORDER BY cosine distance LIMIT
-       ``CANDIDATE_LIMIT``; same self/draft/vault_path exclusions.
-    5. **RRF blend.** ``1 / (RRF_K + rank)`` per leg, summed per chunk.
-       Group by ``document_id`` taking the max chunk score; that chunk's
-       content becomes the snippet.
-    6. **Top-K.** Highest ``k`` documents by RRF score.
-
-    Implementation choice: a Python loop over eligible source docs is the
-    plan's pseudocode shape. Each iteration is independent; per-doc cost is
-    comparable to a single ``brain search`` (~200ms) so a ~1k-doc corpus
-    finishes well under the plan's 60s ideal / 3min ceiling.
-    """
-    # DEFAULT ``True`` = fail-closed, matching :func:`compute_related` and
-    # :func:`_neighbors_for_source`. This default was ``False``, filed with the
-    # question "whether those files sit inside the F6 boundary". ANSWERED, and
-    # the answer is no -- they are published:
-    #
-    #   * Spec ``docs/specs/2026-07-25-sections/F4-F6-ingest-secret-guard.md``
-    #     names the published wiki as egress boundary (3): confidential keeps a
-    #     body "off the published wiki".
-    #   * That boundary is enforced by ``RemoveConfidential`` at Quartz's
-    #     ``shouldPublish``, which gates CONTENT vfiles. Asset files never pass
-    #     through it, so ``<vault>/static/related/<slug>.json`` -- written by
-    #     ``wiki.build_related.regenerate_related_json`` from these rows,
-    #     snippets included -- bypasses the boundary entirely.
-    #   * They reach the site via ``Plugin.Assets()`` (NOT ``Plugin.Static()``;
-    #     see that emitter's docstring), which copies every non-``.md`` file
-    #     under the vault, and ``static`` is not in ``ignorePatterns``.
-    #
-    # The deferral's stated cost -- "flipping the default silently rewrites
-    # every generated JSON file" -- was measured and is false: the predicate
-    # excludes nothing while no document is confidential, so the emitter's
-    # unchanged-file branch skips every write. The rewrite it feared only
-    # begins once a document IS confidential, which is exactly when the old
-    # default would have published that document's body.
-    eligible = _eligible_source_docs(conn, exclude_confidential=exclude_confidential)
-    corpus_common = _corpus_common_lexemes(conn)
-    rows: list[tuple[Any, ...]] = []
-    for source in eligible:
-        neighbors = _neighbors_for_source(
-            conn,
-            source=source,
-            k=k,
-            vector_sim_floor=vector_sim_floor,
-            corpus_common=corpus_common,
-            exclude_confidential=exclude_confidential,
-        )
-        for neighbor in neighbors:
-            rows.append(
-                (
-                    source.vault_path,
-                    neighbor.vault_path,
-                    neighbor.title,
-                    neighbor.source,
-                    neighbor.score,
-                    neighbor.snippet,
-                )
-            )
-    return rows
-
-
 @dataclass(frozen=True)
 class _SourceDoc:
-    """One eligible source document for the related-docs precompute."""
+    """One eligible source document for the corpus-wide related-docs ranking."""
 
     id: str
     title: str
@@ -346,18 +259,18 @@ class _Neighbor:
 def _eligible_source_docs(
     conn: psycopg.Connection[Any], *, exclude_confidential: bool = True
 ) -> list[_SourceDoc]:
-    """Return the set of docs the precompute generates JSON for.
+    """Return the eligible source documents for corpus-wide related-docs scoring.
 
     Eligibility mirrors the pre-rewrite query: non-draft, non-NULL
     ``vault_path``, at least one chunk with a non-NULL embedding.
 
     ``exclude_confidential`` defaults fail-closed, and gating the SOURCE is a
-    SEPARATE leak from gating candidates. A confidential source that survives
-    here gets its own published ``static/related/<its-slug>.json``, which
-    discloses the note's existence and slug plus its neighbours' titles and
-    body snippets -- an inference channel about a document Quartz deliberately
-    did not publish. Gating only candidates closes the direct body egress and
-    leaves this one open, so both are gated.
+    SEPARATE leak from gating candidates. It was written for the Quartz
+    ``static/related/<slug>.json`` emitter (deleted with the wiki at R3, phase
+    9), where a confidential source that survived got its own published file,
+    disclosing the note's existence and its neighbours' titles and body
+    snippets. The fail-closed default stays: a future corpus-wide consumer
+    inherits the safe polarity rather than having to remember it.
 
     Note the local default embedder (``arctic``) is not hosted, so F6's
     hosted-embedder boundary does NOT null a confidential doc's embeddings --

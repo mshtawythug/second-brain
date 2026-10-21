@@ -61,11 +61,11 @@ _UNRESOLVED_CLASS = "wikilink wikilink--unresolved"
 Resolver = Callable[[str], str | None]
 
 #: The attribute the link-kind stylesheet keys off. Same ``data-brain-`` prefix
-#: the Quartz overlay uses (``quartz_overrides/.../linkKindMark.ts``), so the
-#: port can reuse that stylesheet's selectors verbatim.
+#: the retired Quartz overlay used (its ``linkKindMark.ts``, deleted at R3), so
+#: the port reused that stylesheet's selectors verbatim.
 LINK_KIND_ATTR = "data-brain-link-kind"
 
-#: Prefixes, ported from ``linkKindMark.ts``. Both the relative and the
+#: Prefixes, ported from the retired ``linkKindMark.ts``. Both the relative and the
 #: leading-slash forms appear in real bodies depending on how the link was
 #: written, so between them the prefix list and :data:`_TAG_INFIX` cover every
 #: shape.

@@ -46,8 +46,8 @@ import { openNote } from "/static/js/inspector.js";
 /* Ported from results.js's table rather than re-invented, and deliberately not
    imported from it: results.js does not export it, and widening another task's
    module surface to save five lines is not a trade this phase should make. The
-   vocabulary itself is `quartz/util/sourceIcons.ts`, which four overlay
-   components already share. */
+   live vocabulary is results.js's table (itself ported from the retired Quartz
+   overlay, deleted at R3); keep the two in step. */
 const SOURCE_ICONS = {
   krisp: "🎙️", slack: "💬", gmail: "📧", manual: "✍️", vault: "🌱",
 };

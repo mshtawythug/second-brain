@@ -23,7 +23,7 @@ from brain import setup
 
 
 def _interactive_full_dry_run(tmp_path: Path, *, answer: bool) -> str:
-    """An interactive full-profile ``--skip-wiki`` dry run on macOS.
+    """An interactive full-profile dry run on macOS.
 
     Every confirm answers ``answer``.
     """
@@ -42,8 +42,6 @@ def _interactive_full_dry_run(tmp_path: Path, *, answer: bool) -> str:
             brain_home_override=tmp_path / ".brain",
             vault_override=tmp_path / "vault",
             pg_port=0,
-            wiki_port=0,
-            skip_wiki=True,
             skip_skill=True,
         )
     return buf.getvalue()
@@ -99,7 +97,7 @@ def test_the_daemon_prompt_names_the_vault_watcher_and_the_brief(tmp_path: Path)
 
 
 def test_setup_no_longer_installs_the_build_wrapper_shim(tmp_path: Path) -> None:
-    """Nothing installed at R2 runs ``_brain-build-fg``; the template stays until R3."""
+    """Nothing installed runs ``_brain-build-fg``; it was deleted with the wiki at R3."""
     out = _interactive_full_dry_run(tmp_path, answer=False)
 
     assert "_brain-build-fg" not in setup._SHIM_NAMES

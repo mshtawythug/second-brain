@@ -152,7 +152,11 @@ class DailyUsage:
 
 @dataclass(frozen=True)
 class SurfaceUsage:
-    """Activity attributed to one surface (``cli`` / ``mcp`` / ``wiki``)."""
+    """Activity attributed to one surface (``cli`` / ``mcp`` / ``ui``).
+
+    ``wiki`` stays a legal value in the schema (frozen migrations) but nothing
+    writes it: the Quartz wiki was deleted at R3 (wiki-to-ui phase 9).
+    """
 
     surface: str
     searches: int

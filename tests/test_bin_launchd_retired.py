@@ -2,7 +2,8 @@
 
 It is never installed again, an existing install is booted out and its plist
 deleted on the next ``brain-install-launchd``, and ``brain-uninstall-launchd``
-still sweeps it. Its template and ``_brain-build-fg`` wrapper stay until R3.
+still sweeps it. Its template and ``_brain-build-fg`` wrapper were deleted with
+the wiki at R3 (phase 9); the sweep stays for upgraded machines (R9-1).
 
 Every launchctl here is a recording stub passed explicitly. The conftest stub
 (``tests/test_launchctl_isolation.py``) is the backstop, not the double.
@@ -84,7 +85,7 @@ def test_install_writes_and_bootstraps_only_the_watcher_and_brief(tmp_path: Path
 
 
 def test_install_shims_only_the_installed_wrappers(tmp_path: Path) -> None:
-    """E5: nothing installed at R2 runs ``_brain-build-fg``, so it is not shimmed."""
+    """E5: nothing installed runs ``_brain-build-fg`` (deleted at R3), so it is not shimmed."""
     stub, _ = _recorder(tmp_path)
 
     _install(tmp_path, stub)

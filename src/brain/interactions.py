@@ -9,9 +9,11 @@ pin / click). Q1-C populated this table from two DOCUMENT surfaces:
   action='opened', ``query=originating_query``, optional
   ``session_id`` minted by a prior ``brain_search`` call.
 
-The wiki click surface (source='wiki') is reserved in the schema for a
-future wave; this module accepts it today so the deferred surface needs
-no additional migration. The local web UI (source='ui') joined the enum
+``source='wiki'`` was reserved for a wiki click surface that never shipped;
+the wiki itself was deleted at R3 (wiki-to-ui phase 9), so nothing writes it.
+It stays in the accepted set only because the frozen migrations' ``CHECK``
+still lists it and ``tests/test_telemetry_source_enum.py`` holds the two in
+lockstep; old rows, if any, stay readable. The local web UI (source='ui') joined the enum
 in migration 024, on BOTH telemetry tables — see that migration's header
 for why widening the SQL without this Python mirror silently rejects
 every UI interaction.

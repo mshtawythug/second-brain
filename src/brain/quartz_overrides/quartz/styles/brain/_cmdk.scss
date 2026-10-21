@@ -1,7 +1,0 @@
-// Compatibility alias for the historical command-palette partial name.
-//
-// The Phase 5 handoff standardizes the file as `_command_palette.scss`;
-// this wrapper keeps older comments/tools that probe `_cmdk.scss` from
-// failing while the real styles live in the spec-named partial.
-
-@use "./command_palette";

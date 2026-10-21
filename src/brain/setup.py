@@ -2,7 +2,8 @@
 
 Over the 800-line ceiling (CLAUDE.md table). Phase-7 growth, reasoned inline in
 ``_print_final_report``: the closing report names ``brain ui`` as the reading
-surface (spec R1), ahead of the legacy wiki URL. 2026-10-16: a re-run honours
+surface (spec R1); the legacy wiki URL it used to follow was deleted with the
+wiki at R3 (phase 9), which shrank this file. 2026-10-16: a re-run honours
 ``BRAIN_VAULT_PATH`` / ``VOYAGE_API_KEY`` from an existing ``$BRAIN_HOME/.env``
 (setup never calls ``Config.load``, so nothing published it), reasoned at both
 reads. The lookup and the vault precedence now live in
@@ -29,7 +30,6 @@ from .config import _brain_home_root
 from .errors import BrainError
 from .install_config import brain_home_dotenv_value, resolve_install_vault
 from .vault._atomic import atomic_write_text
-from .wiki import QUARTZ_PINNED_COMMIT, QUARTZ_REPO_URL
 
 
 class SetupError(BrainError):
@@ -54,20 +54,20 @@ class SetupProfile:
     scattered string compares on the profile name. Three profiles ship:
 
     * **minimal** — Postgres + FTS only. Stock compose, ``BRAIN_EMBEDDER=none``,
-      graph off, no Ollama, no wiki/daemons/skill. A user with only Docker +
+      graph off, no Ollama, no daemons/skill. A user with only Docker +
       Git + Python gets a working brain.
     * **standard** — + Ollama hybrid search. Stock compose,
       ``BRAIN_EMBEDDER=arctic`` (or ``--embedder``), graph off, Ollama preflight
-      + pull, soft skill install (only if ``~/.claude`` exists), no wiki/daemons.
-    * **full** — today's behaviour: the AGE compose + Dockerfile, graph on,
-      Ollama pull, and the interactive wiki / daemons / skill offers.
+      + pull, soft skill install (only if ``~/.claude`` exists), no daemons.
+    * **full** — the AGE compose + Dockerfile, graph on, Ollama pull, and the
+      interactive daemons / skill offers. (Its wiki offer was deleted with the
+      Quartz wiki at R3, phase 9.)
     """
 
     name: str
     needs_ollama: bool
     wants_graph: bool
     compose_template: str
-    offer_wiki: bool
     offer_daemons: bool
     offer_skill: bool
     soft_skill: bool
@@ -98,7 +98,6 @@ _PROFILES: dict[str, SetupProfile] = {
         needs_ollama=False,
         wants_graph=False,
         compose_template=_STOCK_COMPOSE,
-        offer_wiki=False,
         offer_daemons=False,
         offer_skill=False,
         soft_skill=False,
@@ -110,7 +109,6 @@ _PROFILES: dict[str, SetupProfile] = {
         needs_ollama=True,
         wants_graph=False,
         compose_template=_STOCK_COMPOSE,
-        offer_wiki=False,
         offer_daemons=False,
         offer_skill=True,
         soft_skill=True,
@@ -122,7 +120,6 @@ _PROFILES: dict[str, SetupProfile] = {
         needs_ollama=True,
         wants_graph=True,
         compose_template=_AGE_COMPOSE,
-        offer_wiki=True,
         offer_daemons=True,
         offer_skill=True,
         soft_skill=False,
@@ -292,25 +289,9 @@ def _check_port_free(port: int, check_name: str) -> PreflightResult:
             message=f"port {port} is already in use",
             remediation=(
                 f"Stop the process using port {port} or pass a different "
-                f"--port / --wiki-port value"
+                f"--port value"
             ),
         )
-
-
-def _check_caddy() -> PreflightResult:
-    """Check 6: caddy installed — NOT auto-installed."""
-    ok = shutil.which("caddy") is not None
-    if ok:
-        return PreflightResult(name="caddy", ok=True, message="caddy found")
-    return PreflightResult(
-        name="caddy",
-        ok=False,
-        message="caddy CLI not found on PATH",
-        remediation=(
-            "macOS: brew install caddy\n"
-            "  Linux: https://caddyserver.com/docs/install"
-        ),
-    )
 
 
 def _check_skills_dir_writable(*, skip: bool) -> PreflightResult:
@@ -336,56 +317,6 @@ def _check_skills_dir_writable(*, skip: bool) -> PreflightResult:
     )
 
 
-def _check_quartz_sha(*, dry_run: bool = False) -> PreflightResult:
-    """Check 8: pinned Quartz commit SHA is reachable — skipped in dry-run."""
-    if dry_run:
-        return PreflightResult(
-            name="quartz-sha",
-            ok=True,
-            message="quartz SHA reachability (skipped in dry-run)",
-        )
-    try:
-        result = subprocess.run(
-            ["git", "ls-remote", QUARTZ_REPO_URL, QUARTZ_PINNED_COMMIT],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return PreflightResult(
-            name="quartz-sha",
-            ok=False,
-            message=f"git ls-remote error: {exc}",
-            remediation=(
-                "Ensure git is installed and you have network access to github.com"
-            ),
-        )
-    if result.returncode != 0:
-        return PreflightResult(
-            name="quartz-sha",
-            ok=False,
-            message="git ls-remote failed (network error or git not installed)",
-            remediation="Check internet connectivity and re-run",
-        )
-    stdout = result.stdout.strip()
-    short = QUARTZ_PINNED_COMMIT[:8]
-    ok = bool(stdout) and short in stdout
-    if ok:
-        return PreflightResult(
-            name="quartz-sha",
-            ok=True,
-            message=f"quartz commit {short} reachable at remote",
-        )
-    return PreflightResult(
-        name="quartz-sha",
-        ok=False,
-        message=f"quartz commit {short} not found at {QUARTZ_REPO_URL}",
-        remediation=(
-            "Check network connectivity or update QUARTZ_PINNED_COMMIT in brain.wiki.__init__"
-        ),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Preflight orchestration
 # ---------------------------------------------------------------------------
@@ -402,10 +333,8 @@ def _embedder_uses_ollama(embedder: str | None) -> bool:
 
 def run_preflight(
     pg_port: int,
-    wiki_port: int,
     embedder: str | None,
     profile: SetupProfile,
-    skip_wiki: bool,
     skip_skill: bool,
     *,
     dry_run: bool = False,
@@ -416,11 +345,11 @@ def run_preflight(
 
     * ollama — only when the profile needs Ollama AND the resolved embedder
       actually embeds over it (an auto-detect fallback to ``none`` drops it).
-    * wiki-port / caddy / skills-dir / quartz-sha — only for the full profile
-      (``offer_wiki``), which hard-requires the heavy optional components;
-      standard/minimal skip them so a missing caddy/quartz/skills-dir is never
-      a preflight failure. Order preserved: Python, docker, ollama, PG port,
-      wiki port, caddy, skills dir, quartz SHA.
+    * skills-dir — only for a profile that installs the skill for real (full:
+      ``offer_skill`` and not ``soft_skill``); standard's soft install and
+      minimal never fail preflight on it. Order: Python, docker, ollama, PG
+      port, skills dir. (The wiki-port, caddy and quartz-SHA checks were deleted
+      with the Quartz wiki at R3, phase 9.)
     """
     results: list[PreflightResult] = []
     results.append(_check_python_version())
@@ -428,13 +357,8 @@ def run_preflight(
     if profile.needs_ollama and _embedder_uses_ollama(embedder):
         results.append(_check_ollama())
     results.append(_check_port_free(pg_port, "postgres-port"))
-    if profile.offer_wiki:
-        if not skip_wiki:
-            results.append(_check_port_free(wiki_port, "wiki-port"))
-            results.append(_check_caddy())
+    if profile.offer_skill and not profile.soft_skill:
         results.append(_check_skills_dir_writable(skip=skip_skill))
-        if not skip_wiki:
-            results.append(_check_quartz_sha(dry_run=dry_run))
     return results
 
 
@@ -739,48 +663,8 @@ def _run_brain_doctor(dry_run: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# T3.6 — interactive wiki + skill installs
+# T3.6 — interactive skill install
 # ---------------------------------------------------------------------------
-
-
-def _maybe_install_wiki(
-    skip: bool,
-    non_interactive: bool,
-    dry_run: bool,
-    vault: Path,
-    brain_home: Path,
-    wiki_port: int,
-) -> bool:
-    """Prompt for and optionally perform the wiki sub-install.
-
-    Returns:
-        True  — wiki was installed (or dry-run would install it).
-        False — skipped via flag or user declined interactively.
-
-    The return value feeds the final report's legacy wiki lines.
-    """
-    if skip:
-        typer.echo("[skipped] wiki install (--skip-wiki)")
-        return False
-    if non_interactive:
-        do_install = True
-    else:
-        do_install = typer.confirm(
-            "Install the wiki UI? Adds ~150 MB of node_modules.",
-            default=True,
-        )
-    if not do_install:
-        typer.echo("[skipped] wiki install (user declined)")
-        return False
-    if dry_run:
-        typer.echo(
-            f"[dry-run] would: brain wiki install --vault {vault} --port {wiki_port}"
-        )
-        return True  # dry-run counts as "would have installed"
-    from .wiki.install import wiki_install
-
-    wiki_install(vault=vault, port=wiki_port)
-    return True
 
 
 def _maybe_install_skill(
@@ -840,7 +724,7 @@ def _maybe_install_launchd(
 ) -> None:
     """Install launchd plists ONLY after every prereq passed — opt-in, default No.
 
-    Runs LAST so DB + wiki are healthy before supervisors start.
+    Runs LAST so the DB is healthy before supervisors start.
 
     Background daemons are OPT-IN (ticket contract):
 
@@ -900,8 +784,6 @@ def _maybe_install_launchd(
 def _print_final_report(
     brain_home: Path,
     vault: Path,
-    wiki_port: int,
-    wiki_installed: bool,
     skill_installed: bool,
     effective_embedder: str,
     ollama_fell_back: bool,
@@ -920,12 +802,10 @@ def _print_final_report(
     typer.echo(f"   brain_home: {brain_home}")
     typer.echo(f"   vault:      {vault}")
     typer.echo(f"   embedder:   {effective_embedder}")
-    # Phase 7 (R1): `brain ui` is the reading surface, so it is named first and
-    # the wiki URL after it, labelled legacy — the same order as brain-up's banner.
+    # Phase 7 (R1): `brain ui` is the reading surface, named first — the same
+    # order as brain-up's banner. The legacy wiki URL that followed it was
+    # deleted with the wiki at R3 (phase 9).
     typer.echo("   read:       brain ui   (search, read and edit in a browser)")
-    if wiki_installed:
-        typer.echo(f"   wiki url:   http://localhost:{wiki_port}  (legacy — read in brain ui)")
-        typer.echo(f"   start wiki: caddy run --config {brain_home}/Caddyfile")
     if skill_installed:
         typer.echo("   skill:      ~/.claude/skills/brain/SKILL.md")
     if effective_embedder == "none":
@@ -951,9 +831,7 @@ def run_setup(
     brain_home_override: Path | None = None,
     vault_override: Path | None = None,
     pg_port: int = 55432,
-    wiki_port: int = 8080,
     embedder_choice: str | None = None,
-    skip_wiki: bool = False,
     skip_skill: bool = False,
     daemons: bool = False,
     reset: bool = False,
@@ -978,8 +856,8 @@ def run_setup(
         brain_home = _brain_home_root()
 
     # Vault: --vault > env var > existing $BRAIN_HOME/.env > default. The .env
-    # leg is what a RE-RUN needs (else the default reached the export, the wiki
-    # install and the plists while .env named another); the precedence lives in
+    # leg is what a RE-RUN needs (else the default reached the export and the
+    # plists while .env named another); the precedence lives in
     # brain.install_config so brain-install-launchd resolves the same vault.
     vault_path = resolve_install_vault(brain_home, override=vault_override)
 
@@ -1047,10 +925,8 @@ def run_setup(
     typer.echo("\n── Preflight checks ──────────────────────────────")
     results = run_preflight(
         pg_port=pg_port,
-        wiki_port=wiki_port,
         embedder=effective_embedder,
         profile=prof,
-        skip_wiki=skip_wiki,
         skip_skill=skip_skill,
         dry_run=dry_run,
     )
@@ -1306,22 +1182,9 @@ def run_setup(
     _run_brain_doctor(dry_run)
 
     # ------------------------------------------------------------------
-    # T3.6 — optional sub-installs (wiki + Claude Code skill), gated by profile
+    # T3.6 — optional sub-install (Claude Code skill), gated by profile
     # ------------------------------------------------------------------
     typer.echo("\n── Optional components ────────────────────────────")
-    if prof.offer_wiki:
-        wiki_installed = _maybe_install_wiki(
-            skip=skip_wiki,
-            non_interactive=non_interactive,
-            dry_run=dry_run,
-            vault=vault_path,
-            brain_home=brain_home,
-            wiki_port=wiki_port,
-        )
-    else:
-        wiki_installed = False
-        typer.echo(f"[skipped] wiki install (profile {prof.name})")
-
     if prof.offer_skill:
         # Standard does a SOFT install (only when ~/.claude exists); full offers
         # it interactively. minimal never installs the skill.
@@ -1336,7 +1199,7 @@ def run_setup(
         typer.echo(f"[skipped] Claude Code skill (profile {prof.name})")
 
     # ------------------------------------------------------------------
-    # T3.7 — launchd install LAST (after DB + wiki are healthy); full only
+    # T3.7 — launchd install LAST (after the DB is healthy); full only
     # ------------------------------------------------------------------
     if prof.offer_daemons:
         _maybe_install_launchd(
@@ -1355,8 +1218,6 @@ def run_setup(
     _print_final_report(
         brain_home=brain_home,
         vault=vault_path,
-        wiki_port=wiki_port,
-        wiki_installed=wiki_installed,
         skill_installed=skill_installed,
         effective_embedder=effective_embedder,
         ollama_fell_back=ollama_fell_back,

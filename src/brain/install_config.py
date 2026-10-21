@@ -1,6 +1,14 @@
-"""Install-time config lookups shared by ``brain setup`` and ``brain-install-launchd``."""
+"""Install-time config lookups shared by the installers and the shell tooling.
+
+``brain setup`` and ``brain-install-launchd`` call :func:`resolve_install_vault`
+directly; ``brain-monitor`` does too. The bash shims (``brain-status``,
+``_brain-watcher-fg``) reach it through ``python -m brain.install_config
+BRAIN_HOME`` (:func:`main`), so the vault precedence is defined once and never
+restated in bash.
+"""
 
 import os
+import sys
 from io import StringIO
 from pathlib import Path
 
@@ -36,10 +44,37 @@ def resolve_install_vault(brain_home: Path, override: Path | None = None) -> Pat
     ``brain-install-launchd`` that every ``brain-up`` runs cannot disagree about
     which vault the daemons watch. The default is read from :mod:`brain.config`
     at call time, not bound at import.
+
+    Every leg is ``expanduser``-ed, the explicit one included: ``--vault
+    '~/x'`` (quoted, so the shell left it alone) reaches here as a literal
+    ``~``, and every installer write (``.env``, ``os.environ``, the plists)
+    derives from this return value.
     """
     if override is not None:
-        return override
+        return override.expanduser()
     raw = os.environ.get("BRAIN_VAULT_PATH") or brain_home_dotenv_value(
         brain_home, "BRAIN_VAULT_PATH"
     )
     return Path(raw).expanduser() if raw else _config.DEFAULT_VAULT_PATH
+
+
+_USAGE = "usage: python -m brain.install_config BRAIN_HOME"
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Print the vault :func:`resolve_install_vault` picks for ``BRAIN_HOME``.
+
+    The shell entry point: a bash shim passes the ``$BRAIN_HOME`` it already
+    resolved for its pid paths, so the vault and the pid files come from the
+    same root. Exit 2 on a wrong argument count.
+    """
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) != 1:
+        print(_USAGE, file=sys.stderr)
+        return 2
+    print(resolve_install_vault(Path(args[0]).expanduser()))
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover — exercised via subprocess
+    raise SystemExit(main())

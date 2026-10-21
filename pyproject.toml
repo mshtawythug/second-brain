@@ -46,7 +46,8 @@ dependencies = [
   # PG16 + `vector` database, the entire surface `brain` actually uses —
   # `pgvector.psycopg.register_vector` (db.py:50), binding a `list[float]` as a
   # `%s::vector` param, `SELECT avg(embedding)`, re-binding that loaded value
-  # as a param (wiki/build_related.py:347,433), and the `::real[]` cast
+  # as a param (related.py `_avg_embedding` and its caller; it lived in the
+  # since-deleted wiki/build_related.py:347,433 when probed), the `::real[]` cast
   # (review/queries.py:363) — passes identically on 0.2.0, 0.2.5, 0.3.0, 0.3.6,
   # 0.4.0, 0.4.2 and 0.5.0. The floor is left where it was rather than raised:
   # there is no evidence for a higher one, and a pin nobody tested is the thing
@@ -663,25 +664,13 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-# Include only the specific asset extensions used by the Quartz overlay tree.
-# Explicit patterns rather than "**/*" so .pyc bytecode and __pycache__ dirs
-# are never shipped into the wheel.
-# Root-level files: quartz.config.ts, quartz.layout.ts  (*.ts covers them)
-# Nested files under quartz/: TS/TSX components, JS/MJS CLI scripts, SCSS
-# stylesheets, and PNG/ICO branding assets.
-"brain.quartz_overrides" = [
-    "*.ts",
-    "**/*.ts",
-    "**/*.tsx",
-    "**/*.js",
-    "**/*.mjs",
-    "**/*.scss",
-    "**/*.png",
-    "**/*.ico",
-]
+# Explicit extension patterns throughout, never "**/*", so .pyc bytecode and
+# __pycache__ dirs are never shipped into the wheel. (The Quartz overlay tree,
+# `brain.quartz_overrides`, and its entry were deleted with the wiki at R3,
+# wiki-to-ui phase 9.)
 # Templates shipped with the brain package for use by the installer.
 # Explicit extension patterns (not "**/*") to avoid shipping bytecode.
-# brain.templates root: docker-compose.yml.j2, Caddyfile.j2, env.example
+# brain.templates root: docker-compose.yml.j2, docker-compose.stock.yml.j2, env.example
 # brain.templates.docker.age: pinned Dockerfile (PG16 + pgvector + AGE), a plain
 #   data subdir (no __init__.py) materialized into $BRAIN_HOME by `brain setup`
 # brain.templates.bin: shell launcher/helper scripts
@@ -743,7 +732,6 @@ where = ["src"]
 [tool.setuptools.exclude-package-data]
 # Strip bytecode caches that Python creates on-disk when the package is imported
 # during a dev install — they are local artefacts and must not appear in wheels.
-"brain.quartz_overrides" = ["__pycache__/*", "*.pyc"]
 "brain.templates" = ["__pycache__/*", "*.pyc"]
 "brain.templates.bin" = ["__pycache__/*", "*.pyc"]
 "brain.templates.launchd" = ["__pycache__/*", "*.pyc"]
@@ -756,18 +744,10 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85 -m 'not eval and not benchmark and not e2e and not phase3 and not live_db and not browser'"
+addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85 -m 'not eval and not benchmark and not phase3 and not live_db and not browser'"
 markers = [
-  # P3.5 — frontend integration harness. Tests under this marker shell
-  # out to `npx quartz build` and serve the artifact over HTTP (or rsync the
-  # live vault for the FastPath T0 perf benchmarks), so they require a Node
-  # toolchain + the live brain Quartz workspace at `~/brain-vault/.quartz/`.
-  # EXCLUDED from the default suite (see the ``addopts`` -m filter, alongside
-  # ``eval`` / ``benchmark``): they are non-hermetic (need a live vault, and
-  # the FastPath benchmarks rsync it — racing the live build daemon) and far
-  # too slow for every local run. Opt IN with `-m e2e`; CI runs them in a
-  # dedicated workflow.
-  "e2e: end-to-end Quartz build + serve test (requires npx + live workspace)",
+  # (The `e2e` marker — the Quartz build + serve harness — was deleted with the
+  # wiki at R3, wiki-to-ui phase 9: every test that carried it was a Quartz test.)
   # Phase D — search-ranking-fix. Tests under this marker connect to the
   # live local Postgres (`second_brain` database) and to a real Ollama
   # instance to embed a known-bad query and measure cosine similarity to

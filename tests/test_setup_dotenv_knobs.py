@@ -40,7 +40,6 @@ def _dry_run_setup(brain_home: Path, **kwargs: object) -> None:
             non_interactive=True,
             brain_home_override=brain_home,
             pg_port=0,
-            skip_wiki=True,
             skip_skill=True,
             **kwargs,  # type: ignore[arg-type]
         )
@@ -225,7 +224,6 @@ def test_real_reset_writes_the_old_dotenv_vault_into_the_fresh_dotenv(
             brain_home_override=brain_home,
             pg_port=0,
             embedder_choice="none",
-            skip_wiki=True,
             skip_skill=True,
         )
 

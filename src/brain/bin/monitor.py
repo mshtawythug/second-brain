@@ -1,21 +1,23 @@
-"""brain-monitor — diagnose the brain sync + build watchers."""
+"""brain-monitor — diagnose the brain vault-sync watcher.
+
+Its Quartz build-watcher half (the build state, ``.quartz/current`` and
+``builds/`` readout, the wiki URL, the build log, and the ``probe`` command
+that timed a rebuild) was deleted with the wiki at R3 (wiki-to-ui phase 9).
+"""
 
 import argparse
 import contextlib
 import os
-import re
 import signal
 import subprocess
 import sys
 import threading
-import time
-import urllib.error
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 from types import FrameType
 
 from ..config import _brain_home_root
+from ..install_config import resolve_install_vault
 
 # ---------------------------------------------------------------------------
 # Env defaults
@@ -23,33 +25,35 @@ from ..config import _brain_home_root
 
 
 def _vault() -> Path:
-    return Path(os.environ.get("BRAIN_VAULT_PATH", str(Path.home() / "brain-vault")))
+    """The vault the installers resolve (and ``brain-up`` bakes into the plists).
 
+    Resolved now, so after a config change it can lead the running daemons
+    until the next ``brain-up`` re-bakes the plists.
 
-def _port() -> int:
-    return int(os.environ.get("BRAIN_WIKI_PORT", "8080"))
+    Reading only ``BRAIN_VAULT_PATH`` inspected ``~/brain-vault`` whenever the
+    vault was configured in ``$BRAIN_HOME/.env`` (nothing exports it into an
+    interactive shell), while ``brain-install-launchd`` baked the configured
+    one into the plists.
+    """
+    return resolve_install_vault(_brain_home_root())
 
 
 # ---------------------------------------------------------------------------
 # Runtime state paths.
 #
-# PID files live under $BRAIN_HOME/run/, matching the foreground wrapper
-# scripts (`_brain-{watcher,build}-fg.sh`). They used to default to
-# /tmp/brain-{watch,build}.pid, but macOS's tmp_cleaner reaps files left
-# untouched for 3 days — and these daemons write their pid file once at launch
-# then run for weeks, so the /tmp pid file silently vanished and we misreported
-# a live daemon as "stopped". $BRAIN_HOME/run/ is not reaped. The BRAIN_*_PID
-# env overrides mirror the shell shims (and let the test suite point them at a
-# tmp dir). Log files live at
-# `$BRAIN_HOME/logs/com.brain.{watcher,build}.{out,err}.log` (the launchd
-# plists redirect StandardOut/StandardError there).
+# The PID file lives under $BRAIN_HOME/run/, matching the foreground wrapper
+# script (`_brain-watcher-fg.sh`). It used to default to /tmp/brain-watch.pid,
+# but macOS's tmp_cleaner reaps files left untouched for 3 days — and the
+# daemon writes its pid file once at launch then runs for weeks, so the /tmp pid
+# file silently vanished and we misreported a live daemon as "stopped".
+# $BRAIN_HOME/run/ is not reaped. The BRAIN_WATCH_PID env override mirrors the
+# shell shims (and lets the test suite point it at a tmp dir). The log lives at
+# `$BRAIN_HOME/logs/com.brain.watcher.{out,err}.log` (the launchd plist
+# redirects StandardOut/StandardError there).
 # ---------------------------------------------------------------------------
 
 WATCH_PID = Path(
     os.environ.get("BRAIN_WATCH_PID", str(_brain_home_root() / "run" / "brain-watch.pid"))
-)
-BUILD_PID = Path(
-    os.environ.get("BRAIN_BUILD_PID", str(_brain_home_root() / "run" / "brain-build.pid"))
 )
 
 
@@ -57,27 +61,12 @@ def _watch_log() -> Path:
     return _brain_home_root() / "logs" / "com.brain.watcher.out.log"
 
 
-def _build_log() -> Path:
-    return _brain_home_root() / "logs" / "com.brain.build.out.log"
-
 # Directories to skip when walking the vault tree (mirrors the bash `find`
-# -not -path invocations that used BSD-only stat -f flags).
+# -not -path invocations that used BSD-only stat -f flags). `.quartz` stays
+# although the wiki is deleted (R3): an upgraded vault still holds the old
+# workspace, with tens of thousands of files under node_modules, until the user
+# removes it by hand (ruling R9-8).
 _VAULT_SKIP_DIRS: frozenset[str] = frozenset({".quartz", ".git"})
-
-
-# ---------------------------------------------------------------------------
-# Build-log noise filter — mirrors the bash grep -Ev shape exactly.
-# Also drops blank lines so trailing KaTeX bursts don't pollute the tail.
-# ---------------------------------------------------------------------------
-
-_BUILD_LOG_NOISE = re.compile(
-    r"^\s*$"
-    r"|LaTeX-incompatible input"
-    r"|No character metrics for"
-    r"|Warning: couldn't find git repository"
-    r"|^Parsing input files using"
-    r"|^Cleaned output directory"
-)
 
 
 # ---------------------------------------------------------------------------
@@ -110,26 +99,6 @@ def _pid_or_dash(pid_file: Path) -> str:
         return "-"
 
 
-def _current_build_id(vault: Path) -> str:
-    """Return the current build ID from vault/.quartz/current/.build-id."""
-    build_id_file = vault / ".quartz" / "current" / ".build-id"
-    if not build_id_file.is_file():
-        return "(none)"
-    try:
-        return build_id_file.read_text().strip()
-    except OSError:
-        return "(none)"
-
-
-def _recent_builds(vault: Path, n: int = 5) -> list[str]:
-    """Return the *n* most-recent build directory names (lexical == chronological)."""
-    builds_dir = vault / ".quartz" / "builds"
-    if not builds_dir.is_dir():
-        return []
-    names = sorted(p.name for p in builds_dir.iterdir())
-    return names[-n:]
-
-
 def _recent_vault_files(vault: Path, n: int = 5) -> list[tuple[float, str]]:
     """Return the *n* most-recently-modified vault files as (mtime, path) tuples.
 
@@ -154,31 +123,6 @@ def _recent_vault_files(vault: Path, n: int = 5) -> list[tuple[float, str]]:
     return results[:n]
 
 
-def _mtime_human(p: Path, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
-    """Return the mtime of *p* formatted according to *fmt*, or '?' on error.
-
-    Replaces the BSD-only ``stat -f '%Sm' -t '<fmt>'`` calls in the bash.
-    """
-    try:
-        return datetime.fromtimestamp(p.stat().st_mtime).strftime(fmt)
-    except OSError:
-        return "?"
-
-
-def _filter_build_log_line(line: str) -> bool:
-    """Return True if *line* should be KEPT (i.e. it is not noise)."""
-    return not bool(_BUILD_LOG_NOISE.search(line))
-
-
-def _url_responds(url: str, timeout: float = 2.0) -> bool:
-    """Return True if *url* returns a non-error response within *timeout* seconds."""
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return int(resp.status) < 400
-    except (urllib.error.URLError, OSError, ValueError):
-        return False
-
-
 def _pgrep_count(pattern: str) -> int:
     """Return the number of running processes matching *pattern* (0 on any error)."""
     try:
@@ -198,58 +142,22 @@ def _pgrep_count(pattern: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _snapshot(vault: Path, port: int) -> int:
-    """Print a status snapshot of both watchers and recent activity."""
+def _snapshot(vault: Path) -> int:
+    """Print a status snapshot of the sync watcher and recent activity."""
     sync_pid = _pid_or_dash(WATCH_PID)
-    build_pid = _pid_or_dash(BUILD_PID)
     sync_state = "running" if _pid_alive(WATCH_PID) else "stopped"
-    # Dormant since R2 (phase 8): a stopped build watcher is the resting state.
-    build_state = "running" if _pid_alive(BUILD_PID) else "dormant (R2)"
-    url = f"http://localhost:{port}"
 
     print(f"🧠 brain-monitor   vault={vault}")
     print()
     print(f"  sync watcher   {sync_state:<12}  pid={sync_pid:<7}  log={_watch_log()}")
-    print(f"  build watcher  {build_state:<12}  pid={build_pid:<7}  log={_build_log()}")
 
     # Cross-check: PID file says one thing; ps may say another. Surface mismatches.
     sync_seen = _pgrep_count("brain vault sync --watch")
-    build_seen = _pgrep_count("brain.wiki.build_watcher")
-    # No build watcher is expected at R2, so 0 is only a mismatch when a pid
-    # file claims one; >1 is an orphan either way.
-    build_mismatch = build_seen > 1 or (build_seen == 0 and build_pid != "-")
-    if sync_seen != 1 or build_mismatch:
+    if sync_seen != 1:
         print()
         print("  ⚠️  process count vs pid file:")
         print(f"       sync_watcher  pgrep={sync_seen}  pidfile={sync_pid}")
-        print(f"       build_watcher pgrep={build_seen}  pidfile={build_pid}")
         print("       (>1 = orphan running; 0 with pidfile = stale pid)")
-
-    # Current build
-    print()
-    print("  current build:")
-    current = vault / ".quartz" / "current"
-    if current.is_symlink():
-        target = os.readlink(str(current))
-        print(f"    symlink → {target}")
-        print(f"    build-id {_current_build_id(vault)}")
-        index_html = current / "index.html"
-        if index_html.is_file():
-            age = _mtime_human(index_html, "%Y-%m-%d %H:%M:%S")
-            print(f"    last build {age}")
-    else:
-        print("    (no symlink — run brain-up to bootstrap)")
-
-    # Recent builds
-    builds_dir = vault / ".quartz" / "builds"
-    if builds_dir.is_dir():
-        print()
-        print("  recent builds:")
-        cur_id = _current_build_id(vault)
-        for b in _recent_builds(vault, 5):
-            mark = "→ " if b == cur_id else "  "
-            mt = _mtime_human(builds_dir / b, "%H:%M:%S")
-            print(f"    {mark}{mt}   {b}")
 
     # Recent vault edits
     print()
@@ -257,34 +165,6 @@ def _snapshot(vault: Path, port: int) -> int:
     for mtime, path in _recent_vault_files(vault, 5):
         t = datetime.fromtimestamp(mtime).strftime("%H:%M:%S")
         print(f"  {t}  {path}")
-
-    # Wiki URL
-    print()
-    print("  wiki url:")
-    if _url_responds(f"{url}/"):
-        print(f"    {url}  reachable ✅")
-    else:
-        print(f"    {url}  unreachable ⚠️")
-
-    # Last 8 build-log lines (filtered)
-    print()
-    print("  last 8 build-log lines (filtered):")
-    if _build_log().is_file() and _build_log().stat().st_size > 0:
-        try:
-            tail_lines = _build_log().read_text(errors="replace").splitlines()[-1000:]
-            filtered = [ln for ln in tail_lines if _filter_build_log_line(ln)]
-            last_8 = filtered[-8:]
-        except OSError:
-            last_8 = []
-        if last_8:
-            for ln in last_8:
-                print(f"    {ln}")
-        else:
-            print(
-                "    (only KaTeX/git-warnings in the tail window — filter saw nothing else)"
-            )
-    else:
-        print("    (empty)")
 
     # Last 5 sync-log lines
     print()
@@ -308,19 +188,18 @@ def _snapshot(vault: Path, port: int) -> int:
 
 
 def _tail(vault: Path) -> int:
-    """Stream both watcher logs to stdout with source prefixes."""
-    if not _build_log().is_file() and not _watch_log().is_file():
-        print("no logs to tail (neither watcher has started)", file=sys.stderr)
+    """Stream the sync-watcher log to stdout with a source prefix."""
+    if not _watch_log().is_file():
+        print("no log to tail (the sync watcher has not started)", file=sys.stderr)
         return 1
 
-    print("tailing watchers — Ctrl-C to stop")
+    print("tailing the sync watcher — Ctrl-C to stop")
     print(f"  sync:  {_watch_log()}")
-    print(f"  build: {_build_log()}  (KaTeX/git-warnings filtered)")
     print()
 
     procs: list[subprocess.Popen[str]] = []
 
-    def _stream(log_path: Path, prefix: str, filtered: bool) -> None:
+    def _stream(log_path: Path, prefix: str) -> None:
         """Tail *log_path* and print prefixed lines to stdout."""
         try:
             proc: subprocess.Popen[str] = subprocess.Popen(
@@ -335,8 +214,6 @@ def _tail(vault: Path) -> int:
                 return
             for raw_line in proc.stdout:
                 stripped = raw_line.rstrip("\n")
-                if filtered and not _filter_build_log_line(stripped):
-                    continue
                 print(f"{prefix}{stripped}", flush=True)
         except (OSError, ValueError):
             pass
@@ -350,108 +227,9 @@ def _tail(vault: Path) -> int:
     signal.signal(signal.SIGINT, _cleanup)
     signal.signal(signal.SIGTERM, _cleanup)
 
-    threads = [
-        threading.Thread(target=_stream, args=(_watch_log(), "[sync ] ", False), daemon=True),
-        threading.Thread(target=_stream, args=(_build_log(), "[build] ", True), daemon=True),
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# Probe mode
-# ---------------------------------------------------------------------------
-
-
-def _probe(vault: Path, timeout: int = 90) -> int:
-    """Write a probe file into vault and time the build watcher's response."""
-    if not vault.is_dir():
-        print(f"vault not found at {vault}", file=sys.stderr)
-        return 1
-    if not _pid_alive(BUILD_PID):
-        print(
-            "build watcher not running: the wiki is dormant since R2, so there is no "
-            "rebuild to time. Rebuild it once with `brain-rebuild --only quartz` (or "
-            "`BRAIN_WIKI_BUILD=1 brain-up` for a cold start).",
-            file=sys.stderr,
-        )
-        return 1
-
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    probe_id = f"probe-{stamp}-{os.getpid()}"
-    probe_file = vault / f"_brain_monitor_{probe_id}.md"
-    baseline = _current_build_id(vault)
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    probe_file.write_text(
-        f"---\n"
-        f"title: brain-monitor probe {probe_id}\n"
-        f"---\n"
-        f"\n"
-        f"This file was written by brain-monitor at {now_str}.\n"
-        f"Marker: {probe_id}\n"
-    )
-
-    print(f"🧠 probe {probe_id}")
-    print(f"  wrote   {probe_file}")
-    print(f"  baseline build-id: {baseline}")
-    print(f"  waiting up to {timeout}s for the build watcher to react...")
-    print()
-
-    started = time.monotonic()
-    swap_elapsed: str | None = None
-    rendered_elapsed: str | None = None
-    current_dir = vault / ".quartz" / "current"
-
-    try:
-        while True:
-            elapsed = int(time.monotonic() - started)
-            cur = _current_build_id(vault)
-
-            if swap_elapsed is None and cur != baseline and cur != "(none)":
-                swap_elapsed = f"{elapsed}s"
-                print(f"  +{elapsed}s  current swapped → {cur}")
-
-            if rendered_elapsed is None:
-                matches = list(current_dir.glob(f"_brain_monitor_{probe_id}*"))
-                if matches:
-                    rendered_elapsed = f"{elapsed}s"
-                    print(f"  +{elapsed}s  probe HTML appeared in current/")
-                    break
-
-            if elapsed >= timeout:
-                break
-
-            time.sleep(1)
-    finally:
-        with contextlib.suppress(OSError):
-            probe_file.unlink(missing_ok=True)
-
-    print()
-    print("  result:")
-    if swap_elapsed is not None and rendered_elapsed is not None:
-        print("    ✅ end-to-end OK")
-        print(f"       swap to new build:    {swap_elapsed}")
-        print(f"       probe content live:   {rendered_elapsed}")
-    elif swap_elapsed is not None:
-        print(f"    ⚠️ build ran ({swap_elapsed}) but probe HTML never appeared in current/")
-        print("       likely a build_swap mismatch or the probe was filtered out")
-        print(f"       inspect: tail -n 200 {_build_log()} | grep -i {probe_id}")
-    else:
-        print(f"    ❌ no rebuild within {timeout}s — watcher is not seeing the vault")
-        print("       things to check:")
-        print(
-            "         pgrep -af brain.wiki.build_watcher"
-            "        # one process? right --vault?"
-        )
-        print("         pgrep -af 'brain vault sync --watch'      # same")
-        print(f"         tail -n 50 {_build_log()}")
-        print(f"         tail -n 50 {_watch_log()}")
-        print("         brain-down && brain-up                    # nuclear option")
+    thread = threading.Thread(target=_stream, args=(_watch_log(), "[sync ] "), daemon=True)
+    thread.start()
+    thread.join()
 
     return 0
 
@@ -465,42 +243,29 @@ def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="brain-monitor",
         description=(
-            "Diagnose the brain sync + build watchers.\n\n"
+            "Diagnose the brain vault-sync watcher.\n\n"
             "Modes:\n"
-            "  (default)   Snapshot of both watchers and recent activity.\n"
-            "  -f/--tail   Live stream of relevant events from both logs.\n"
-            "  probe [N]   Touch a vault file and time the build watcher's rebuild\n"
-            "              (timeout N sec; none runs while the wiki is dormant, R2).\n"
+            "  (default)   Snapshot of the sync watcher and recent activity.\n"
+            "  -f/--tail   Live stream of the sync-watcher log.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Env vars:\n"
-            "  BRAIN_VAULT_PATH   default ~/brain-vault\n"
-            "  BRAIN_WIKI_PORT    default 8080"
-        ),
+        epilog=("Env vars:\n  BRAIN_VAULT_PATH   else $BRAIN_HOME/.env, else ~/brain-vault"),
     )
     # Accept all bash-compatible positional aliases.  "tail" and "help" are
     # kept as aliases so existing scripts using the bash form still work.
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["probe", "snapshot", "status", "tail", "help"],
+        choices=["snapshot", "status", "tail", "help"],
         default=None,
         metavar="COMMAND",
-        help="probe | snapshot | status | tail | help (default: snapshot)",
+        help="snapshot | status | tail | help (default: snapshot)",
     )
     parser.add_argument(
         "-f",
         "--tail",
         action="store_true",
-        help="Live-stream both watcher logs (KaTeX noise filtered on build log).",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=90,
-        metavar="SECONDS",
-        help="Timeout for probe mode in seconds (default: 90).",
+        help="Live-stream the sync-watcher log.",
     )
     return parser
 
@@ -513,9 +278,9 @@ def _make_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Parse args and dispatch to the appropriate mode. Returns exit code."""
     parser = _make_parser()
-    # parse_known_args is used solely to allow `brain-monitor probe 60`
-    # (positional timeout — bash backward-compat). The leftover `extra` list
-    # is validated immediately below; anything unexpected is still an error.
+    # parse_known_args used to carve out `brain-monitor probe 60` (a positional
+    # timeout). `probe` was deleted with the wiki at R3, so every leftover token
+    # is now an error — `brain-monitor probe` itself is rejected by `choices=`.
     try:
         args, extra = parser.parse_known_args(argv)
     except SystemExit as exc:
@@ -525,33 +290,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     vault = _vault()
-    port = _port()
 
     cmd: str = str(args.command) if args.command else "snapshot"
 
-    # Validate leftover tokens from parse_known_args BEFORE dispatching to any
-    # mode (including --tail).  The only valid case for a non-empty `extra` is
-    # `probe <N>` where N is a bare integer (bash compat for the positional
-    # timeout). Anything else — unknown flags, extra words on --tail or any
-    # other command — is an error so that e.g. `brain-monitor --tail --bogus`
-    # or `brain-monitor snapshot --x` fail loudly rather than being silently
-    # swallowed.
+    # Validate leftover tokens BEFORE dispatching to any mode (including
+    # --tail), so e.g. `brain-monitor --tail --bogus` or `brain-monitor
+    # snapshot --x` fail loudly rather than being silently swallowed.
     if extra:
-        probe_timeout_ok = cmd == "probe" and len(extra) == 1 and extra[0].isdigit()
-        if not probe_timeout_ok:
-            print(
-                f"brain-monitor: error: unrecognized arguments: {' '.join(extra)}",
-                file=sys.stderr,
-            )
-            parser.print_usage(sys.stderr)
-            return 2
+        print(
+            f"brain-monitor: error: unrecognized arguments: {' '.join(extra)}",
+            file=sys.stderr,
+        )
+        parser.print_usage(sys.stderr)
+        return 2
 
     # -f / --tail flag takes precedence over any positional.
     if args.tail:
         return _tail(vault)
 
     if cmd in ("snapshot", "status"):
-        return _snapshot(vault, port)
+        return _snapshot(vault)
 
     # "tail" as a bare positional: bash-compat alias for -f/--tail.
     if cmd == "tail":
@@ -561,13 +319,6 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "help":
         parser.print_help()
         return 0
-
-    if cmd == "probe":
-        # Accept positional timeout for bash compat: `brain-monitor probe 60`
-        timeout = args.timeout
-        if extra and extra[0].isdigit():
-            timeout = int(extra[0])
-        return _probe(vault, timeout)
 
     # Defensive: argparse choices= already rejects truly unknown values.
     print(f"unknown command: {cmd}", file=sys.stderr)

@@ -11,7 +11,7 @@ Local, queryable knowledge base and note vault with hybrid search and an entity-
 [![PyPI downloads](https://img.shields.io/pypi/dm/secondbrain-py)](https://pypistats.org/packages/secondbrain-py)
 [![GitHub stars](https://img.shields.io/github/stars/mshtawythug/second-brain)](https://github.com/mshtawythug/second-brain)
 
-Stores career docs, interview prep, Krisp transcripts, Slack threads, Gmail, and authored Markdown notes in Postgres + pgvector. Any agent reaches all of it through the `brain` CLI or the bundled `brain-mcp` MCP server — no re-pasting context into every chat. You read it through the CLI or the [local web UI](#local-web-ui); the older [rendered wiki](docs/vault-and-wiki.md) is a legacy view, dormant since R2 (`brain-rebuild --only quartz` rebuilds it).
+Stores career docs, interview prep, Krisp transcripts, Slack threads, Gmail, and authored Markdown notes in Postgres + pgvector. Any agent reaches all of it through the `brain` CLI or the bundled `brain-mcp` MCP server — no re-pasting context into every chat. You read it through the CLI or the [local web UI](#local-web-ui), and the [vault](docs/vault.md) is plain Markdown you can open in any editor.
 
 The everyday loop — capture a note, search it back, read the top hit, check the corpus:
 
@@ -76,19 +76,19 @@ Already ran the demo? You have `brain` installed — jump straight to `brain set
 
 ## Quick start
 
-Full install — the `brain` CLI plus the runtime (Postgres, and optionally Ollama / graph / wiki):
+Full install — the `brain` CLI plus the runtime (Postgres, and optionally Ollama / graph):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mshtawythug/second-brain/v0.2.1/install.sh | bash
 ```
 
-The installer pipx-installs `brain` from the `v0.2.1` tag, then runs `brain setup` to provision `$BRAIN_HOME`, start the Postgres container, and (optionally) install the wiki + Claude Code skill. Choose how much to stand up with `--profile`:
+The installer pipx-installs `brain` from the `v0.2.1` tag, then runs `brain setup` to provision `$BRAIN_HOME`, start the Postgres container, and (optionally) install the Claude Code skill. Choose how much to stand up with `--profile`:
 
 | Profile | Search | Extra dependencies beyond the core |
 |---|---|---|
 | `minimal` | FTS-only (`BRAIN_EMBEDDER=none`) | None — core only (no Ollama, no models). |
 | `standard` *(default)* | Hybrid (FTS + vector) | + Ollama + one ~1 GB embedding model (`snowflake-arctic-embed2`). |
-| `full` | Hybrid + GraphRAG + wiki | + Apache AGE image, concept-extraction LLM, Quartz/Caddy wiki, and (opt-in) launchd daemons via `--daemons`. |
+| `full` | Hybrid + GraphRAG | + Apache AGE image, concept-extraction LLM, and (opt-in) launchd daemons via `--daemons`. |
 
 ```bash
 brain setup --profile minimal    # Docker-only, FTS search — fastest to stand up
@@ -101,7 +101,6 @@ brain setup --profile full --daemons
 **Optional extras** (only if you want more than FTS-only search):
 
 - **[Ollama](https://ollama.com/)** — local, free embeddings + LLM enrichment. To upgrade a `minimal` (FTS-only) brain to hybrid search: install Ollama, then `ollama pull snowflake-arctic-embed2`, set `BRAIN_EMBEDDER=arctic` in `.env`, and run `brain init && brain reembed`.
-- **Node.js 18+ and [Caddy](https://caddyserver.com/)** — only for the rendered [wiki](docs/vault-and-wiki.md).
 - **`gws` CLI** — only for Gmail ingest and Google-backed directory linking.
 
 Prefer to drive every step yourself, or hacking on the code? See [Installing from source](docs/configuration.md#installing-from-source-manual).
@@ -149,6 +148,8 @@ brain ui --lan --read-only                # read from your phone: LAN address + 
 ```
 
 Reading from another device always needs a token. `--lan` binds this machine's LAN address and mints a token, then prints the URL to open. See [Reading your brain from a phone](docs/guides/brain-ui-on-your-phone.md) for the manual `--host <LAN address> --token <secret>` form and the caveats.
+
+Upgrading from a release that had the rendered Quartz wiki? It was retired in favour of `brain ui`, and upgrading does not remove its leftovers or stop a Caddy still serving it. [The vault docs](docs/vault.md) list what to delete by hand.
 
 It adds no runtime dependency — `starlette` and `uvicorn` already ship as transitive deps of the MCP SDK — and the front end is hand-written static assets with no bundler and no CDN, so it works fully offline.
 
@@ -202,7 +203,7 @@ brain mark-confidential <id-prefix>       # brain mark-normal downgrades it agai
 brain list --sensitivity confidential
 ```
 
-`confidential` is an **egress** control, not an access control. The document stays fully readable from the local CLI — that is inside the trust boundary. What changes is what leaves the machine: the body is kept off a hosted embedder, withheld from the MCP `brain_show` / `brain_search` / `brain_recall` / `brain_resurface` responses unless the caller passes `include_confidential=true`, and dropped from the published wiki index. Re-ingest is escalate-only — it can raise a document's tier but never lower it — so a background `vault sync --watch` pass cannot quietly reset what you marked.
+`confidential` is an **egress** control, not an access control. The document stays fully readable from the local CLI — that is inside the trust boundary. What changes is what leaves the machine: the body is kept off a hosted embedder, withheld from the MCP `brain_show` / `brain_search` / `brain_recall` / `brain_resurface` responses unless the caller passes `include_confidential=true`, kept out of the pages brain generates into the vault, and withheld from `brain ui` on a LAN bind unless it is started with `--include-confidential`. Re-ingest is escalate-only — it can raise a document's tier but never lower it — so a background `vault sync --watch` pass cannot quietly reset what you marked.
 
 ## Backups and health
 
@@ -210,7 +211,7 @@ brain list --sensitivity confidential
 brain backup --label pre-upgrade    # checksummed DB + vault archive, with a manifest
 brain restore <archive> --db-only   # y/N confirmed; the pre-flight checks are not skippable
 brain usage --days 30               # searches, opens, ingests, and search latency p50/p95
-brain doctor                        # environment, database, embedder, daemons, wiki freshness
+brain doctor                        # environment, database, embedder, daemons, mirror drift
 ```
 
 `pg_dump` runs inside the container by default: the server is 16.x while a typical host Homebrew `pg_dump` is 14.x, and that mismatch aborts the dump outright. The archive is a logical dump holding the corpus in **plaintext**, not a copy of the `data/postgres` bind mount.
@@ -226,7 +227,7 @@ brain doctor                        # environment, database, embedder, daemons, 
 - [docs/](docs/README.md) — full documentation index
 - [CLI reference](docs/cli-reference.md) — every command beyond the core five
 - [GraphRAG](docs/graphrag.md) — entity-graph retrieval (themes, patterns, connections)
-- [Vault and Wiki](docs/vault-and-wiki.md) — the two-tier note vault + optional rendered wiki
+- [Vault](docs/vault.md) — the two-tier note vault, its maintenance commands, and the `bin/` scripts
 - [Configuration](docs/configuration.md) — tech stack, tuning knobs, integrations, embedder backends, uninstall
 - [Agent skills](docs/agent-skills.md) — the Claude Code skills bundled with the repo, and how to install them
 - [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, codebase layout, running the tests

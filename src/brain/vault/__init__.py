@@ -2,7 +2,8 @@
 
 Phase 1 ships :func:`init_vault` (one-shot directory + template scaffold) and
 :func:`export_vault` (DB → vault dump). Later phases add sync, link parsing,
-authoring commands, and a Quartz renderer on top of the same module layout.
+and authoring commands on top of the same module layout. (A Quartz renderer
+sat on top until the wiki was deleted at R3; ``brain ui`` reads the vault now.)
 """
 from dataclasses import dataclass, field
 from pathlib import Path

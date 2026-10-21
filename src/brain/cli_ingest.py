@@ -128,9 +128,9 @@ _ALLOW_SECRETS_HELP = (
 
 _SENSITIVITY_HELP = (
     "Sensitivity tier for the ingested document(s): normal|confidential. "
-    "'confidential' keeps the body off a hosted embedder (chunks are stored "
-    "with NULL embeddings, so the doc is findable by full-text search only), "
-    "out of MCP brain_show by default, and off the published wiki."
+    "'confidential' keeps the body off a hosted embedder (NULL embeddings, so "
+    "full-text search only), out of MCP brain_show by default, out of brain ui's "
+    "unprompted listings, and out of generated vault pages (People Hub, review, brief)."
 )
 
 

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # One-shot wrapper for the daily brief, intended to run under launchd's
-# StartCalendarInterval (07:00 local). Unlike _brain-watcher-fg / _brain-build-fg
+# StartCalendarInterval (07:00 local). Unlike _brain-watcher-fg
 # this does NOT supervise a long-running daemon and writes no pid file — it runs
 # `brain brief --wiki` once and exits. launchd's StandardOut/ErrorPath capture
 # the digest + any warnings.
 #
 # Env contract:
-#   BRAIN_VAULT_PATH  (default: $HOME/brain-vault) — passed through to brief.
+#   BRAIN_VAULT_PATH  not read here: `brain brief` resolves the vault itself via
+#                     Config.load (exported — the plist bakes it — else the
+#                     .env chain, else the default).
 #   BRAIN_PY          pins the Python interpreter that has `brain` importable
 #                     (exported by the launchd plist); falls back to python3.
 

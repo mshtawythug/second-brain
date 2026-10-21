@@ -22,7 +22,7 @@ Other approaches you thought about and why they fall short.
 ## Scope
 
 Which part of the brain would this touch? (search · ingest · GraphRAG ·
-vault/wiki · MCP server · CLI · enrichment · other)
+vault · brain ui · MCP server · CLI · enrichment · other)
 
 ## Additional context
 
