@@ -4,7 +4,6 @@
 # Run this inside a fresh Ubuntu 22.04 VM or Docker container AFTER you have:
 #   - installed Docker (the daemon, not just the CLI — `docker info` must work),
 #   - installed Python 3.11+ (apt + deadsnakes or pyenv),
-#   - installed Caddy (`brain setup` refuses to bring the wiki up without it),
 #   - tagged + pushed v0.2.1 (or set BRAIN_INSTALL_REF / BRAIN_INSECURE=1
 #     to test against a branch / commit).
 #
@@ -13,15 +12,15 @@
 #   unconditionally delegates daemon supervision to `brain-install-launchd`
 #   (a macOS-only helper that calls `launchctl bootstrap`). Calling brain-up
 #   on Linux would therefore fail at supervisor install. Instead this script
-#   starts Caddy + watcher + build-watcher itself with `nohup`, tracks the
-#   PIDs, and kills them via an EXIT trap when it finishes. That mirrors the
+#   starts the vault-sync watcher itself with `nohup`, tracks its PID, and
+#   kills it via an EXIT trap when it finishes. That mirrors the
 #   pre-launchd-era manual bring-up flow exactly.
 #
 #   This is also why T4.5 is documented as "best-effort": background
 #   supervision on Linux is not yet shipped (systemd-user unit is a v0.2.1+
 #   follow-up). The smoke proves the install path works end-to-end; the
-#   long-lived daemon story still requires the user to run Caddy + the
-#   watchers inside tmux / systemd-user themselves.
+#   long-lived daemon story still requires the user to run the watcher
+#   inside tmux / systemd-user themselves.
 #
 # Re-runnable: yes. The EXIT trap stops the daemons this run started; the
 # install itself is preserved.  Full reset:
@@ -38,20 +37,15 @@ set -euo pipefail
 REPO_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
 INSTALL_SH="${INSTALL_SH:-$REPO_ROOT/install.sh}"
 VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
-BRAIN_HOME_DIR="${BRAIN_HOME:-$HOME/.brain}"
-CADDYFILE="$BRAIN_HOME_DIR/Caddyfile"
-WIKI_URL="${WIKI_URL:-http://localhost:8080}"
 SMOKE_NOTE_BASENAME="smoke-$(date +%Y%m%d-%H%M%S).md"
-REBUILD_WAIT_SECONDS="${REBUILD_WAIT_SECONDS:-90}"
+SYNC_WAIT_SECONDS="${SYNC_WAIT_SECONDS:-90}"
 
 PASSED=0
 FAILED=0
 FAILURES=()
 
-# PIDs of daemons we start; killed by the EXIT trap.
-CADDY_PID=""
+# PID of the daemon we start; killed by the EXIT trap.
 WATCH_PID=""
-BUILD_PID=""
 
 _pass() { printf '\033[32m[PASS]\033[0m %s\n' "$*"; PASSED=$((PASSED + 1)); }
 _fail() {
@@ -64,7 +58,7 @@ _section() { printf '\n\033[1m=== %s ===\033[0m\n' "$*"; }
 
 _cleanup() {
     local pid
-    for pid in "$CADDY_PID" "$WATCH_PID" "$BUILD_PID"; do
+    for pid in "$WATCH_PID"; do
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             _info "Stopping daemon pid=$pid"
             kill "$pid" 2>/dev/null || true
@@ -101,12 +95,6 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 _pass "Docker daemon reachable"
-
-if ! command -v caddy >/dev/null 2>&1; then
-    _fail "caddy not on PATH. Install it: https://caddyserver.com/docs/install"
-    exit 1
-fi
-_pass "Caddy: $(caddy version 2>/dev/null | head -1)"
 
 FREE_KB="$(df -P "$HOME" | awk 'NR==2 {print $4}')"
 FREE_GB=$(( FREE_KB / 1024 / 1024 ))
@@ -158,120 +146,17 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 4 — bring up Caddy + cold-start build + watchers MANUALLY.
+# Step 4 — bring up the vault-sync watcher MANUALLY.
 #
 # Linux has no launchd; we cannot use `brain-up` (it execs
 # brain-install-launchd, which only works on macOS). The pre-launchd
 # `nohup ... &` shape below is exactly what brain-up did before the
-# 2026-05-08 launchd handoff.
-#
-# CRITICAL: `python -m brain.wiki.*` MUST run in the pipx-managed venv
-# (where `secondbrain-py` is installed), NOT the system python3. Resolve
-# the pipx Python from the brain script's shebang — robust regardless
-# of pipx version or whether `pipx environment` is on PATH.
+# 2026-05-08 launchd handoff. (Caddy, the cold-start Quartz build and the
+# build watcher this step used to start were deleted with the wiki at R3,
+# wiki-to-ui phase 9.)
 # ---------------------------------------------------------------------------
-_section "4. Start Caddy + cold-start build + watchers (manual, no launchd)"
+_section "4. Start the vault sync watcher (manual, no launchd)"
 
-if [[ ! -f "$CADDYFILE" ]]; then
-    _fail "Caddyfile missing at $CADDYFILE — did brain setup --skip-wiki run?"
-    exit 1
-fi
-
-# Resolve the pipx-managed Python interpreter where `brain` is installed.
-# System python3 does NOT have the brain package, so `python3 -m brain.wiki.*`
-# would fail with ModuleNotFoundError.
-#
-# Two paths:
-#   1. Preferred — `pipx environment --value PIPX_LOCAL_VENVS` returns the
-#      venvs dir; the interpreter lives at <venvs>/secondbrain-py/bin/python.
-#      This is robust across pipx versions and across pip's long-shebang
-#      workaround.
-#   2. Fallback — parse the shebang on the `brain` console script. ONLY
-#      trust shebangs that point at a python interpreter; pip/setuptools
-#      falls back to a `#!/bin/sh` shebang on systems where the venv path
-#      exceeds the Linux 128-byte BINPRM_BUF_SIZE limit (the actual Python
-#      invocation is then embedded inside the script body). A naive
-#      `head -1 | sed` would extract `/bin/sh` and try to run
-#      `/bin/sh -m brain.wiki.build_swap`, which fails opaquely.
-#
-# We also sanity-check the result: must be executable AND must report
-# `Python 3.x` from --version, otherwise we abort.
-resolve_pipx_python() {
-    local py=""
-
-    if command -v pipx >/dev/null 2>&1; then
-        local venvs
-        venvs="$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)"
-        if [[ -n "$venvs" && -x "$venvs/secondbrain-py/bin/python" ]]; then
-            py="$venvs/secondbrain-py/bin/python"
-        fi
-    fi
-
-    if [[ -z "$py" ]]; then
-        local brain_bin shebang
-        brain_bin="$(command -v brain)"
-        [[ -z "$brain_bin" ]] && return 1
-        shebang="$(head -1 "$brain_bin" | sed 's/^#!//;s/[[:space:]].*//')"
-        case "$shebang" in
-            */python|*/python3|*/python3.[0-9]|*/python3.[0-9][0-9])
-                py="$shebang"
-                ;;
-            *)
-                # /bin/sh long-shebang trick, empty, or junk — bail.
-                return 1
-                ;;
-        esac
-    fi
-
-    [[ -x "$py" ]] || return 1
-    "$py" --version 2>&1 | grep -qE '^Python 3\.' || return 1
-    printf '%s\n' "$py"
-}
-
-if ! BRAIN_PY="$(resolve_pipx_python)"; then
-    _fail "Could not resolve the pipx-managed Python for secondbrain-py.
-       Tried: 'pipx environment --value PIPX_LOCAL_VENVS' then 'brain'
-       shebang. If pipx put the venv in a path >128 bytes the shebang
-       fallback is /bin/sh — ensure 'pipx' is on PATH so the preferred
-       lookup succeeds."
-    exit 1
-fi
-_pass "Resolved pipx Python: $BRAIN_PY"
-
-# 4a. Apply the Quartz overlay (no build — we cold-start below).
-if ! brain vault render --overlay --no-build --vault "$VAULT" \
-        >/tmp/brain-overlay-smoke.log 2>&1; then
-    _fail "Quartz overlay apply failed (see /tmp/brain-overlay-smoke.log)"
-else
-    _pass "Quartz overlay applied"
-fi
-
-# 4b. Cold-start build (synchronous): ensures <vault>/.quartz/current
-# resolves to a real build before we curl the wiki.  MUST use $BRAIN_PY
-# (the pipx venv interpreter), not system python3 — system python3 has
-# no `brain` package installed.
-_info "Cold-start build ($BRAIN_PY -m brain.wiki.build_swap) — first run can take ~60s"
-if BRAIN_WIKI_RELOAD=1 "$BRAIN_PY" -m brain.wiki.build_swap \
-        --vault "$VAULT" --keep 3 >/tmp/brain-build-swap-smoke.log 2>&1; then
-    _pass "Cold-start build succeeded"
-else
-    _fail "Cold-start build failed (see /tmp/brain-build-swap-smoke.log)"
-    exit 1
-fi
-
-# 4c. Start Caddy in background.
-_info "Starting Caddy in background"
-nohup caddy run --config "$CADDYFILE" >/tmp/brain-caddy-smoke.log 2>&1 &
-CADDY_PID=$!
-sleep 2
-if kill -0 "$CADDY_PID" 2>/dev/null; then
-    _pass "Caddy running (pid=$CADDY_PID)"
-else
-    _fail "Caddy died on startup (see /tmp/brain-caddy-smoke.log)"
-    CADDY_PID=""
-fi
-
-# 4d. Start vault sync watcher in background.
 _info "Starting vault sync watcher in background"
 nohup brain vault sync --watch --vault "$VAULT" \
         >/tmp/brain-watch-smoke.log 2>&1 &
@@ -284,57 +169,21 @@ else
     WATCH_PID=""
 fi
 
-# 4e. Start build watcher in background.  Same rule as 4b — pipx Python only.
-_info "Starting build watcher in background"
-nohup "$BRAIN_PY" -m brain.wiki.build_watcher \
-        --vault "$VAULT" --keep 3 \
-        >/tmp/brain-build-watcher-smoke.log 2>&1 &
-BUILD_PID=$!
-sleep 2
-if kill -0 "$BUILD_PID" 2>/dev/null; then
-    _pass "Build watcher running (pid=$BUILD_PID)"
-else
-    _fail "Build watcher died (see /tmp/brain-build-watcher-smoke.log)"
-    BUILD_PID=""
-fi
-
 # ---------------------------------------------------------------------------
-# Step 5 — wiki HTTP probe
+# Step 5 — drop a markdown file, observe the watcher sync it into the brain
 # ---------------------------------------------------------------------------
-_section "5. Wiki at $WIKI_URL"
-
-# Caddy needs a moment to bind after process spawn.
-sleep 3
-
-HTTP_CODE="$(curl -s -o /tmp/brain-smoke-wiki.html -w '%{http_code}' "$WIKI_URL" || echo 000)"
-if [[ "$HTTP_CODE" == "200" ]]; then
-    _pass "Wiki returned HTTP 200"
-else
-    _fail "Wiki returned HTTP $HTTP_CODE (expected 200)"
-fi
-if grep -qiE 'quartz|brain' /tmp/brain-smoke-wiki.html 2>/dev/null; then
-    _pass "Wiki HTML contains expected markers"
-else
-    _fail "Wiki HTML missing 'quartz' or 'brain' markers (see /tmp/brain-smoke-wiki.html)"
-fi
-
-# ---------------------------------------------------------------------------
-# Step 6 — drop a markdown file, observe rebuild
-# ---------------------------------------------------------------------------
-_section "6. Vault watcher + rebuild"
+_section "5. Vault watcher sync"
 
 if [[ ! -d "$VAULT" ]]; then
     _fail "Vault directory missing at $VAULT"
 else
     _pass "Vault exists at $VAULT"
 
-    BUILD_ID_BEFORE="$(curl -fsS "$WIKI_URL/.build-id" 2>/dev/null || echo none)"
-    _info "Build id before: $BUILD_ID_BEFORE"
-
+    SMOKE_TOKEN="smoketoken$(date +%s)"
     SMOKE_PATH="$VAULT/$SMOKE_NOTE_BASENAME"
     cat >"$SMOKE_PATH" <<EOF
 ---
-title: Smoke note $SMOKE_NOTE_BASENAME
+title: Smoke note $SMOKE_TOKEN
 content_type: note
 kind: vault
 ---
@@ -343,33 +192,31 @@ kind: vault
 
 This note was generated by scripts/smoke-linux.sh at $(date -u +%Y-%m-%dT%H:%M:%SZ).
 EOF
-    _info "Wrote $SMOKE_PATH; waiting up to ${REBUILD_WAIT_SECONDS}s for rebuild"
+    _info "Wrote $SMOKE_PATH; waiting up to ${SYNC_WAIT_SECONDS}s for the watcher to sync it"
 
-    DEADLINE=$(( $(date +%s) + REBUILD_WAIT_SECONDS ))
-    REBUILT=0
+    DEADLINE=$(( $(date +%s) + SYNC_WAIT_SECONDS ))
+    SYNCED=0
     while (( $(date +%s) < DEADLINE )); do
         sleep 2
-        BUILD_ID_NOW="$(curl -fsS "$WIKI_URL/.build-id" 2>/dev/null || echo none)"
-        if [[ "$BUILD_ID_NOW" != "$BUILD_ID_BEFORE" && "$BUILD_ID_NOW" != "none" ]]; then
-            REBUILT=1
-            _info "Build id after: $BUILD_ID_NOW"
+        if brain search "$SMOKE_TOKEN" 2>/dev/null | grep -q "$SMOKE_TOKEN"; then
+            SYNCED=1
             break
         fi
     done
 
-    if (( REBUILT == 1 )); then
-        _pass "Wiki rebuilt within ${REBUILD_WAIT_SECONDS}s of file drop"
+    if (( SYNCED == 1 )); then
+        _pass "Watcher synced the note within ${SYNC_WAIT_SECONDS}s of file drop"
     else
-        _fail "Wiki did NOT rebuild within ${REBUILD_WAIT_SECONDS}s (build id unchanged)"
+        _fail "Watcher did NOT sync the note within ${SYNC_WAIT_SECONDS}s (brain search found no match)"
     fi
 
     rm -f "$SMOKE_PATH"
 fi
 
 # ---------------------------------------------------------------------------
-# Step 7 — Claude Code skill
+# Step 6 — Claude Code skill
 # ---------------------------------------------------------------------------
-_section "7. Claude Code skill (opt-in)"
+_section "6. Claude Code skill (opt-in)"
 
 SKILL_PATH="$HOME/.claude/skills/brain/SKILL.md"
 if [[ -f "$SKILL_PATH" ]]; then
@@ -402,13 +249,11 @@ Manual step that cannot be automated:
   (If you skipped the skill above: run `brain claude install-skill` first.)
 
 Known Linux gaps:
-  - No launchd → no auto-supervision. This script started Caddy + the two
-    watchers in background and will tear them down on exit. For a real
-    long-lived install on Linux, run Caddy + `brain vault sync --watch` +
-    `<pipx-venv-python> -m brain.wiki.build_watcher` inside tmux panes or
-    a systemd-user unit. Find the pipx Python with:
-        echo "$(pipx environment --value PIPX_LOCAL_VENVS)/secondbrain-py/bin/python"
-    A first-class systemd-user template is a post-v0.2.0 follow-up.
+  - No launchd → no auto-supervision. This script started the vault-sync
+    watcher in background and will tear it down on exit. For a real
+    long-lived install on Linux, run `brain vault sync --watch` inside a
+    tmux pane or a systemd-user unit. A first-class systemd-user template
+    is a post-v0.2.0 follow-up.
 
 To clean up the install entirely:
   brain uninstall --yes --remove-db --remove-vault

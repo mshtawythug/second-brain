@@ -99,7 +99,6 @@ import json as _json  # aliased — `json` conflicts with the --json output flag
 import logging
 import os
 import shutil
-import subprocess
 import sys
 import time as _time
 import uuid
@@ -326,14 +325,11 @@ from .vault.note_builder import (
     _build_embedder,
     _build_note_text,
 )
-from .vault.quartz_overlay import OverlayError, apply_overlay, plan_overlay
 from .vault.slug import slugify
 from .vault.sync import SyncReport, sync_one_file, sync_vault
 from .vault.sync_summaries import sync_summaries
 from .vault.templates import list_template_names
 from .vault.watch import WatchConfig, run_watcher
-from .wiki.install import WikiInstallError
-from .wiki.install import wiki_install as _wiki_install
 
 logger = logging.getLogger(__name__)
 
@@ -441,13 +437,6 @@ owner_app = typer.Typer(
 )
 app.add_typer(owner_app, name="owner")
 
-wiki_app = typer.Typer(
-    name="wiki",
-    help="Wiki workspace management (Quartz install, Caddyfile rendering).",
-    no_args_is_help=True,
-)
-app.add_typer(wiki_app, name="wiki")
-
 claude_app = typer.Typer(
     name="claude",
     help="Claude Code integration.",
@@ -554,7 +543,7 @@ def setup_cmd(
     profile: ProfileName = typer.Option(
         ProfileName.standard,
         "--profile",
-        help="minimal (PG+FTS) | standard (+Ollama hybrid) | full (+graph/wiki/daemons)",
+        help="minimal (PG+FTS) | standard (+Ollama hybrid) | full (+graph/daemons)",
     ),
     non_interactive: bool = typer.Option(
         False, "--non-interactive", help="Use defaults for every prompt"
@@ -1840,7 +1829,7 @@ def doctor(
         )
     )
 
-    # Task 4.2: the external probes (embedder HTTP/API, gws + npx subprocess) are
+    # Task 4.2: the external probes (embedder HTTP/API, gws subprocess) are
     # independent of the Postgres connection, so run them concurrently with the
     # serial DB block below. psycopg connections are NOT thread-safe, so the DB
     # checks stay on the main thread's single connection; the external probes
@@ -1848,10 +1837,9 @@ def doctor(
     # external-probe results are gathered + recorded in a fixed order afterwards.
     # Each future is resolved through _resolve_probe so one probe's crash can
     # never crash doctor or suppress the siblings.
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         embedder_future = pool.submit(_probe_embedder, cfg)
         gws_future = pool.submit(_probe_gws)
-        npx_future = pool.submit(_probe_npx)
 
         try:
             with connect(cfg.database_url) as conn:
@@ -1919,7 +1907,6 @@ def doctor(
         # deterministic regardless of which probe finished first (Task 4.2).
         report.record_all(_resolve_probe(embedder_future, "embedder"))
         report.record_all(_resolve_probe(gws_future, "gws CLI"))
-        report.record_all(_resolve_probe(npx_future, "quartz/npx"))
 
         # Backup freshness (F3). Pure filesystem stat of the backup directory —
         # no database, no network — so it runs after the probes and cannot fail
@@ -1962,71 +1949,6 @@ def _probe_gws() -> list[_DoctorCheck]:
             detail="missing — Gmail ingestion disabled",
             lines=(
                 _DoctorLine("gws CLI         missing — Gmail ingestion disabled"),
-            ),
-        )
-    ]
-
-
-def _probe_npx() -> list[_DoctorCheck]:
-    """Doctor sub-check (buffered): probe ``npx`` for the Quartz integration.
-
-    Soft check — Quartz is optional; missing npx is a warning, never a
-    failure. We only emit one line either way:
-
-    - ``quartz/npx       OK (npx 10.x.x at /path/to/npx)`` — present.
-    - ``quartz/npx       not installed`` — absent.
-
-    Treats every error path as "not installed": missing on PATH,
-    timeout, non-zero exit, or unparseable stdout. Doctor never fails
-    on Quartz absence — `brain vault render` is the only command that
-    needs it and it surfaces its own setup errors when invoked.
-
-    Buffered (returns structured checks) so it can run in a worker thread
-    concurrently with the serial DB block (Task 4.2).
-    """
-    not_installed = [
-        _DoctorCheck(
-            check="quartz/npx",
-            status="warn",
-            detail="not installed — `brain vault render` will fail",
-            remedy="install Node.js if you want HTML rendering",
-            lines=(
-                _DoctorLine(
-                    "quartz/npx      not installed — `brain vault render` will fail; "
-                    "install Node.js if you want HTML rendering",
-                    fg="yellow",
-                ),
-            ),
-        )
-    ]
-    npx_path = shutil.which("npx")
-    if npx_path is None:
-        return not_installed
-    try:
-        completed = subprocess.run(  # noqa: S603 — list-form args, no shell
-            [npx_path, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        # Daemon hung, npx not executable, etc. Treat as "not
-        # installed" — we don't want a flaky probe to red-flag doctor.
-        return not_installed
-    if completed.returncode != 0:
-        return not_installed
-    version = completed.stdout.strip() or "?"
-    return [
-        _DoctorCheck(
-            check="quartz/npx",
-            status="ok",
-            detail=f"npx {version} at {npx_path}",
-            lines=(
-                _DoctorLine(
-                    f"quartz/npx      OK (npx {version} at {npx_path}) — "
-                    "`brain vault render` available"
-                ),
             ),
         )
     ]
@@ -6616,431 +6538,6 @@ def vault_prune_orphans(
 
 
 # ---------------------------------------------------------------------------
-# Quartz render — `brain vault render`.
-#
-# Thin wrapper around `npx --no -- quartz build`. Quartz is purpose-built for
-# Obsidian-style vaults; we orchestrate it rather than reinventing
-# backlinks / graph view / search in Python. The user installs Quartz
-# themselves via `npx quartz create` (one-time, per vault); this
-# command just shells out to the binary.
-#
-# On npx vs the daemon's `node bootstrap-cli.mjs` (brain.wiki.build_swap):
-# both reach the SAME entry point. A `npx quartz create` workspace IS the
-# Quartz package and declares `"bin": {"quartz": "./quartz/bootstrap-cli.mjs"}`,
-# so npx resolves the local bin — same version, same overlay, not a second
-# build mechanism. Measured 2026-08-07 on the live vault, the difference is
-# npm-exec startup: ~0.6-1.1 s vs ~0.15 s (build_swap's docstring cites ~100 s;
-# that does not reproduce here and is likely a cold-npm-cache figure). Against
-# a multi-minute build that gap does not justify adding a `node`-on-PATH
-# requirement to this path, which currently needs only npx.
-# ---------------------------------------------------------------------------
-
-
-# Hard ceiling on the build subprocess. NOT defined here — this used to be a
-# local `_QUARTZ_BUILD_TIMEOUT_S = 300` while `brain.wiki.build_swap` enforced
-# 600 on the identical operation, so how long a Quartz build was allowed to run
-# depended purely on which entrypoint you came through. The single source of
-# truth now lives next to the subprocess that enforces it, in
-# `brain.wiki.build_swap`; resolve it per-call via `resolve_build_timeout_s()`
-# so `$BRAIN_WIKI_BUILD_TIMEOUT_S` is honored on both paths identically.
-
-
-def _default_render_output(workspace: Path) -> Path:
-    """The default output directory: ``<workspace>/dist``.
-
-    Cwd-independent **provided the vault path is absolute**, which is the
-    normal case. ``BRAIN_VAULT_PATH`` is ``expanduser``-ed but not
-    ``resolve``-d (:func:`brain.config._default_vault_path`) and nothing
-    rejects a relative value, so a relative vault path makes this resolve
-    against the process cwd after all. That case fails CLOSED — the
-    ``target_vault.is_dir()`` check rejects it with exit 2 before anything is
-    written — but the claim is conditional and saying otherwise would be the
-    kind of overstated guarantee this command's history is made of.
-
-    Anchored to the Quartz workspace — which itself defaults to
-    ``<vault>/.quartz``, i.e. it is derived from a configured value
-    (``BRAIN_VAULT_PATH``) rather than from ambient process state. That
-    is the whole point: the previous default (``./dist``) meant the
-    rendered site landed wherever the shell happened to be, so running
-    the command from an unrelated project wrote a full static site into
-    that project's source tree. A daemon — which has no meaningful cwd —
-    would do the same thing on every scheduled run.
-
-    ``<workspace>/dist`` also sits alongside the blue/green build tree
-    (``<workspace>/builds/<id>`` + ``<workspace>/current``) that
-    :mod:`brain.wiki.build_swap` already writes, so all rendered output
-    for a vault lives under one root, and none of it is inside the
-    Markdown tree Quartz globs for content.
-    """
-    return workspace / "dist"
-
-
-def _resolve_render_to(to: Path | None, cwd: Path, *, default_dir: Path) -> Path:
-    """Resolve the render output directory.
-
-    ``to`` is the user's explicit ``--to`` override, or ``None`` to take
-    ``default_dir`` (see :func:`_default_render_output`). An explicit
-    relative path keeps ordinary shell semantics — ``--to dist`` from
-    ``/tmp/x`` means ``/tmp/x/dist`` — because a path the user typed is
-    a deliberate act, interpreted against where they typed it. Only the
-    *default* is cwd-independent.
-
-    Relative paths resolve against the supplied ``cwd``, NOT the process
-    cwd, so callers and tests can pin the anchor explicitly.
-
-    The returned path is not validated here;
-    :func:`_assert_render_output_safe` is the guard.
-    """
-    if to is None:
-        return default_dir.expanduser().resolve()
-    expanded = to.expanduser()
-    if expanded.is_absolute():
-        return expanded.resolve()
-    return (cwd.resolve() / expanded).resolve()
-
-
-def _assert_render_output_safe(
-    output: Path, *, cwd: Path, vault: Path, workspace: Path
-) -> None:
-    """Refuse output directories whose contents Quartz would destroy.
-
-    Quartz's build does ``rm(output, {recursive: true, force: true})``
-    before it emits anything (see ``quartz_overrides/quartz/build.ts``),
-    so ``--output`` is not merely "where files appear" — it is a
-    directory that gets deleted. Pointing it at a directory that
-    *contains* the vault, the Quartz workspace, or the shell's current
-    directory therefore deletes that tree. ``--to .`` is the sharpest
-    edge: one character, and the build wipes the working directory.
-
-    The rule is deliberately plain path arithmetic against three known
-    anchors — no sniffing of what a directory "looks like". A heuristic
-    ("does it contain a .git / package.json that isn't ours?") would
-    both false-positive (a vault kept under git — common for Obsidian
-    users — makes the *default* output path look like someone else's
-    repo) and false-negative (an unrelated project with neither marker
-    sails through). Refusing to delete a tree that contains something we
-    know we need is exact; guessing whose directory it is, is not.
-    """
-    resolved = output.resolve()
-    for label, anchor in (
-        ("the current working directory", cwd),
-        ("the vault", vault),
-        ("the Quartz workspace", workspace),
-    ):
-        anchor_resolved = anchor.expanduser().resolve()
-        if anchor_resolved == resolved or anchor_resolved.is_relative_to(resolved):
-            raise typer.BadParameter(
-                f"refusing to render into {resolved}: the Quartz build "
-                f"deletes its output directory, and that path contains "
-                f"{label} ({anchor_resolved}). Pick a dedicated output "
-                f"directory (the default is {_default_render_output(workspace)}).",
-                param_hint="--to",
-            )
-
-
-def _vault_has_markdown(vault_path: Path) -> bool:
-    """True iff the vault has at least one `.md` file anywhere."""
-    return any(p.is_file() for p in vault_path.rglob("*.md"))
-
-
-def _check_quartz_workspace(quartz_dir: Path) -> None:
-    """Verify the Quartz workspace exists with the files Quartz expects.
-
-    A well-formed `npx quartz create`-scaffolded directory always has
-    `package.json` (Quartz's own package metadata) and `quartz.config.ts`
-    (the user-editable config). Their absence is the single most common
-    setup failure, and the error message has to walk the user back
-    through the one-time setup — anything less and they get a confusing
-    npx stack trace.
-    """
-    if not quartz_dir.is_dir():
-        # Print the multi-line setup hint to stderr ourselves before
-        # raising — typer's BadParameter wraps long messages inside a
-        # box, which mangles them; a plain stderr write keeps the
-        # `npx quartz create` string contiguous so users (and tests)
-        # can grep it.
-        typer.secho(
-            f"Quartz workspace not found at {quartz_dir}.\n"
-            f"  Run `npx quartz create` in your vault, then re-run.\n"
-            f"  A sample config lives at the brain repo root: "
-            f"`quartz.config.ts`.",
-            fg="red",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    missing = [
-        name
-        for name in ("package.json", "quartz.config.ts")
-        if not (quartz_dir / name).is_file()
-    ]
-    if missing:
-        typer.secho(
-            f"Quartz workspace at {quartz_dir} is missing: "
-            f"{', '.join(missing)}.\n"
-            f"  Run `npx quartz create` to scaffold a fresh workspace, "
-            f"then copy the sample `quartz.config.ts` from the brain "
-            f"repo root if needed.",
-            fg="red",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-
-@vault_app.command("render")
-def vault_render(
-    to: Path | None = typer.Option(
-        None,
-        "--to",
-        help=(
-            "Output directory for the rendered HTML site "
-            "(default: <quartz-dir>/dist, i.e. <vault>/.quartz/dist). "
-            "A relative path is resolved against the current directory."
-        ),
-    ),
-    vault: Path | None = typer.Option(
-        None,
-        "--vault",
-        help="Override the configured vault path.",
-    ),
-    quartz_dir: Path | None = typer.Option(
-        None,
-        "--quartz-dir",
-        help="Quartz workspace directory (default: <vault>/.quartz).",
-    ),
-    no_build: bool = typer.Option(
-        False,
-        "--no-build",
-        help="Verify the Quartz workspace is set up without running the build.",
-    ),
-    overlay: bool = typer.Option(
-        True,
-        "--overlay/--no-overlay",
-        help=(
-            "Copy the brain package's quartz_overrides/ tree over the Quartz workspace "
-            "before building. Use `--no-overlay` to skip and use whatever is "
-            "already in the workspace."
-        ),
-    ),
-    print_overlay: bool = typer.Option(
-        False,
-        "--print-overlay",
-        help=(
-            "Print the overlay plan (file pairs + rename status) and exit "
-            "without copying or building. Takes precedence over "
-            "`--overlay/--no-overlay`."
-        ),
-    ),
-) -> None:
-    """Render the vault to a static HTML site via Quartz.
-
-    Shells out to `npx --no -- quartz build --directory <vault> --output <to>`
-    (`--no` so a workspace npm cannot resolve fails instead of silently
-    installing some other "quartz" from the registry).
-    The user is responsible for one-time Quartz setup (see the README's
-    "Wiki rendering (Quartz)" section): scaffold a workspace at
-    `<vault>/.quartz/` with `npx quartz create`, then copy the sample
-    `quartz.config.ts` from the brain repo root.
-
-    Before the build, the overlay step copies the brain package's
-    ``quartz_overrides/`` tree over the Quartz workspace (custom Graph
-    component, contentIndex emitter, etc.). Use `--no-overlay` to skip,
-    or `--print-overlay` to see what would be copied without applying.
-
-    The output directory defaults to `<quartz-dir>/dist` — derived from
-    the configured vault, never from the current working directory, so
-    the site lands in the same place whether it is invoked from a shell,
-    a script, or a daemon with no meaningful cwd. `--to` overrides it.
-
-    Honours stdout/stderr passthrough so the user sees Quartz's
-    progress live. Propagates a non-zero exit code from npx as exit 1.
-    """
-    cfg = Config.load()
-    target_vault = vault.expanduser() if vault is not None else cfg.vault_path
-    if not target_vault.is_dir():
-        typer.secho(
-            f"vault path is not a directory: {target_vault}",
-            fg="red",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    if not _vault_has_markdown(target_vault):
-        # No .md files = nothing for Quartz to render. We don't try to
-        # be clever here (e.g. by emitting a "you might want to run
-        # `brain vault export` first" hint) — the user knows what they
-        # have; we just bail clearly.
-        typer.secho(
-            f"vault at {target_vault} has no .md files — nothing to render",
-            fg="red",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    workspace = (
-        quartz_dir.expanduser() if quartz_dir is not None else target_vault / ".quartz"
-    )
-    _check_quartz_workspace(workspace)
-
-    # Resolve the output directory AFTER the workspace, because the
-    # default is derived from it — never from the cwd. Validate before
-    # any overlay copying so a bad `--to` fails before we touch disk.
-    #
-    # `Path.cwd()` raises FileNotFoundError if the working directory has been
-    # deleted out from under the process. That is DELIBERATELY left to
-    # propagate: this command's entire bug class was silent wrong writes, so
-    # failing closed (a crash, nothing written) is the correct side of the
-    # line. Do not "harden" this into a tolerant fallback — a default that
-    # quietly substitutes some other directory would reopen exactly the
-    # failure this code exists to prevent. Note the default output path itself
-    # never consults the cwd; only the guard's third anchor does.
-    cwd = Path.cwd()
-    output_dir = _resolve_render_to(
-        to, cwd, default_dir=_default_render_output(workspace)
-    )
-    _assert_render_output_safe(
-        output_dir, cwd=cwd, vault=target_vault, workspace=workspace
-    )
-
-    try:
-        plan = plan_overlay(workspace)
-    except OverlayError as e:
-        typer.secho(str(e), fg="red", err=True)
-        raise typer.Exit(code=2) from e
-
-    if print_overlay:
-        typer.echo(f"overlay plan for {workspace}:")
-        if plan.rename is not None:
-            src, dest = plan.rename
-            typer.echo(f"  rename: {src} → {dest}")
-        elif plan.rename_state == "already_applied":
-            typer.echo(
-                "  rename: already applied "
-                "(_upstreamContentIndex.tsx present, no upstream contentIndex.tsx)"
-            )
-        else:
-            typer.echo(
-                "  rename: skipped — neither contentIndex.tsx nor "
-                "_upstreamContentIndex.tsx exists; the brain wrapper "
-                "will fail at build time until Quartz is reinstalled"
-            )
-        for src, dest in plan.pairs:
-            typer.echo(f"  copy:   {src} → {dest}")
-        raise typer.Exit(code=0)
-
-    if overlay:
-        try:
-            copied = apply_overlay(plan)
-        except OverlayError as e:
-            typer.secho(str(e), fg="red", err=True)
-            raise typer.Exit(code=2) from e
-        if plan.rename is not None:
-            typer.echo(
-                "overlay: renamed contentIndex.tsx → _upstreamContentIndex.tsx"
-            )
-        elif plan.rename_state == "already_applied":
-            typer.echo("overlay: rename already applied")
-        else:
-            typer.echo(
-                "overlay: rename skipped — upstream contentIndex.tsx not "
-                "found (the brain wrapper will fail at build time)"
-            )
-        typer.echo(f"overlay: copied {len(copied)} files into {workspace}")
-    else:
-        typer.echo(
-            "overlay: skipped (--no-overlay) — using whatever is already "
-            "in place"
-        )
-
-    if no_build:
-        typer.echo(f"quartz workspace OK at {workspace}")
-        return
-
-    # `npx quartz build` reads its config from cwd, hence cwd=workspace.
-    # `--directory` points it at the vault content; `--output` controls
-    # where it writes the rendered site.
-    #
-    # `--no` is load-bearing, not cosmetic: without it, a workspace where npm
-    # cannot resolve `quartz` locally makes npx fall back to FETCHING a package
-    # named "quartz" from the registry and building the vault with it. That
-    # workspace state passes `_check_quartz_workspace` (which only requires
-    # package.json + quartz.config.ts), so the failure would be silent — a site
-    # built by some other package instead of the pinned, overlaid local Quartz.
-    # With `--no`, npx refuses to install and exits non-zero instead. The `--`
-    # then ends npx's own option parsing so every flag after it reaches Quartz.
-    #
-    # Resolution stays dynamic on purpose: "npx" is a bare name looked up on
-    # PATH by exec at call time, never cached or captured at install time, so a
-    # Node upgrade takes effect immediately. In a well-formed workspace npx
-    # resolves the package's own `bin` entry — `./quartz/bootstrap-cli.mjs`,
-    # the exact file `brain.wiki.build_swap` invokes directly — so this path and
-    # the daemon path run the same Quartz build, differing only by npm-exec
-    # startup (measured ~0.6-1.1 s against a multi-minute build).
-    args = [
-        "npx",
-        "--no",
-        "--",
-        "quartz",
-        "build",
-        "--directory",
-        str(target_vault),
-        "--output",
-        str(output_dir),
-    ]
-    # One ceiling for a Quartz build, wherever it is launched from. Resolved
-    # here rather than at module import so $BRAIN_WIKI_BUILD_TIMEOUT_S is read
-    # from the environment this command actually runs in.
-    from .wiki.build_swap import resolve_build_timeout_s
-
-    quartz_build_timeout_s = resolve_build_timeout_s()
-    typer.echo(f"running: {' '.join(args)} (cwd={workspace})")
-    try:
-        completed = subprocess.run(  # noqa: S603 — args are list-form, no shell
-            args,
-            cwd=str(workspace),
-            check=False,
-            timeout=quartz_build_timeout_s,
-        )
-    except FileNotFoundError as e:
-        # `npx` itself isn't on PATH. `brain doctor` warns about this
-        # ahead of time, but we still surface a friendly error here in
-        # case the user skipped it.
-        typer.secho(
-            f"npx not found ({e}); install Node.js (https://nodejs.org/) "
-            "and re-run.",
-            fg="red",
-            err=True,
-        )
-        raise typer.Exit(code=1) from e
-    except subprocess.TimeoutExpired as e:
-        typer.secho(
-            f"quartz build exceeded {quartz_build_timeout_s:g}s — likely a "
-            "misconfigured plugin or a runaway transformer; aborting. "
-            "Set BRAIN_WIKI_BUILD_TIMEOUT_S if this vault legitimately "
-            "needs longer.",
-            fg="red",
-            err=True,
-        )
-        raise typer.Exit(code=1) from e
-
-    if completed.returncode != 0:
-        # npx already streamed its error output to the inherited
-        # stderr; we just need to propagate the failure. Map any
-        # non-zero exit to 1 (the user shells will see "render
-        # failed", not the raw npx code).
-        typer.secho(
-            f"quartz build failed with exit code {completed.returncode}",
-            fg="red",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    typer.echo(
-        f"rendered to {output_dir} "
-        f"(open {output_dir / 'index.html'} or serve with "
-        f"`python -m http.server` from there)"
-    )
-
-
-# ---------------------------------------------------------------------------
 # brain vault relink-derived — full-corpus directory + derived-links rebuild.
 #
 # One-shot maintenance command: rescan every Gmail document into the
@@ -8749,63 +8246,6 @@ def owner_remove(
     current = [e for e in current if e != norm]
     _owner_write_dotenv(path, current)
     typer.echo(_OWNER_RELINK_HINT)
-
-
-# ---------------------------------------------------------------------------
-# brain wiki — wiki workspace management
-# ---------------------------------------------------------------------------
-
-
-@wiki_app.command("install")
-def wiki_install_cmd(
-    vault: Path | None = typer.Option(
-        None,
-        "--vault",
-        help="Vault path; defaults to $BRAIN_VAULT_PATH or ~/brain-vault.",
-    ),
-    port: int = typer.Option(
-        8080,
-        "--port",
-        help="Caddy listening port written into the Caddyfile template.",
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        help="Re-clone even if workspace exists (destructive — rmtrees .quartz/).",
-    ),
-    no_npm: bool = typer.Option(
-        False,
-        "--no-npm",
-        help="Skip npm install (useful in tests and offline environments).",
-    ),
-    dry_run: bool = typer.Option(
-        False,
-        "--dry-run",
-        help="Print planned actions; touch nothing.",
-    ),
-) -> None:
-    """Install Quartz workspace, apply brain overlay, render Caddyfile.
-
-    On a fresh vault this clones jackyzha0/quartz at the pinned commit,
-    applies the brain overlay (quartz_overrides/), runs ``npm install``,
-    and writes ``$BRAIN_HOME/Caddyfile`` ready for ``caddy run``.
-
-    Re-running on an existing workspace re-applies the overlay and
-    re-renders the Caddyfile without re-cloning.  Use ``--force`` to
-    wipe and re-clone.  Does NOT auto-install Caddy or npm — prints
-    remediation messages if either is missing.
-    """
-    try:
-        _wiki_install(
-            vault=vault,
-            port=port,
-            force=force,
-            no_npm=no_npm,
-            dry_run=dry_run,
-        )
-    except WikiInstallError as exc:
-        typer.secho(f"error: {exc}", fg="red", err=True)
-        raise typer.Exit(code=1) from exc
 
 
 # ---------------------------------------------------------------------------

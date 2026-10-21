@@ -11,11 +11,9 @@ import pytest
 
 _BRAIN_SRC = Path(__file__).resolve().parents[1] / "src" / "brain"
 _ALLOWED_EXCEPTION = _BRAIN_SRC / "_compose.py"
-# __pycache__: bytecode caches, not source. quartz_overrides: the only .py file
-# inside this packaged tree is its empty __init__.py marker; skipping the whole
-# directory keeps the test honest about what we actually guard (the brain source
-# tree, not packaged static assets that happen to contain a Python init file).
-_SKIP_DIRS = {"__pycache__", "quartz_overrides"}
+# __pycache__: bytecode caches, not source. (A quartz_overrides skip stood here
+# until that packaged tree was deleted with the wiki at R3, wiki-to-ui phase 9.)
+_SKIP_DIRS = {"__pycache__"}
 
 
 def _python_files() -> list[Path]:
