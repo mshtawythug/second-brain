@@ -1170,3 +1170,28 @@ def test_minimal_dry_run_narrative_reaches_doctor(tmp_path: Path) -> None:
     assert "embedder:   none" in out
     assert "FTS-only brain" in out
     assert "Ollama not found" not in out
+
+
+# ---------------------------------------------------------------------------
+# R3 (wiki-to-ui phase 9, R9-5): the wiki flags are gone, not silently accepted
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("argv", [["--skip-wiki"], ["--wiki-port", "8080"]])
+def test_setup_rejects_the_removed_wiki_flags(argv: list[str]) -> None:
+    """``--skip-wiki`` / ``--wiki-port`` were deleted with the wiki: a usage error (exit 2).
+
+    The same contract as ``brain-rebuild --clean-cache`` / ``--only quartz`` (R9-3).
+    The parser rejects the option before ``run_setup`` is reached, so nothing
+    on this machine is touched; ``run_setup`` is patched to fail loudly if the
+    rejection ever stops happening.
+    """
+    from typer.testing import CliRunner
+
+    from brain.cli import app
+
+    with patch("brain.setup.run_setup", side_effect=AssertionError("setup ran")):
+        result = CliRunner().invoke(app, ["setup", "--dry-run", *argv])
+
+    assert result.exit_code == 2, result.output
+    assert "No such option" in result.output, result.output
