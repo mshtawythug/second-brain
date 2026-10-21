@@ -569,11 +569,9 @@ def setup_cmd(
         None, "--vault", help="Override $BRAIN_VAULT_PATH"
     ),
     port: int = typer.Option(55432, "--port", help="Postgres host port"),
-    wiki_port: int = typer.Option(8080, "--wiki-port", help="Caddy port for the wiki"),
     embedder: str | None = typer.Option(
         None, "--embedder", help="arctic|voyage|qwen3|none (non-interactive choice)"
     ),
-    skip_wiki: bool = typer.Option(False, "--skip-wiki", help="Don't install the wiki UI"),
     skip_skill: bool = typer.Option(
         False, "--skip-skill", help="Don't install the Claude Code skill"
     ),
@@ -591,7 +589,7 @@ def setup_cmd(
     """One-command installer for the second-brain runtime.
 
     Sets up $BRAIN_HOME, installs shims, starts Postgres via Docker, and
-    optionally configures the wiki (Caddy + Quartz) and the Claude Code skill.
+    optionally installs the Claude Code skill and the launchd daemons.
 
     Use --dry-run to preview every action without touching the filesystem.
     Use --reset to wipe an existing $BRAIN_HOME before re-running (typed
@@ -607,9 +605,7 @@ def setup_cmd(
             brain_home_override=brain_home,
             vault_override=vault,
             pg_port=port,
-            wiki_port=wiki_port,
             embedder_choice=embedder,
-            skip_wiki=skip_wiki,
             skip_skill=skip_skill,
             daemons=daemons,
             reset=reset,

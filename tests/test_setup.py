@@ -63,7 +63,6 @@ def test_setup_dry_run_no_side_effects(tmp_path: Path) -> None:
             # Use port 0 so the socket.bind probe always succeeds regardless of
             # whether the developer's local Postgres is already running on 5433.
             pg_port=0,
-            skip_wiki=True,
             skip_skill=True,
         )
 
@@ -102,7 +101,6 @@ def test_setup_reset_requires_typed_confirmation(tmp_path: Path) -> None:
             reset=True,
             non_interactive=True,
             brain_home_override=brain_home,
-            skip_wiki=True,
             skip_skill=True,
         )
 
@@ -146,7 +144,6 @@ def test_setup_preflight_fails_when_docker_missing(
             # Use port 0 so the socket.bind probe always succeeds (OS assigns
             # an ephemeral port; there is no risk of collision with real Postgres).
             pg_port=0,
-            skip_wiki=True,
             skip_skill=True,
         )
 
@@ -204,7 +201,6 @@ def _run_through_state_creation(
             brain_home_override=brain_home,
             vault_override=vault_override,
             pg_port=0,
-            skip_wiki=True,
             skip_skill=True,
         )
 
@@ -246,11 +242,9 @@ def _dry_run_output(
     tmp_path: Path,
     *,
     profile: str = "standard",
-    skip_wiki: bool = True,
     skip_skill: bool = True,
     vault_override: Path | None = None,
     pg_port: int = 0,
-    wiki_port: int = 0,
     which_returns: str | None = "/usr/bin/fake",
 ) -> str:
     """Run setup in dry-run + non-interactive mode; return stdout as a string.
@@ -260,8 +254,8 @@ def _dry_run_output(
     Stderr (typer.secho(..., err=True)) is NOT captured — tests that need stderr
     should use capsys directly instead of this helper.
 
-    Both pg_port and wiki_port default to 0 so the socket.bind probe always
-    succeeds regardless of what's running on the developer's machine.
+    pg_port defaults to 0 so the socket.bind probe always succeeds regardless
+    of what's running on the developer's machine.
     """
     brain_home = tmp_path / ".brain"
     _vault = vault_override or (tmp_path / "vault")
@@ -281,8 +275,6 @@ def _dry_run_output(
             brain_home_override=brain_home,
             vault_override=_vault,
             pg_port=pg_port,
-            wiki_port=wiki_port,
-            skip_wiki=skip_wiki,
             skip_skill=skip_skill,
         )
 
@@ -312,131 +304,52 @@ def test_setup_idempotent_second_run(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 7 — caddy preflight only fails when wiki is enabled
+# Test 8 — the full profile at R3: no wiki step, daemons still opt-in
 # ---------------------------------------------------------------------------
 
 
-def test_setup_preflight_caddy_missing_only_when_wiki_enabled(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_setup_full_profile_has_no_wiki_step_and_daemons_stay_opt_in(
+    tmp_path: Path,
 ) -> None:
-    """caddy check must be skipped with --skip-wiki and fail without it."""
-    brain_home = tmp_path / ".brain"
+    """R3 (phase 9): the full profile installs no wiki and preflights no Caddy/Quartz.
 
-    def _which_no_caddy(name: str) -> str | None:
-        if name == "caddy":
-            return None
-        return f"/usr/bin/{name}"
-
-    # --- skip_wiki=True: caddy check is bypassed; setup succeeds ---
-    # (caddy is a full-profile-only preflight, so exercise the full profile.)
-    with (
-        patch("shutil.which", side_effect=_which_no_caddy),
-        patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
-    ):
-        from brain.setup import run_setup
-
-        # Should NOT raise
-        run_setup(
-            profile="full",
-            dry_run=True,
-            non_interactive=True,
-            brain_home_override=brain_home,
-            vault_override=tmp_path / "vault",
-            pg_port=0,
-            skip_wiki=True,
-            skip_skill=True,
-        )
-
-    # --- skip_wiki=False: caddy check runs and fails ---
-    with (
-        pytest.raises((typer.Exit, SystemExit)) as exc_info,
-        patch("shutil.which", side_effect=_which_no_caddy),
-    ):
-        run_setup(
-            profile="full",
-            dry_run=True,
-            non_interactive=True,
-            brain_home_override=brain_home,
-            vault_override=tmp_path / "vault",
-            pg_port=0,
-            wiki_port=0,
-            skip_wiki=False,
-            skip_skill=True,
-        )
-
-    assert _exit_code(exc_info.value) != 0, (
-        "setup must exit non-zero when caddy is missing and --skip-wiki is not set"
-    )
-    captured = capsys.readouterr()
-    assert "caddy" in (captured.out + captured.err).lower(), (
-        "output must mention 'caddy' when the caddy check fails"
-    )
-    assert "remediation" in (captured.out + captured.err).lower(), (
-        "output must include remediation hint for missing caddy"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Test 8 — launchd gating by --skip-wiki
-# ---------------------------------------------------------------------------
-
-
-def test_setup_skip_wiki_no_longer_suppresses_launchd(tmp_path: Path) -> None:
-    """Q8 / R8-1: --skip-wiki no longer gates launchd; daemons stay opt-in.
-
-    launchd is a full-profile-only component; standard/minimal never reach it.
-    ``_dry_run_output`` runs --non-interactive and does NOT patch
-    ``sys.platform``, so the skip line it sees is platform-correct: on macOS the
-    --non-interactive contract line, elsewhere the not-macOS gate, which returns
-    first. On both, the old wiki gate's line must be gone. That gate ran BEFORE
-    the platform gate, so restoring it turns this red on either platform.
+    Q8 / R8-1 (phase 8) already removed the wiki gate on launchd; R3 removes the
+    wiki offer itself. ``_dry_run_output`` runs --non-interactive and does NOT
+    patch ``sys.platform``, so the launchd skip line it sees is platform-correct:
+    on macOS the --non-interactive contract line, elsewhere the not-macOS gate.
+    Restoring any wiki step (the install offer, its Caddy / Quartz-SHA / port
+    preflights, or the final report's wiki URL) turns this red.
     """
-    out_skipped = _dry_run_output(tmp_path / "skip", profile="full", skip_wiki=True)
-    assert "launchd install (wiki not installed)" not in out_skipped, (
-        "the wiki gate is gone (Q8): a wikiless install is still offered daemons"
-    )
+    out = _dry_run_output(tmp_path, profile="full")
+    lowered = out.lower()
+    for leftover in ("wiki install", "caddy", "quartz", "wiki-port", "wiki url"):
+        assert leftover not in lowered, f"R3 deleted the wiki, but setup still says {leftover!r}"
+    assert "launchd install (wiki not installed)" not in out
     if sys.platform == "darwin":
-        assert "[skipped] launchd background daemons (--non-interactive" in out_skipped
+        assert "[skipped] launchd background daemons (--non-interactive" in out
     else:
-        assert "[skipped] launchd install (not macOS)" in out_skipped
-
-    # skip_wiki=False + --non-interactive → daemons NEVER auto-install.
-    out_enabled = _dry_run_output(tmp_path / "enabled", profile="full", skip_wiki=False)
-    assert "launchd" in out_enabled.lower() or "daemons" in out_enabled.lower(), (
-        "expected launchd/daemons mention when wiki is enabled"
-    )
+        assert "[skipped] launchd install (not macOS)" in out
     # The dry-run *install* line must be absent — daemons are opt-in only. (The
     # skip message legitimately mentions `brain-install-launchd` as the opt-in
     # command, so assert on the "would:" install action specifically.)
-    assert "would: brain-install-launchd" not in out_enabled, (
+    assert "would: brain-install-launchd" not in out, (
         "--non-interactive must NEVER install launchd daemons"
     )
-    if sys.platform != "darwin":
-        assert "not macos" in out_enabled.lower(), (
-            "expected 'not macOS' skip message on Linux"
-        )
 
 
 def test_setup_noninteractive_never_installs_launchd(tmp_path: Path) -> None:
     """D1d: --non-interactive (full profile) must NOT invoke install_plists.
 
-    Regression for the default-on bug: previously wiki auto-installed in
-    --non-interactive mode and launchd registration rode along unconditionally.
+    Regression for the default-on bug: the wiki (deleted at R3) used to
+    auto-install in --non-interactive mode, and launchd registration rode along
+    unconditionally.
     """
-    from brain.setup import PreflightResult
-
     install_plists_calls: list[Any] = []
-
-    def _quartz_ok(*, dry_run: bool = False) -> PreflightResult:
-        return PreflightResult(name="quartz-sha", ok=True, message="ok (patched)")
 
     with (
         patch("shutil.which", return_value="/usr/bin/fake"),
         patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
         patch("brain.setup.ensure_shim"),
-        # Avoid the real `git ls-remote` network call in the full preflight.
-        patch("brain.setup._check_quartz_sha", side_effect=_quartz_ok),
-        patch("brain.wiki.install.wiki_install"),
         patch("brain.cli_claude.install_skill"),
         patch(
             "brain.bin.launchd.install_plists",
@@ -452,8 +365,6 @@ def test_setup_noninteractive_never_installs_launchd(tmp_path: Path) -> None:
             brain_home_override=tmp_path / ".brain",
             vault_override=tmp_path / "vault",
             pg_port=0,
-            wiki_port=0,
-            skip_wiki=False,
             skip_skill=True,
         )
 
@@ -534,8 +445,6 @@ def test_daemons_ignored_warns_under_non_interactive(
             brain_home_override=tmp_path / ".brain",
             vault_override=tmp_path / "vault",
             pg_port=0,
-            wiki_port=0,
-            skip_wiki=True,
             skip_skill=True,
         )
 
@@ -560,7 +469,6 @@ def test_daemons_ignored_warns_on_profile_without_daemons(
             brain_home_override=tmp_path / ".brain",
             vault_override=tmp_path / "vault",
             pg_port=0,
-            skip_wiki=True,
             skip_skill=True,
         )
 
@@ -580,7 +488,7 @@ def test_setup_skill_install_skipped_via_flag(tmp_path: Path) -> None:
         "brain.cli_claude.install_skill",
         side_effect=lambda **kw: install_skill_calls.append(kw),
     ):
-        out = _dry_run_output(tmp_path, skip_skill=True, skip_wiki=True)
+        out = _dry_run_output(tmp_path, skip_skill=True)
 
     assert "skip" in out.lower() and "skill" in out.lower(), (
         f"expected skill-skip message in output:\n{out}"
@@ -634,7 +542,6 @@ def test_setup_init_failure_aborts(tmp_path: Path) -> None:
             # intercepted by _smart_subprocess_run (returns 0).
             # pg_port=0 makes the socket.bind probe always succeed.
             pg_port=0,
-            skip_wiki=True,
             skip_skill=True,
         )
 
@@ -856,7 +763,6 @@ def test_setup_renders_chosen_port_into_generated_env(tmp_path: Path) -> None:
             brain_home_override=brain_home,
             vault_override=tmp_path / "vault",
             pg_port=55432,
-            skip_wiki=True,
             skip_skill=True,
         )
 
@@ -979,13 +885,12 @@ def test_compose_pull_failure_still_reaches_up(tmp_path: Path) -> None:
         from brain.setup import run_setup
 
         run_setup(
-            profile="minimal",  # stock compose, no ollama/wiki/skill/launchd noise
+            profile="minimal",  # stock compose, no ollama/skill/launchd noise
             dry_run=False,
             non_interactive=True,
             brain_home_override=tmp_path / ".brain",
             vault_override=tmp_path / "vault",
             pg_port=0,
-            skip_wiki=True,
             skip_skill=True,
         )
 
@@ -1009,7 +914,6 @@ def _run_profile_setup(
     tmp_path: Path,
     profile: str,
     *,
-    skip_wiki: bool = True,
     skip_skill: bool = True,
 ) -> tuple[Path, list[Path]]:
     """Run a real (non-dry) profile setup with every external call mocked.
@@ -1043,7 +947,6 @@ def _run_profile_setup(
             brain_home_override=brain_home,
             vault_override=tmp_path / "vault",
             pg_port=0,
-            skip_wiki=skip_wiki,
             skip_skill=skip_skill,
         )
 
@@ -1051,21 +954,19 @@ def _run_profile_setup(
 
 
 def test_minimal_preflight_omits_optional_checks() -> None:
-    """D1a: minimal preflight has NO ollama/caddy/quartz/wiki-port/skills-dir checks."""
+    """D1a: minimal preflight has NO ollama/skills-dir checks."""
     from brain.setup import resolve_profile, run_preflight
 
     results = run_preflight(
         pg_port=0,
-        wiki_port=0,
         embedder="none",
         profile=resolve_profile("minimal"),
-        skip_wiki=False,
         skip_skill=False,
         dry_run=True,
     )
     names = {r.name for r in results}
     assert names.isdisjoint(
-        {"ollama", "caddy", "quartz-sha", "wiki-port", "skills-dir"}
+        {"ollama", "skills-dir"}
     ), f"minimal preflight leaked an optional check: {names}"
     # The always-on checks must still be present.
     assert {"python>=3.11", "docker", "postgres-port"} <= names
@@ -1102,10 +1003,8 @@ def test_standard_and_full_preflight_run_ollama() -> None:
     for name in ("standard", "full"):
         results = run_preflight(
             pg_port=0,
-            wiki_port=0,
             embedder="arctic",
             profile=resolve_profile(name),
-            skip_wiki=True,
             skip_skill=True,
             dry_run=True,
         )
@@ -1114,27 +1013,29 @@ def test_standard_and_full_preflight_run_ollama() -> None:
         )
 
 
-def test_full_preflight_includes_wiki_and_skill_checks() -> None:
-    """D1f: full keeps today's heavy-component preflight (wiki-port/caddy/skills/quartz)."""
+def test_full_preflight_includes_the_skill_check_and_no_wiki_checks() -> None:
+    """D1f: full keeps the skills-dir preflight; R3 deleted wiki-port/caddy/quartz-sha.
+
+    Pinned exactly so a restored wiki preflight, or a lost skills-dir check,
+    both turn this red.
+    """
     from brain.setup import resolve_profile, run_preflight
 
     results = run_preflight(
         pg_port=0,
-        wiki_port=0,
         embedder="arctic",
         profile=resolve_profile("full"),
-        skip_wiki=False,
         skip_skill=False,
         dry_run=True,
     )
     names = {r.name for r in results}
-    assert {"wiki-port", "caddy", "skills-dir", "quartz-sha"} <= names
+    assert names == {"python>=3.11", "docker", "ollama", "postgres-port", "skills-dir"}
 
 
 def test_full_materializes_age_and_writes_graph_on_env(tmp_path: Path) -> None:
     """D1f: full renders the AGE compose, materializes the Dockerfile, graph on."""
     brain_home, mat_calls = _run_profile_setup(
-        tmp_path, "full", skip_wiki=True, skip_skill=True
+        tmp_path, "full", skip_skill=True
     )
 
     compose = (brain_home / "docker-compose.yml").read_text(encoding="utf-8")
@@ -1230,7 +1131,6 @@ def test_autodetect_prints_hint_in_setup_narrative(tmp_path: Path) -> None:
             brain_home_override=tmp_path / ".brain",
             vault_override=tmp_path / "vault",
             pg_port=0,
-            skip_wiki=True,
             skip_skill=True,
         )
     out = buf.getvalue()
@@ -1251,7 +1151,7 @@ def test_minimal_dry_run_narrative_reaches_doctor(tmp_path: Path) -> None:
     that Wave 1's none-branch keeps green) with no Ollama, no AGE, no wiki, no
     launchd — proving the FTS-only path is self-contained.
     """
-    out = _dry_run_output(tmp_path, profile="minimal", skip_wiki=True, skip_skill=True)
+    out = _dry_run_output(tmp_path, profile="minimal", skip_skill=True)
 
     # Renders a compose file, but never the AGE Dockerfile.
     assert "docker-compose.yml" in out
@@ -1262,7 +1162,6 @@ def test_minimal_dry_run_narrative_reaches_doctor(tmp_path: Path) -> None:
     assert "brain init" in out
     assert "brain doctor" in out
     # Heavy optional components are all skipped for minimal.
-    assert "[skipped] wiki install (profile minimal)" in out
     assert "[skipped] Claude Code skill (profile minimal)" in out
     assert "[skipped] launchd background daemons (profile minimal)" in out
     # Closing banner + FTS-only guidance. Minimal is FTS-only BY CHOICE, so the
@@ -1271,54 +1170,3 @@ def test_minimal_dry_run_narrative_reaches_doctor(tmp_path: Path) -> None:
     assert "embedder:   none" in out
     assert "FTS-only brain" in out
     assert "Ollama not found" not in out
-
-
-# ---------------------------------------------------------------------------
-# Q8 (phase 8): declining the wiki no longer suppresses launchd
-# ---------------------------------------------------------------------------
-
-
-def test_launchd_offered_when_wiki_interactively_declined(tmp_path: Path) -> None:
-    """Q8 / R8-1: declining the wiki still offers, and on Yes installs, the daemons.
-
-    This test used to pin the opposite ("Bug 2"): the launchd install was gated
-    on ``wiki_installed`` because the only daemons supervised the wiki. At R2 the
-    installed daemons are the vault-sync watcher and the brief, which need no
-    wiki. The first confirm declines the wiki and the second accepts the
-    daemons. A single ``return_value=False`` would answer No to BOTH, so it
-    could not tell a removed gate from a restored one.
-    """
-    from brain.setup import _maybe_install_launchd, _maybe_install_wiki
-
-    install_plists_calls: list[Any] = []
-
-    def _record_install_plists(*args: Any, **kwargs: Any) -> None:
-        install_plists_calls.append((args, kwargs))
-
-    with (
-        # Declines the wiki, then accepts the daemons.
-        patch("typer.confirm", side_effect=[False, True]),
-        patch("brain.bin.launchd.install_plists", side_effect=_record_install_plists),
-        patch("sys.platform", "darwin"),
-    ):
-        wiki_installed = _maybe_install_wiki(
-            skip=False,
-            non_interactive=False,
-            dry_run=False,
-            vault=tmp_path / "vault",
-            brain_home=tmp_path / ".brain",
-            wiki_port=8080,
-        )
-        assert not wiki_installed, (
-            "_maybe_install_wiki must return False when the user declines"
-        )
-
-        _maybe_install_launchd(
-            vault_path=tmp_path / "vault",
-            brain_home=tmp_path / ".brain",
-            dry_run=False,
-        )
-
-    assert len(install_plists_calls) == 1, (
-        "declining the wiki must not suppress the daemons the user accepted"
-    )

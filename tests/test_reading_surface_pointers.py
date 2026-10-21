@@ -34,14 +34,12 @@ _WILDCARD_RECIPE = re.compile(
 # --------------------------------------------------------------------------
 
 
-def _setup_report(capsys: pytest.CaptureFixture[str], tmp_path: Path, *, wiki: bool) -> list[str]:
+def _setup_report(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> list[str]:
     from brain.setup import _print_final_report
 
     _print_final_report(
         brain_home=tmp_path,
         vault=tmp_path / "vault",
-        wiki_port=8080,
-        wiki_installed=wiki,
         skill_installed=False,
         effective_embedder="arctic",
         ollama_fell_back=False,
@@ -55,26 +53,23 @@ def _read_line(lines: list[str]) -> int:
     return hits[0]
 
 
-@pytest.mark.parametrize("wiki_installed", [True, False])
 def test_setup_report_names_brain_ui_as_the_reading_surface(
-    capsys: pytest.CaptureFixture[str], tmp_path: Path, wiki_installed: bool
-) -> None:
-    _read_line(_setup_report(capsys, tmp_path, wiki=wiki_installed))
-
-
-def test_setup_report_names_brain_ui_before_the_legacy_wiki_url(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    """M-2 (phase-7 review): the ORDER, not just the label.
+    _read_line(_setup_report(capsys, tmp_path))
 
-    The first version of this test was named for the order and asserted only
-    that the wiki line said "legacy", while the report printed the wiki URL
-    above everything else. Both halves are asserted now.
+
+def test_setup_report_names_no_wiki(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """R3 (phase 9): the legacy wiki URL and its ``caddy run`` hint are gone.
+
+    Phase 7 (M-2) pinned ``brain ui`` ABOVE the legacy wiki URL; R3 deleted the
+    wiki, so the report names no wiki and no Caddy at all.
     """
-    lines = _setup_report(capsys, tmp_path, wiki=True)
-    wiki = [i for i, line in enumerate(lines) if "http://localhost:8080" in line]
-    assert wiki and "legacy" in lines[wiki[0]], lines
-    assert _read_line(lines) < wiki[0], lines
+    lines = _setup_report(capsys, tmp_path)
+    text = "\n".join(lines).lower()
+    assert "localhost:8080" not in text and "caddy" not in text and "wiki" not in text, lines
 
 
 @pytest.mark.parametrize(

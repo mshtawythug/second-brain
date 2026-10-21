@@ -23,7 +23,7 @@ from brain import setup
 
 
 def _interactive_full_dry_run(tmp_path: Path, *, answer: bool) -> str:
-    """An interactive full-profile ``--skip-wiki`` dry run on macOS.
+    """An interactive full-profile dry run on macOS.
 
     Every confirm answers ``answer``.
     """
@@ -42,8 +42,6 @@ def _interactive_full_dry_run(tmp_path: Path, *, answer: bool) -> str:
             brain_home_override=tmp_path / ".brain",
             vault_override=tmp_path / "vault",
             pg_port=0,
-            wiki_port=0,
-            skip_wiki=True,
             skip_skill=True,
         )
     return buf.getvalue()
