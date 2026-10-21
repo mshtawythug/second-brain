@@ -24,7 +24,12 @@ from typing import Any
 import httpx
 
 from .config import Config, keep_alive_wire_value
-from .errors import EnrichmentError, OllamaContextOverflow, OllamaUnavailable
+from .errors import (
+    ChatOutputTruncated,
+    EnrichmentError,
+    OllamaContextOverflow,
+    OllamaUnavailable,
+)
 from .ollama_budget import (
     CHAT_DEFAULT_NUM_PREDICT,
     CONTEXT_OVERFLOW_RE,
@@ -191,8 +196,13 @@ def chat_json_with_client(
     consecutive attempts fail JSON parsing / schema validation.
     """
     last_error: Exception | None = None
+    # The last reply's text when that attempt was cut off at ``num_predict``,
+    # else None. Reset on every attempt so only the FINAL failure decides
+    # whether the caller gets :class:`ChatOutputTruncated` (with the prefix).
+    truncated_text: str | None = None
     current_num_predict = num_predict
     for attempt in (1, 2):
+        truncated_text = None
         try:
             response_text = _chat_once(
                 client,
@@ -207,6 +217,14 @@ def chat_json_with_client(
             raise
         try:
             parsed = json.loads(response_text)
+        except RecursionError:
+            # Nesting deeper than the decoder's recursion limit. Not a
+            # JSONDecodeError (not even a ValueError), so without this it
+            # escapes every caller's ``except EnrichmentError`` -- including
+            # concept extraction's never-raise boundary. Malformed, not
+            # truncated: a best-effort retry, and a plain EnrichmentError.
+            last_error = EnrichmentError("chat returned JSON nested too deeply to decode")
+            continue
         except json.JSONDecodeError as exc:
             last_error = exc
             # Truncation: the model exhausted ``num_predict`` before closing the
@@ -224,7 +242,9 @@ def chat_json_with_client(
             # the retry there is a deliberate best-effort second try. Schema /
             # non-dict failures don't reach this branch.
             if "Unterminated" in exc.msg or exc.pos >= len(response_text):
-                current_num_predict *= NUM_PREDICT_RETRY_FACTOR
+                truncated_text = response_text
+                if attempt == 1:
+                    current_num_predict *= NUM_PREDICT_RETRY_FACTOR
             _logger.debug(
                 "chat attempt %d: JSON decode failed (%s); response=%r",
                 attempt,
@@ -246,9 +266,15 @@ def chat_json_with_client(
         return parsed
     # Both attempts failed.
     assert last_error is not None
-    raise EnrichmentError(
-        f"chat failed after 2 attempts: {last_error}"
-    ) from last_error
+    message = f"chat failed after 2 attempts: {last_error}"
+    if truncated_text is not None:
+        # Cut off at the doubled budget too. Hand the caller the prefix -- a
+        # JSON list reply's complete items are still usable (concept
+        # extraction salvages them) -- under the same message, never logged.
+        raise ChatOutputTruncated(
+            message, partial=truncated_text, num_predict=current_num_predict
+        ) from last_error
+    raise EnrichmentError(message) from last_error
 
 
 def _chat_once(
@@ -318,9 +344,10 @@ def _chat_once(
         raise OllamaUnavailable(f"Ollama unreachable: {exc}") from exc
     except httpx.HTTPError as exc:
         raise OllamaUnavailable(f"Ollama transport error: {exc}") from exc
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         # json.JSONDecodeError is a ValueError — a 200 OK with non-JSON body
-        # leaks as a raw decode error otherwise.
+        # leaks as a raw decode error otherwise. A body nested past the
+        # recursion limit raises RecursionError, which is neither.
         raise EnrichmentError(
             f"Ollama returned non-JSON envelope: {exc}"
         ) from exc

@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import psycopg
 
+from ..errors import describe_failure
 from ..sensitivity import not_confidential_sql
 from ._retrieval_common import _build_doc_results, _fetch_entities
 from .grouping import group_themes
@@ -524,7 +525,7 @@ def _synthesize_groups(
             _logger.warning(
                 "themes synthesize: group %d summary failed (%s); summary=None",
                 group.group_id,
-                exc,
+                describe_failure(exc),  # class only: the message may quote model output
             )
             summary = None
         summarized.append(replace(group, summary=summary))

@@ -68,13 +68,20 @@ module is dormant until G2-c wires it behind that flag. G2-b builds and
 unit-tests the extractor in isolation only.
 
 **Over the 800-line ceiling** (885 at the branch base, CLAUDE.md table). The
-one growth since: ``make_extractor`` threads ``BRAIN_OLLAMA_NUM_CTX`` into its
+first growth since: ``make_extractor`` threads ``BRAIN_OLLAMA_NUM_CTX`` into its
 enricher, and the chunk constants are bound from ``brain.ollama_budget`` (where
 ``num_ctx`` is validated against them) instead of restated (perf/ollama-num-ctx,
-reasoned inline). Re-derive the size with ``wc -l``.
+reasoned inline). Second growth (fix/concept-extract-output-budget): ``extract``
+routes each chunk through :func:`.chunk_split.extract_splitting_on_truncation`,
+so a chunk whose reply is cut off at ``num_predict`` is split and re-extracted
+rather than skipped; the recursion lives in that module, and only the call and
+its counts-only WARN are here (reasoned inline; plan
+``docs/plans/2026-10-21-concept-extract-output-budget.md``).
+Re-derive the size with ``wc -l``.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import re
 from dataclasses import dataclass
@@ -82,8 +89,9 @@ from typing import Any, Protocol, runtime_checkable
 
 from ..config import Config
 from ..enrichment import OllamaEnricher
-from ..errors import EnrichmentError, OllamaUnavailable
+from ..errors import EnrichmentError, OllamaUnavailable, describe_failure
 from ..ollama_budget import EXTRACT_CHUNK_OVERLAP_TOKENS, EXTRACT_CHUNK_TARGET_TOKENS
+from .chunk_split import extract_splitting_on_truncation, split_in_half
 from .cooccur import DEFAULT_MAX_ENTITIES_PER_DOC
 
 _logger = logging.getLogger(__name__)
@@ -468,7 +476,9 @@ class OllamaExtractor:
         (capped) document, and applies the per-doc cap. On Ollama unavailability
         the whole extraction returns ``[]`` (+ WARN); a single chunk that returns
         malformed JSON is skipped (+ WARN) and the remaining chunks still
-        contribute.
+        contribute. A chunk whose reply is cut off at ``num_predict`` on both
+        attempts is split and re-extracted, its complete prefix salvaged only
+        at the split bound (+ WARN, counts only; :mod:`.chunk_split`).
         """
         text = text.strip()
         if not text:
@@ -500,7 +510,17 @@ class OllamaExtractor:
         candidates: list[tuple[str, str]] = []
         for chunk in chunks:
             try:
-                raw_entities = self._enricher.extract_entities(chunk.content)
+                # Over-ceiling growth (module docstring): a chunk whose reply is
+                # cut off at ``num_predict`` is split and re-extracted, salvaged
+                # only at the split bound, instead of skipped whole.
+                result = extract_splitting_on_truncation(
+                    chunk.content,
+                    extract_entities=self._enricher.extract_entities,
+                    split=functools.partial(
+                        split_in_half, count_tokens=self._enricher.count_tokens
+                    ),
+                    count_tokens=self._enricher.count_tokens,
+                )
             except OllamaUnavailable as exc:
                 # Server down — no chunk can succeed; abort the whole extraction.
                 _logger.warning(
@@ -514,10 +534,22 @@ class OllamaExtractor:
                 _logger.warning(
                     "concept extraction: chunk %d failed (%s); skipping chunk",
                     chunk.index,
-                    exc,
+                    describe_failure(exc),
                 )
                 continue
-            for entry in raw_entities:
+            if result.truncated:
+                # Counts only: the model's reply is document-derived.
+                _logger.warning(
+                    "concept extraction: chunk %d output truncated at num_predict; "
+                    "split %d piece(s), salvaged %d entries from %d piece(s), "
+                    "skipped %d malformed piece(s)",
+                    chunk.index,
+                    result.pieces_split,
+                    result.entries_salvaged,
+                    result.pieces_salvaged,
+                    result.pieces_failed,
+                )
+            for entry in result.entries:
                 validated = _validate_entry(entry)
                 if validated is not None:
                     candidates.append(validated)

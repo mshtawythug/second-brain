@@ -44,7 +44,7 @@ import tiktoken
 
 from .chat import ChatMessage, chat_json_with_client
 from .config import Config
-from .errors import EnrichmentError
+from .errors import EnrichmentError, describe_failure
 from .ollama_budget import (
     CHAT_DEFAULT_NUM_PREDICT,
     DEFAULT_OLLAMA_NUM_CTX,
@@ -579,7 +579,7 @@ class OllamaEnricher:
             # clause covers transport failure AND malformed-JSON-twice.
             _logger.warning(
                 "summarize_group: synthesis failed (%s); returning summary=None",
-                exc,
+                describe_failure(exc),
             )
             return None
         summary = body["summary"]
@@ -648,7 +648,7 @@ class OllamaEnricher:
             # clause covers transport failure AND malformed-JSON-twice.
             _logger.warning(
                 "summarize_bucket: synthesis failed (%s); returning summary=None",
-                exc,
+                describe_failure(exc),
             )
             return None
         summary = body["summary"]

@@ -331,6 +331,41 @@ class OllamaContextOverflow(EnrichmentError):
     """
 
 
+class ChatOutputTruncated(EnrichmentError):
+    """A JSON-mode chat reply was cut off at ``num_predict`` on both attempts.
+
+    Raised by :func:`brain.chat.chat_json_with_client` instead of a plain
+    :class:`EnrichmentError` when the FINAL attempt's decode failure was a
+    truncation (an unterminated string, or the decoder running out of input) --
+    the retry at a doubled budget was cut off too. A subclass, so every
+    ``except EnrichmentError`` caller is unaffected; a caller that can recover
+    catches it specifically (GraphRAG concept extraction splits the chunk and,
+    at the split bound, salvages the complete entities from the prefix).
+    ``partial`` is the last reply's raw text: it is derived from document
+    content, so it is deliberately NOT part of ``str(self)`` and must never be
+    logged.
+    """
+
+    def __init__(self, message: str, *, partial: str, num_predict: int) -> None:
+        super().__init__(message)
+        self.partial = partial
+        self.num_predict = num_predict
+
+
+def describe_failure(exc: BaseException) -> str:
+    """A content-free description of ``exc`` for a log line: its class, and its cause's.
+
+    Exception MESSAGES can carry document-derived text -- a chat error embeds the
+    model's reply (``{parsed!r}``), a psycopg error's DETAIL can quote row values
+    such as an entity name -- and CLAUDE.md forbids document content in a
+    WARNING log. Class names cannot carry it, and still say what went wrong
+    (``EnrichmentError from JSONDecodeError``).
+    """
+    name = type(exc).__name__
+    cause = exc.__cause__
+    return f"{name} from {type(cause).__name__}" if cause is not None else name
+
+
 class AudioError(BrainError):
     """Raised when ``brain audio`` script generation fails unrecoverably (Plan 04).
 

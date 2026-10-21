@@ -69,7 +69,7 @@ import psycopg
 
 from ..config import Config
 from ..db import ensure_embedding_column
-from ..errors import GraphTenantError
+from ..errors import GraphTenantError, describe_failure
 from ..ingest import Embedder
 from ..sensitivity import not_confidential_sql
 
@@ -280,7 +280,7 @@ def _run_summary_phase(
                 "summarize_communities: summary for community %s failed (%s); "
                 "leaving NULL (retried next run)",
                 community_key,
-                exc,
+                describe_failure(exc),  # class only: the message may quote model output
             )
             summary = None
         if summary is None:

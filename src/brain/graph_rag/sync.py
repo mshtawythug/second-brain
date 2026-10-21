@@ -45,6 +45,7 @@ import psycopg
 
 from ..config import Config
 from ..db import age_extension_available, load_age
+from ..errors import describe_failure
 from .backends.age import AgeBackend
 from .backends.base import GraphBackend
 from .extract import EntityExtractor
@@ -158,7 +159,8 @@ class GraphSyncer:
                 "graph sync (reconcile) skipped for doc %s: %s; "
                 "the graph is recomputable via `brain graphrag build`",
                 document_id,
-                exc,
+                # Class only: a psycopg DETAIL can quote row values (entity names).
+                describe_failure(exc),
             )
 
     def remove(self, conn: psycopg.Connection[Any], document_id: str) -> None:
@@ -179,7 +181,7 @@ class GraphSyncer:
                 "graph sync (remove) skipped for doc %s: %s; "
                 "the graph is recomputable via `brain graphrag build`",
                 document_id,
-                exc,
+                describe_failure(exc),  # class only, as in reconcile
             )
 
     def _age_ready(self, conn: psycopg.Connection[Any]) -> bool:
