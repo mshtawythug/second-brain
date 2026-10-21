@@ -74,10 +74,15 @@ the cut, which on a dense chunk is its whole tail. So a truncated chunk is
   one).
 * **`brain.graph_rag.chunk_split`** is a new module that owns the recursion.
   `extract_splitting_on_truncation` calls the model on a chunk. On
-  `ChatOutputTruncated` it splits the piece roughly in half (`split_in_half`: the
-  ingest chunker's paragraph → sentence → whitespace chain, target = half, no
-  overlap, so the halves partition the text) and extracts each half. A piece is
-  **salvaged instead of split** only at the bound:
+  `ChatOutputTruncated` it splits the piece in two with `split_in_half` and
+  extracts each half. `split_in_half` cuts ONCE, at the boundary nearest the
+  token midpoint, at the coarsest level (paragraph, then sentence, then line,
+  then word) that leaves each side at least 25% of the tokens. It falls back to
+  the token midpoint itself, and the two pieces concatenate back to the exact
+  input. *(Corrected after the audit of `5b4940d`: the first version packed
+  greedily through `chunk_text` with a half-size target. That could return three
+  or four pieces, so the 7-call bound below was false; a measured repro made 13
+  calls.)* A piece is **salvaged instead of split** only at the bound:
   * it has been split `MAX_SPLIT_DEPTH` = 2 times already (a 1,600-token chunk
     bottoms out at four pieces of about 400 tokens), or
   * it is under `MIN_SPLIT_TOKENS` = 200, or
@@ -97,7 +102,9 @@ the cut, which on a dense chunk is its whole tail. So a truncated chunk is
 **Cost.** A truncated call has already generated up to 1,024 + 2,048 tokens. Each
 split level can repeat that per piece, so depth 2 caps one pathological chunk at
 1 + 2 + 4 = 7 such calls (≈21.5k generated tokens, about ten minutes on
-`llama3.1:8b` locally). This is worth it rather than "clearly worse":
+`llama3.1:8b` locally). The bound is pinned against the REAL splitter by
+`test_extract_worst_case_truncated_chunk_costs_seven_calls`: exactly 14 requests,
+because each call is a first attempt plus its doubled-budget retry. This is worth it rather than "clearly worse":
 * it only runs on chunks that today produce **zero** entities;
 * the log shows 51 such chunks in total, not a per-document pattern;
 * it runs in the background watcher, not on an interactive path;
@@ -142,9 +149,9 @@ they cannot be targeted from it.
 | `src/brain/graph_rag/chunk_split.py` | NEW: split/salvage recursion | under 800 |
 | `src/brain/graph_rag/extract.py` | call `chunk_split` + counts-only WARN | **over**: inline reason at the growth, docstring pointer, CLAUDE.md row (promote the trailing descriptive hop to `a977744` / 896, add a fresh descriptive hop) |
 | `tests/test_json_salvage.py` | NEW | n/a |
-| `tests/test_graphrag_chunk_split.py` | NEW: depth/floor/unsplittable bounds, split-then-salvage, error policy | n/a |
+| `tests/test_graphrag_chunk_split.py` | NEW: depth/floor/unsplittable bounds, split-then-salvage, error policy, `split_in_half` cut choice and its ≤2 / lossless fan-out on the real tokenizer | n/a |
 | `tests/test_chat.py` | truncation → typed error carrying the partial; malformed → NOT typed | n/a |
-| `tests/test_graphrag_extract.py` | regressions: salvage under the floor, split keeps the tail, split-then-salvage at the floor | n/a |
+| `tests/test_graphrag_extract.py` | regressions: salvage under the floor, split keeps the tail, split-then-salvage at the floor, real worst-case call count | n/a |
 
 ## 6. Risks
 
@@ -159,59 +166,652 @@ they cannot be targeted from it.
 * **Other `chat_json` callers** see a subclass of the error they already catch.
   None catches `ChatOutputTruncated`, so their behaviour is unchanged.
 
-## 7. TDD + mutation proofs
+## 7. Mutation proofs — the repo's five-clause definition
 
-Recorded in §8 after implementation: for each new test, the five clauses — passes
-unmutated; the mutation lands (declared count); the test goes red; it fails on the
-targeted assertion; restored → green.
+The clauses: **(a)** every case passes unmutated; **(b)** each mutation lands
+exactly its declared count, replacing every occurrence; **(c)** the declared
+cases go red, and ONLY those, as an exact-set claim over every case below;
+**(d)** each red case fails with an `AssertionError` AT its targeted assertion
+line; **(e)** every independent claim has its own entry, every assertion is
+fired by at least one mutation, and any that no mutation reaches is listed as
+unfired with a reason. Restored → green is checked after every mutation as
+hygiene, not as a clause.
 
-## 8. Mutation proofs
+*(Corrected after the audit of `5b4940d`. The first record of this section used
+a homegrown clause list whose fifth clause was "restored → green". So (e) was
+never checked: twenty-odd assertions had no mutation reaching them. Its S6 row
+recorded a surviving single-site separator mutation (`pos += 1` → `+= 2`)
+and pointed at S6′, which pins a different line. That mutant is real: on
+compact JSON it returns `[{'name':'A'}, 'name']`. It is now killed by the new
+compact-separator test: J1 below, at one site.)*
 
-Harness: a copy of `src/` + `tests/` in the session scratchpad, imported ahead of
-the editable install, with its own sibling test DB. The worktree was never mutated
-while a suite ran. Each row records the five clauses:
+**Method.** Run 2026-10-21 against `8afd864`, sequentially in this worktree,
+with nothing else running in it and its own sibling test DB. Each run executes
+all **34** cases: the new json_salvage and chunk_split tests, plus the three new
+chat and four new extractor tests. The inventory for (e) is derived from the
+test files' AST: every `assert` in every case, **59** in all. It is not
+hand-listed, and the harness refuses to run if a new test in those files is
+missing from the case list. Raise checks assert `isinstance` on the caught
+exception, so a missing raise is an `AssertionError` at that line rather than
+pytest's `DID NOT RAISE`.
 
-1. the test passes unmutated;
-2. the mutation lands (1 site matched, file differs);
-3. the test goes red;
-4. it fails on the **targeted** assertion (quoted);
-5. it is green again after restore.
+The declared red sets were pinned from a `--dry` run in which every red case
+was reviewed: each failure is an `AssertionError` at that case's own assertion
+for the mutated claim. The judged run then re-measured them. One dry-run red
+was NOT an assertion: under P6, `u_lopsided` died with a `ValueError` while
+unpacking two pieces. The test was changed to assert on `pieces[0]`
+(`8afd864`) rather than declaring a non-assertion failure.
 
-All rows passed all five clauses on 2026-10-21.
+**Result: (a) 34/34. (b)–(d) OK for all 44 mutations. (e) 59/59 assertions
+fired, 0 exempt. Restored-green OK after every mutation.**
 
-| # | Test | Mutation | Red on (clause 4) |
-|---|---|---|---|
-| E1 | `test_graphrag_extract::…salvages_complete_entities_from_output_truncated_twice` | `chunk_split`: salvage → `[]` | `assert set() == {…Zorvex…}` |
-| E2 | `…splits_a_truncated_chunk_and_keeps_its_tail` | never split (`if False`) | `{('tool','Zorvex')} == {…Lumkai…}`: the tail is lost |
-| E3 | `…split_then_salvages_a_half_still_truncated_at_the_floor` | floor `>= min_tokens` → `>= 0` | WARN reads `split 2 … salvaged 3 … 3 piece(s)` |
-| E4 | `…splits_a_truncated_chunk_and_keeps_its_tail` | extract.py also logs `result.entries` | `'Zorvex' not in caplog` |
-| U1 | `test_graphrag_chunk_split::…split_depth_is_bounded…` | `depth < max_depth` → `<=` | `assert 15 == 7` |
-| U2 | `…a_piece_under_the_floor_is_salvaged_without_splitting` | floor → `>= 0` | `assert 7 == 1` |
-| U3 | `…a_piece_at_the_floor_is_split` | `>= min_tokens` → `>` | `assert 1 == 3` |
-| U4 | `…a_piece_that_will_not_split_is_salvaged` | `len(pieces) < 2` → `< 1` | `assert 3 == 1` |
-| U5 | `…split_then_salvage_keeps_the_parsed_half_and_the_salvaged_prefix` | salvage → `[]` | `({'name':'A'},) == ({'name':'A'},{'name':'B'})` |
-| U6 | `…a_malformed_sub_piece_is_skipped_and_counted…` | `pieces_failed += 1` → `+= 0` | `assert 0 == 1` |
-| U7 | `…ollama_unavailable_in_a_sub_piece_propagates` | drop `except OllamaUnavailable: raise` | `DID NOT RAISE OllamaUnavailable` |
-| U8 | `…the_chunks_own_malformed_reply_propagates` | swallow `EnrichmentError` at the top | `DID NOT RAISE EnrichmentError` |
-| U9 | `…split_in_half_partitions_the_text…` | `overlap_tokens=0` → `10` | `assert [...] == [...]` |
-| U10 | `…a_reply_that_parses_is_returned_untouched_with_no_split` | `truncated` → `return True` | `assert not True` |
-| M2a | `test_chat::…truncated_twice_raises_typed_error_with_partial` | `if truncated_text is not None` → `if False` | raises plain `EnrichmentError` past `pytest.raises(ChatOutputTruncated)` |
-| M2b | same | budget doubled on attempt 2 too | `assert 512 == 256` |
-| M2c | same | partial appended to the message | `'still trunc' not in …` |
-| M3 | `…malformed_twice_is_not_truncation` | truncation classifier → `if True` | `assert not True` (isinstance) |
-| M4 | `…truncation_then_malformed_is_not_truncation` | drop the per-attempt reset | `assert not True` (isinstance) |
-| S1 | `test_json_salvage::…stops_at_a_malformed_separator` | separator check → EOF only | `[{'name':'A'}, 'name', 'B'] == [{'name':'A'}]` |
-| S2 | `…key_not_followed_by_an_array_is_empty` | regex drops `\[` | `['oops'] == []` |
-| S3 | `…tolerates_pretty_printed_whitespace` | whitespace set → `" "` | `[] == [{…}]` |
-| S4 | `…skips_the_key_appearing_earlier_as_a_value` | regex drops `\s*:\s*\[` | `[] == [{'name':'Zorvex'}]` |
-| S5/S6′ | `…before_a_mid_string_cut`, `…cut_between_items` | stop returns `[]` | `[] == [{…}]` (both) |
-| S7 | `…empty_array…`, `…cut_inside_the_first_item…` | stop returns `items or [None]` | `[None] == []` (both) |
-| S8 | `…missing_key_is_empty` | missing key returns `[text]` | `[…] == []` |
-| S9 | `…closed_array_returns_every_item` | keep dict items only | `[{'b':[3]}] == ['a', 2, {'b':[3]}]` |
+**Where one mutation covers several tests of one claim:**
+* J7 covers `j_mid`, `j_between`, `j_compact`, `j_allws`, `j_pretty` and
+  `j_keyvalue`: all of them claim "the complete prefix is kept".
+* J8 covers `j_empty` and `j_first`: nothing is invented at a stop.
+* J9 covers `j_missing` and `j_notarray`: there is no array to read.
+* C6 covers `c_malformed` and `c_then`: garbage is not truncation.
 
-**One mutation was too weak, and the record says so.** S6, `pos += 1` → `+= 2`
-on the cut-between-items test, survived. It matched two sites, and skipping one
-extra character before an EOF changes nothing. The test is pinned instead by
-S6′ (stop returns `[]`). The salvage loop was also simplified in the course of
-these proofs: an explicit `]`/EOF check before `raw_decode` was dead-equivalent,
-because `raw_decode` refuses both. It was removed rather than left untestable.
+Mutations that also redden downstream tests declare those reds explicitly
+(e.g. C1 and S6 reach the extractor tests), so (c) holds as an exact set.
+
+Case keys:
+* `j_*`: `tests/test_json_salvage.py`
+* `u_*`: `tests/test_graphrag_chunk_split.py`
+* `c_*`: the three new tests in `tests/test_chat.py`
+* `e_*`: the four new tests in `tests/test_graphrag_extract.py`
+
+The harness maps each key to its test name.
+
+| # | Mutation | Red set (exact) → assertion fired |
+|---|---|---|
+| J1 | separator advance skips a char | `j_compact` → `assert salvage_array_items(text, "entities") == [{"name": "A"}, {"n…` |
+| J2 | whitespace set drops tab and CR | `j_allws` → `assert salvage_array_items(text, "entities") == [{"name": "A"}, {"n…` |
+| J3 | whitespace set is space only | `j_allws` → `assert salvage_array_items(text, "entities") == [{"name": "A"}, {"n…`<br>`j_pretty` → `assert salvage_array_items(text, "entities") == [{"name": "Zorvex",…` |
+| J4 | any separator continues | `j_badsep` → `assert salvage_array_items(text, "entities") == [{"name": "A"}]` |
+| J5 | key need not open an array | `e_salvage` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_sts` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_worst` → `assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in ca…`<br>`j_allws` → `assert salvage_array_items(text, "entities") == [{"name": "A"}, {"n…`<br>`j_badsep` → `assert salvage_array_items(text, "entities") == [{"name": "A"}]`<br>`j_between` → `assert salvage_array_items(text, "entities") == [{"name": "Zorvex",…`<br>`j_closed` → `assert salvage_array_items(text, "entities") == ["a", 2, {"b": [3]}]`<br>`j_compact` → `assert salvage_array_items(text, "entities") == [{"name": "A"}, {"n…`<br>`j_empty` → `assert salvage_array_items('{"entities": []}', "entities") == []`<br>`j_keyvalue` → `assert salvage_array_items(text, "entities") == [{"name": "Zorvex"}]`<br>`j_mid` → `assert salvage_array_items(text, "entities") == [`<br>`j_notarray` → `assert salvage_array_items('{"entities": "oops"}', "entities") == []`<br>`j_pretty` → `assert salvage_array_items(text, "entities") == [{"name": "Zorvex",…`<br>`u_depth` → `assert result.entries == ({"name": "W"},) * 4`<br>`u_sts` → `assert result.entries == ({"name": "A"}, {"name": "B"})` |
+| J6 | key need not be followed by a colon | `e_salvage` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_sts` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_worst` → `assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in ca…`<br>`j_allws` → `assert salvage_array_items(text, "entities") == [{"name": "A"}, {"n…`<br>`j_badsep` → `assert salvage_array_items(text, "entities") == [{"name": "A"}]`<br>`j_between` → `assert salvage_array_items(text, "entities") == [{"name": "Zorvex",…`<br>`j_closed` → `assert salvage_array_items(text, "entities") == ["a", 2, {"b": [3]}]`<br>`j_compact` → `assert salvage_array_items(text, "entities") == [{"name": "A"}, {"n…`<br>`j_keyvalue` → `assert salvage_array_items(text, "entities") == [{"name": "Zorvex"}]`<br>`j_mid` → `assert salvage_array_items(text, "entities") == [`<br>`j_pretty` → `assert salvage_array_items(text, "entities") == [{"name": "Zorvex",…`<br>`u_depth` → `assert result.entries == ({"name": "W"},) * 4`<br>`u_sts` → `assert result.entries == ({"name": "A"}, {"name": "B"})` |
+| J7 | a cut discards the prefix | `e_salvage` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_sts` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_worst` → `assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in ca…`<br>`j_allws` → `assert salvage_array_items(text, "entities") == [{"name": "A"}, {"n…`<br>`j_between` → `assert salvage_array_items(text, "entities") == [{"name": "Zorvex",…`<br>`j_compact` → `assert salvage_array_items(text, "entities") == [{"name": "A"}, {"n…`<br>`j_keyvalue` → `assert salvage_array_items(text, "entities") == [{"name": "Zorvex"}]`<br>`j_mid` → `assert salvage_array_items(text, "entities") == [`<br>`j_pretty` → `assert salvage_array_items(text, "entities") == [{"name": "Zorvex",…`<br>`u_depth` → `assert result.entries == ({"name": "W"},) * 4`<br>`u_sts` → `assert result.entries == ({"name": "A"}, {"name": "B"})` |
+| J8 | a stop invents an item | `j_empty` → `assert salvage_array_items('{"entities": []}', "entities") == []`<br>`j_first` → `assert salvage_array_items('{"entities": [{"name": "Zor', "entities…` |
+| J9 | missing key returns the text | `j_missing` → `assert salvage_array_items('{"other": [{"name": "Zorvex"}]}', "enti…`<br>`j_notarray` → `assert salvage_array_items('{"entities": "oops"}', "entities") == []` |
+| J10 | only object items kept | `j_closed` → `assert salvage_array_items(text, "entities") == ["a", 2, {"b": [3]}]` |
+| C1 | final truncation not typed | `c_trunc` → `assert isinstance(excinfo.value, ChatOutputTruncated)`<br>`e_salvage` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_split` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_sts` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_worst` → `assert len(requests) == 14` |
+| C2 | partial keeps the FIRST reply | `c_then` → `assert not isinstance(excinfo.value, ChatOutputTruncated)`<br>`c_trunc` → `assert excinfo.value.partial == '{"answer": "still trunc'` |
+| C3 | reported budget doubled again | `c_trunc` → `assert excinfo.value.num_predict == 256` |
+| C4 | partial leaks into the message | `c_trunc` → `assert "still trunc" not in str(excinfo.value)` |
+| C5 | message prefix reworded | `c_trunc` → `assert str(excinfo.value).startswith("chat failed after 2 attempts:…` |
+| C6 | every decode failure is truncation | `c_malformed` → `assert not isinstance(excinfo.value, ChatOutputTruncated)`<br>`c_then` → `assert not isinstance(excinfo.value, ChatOutputTruncated)` |
+| C7 | per-attempt reset dropped | `c_then` → `assert not isinstance(excinfo.value, ChatOutputTruncated)` |
+| S1 | depth bound raised to 3 | `e_worst` → `assert len(requests) == 14`<br>`u_depth` → `assert MAX_SPLIT_DEPTH == 2` |
+| S2 | depth comparison off by one | `e_worst` → `assert len(requests) == 14`<br>`u_depth` → `assert len(calls) == 7`<br>`u_sts` → `assert result.entries == ({"name": "A"}, {"name": "B"})` |
+| S3 | no size floor | `e_salvage` → `assert "split 0 piece(s), salvaged 3 entries from 1 piece(s)" in ca…`<br>`e_sts` → `assert "split 1 piece(s), salvaged 1 entries from 1 piece(s)" in ca…`<br>`u_under` → `assert len(calls) == 1` |
+| S4 | floor exclusive | `u_at` → `assert len(calls) == 3` |
+| S5 | a one-piece split recurses | `u_wont` → `assert len(calls) == 1` |
+| S6 | salvage at the bound yields nothing | `e_salvage` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_sts` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_worst` → `assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in ca…`<br>`u_depth` → `assert result.entries == ({"name": "W"},) * 4`<br>`u_sts` → `assert result.entries == ({"name": "A"}, {"name": "B"})` |
+| S7 | pieces_split over-counted | `e_split` → `assert "split 1 piece(s), salvaged 0 entries from 0 piece(s)" in ca…`<br>`e_sts` → `assert "split 1 piece(s), salvaged 1 entries from 1 piece(s)" in ca…`<br>`e_worst` → `assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in ca…`<br>`u_at` → `assert result.pieces_split == 1`<br>`u_depth` → `assert result.pieces_split == 3`<br>`u_sts` → `assert (result.pieces_split, result.pieces_salvaged, result.entries…` |
+| S8 | pieces_salvaged over-counted | `e_salvage` → `assert "split 0 piece(s), salvaged 3 entries from 1 piece(s)" in ca…`<br>`e_sts` → `assert "split 1 piece(s), salvaged 1 entries from 1 piece(s)" in ca…`<br>`e_worst` → `assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in ca…`<br>`u_depth` → `assert result.pieces_salvaged == 4`<br>`u_sts` → `assert (result.pieces_split, result.pieces_salvaged, result.entries…`<br>`u_under` → `assert result.pieces_salvaged == 1`<br>`u_wont` → `assert result.pieces_salvaged == 1` |
+| S9 | entries_salvaged over-counted | `e_salvage` → `assert "split 0 piece(s), salvaged 3 entries from 1 piece(s)" in ca…`<br>`e_sts` → `assert "split 1 piece(s), salvaged 1 entries from 1 piece(s)" in ca…`<br>`e_worst` → `assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in ca…`<br>`u_depth` → `assert result.entries_salvaged == 4`<br>`u_sts` → `assert (result.pieces_split, result.pieces_salvaged, result.entries…` |
+| S10 | malformed piece not counted | `u_malformed` → `assert result.pieces_failed == 1` |
+| S11 | malformed piece abandons its siblings | `u_malformed` → `assert result.entries == ({"name": "B"},)` |
+| S12 | OllamaUnavailable swallowed in a sub-piece | `u_unavail` → `assert isinstance(raised, OllamaUnavailable)` |
+| S13 | the chunk's own malformed reply swallowed | `u_own` → `assert isinstance(raised, EnrichmentError)`<br>`u_unavail` → `assert isinstance(raised, OllamaUnavailable)` |
+| S14 | truncated always true | `u_parses` → `assert not result.truncated` |
+| S15 | parsed entries dropped | `e_split` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_sts` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`u_malformed` → `assert result.entries == ({"name": "B"},)`<br>`u_parses` → `assert result.entries == ({"name": "A"},)`<br>`u_sts` → `assert result.entries == ({"name": "A"}, {"name": "B"})` |
+| S16 | a parsing piece is called twice | `e_sts` → `assert len(calls) == 5`<br>`u_parses` → `assert len(calls) == 1` |
+| S17 | never split | `e_split` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_sts` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_worst` → `assert len(requests) == 14`<br>`u_at` → `assert len(calls) == 3`<br>`u_depth` → `assert len(calls) == 7`<br>`u_malformed` → `assert result.entries == ({"name": "B"},)`<br>`u_sts` → `assert result.entries == ({"name": "A"}, {"name": "B"})`<br>`u_unavail` → `assert isinstance(raised, OllamaUnavailable)` |
+| P1 | paragraph level skipped | `e_split` → `assert {(e.entity_type, e.display_name) for e in out} == {`<br>`e_sts` → `assert "split 1 piece(s), salvaged 1 entries from 1 piece(s)" in ca…`<br>`u_para` → `assert split_in_half(text, count_tokens=_words) == [f"{first}\n\n{s…` |
+| P2 | nearer-neighbour check dropped | `u_nearer` → `assert split_in_half(text, count_tokens=_words)[0] == f"{first}\n\n"` |
+| P3 | no balance requirement | `u_lopsided` → `assert _words(pieces[0]) == 40` |
+| P4 | token midpoint off by one | `u_midpoint` → `assert split_in_half("abcdefgh", count_tokens=len) == ["abcd", "efgh"]` |
+| P5 | a single token is split | `u_single` → `assert split_in_half("word", count_tokens=_words) == ["word"]` |
+| P6 | greedy packing restored | `e_worst` → `assert len(requests) == 14`<br>`u_fanout` → `assert len(pieces) <= 2`<br>`u_lopsided` → `assert _words(pieces[0]) == 40`<br>`u_midpoint` → `assert split_in_half("abcdefgh", count_tokens=len) == ["abcd", "efgh"]`<br>`u_nearer` → `assert split_in_half(text, count_tokens=_words)[0] == f"{first}\n\n"`<br>`u_para` → `assert split_in_half(text, count_tokens=_words) == [f"{first}\n\n{s…` |
+| P7 | cut whitespace dropped | `u_fanout` → `assert "".join(pieces) == text`<br>`u_nearer` → `assert split_in_half(text, count_tokens=_words)[0] == f"{first}\n\n"`<br>`u_para` → `assert split_in_half(text, count_tokens=_words) == [f"{first}\n\n{s…` |
+| X1 | WARN carries the entries | `e_salvage` → `assert "Zorvex" not in caplog.text`<br>`e_split` → `assert "Zorvex" not in caplog.text` |
+| X2 | WARN salvage counts swapped | `e_salvage` → `assert "split 0 piece(s), salvaged 3 entries from 1 piece(s)" in ca…` |
+| X3 | truncated chunk reported as skipped | `e_salvage` → `assert "skipping chunk" not in caplog.text` |
+
+## Appendix — the harness
+
+Run from the worktree root on a clean, committed tree (it restores with
+`git checkout`), with `TEST_DATABASE_URL` pointing at a sibling test DB:
+`.venv/bin/python harness.py <scratch-dir>` (`--dry` prints the measured red
+sets without judging).
+
+```python
+"""Five-clause mutation harness (repo definition (a)-(e)) for the concept-extract output-budget tests.
+
+(a) every case passes unmutated; (b) every mutation pair lands exactly its declared
+count, replacing all occurrences; (c) the declared cases go red, and ONLY those;
+(d) each red case fails with an AssertionError AT its targeted assertion line;
+(e) every assertion in the inventory -- derived from the test files' AST, not
+hand-listed -- is fired by at least one mutation, or listed as unfired with a
+reason. Restored -> clean tree and all green is checked as hygiene.
+
+Usage (worktree root, clean committed tree, TEST_DATABASE_URL on a sibling DB):
+    .venv/bin/python harness.py <scratch-dir> [--dry]
+--dry prints each mutation's measured red set and failing lines without judging.
+"""
+import ast
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+WT = Path.cwd()
+OUT = Path(sys.argv[1])
+DRY = "--dry" in sys.argv
+OUT.mkdir(parents=True, exist_ok=True)
+
+FILES = {
+    "j": ("tests/test_json_salvage.py", None),
+    "u": ("tests/test_graphrag_chunk_split.py", None),
+    "c": ("tests/test_chat.py", [
+        "test_chat_json_with_client_truncated_twice_raises_typed_error_with_partial",
+        "test_chat_json_with_client_malformed_twice_is_not_truncation",
+        "test_chat_json_with_client_truncation_then_malformed_is_not_truncation",
+    ]),
+    "e": ("tests/test_graphrag_extract.py", [
+        "test_extract_salvages_complete_entities_from_output_truncated_twice",
+        "test_extract_splits_a_truncated_chunk_and_keeps_its_tail",
+        "test_extract_split_then_salvages_a_half_still_truncated_at_the_floor",
+        "test_extract_worst_case_truncated_chunk_costs_seven_calls",
+    ]),
+}
+SHORT = {
+    # json_salvage
+    "j_mid": "test_salvage_returns_complete_items_before_a_mid_string_cut",
+    "j_between": "test_salvage_stops_at_a_cut_between_items",
+    "j_compact": "test_salvage_handles_compact_separators",
+    "j_allws": "test_salvage_handles_every_json_whitespace_around_separators",
+    "j_pretty": "test_salvage_tolerates_pretty_printed_whitespace",
+    "j_closed": "test_salvage_of_a_closed_array_returns_every_item",
+    "j_empty": "test_salvage_of_an_empty_array_is_empty",
+    "j_first": "test_salvage_cut_inside_the_first_item_is_empty",
+    "j_missing": "test_salvage_missing_key_is_empty",
+    "j_notarray": "test_salvage_key_not_followed_by_an_array_is_empty",
+    "j_keyvalue": "test_salvage_skips_the_key_appearing_earlier_as_a_value",
+    "j_badsep": "test_salvage_stops_at_a_malformed_separator",
+    # chunk_split
+    "u_parses": "test_a_reply_that_parses_is_returned_untouched_with_no_split",
+    "u_depth": "test_split_depth_is_bounded_then_each_leaf_is_salvaged",
+    "u_under": "test_a_piece_under_the_floor_is_salvaged_without_splitting",
+    "u_at": "test_a_piece_at_the_floor_is_split",
+    "u_wont": "test_a_piece_that_will_not_split_is_salvaged",
+    "u_sts": "test_split_then_salvage_keeps_the_parsed_half_and_the_salvaged_prefix",
+    "u_malformed": "test_a_malformed_sub_piece_is_skipped_and_counted_its_sibling_kept",
+    "u_unavail": "test_ollama_unavailable_in_a_sub_piece_propagates",
+    "u_own": "test_the_chunks_own_malformed_reply_propagates",
+    "u_para": "test_split_in_half_cuts_at_the_paragraph_boundary_nearest_the_midpoint",
+    "u_nearer": "test_split_in_half_picks_the_nearer_of_the_two_neighbouring_cuts",
+    "u_lopsided": "test_split_in_half_a_lopsided_paragraph_cut_falls_through_to_a_word_cut",
+    "u_midpoint": "test_split_in_half_falls_back_to_the_token_midpoint_without_whitespace",
+    "u_single": "test_split_in_half_leaves_a_single_token_whole",
+    "u_fanout": "test_split_in_half_never_fans_out_past_two_and_loses_nothing",
+    # chat
+    "c_trunc": "test_chat_json_with_client_truncated_twice_raises_typed_error_with_partial",
+    "c_malformed": "test_chat_json_with_client_malformed_twice_is_not_truncation",
+    "c_then": "test_chat_json_with_client_truncation_then_malformed_is_not_truncation",
+    # extract
+    "e_salvage": "test_extract_salvages_complete_entities_from_output_truncated_twice",
+    "e_split": "test_extract_splits_a_truncated_chunk_and_keeps_its_tail",
+    "e_sts": "test_extract_split_then_salvages_a_half_still_truncated_at_the_floor",
+    "e_worst": "test_extract_worst_case_truncated_chunk_costs_seven_calls",
+}
+TESTS = {k: f"{FILES[k[0]][0]}::{fn}" for k, fn in SHORT.items()}
+
+
+def _inventory() -> dict[str, list[str]]:
+    """Every assert in each case, as its stripped first source line (AST-derived)."""
+    inv: dict[str, list[str]] = {}
+    for prefix, (path, only) in FILES.items():
+        src = (WT / path).read_text()
+        lines = src.splitlines()
+        names = {fn for k, fn in SHORT.items() if k[0] == prefix}
+        defined = set()
+        for node in ast.parse(src).body:
+            if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
+                continue
+            if only is None or node.name in only:
+                defined.add(node.name)
+            if node.name not in names:
+                continue
+            key = next(k for k, fn in SHORT.items() if fn == node.name)
+            asserts = [lines[a.lineno - 1].strip() for a in ast.walk(node) if isinstance(a, ast.Assert)]
+            assert len(asserts) == len(set(asserts)), f"duplicate assert line in {key}"
+            inv[key] = asserts
+        missing = defined - names
+        assert not missing, f"new test not in the case list: {missing}"
+    return inv
+
+
+INVENTORY = _inventory()
+# (e) exemptions: (case, snippet) -> reason. Empty unless a run shows a gap.
+UNFIRED: dict[tuple[str, str], str] = {}
+
+J = "src/brain/json_salvage.py"
+C = "src/brain/chat.py"
+S = "src/brain/graph_rag/chunk_split.py"
+X = "src/brain/graph_rag/extract.py"
+GREEDY = (
+    "    from ..ingest.chunker import chunk_text\n\n"
+    "    half_ = max(1, (count_tokens(text) + 1) // 2)\n"
+    "    return [c.content for c in chunk_text(text, target_tokens=half_, overlap_tokens=0,"
+    " count_tokens=count_tokens)]\n"
+)
+ENT = "assert {(e.entity_type, e.display_name) for e in out} == {"
+SAL = "assert salvage_array_items("
+
+# (label, file, [(old, new, declared_count)], {case: targeted-assert snippet})
+M = [
+    ("J1 separator advance skips a char", J, [("            return items\n        pos += 1\n",
+                                               "            return items\n        pos += 2\n", 1)],
+     {"j_compact": SAL}),
+    ("J2 whitespace set drops tab and CR", J, [('_WHITESPACE = " \\t\\n\\r"', '_WHITESPACE = " \\n"', 1)],
+     {"j_allws": SAL}),
+    ("J3 whitespace set is space only", J, [('_WHITESPACE = " \\t\\n\\r"', '_WHITESPACE = " "', 1)],
+     {"j_allws": SAL, "j_pretty": SAL}),
+    ("J4 any separator continues", J, [('        if pos >= len(text) or text[pos] != ",":\n',
+                                       "        if pos >= len(text):\n", 1)],
+     {"j_badsep": SAL}),
+    ("J5 key need not open an array", J, [("\\s*:\\s*\\['", "\\s*:\\s*'", 1)],
+     {}),
+    ("J6 key need not be followed by a colon", J, [("rf'\"{re.escape(key)}\"\\s*:\\s*\\['", "rf'\"{re.escape(key)}\"'", 1)],
+     {}),
+    ("J7 a cut discards the prefix", J, [("        except json.JSONDecodeError:\n            return items\n",
+                                         "        except json.JSONDecodeError:\n            return []\n", 1)],
+     {}),
+    ("J8 a stop invents an item", J, [("        except json.JSONDecodeError:\n            return items\n",
+                                       "        except json.JSONDecodeError:\n            return items or [None]\n", 1)],
+     {}),
+    ("J9 missing key returns the text", J, [("    if match is None:\n        return []\n",
+                                            "    if match is None:\n        return [text]\n", 1)],
+     {}),
+    ("J10 only object items kept", J, [("        items.append(item)\n",
+                                       "        items.append(item) if isinstance(item, dict) else None\n", 1)],
+     {"j_closed": SAL}),
+    ("C1 final truncation not typed", C, [("    if truncated_text is not None:\n", "    if False:\n", 1)],
+     {}),
+    ("C2 partial keeps the FIRST reply", C, [("        truncated_text = None\n", "        pass\n", 1),
+                                             ("                truncated_text = response_text\n",
+                                              "                truncated_text = truncated_text or response_text\n", 1)],
+     {}),
+    ("C3 reported budget doubled again", C, [("                if attempt == 1:\n", "                if True:\n", 1)],
+     {"c_trunc": "assert excinfo.value.num_predict == 256"}),
+    ("C4 partial leaks into the message", C, [('    message = f"chat failed after 2 attempts: {last_error}"\n',
+                                               '    message = f"chat failed after 2 attempts: {last_error} {truncated_text}"\n', 1)],
+     {"c_trunc": 'assert "still trunc" not in str(excinfo.value)'}),
+    ("C5 message prefix reworded", C, [('    message = f"chat failed after 2 attempts: {last_error}"\n',
+                                        '    message = f"chat failed: {last_error}"\n', 1)],
+     {"c_trunc": 'assert str(excinfo.value).startswith("chat failed after 2 attempts: Unterminated")'}),
+    ("C6 every decode failure is truncation", C, [('            if "Unterminated" in exc.msg or exc.pos >= len(response_text):\n',
+                                                   "            if True:\n", 1)],
+     {}),
+    ("C7 per-attempt reset dropped", C, [("        truncated_text = None\n", "        pass\n", 1)],
+     {}),
+    ("S1 depth bound raised to 3", S, [("MAX_SPLIT_DEPTH = 2\n", "MAX_SPLIT_DEPTH = 3\n", 1)], {}),
+    ("S2 depth comparison off by one", S, [("            if depth < max_depth and", "            if depth <= max_depth and", 1)], {}),
+    ("S3 no size floor", S, [("count_tokens(piece) >= min_tokens", "count_tokens(piece) >= 0", 1)], {}),
+    ("S4 floor exclusive", S, [("count_tokens(piece) >= min_tokens", "count_tokens(piece) > min_tokens", 1)], {}),
+    ("S5 a one-piece split recurses", S, [("        if len(pieces) < 2:\n", "        if len(pieces) < 1:\n", 1)], {}),
+    ("S6 salvage at the bound yields nothing", S, [("            salvaged = salvage_array_items(exc.partial, _ENTITIES_KEY)\n",
+                                                    "            salvaged = []\n", 1)], {}),
+    ("S7 pieces_split over-counted", S, [("        tally.pieces_split += 1\n", "        tally.pieces_split += 2\n", 1)], {}),
+    ("S8 pieces_salvaged over-counted", S, [("            tally.pieces_salvaged += 1\n", "            tally.pieces_salvaged += 2\n", 1)], {}),
+    ("S9 entries_salvaged over-counted", S, [("            tally.entries_salvaged += len(salvaged)\n",
+                                              "            tally.entries_salvaged += 2 * len(salvaged)\n", 1)], {}),
+    ("S10 malformed piece not counted", S, [("                tally.pieces_failed += 1\n", "                tally.pieces_failed += 0\n", 1)], {}),
+    ("S11 malformed piece abandons its siblings", S, [("                tally.pieces_failed += 1\n",
+                                                       "                tally.pieces_failed += 1\n                break\n", 1)], {}),
+    ("S12 OllamaUnavailable swallowed in a sub-piece", S, [("            except OllamaUnavailable:\n                raise\n", "", 1)], {}),
+    ("S13 the chunk's own malformed reply swallowed", S, [("    extract(text, 0)\n",
+                                                          "    try:\n        extract(text, 0)\n    except EnrichmentError:\n        pass\n", 1)], {}),
+    ("S14 truncated always true", S, [("        return self.pieces_split > 0 or self.pieces_salvaged > 0\n",
+                                       "        return True\n", 1)], {}),
+    ("S15 parsed entries dropped", S, [("            tally.entries.extend(extract_entities(piece))\n",
+                                        "            tally.entries.extend(extract_entities(piece)[:0])\n", 1)], {}),
+    ("S16 a parsing piece is called twice", S, [("            tally.entries.extend(extract_entities(piece))\n",
+                                                 "            extract_entities(piece)\n            tally.entries.extend(extract_entities(piece))\n", 1)], {}),
+    ("S17 never split", S, [("            if depth < max_depth and count_tokens(piece) >= min_tokens\n",
+                             "            if False\n", 1)], {}),
+    ("P1 paragraph level skipped", S, [('    re.compile(r"\\n[ \\t]*\\n\\s*"),\n', "", 1)], {}),
+    ("P2 nearer-neighbour check dropped", S, [("    neighbours = cuts[max(lo - 1, 0) : lo + 1]\n",
+                                               "    neighbours = cuts[lo : lo + 1]\n", 1)], {}),
+    ("P3 no balance requirement", S, [("_MIN_SIDE_SHARE = 0.25\n", "_MIN_SIDE_SHARE = 0.0\n", 1)], {}),
+    ("P4 token midpoint off by one", S, [("        if count_tokens(text[:mid]) < half:\n",
+                                          "        if count_tokens(text[:mid]) <= half:\n", 1)], {}),
+    ("P5 a single token is split", S, [("    if total < 2:\n", "    if total < 1:\n", 1)], {}),
+    ("P6 greedy packing restored", S, [("    total = count_tokens(text)\n    if total < 2:\n",
+                                        GREEDY + "    total = count_tokens(text)\n    if total < 2:\n", 1)], {}),
+    ("P7 cut whitespace dropped", S, [("return [text[:cut], text[cut:]]", "return [text[:cut].rstrip(), text[cut:]]", 2)], {}),
+    ("X1 WARN carries the entries", X, [("            for entry in result.entries:\n",
+                                         '            _logger.warning("%s", result.entries)\n            for entry in result.entries:\n', 1)], {}),
+    ("X2 WARN salvage counts swapped", X, [("                    result.entries_salvaged,\n                    result.pieces_salvaged,\n",
+                                            "                    result.pieces_salvaged,\n                    result.entries_salvaged,\n", 1)], {}),
+    ("X3 truncated chunk reported as skipped", X, [('"concept extraction: chunk %d output truncated at num_predict; "',
+                                                    '"concept extraction: chunk %d output truncated at num_predict; skipping chunk; "', 1)], {}),
+]
+
+# Declared red sets: pinned from a reviewed --dry run (every red line is an
+# AssertionError at that case's own assert for the mutated claim), then re-measured.
+TARGETS: dict[str, dict[str, str]] = {
+    'J1': {
+        'j_compact': 'assert salvage_array_items(text, "entities") == [{"name": "A"}, {"name": "B"}]',
+    },
+    'J2': {
+        'j_allws': 'assert salvage_array_items(text, "entities") == [{"name": "A"}, {"name": "B"}]',
+    },
+    'J3': {
+        'j_allws': 'assert salvage_array_items(text, "entities") == [{"name": "A"}, {"name": "B"}]',
+        'j_pretty': 'assert salvage_array_items(text, "entities") == [{"name": "Zorvex", "type": "tool"}]',
+    },
+    'J4': {
+        'j_badsep': 'assert salvage_array_items(text, "entities") == [{"name": "A"}]',
+    },
+    'J5': {
+        'e_salvage': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_sts': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_worst': 'assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in caplog.text',
+        'j_allws': 'assert salvage_array_items(text, "entities") == [{"name": "A"}, {"name": "B"}]',
+        'j_badsep': 'assert salvage_array_items(text, "entities") == [{"name": "A"}]',
+        'j_between': 'assert salvage_array_items(text, "entities") == [{"name": "Zorvex", "type": "tool"}]',
+        'j_closed': 'assert salvage_array_items(text, "entities") == ["a", 2, {"b": [3]}]',
+        'j_compact': 'assert salvage_array_items(text, "entities") == [{"name": "A"}, {"name": "B"}]',
+        'j_empty': 'assert salvage_array_items(\'{"entities": []}\', "entities") == []',
+        'j_keyvalue': 'assert salvage_array_items(text, "entities") == [{"name": "Zorvex"}]',
+        'j_mid': 'assert salvage_array_items(text, "entities") == [',
+        'j_notarray': 'assert salvage_array_items(\'{"entities": "oops"}\', "entities") == []',
+        'j_pretty': 'assert salvage_array_items(text, "entities") == [{"name": "Zorvex", "type": "tool"}]',
+        'u_depth': 'assert result.entries == ({"name": "W"},) * 4',
+        'u_sts': 'assert result.entries == ({"name": "A"}, {"name": "B"})',
+    },
+    'J6': {
+        'e_salvage': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_sts': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_worst': 'assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in caplog.text',
+        'j_allws': 'assert salvage_array_items(text, "entities") == [{"name": "A"}, {"name": "B"}]',
+        'j_badsep': 'assert salvage_array_items(text, "entities") == [{"name": "A"}]',
+        'j_between': 'assert salvage_array_items(text, "entities") == [{"name": "Zorvex", "type": "tool"}]',
+        'j_closed': 'assert salvage_array_items(text, "entities") == ["a", 2, {"b": [3]}]',
+        'j_compact': 'assert salvage_array_items(text, "entities") == [{"name": "A"}, {"name": "B"}]',
+        'j_keyvalue': 'assert salvage_array_items(text, "entities") == [{"name": "Zorvex"}]',
+        'j_mid': 'assert salvage_array_items(text, "entities") == [',
+        'j_pretty': 'assert salvage_array_items(text, "entities") == [{"name": "Zorvex", "type": "tool"}]',
+        'u_depth': 'assert result.entries == ({"name": "W"},) * 4',
+        'u_sts': 'assert result.entries == ({"name": "A"}, {"name": "B"})',
+    },
+    'J7': {
+        'e_salvage': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_sts': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_worst': 'assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in caplog.text',
+        'j_allws': 'assert salvage_array_items(text, "entities") == [{"name": "A"}, {"name": "B"}]',
+        'j_between': 'assert salvage_array_items(text, "entities") == [{"name": "Zorvex", "type": "tool"}]',
+        'j_compact': 'assert salvage_array_items(text, "entities") == [{"name": "A"}, {"name": "B"}]',
+        'j_keyvalue': 'assert salvage_array_items(text, "entities") == [{"name": "Zorvex"}]',
+        'j_mid': 'assert salvage_array_items(text, "entities") == [',
+        'j_pretty': 'assert salvage_array_items(text, "entities") == [{"name": "Zorvex", "type": "tool"}]',
+        'u_depth': 'assert result.entries == ({"name": "W"},) * 4',
+        'u_sts': 'assert result.entries == ({"name": "A"}, {"name": "B"})',
+    },
+    'J8': {
+        'j_empty': 'assert salvage_array_items(\'{"entities": []}\', "entities") == []',
+        'j_first': 'assert salvage_array_items(\'{"entities": [{"name": "Zor\', "entities") == []',
+    },
+    'J9': {
+        'j_missing': 'assert salvage_array_items(\'{"other": [{"name": "Zorvex"}]}\', "entities") == []',
+        'j_notarray': 'assert salvage_array_items(\'{"entities": "oops"}\', "entities") == []',
+    },
+    'J10': {
+        'j_closed': 'assert salvage_array_items(text, "entities") == ["a", 2, {"b": [3]}]',
+    },
+    'C1': {
+        'c_trunc': 'assert isinstance(excinfo.value, ChatOutputTruncated)',
+        'e_salvage': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_split': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_sts': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_worst': 'assert len(requests) == 14',
+    },
+    'C2': {
+        'c_then': 'assert not isinstance(excinfo.value, ChatOutputTruncated)',
+        'c_trunc': 'assert excinfo.value.partial == \'{"answer": "still trunc\'',
+    },
+    'C3': {
+        'c_trunc': 'assert excinfo.value.num_predict == 256',
+    },
+    'C4': {
+        'c_trunc': 'assert "still trunc" not in str(excinfo.value)',
+    },
+    'C5': {
+        'c_trunc': 'assert str(excinfo.value).startswith("chat failed after 2 attempts: Unterminated")',
+    },
+    'C6': {
+        'c_malformed': 'assert not isinstance(excinfo.value, ChatOutputTruncated)',
+        'c_then': 'assert not isinstance(excinfo.value, ChatOutputTruncated)',
+    },
+    'C7': {
+        'c_then': 'assert not isinstance(excinfo.value, ChatOutputTruncated)',
+    },
+    'S1': {
+        'e_worst': 'assert len(requests) == 14',
+        'u_depth': 'assert MAX_SPLIT_DEPTH == 2',
+    },
+    'S2': {
+        'e_worst': 'assert len(requests) == 14',
+        'u_depth': 'assert len(calls) == 7',
+        'u_sts': 'assert result.entries == ({"name": "A"}, {"name": "B"})',
+    },
+    'S3': {
+        'e_salvage': 'assert "split 0 piece(s), salvaged 3 entries from 1 piece(s)" in caplog.text',
+        'e_sts': 'assert "split 1 piece(s), salvaged 1 entries from 1 piece(s)" in caplog.text',
+        'u_under': 'assert len(calls) == 1',
+    },
+    'S4': {
+        'u_at': 'assert len(calls) == 3',
+    },
+    'S5': {
+        'u_wont': 'assert len(calls) == 1',
+    },
+    'S6': {
+        'e_salvage': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_sts': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_worst': 'assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in caplog.text',
+        'u_depth': 'assert result.entries == ({"name": "W"},) * 4',
+        'u_sts': 'assert result.entries == ({"name": "A"}, {"name": "B"})',
+    },
+    'S7': {
+        'e_split': 'assert "split 1 piece(s), salvaged 0 entries from 0 piece(s)" in caplog.text',
+        'e_sts': 'assert "split 1 piece(s), salvaged 1 entries from 1 piece(s)" in caplog.text',
+        'e_worst': 'assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in caplog.text',
+        'u_at': 'assert result.pieces_split == 1',
+        'u_depth': 'assert result.pieces_split == 3',
+        'u_sts': 'assert (result.pieces_split, result.pieces_salvaged, result.entries_salvaged) == (1, 1, 1)',
+    },
+    'S8': {
+        'e_salvage': 'assert "split 0 piece(s), salvaged 3 entries from 1 piece(s)" in caplog.text',
+        'e_sts': 'assert "split 1 piece(s), salvaged 1 entries from 1 piece(s)" in caplog.text',
+        'e_worst': 'assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in caplog.text',
+        'u_depth': 'assert result.pieces_salvaged == 4',
+        'u_sts': 'assert (result.pieces_split, result.pieces_salvaged, result.entries_salvaged) == (1, 1, 1)',
+        'u_under': 'assert result.pieces_salvaged == 1',
+        'u_wont': 'assert result.pieces_salvaged == 1',
+    },
+    'S9': {
+        'e_salvage': 'assert "split 0 piece(s), salvaged 3 entries from 1 piece(s)" in caplog.text',
+        'e_sts': 'assert "split 1 piece(s), salvaged 1 entries from 1 piece(s)" in caplog.text',
+        'e_worst': 'assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in caplog.text',
+        'u_depth': 'assert result.entries_salvaged == 4',
+        'u_sts': 'assert (result.pieces_split, result.pieces_salvaged, result.entries_salvaged) == (1, 1, 1)',
+    },
+    'S10': {
+        'u_malformed': 'assert result.pieces_failed == 1',
+    },
+    'S11': {
+        'u_malformed': 'assert result.entries == ({"name": "B"},)',
+    },
+    'S12': {
+        'u_unavail': 'assert isinstance(raised, OllamaUnavailable)',
+    },
+    'S13': {
+        'u_own': 'assert isinstance(raised, EnrichmentError)',
+        'u_unavail': 'assert isinstance(raised, OllamaUnavailable)',
+    },
+    'S14': {
+        'u_parses': 'assert not result.truncated',
+    },
+    'S15': {
+        'e_split': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_sts': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'u_malformed': 'assert result.entries == ({"name": "B"},)',
+        'u_parses': 'assert result.entries == ({"name": "A"},)',
+        'u_sts': 'assert result.entries == ({"name": "A"}, {"name": "B"})',
+    },
+    'S16': {
+        'e_sts': 'assert len(calls) == 5',
+        'u_parses': 'assert len(calls) == 1',
+    },
+    'S17': {
+        'e_split': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_sts': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_worst': 'assert len(requests) == 14',
+        'u_at': 'assert len(calls) == 3',
+        'u_depth': 'assert len(calls) == 7',
+        'u_malformed': 'assert result.entries == ({"name": "B"},)',
+        'u_sts': 'assert result.entries == ({"name": "A"}, {"name": "B"})',
+        'u_unavail': 'assert isinstance(raised, OllamaUnavailable)',
+    },
+    'P1': {
+        'e_split': 'assert {(e.entity_type, e.display_name) for e in out} == {',
+        'e_sts': 'assert "split 1 piece(s), salvaged 1 entries from 1 piece(s)" in caplog.text',
+        'u_para': 'assert split_in_half(text, count_tokens=_words) == [f"{first}\\n\\n{second}\\n\\n", third]',
+    },
+    'P2': {
+        'u_nearer': 'assert split_in_half(text, count_tokens=_words)[0] == f"{first}\\n\\n"',
+    },
+    'P3': {
+        'u_lopsided': 'assert _words(pieces[0]) == 40',
+    },
+    'P4': {
+        'u_midpoint': 'assert split_in_half("abcdefgh", count_tokens=len) == ["abcd", "efgh"]',
+    },
+    'P5': {
+        'u_single': 'assert split_in_half("word", count_tokens=_words) == ["word"]',
+    },
+    'P6': {
+        'e_worst': 'assert len(requests) == 14',
+        'u_fanout': 'assert len(pieces) <= 2',
+        'u_lopsided': 'assert _words(pieces[0]) == 40',
+        'u_midpoint': 'assert split_in_half("abcdefgh", count_tokens=len) == ["abcd", "efgh"]',
+        'u_nearer': 'assert split_in_half(text, count_tokens=_words)[0] == f"{first}\\n\\n"',
+        'u_para': 'assert split_in_half(text, count_tokens=_words) == [f"{first}\\n\\n{second}\\n\\n", third]',
+    },
+    'P7': {
+        'u_fanout': 'assert "".join(pieces) == text',
+        'u_nearer': 'assert split_in_half(text, count_tokens=_words)[0] == f"{first}\\n\\n"',
+        'u_para': 'assert split_in_half(text, count_tokens=_words) == [f"{first}\\n\\n{second}\\n\\n", third]',
+    },
+    'X1': {
+        'e_salvage': 'assert "Zorvex" not in caplog.text',
+        'e_split': 'assert "Zorvex" not in caplog.text',
+    },
+    'X2': {
+        'e_salvage': 'assert "split 0 piece(s), salvaged 3 entries from 1 piece(s)" in caplog.text',
+    },
+    'X3': {
+        'e_salvage': 'assert "skipping chunk" not in caplog.text',
+    },
+}
+M = [(lab, f, pairs, TARGETS[lab.split()[0]]) for lab, f, pairs, _ in M]
+
+
+def run(tag: str) -> dict[str, tuple[str, str] | None]:
+    xml = OUT / f"{tag}.xml"
+    subprocess.run([".venv/bin/pytest", "-q", "--no-cov", "--tb=long", "-p", "no:cacheprovider",
+                    f"--junitxml={xml}", *TESTS.values()], capture_output=True, text=True, check=False)
+    res: dict[str, tuple[str, str] | None] = {}
+    for tc in ET.parse(xml).iter("testcase"):
+        key = next(k for k, v in TESTS.items() if v.endswith("::" + tc.get("name", "")))
+        fail = tc.find("failure")
+        if fail is None:
+            fail = tc.find("error")
+        res[key] = None if fail is None else (fail.get("message", ""), fail.text or "")
+    assert set(res) == set(TESTS), set(TESTS) ^ set(res)
+    return res
+
+
+def failing_line(case: str, text: str) -> str:
+    """The first '>'-marked line that is one of the case's own asserts."""
+    marked = [ln[1:].strip() for ln in text.splitlines() if ln.startswith(">")]
+    for ln in marked:
+        if ln in INVENTORY[case]:
+            return ln
+    return marked[0] if marked else ""
+
+
+def clean() -> bool:
+    return subprocess.run(["git", "status", "--porcelain", "--", "src", "tests"],
+                          capture_output=True, text=True).stdout.strip() == ""
+
+
+ok = True
+for label, _, _, targets in M:
+    for k, sn in targets.items():
+        if not any(sn in a for a in INVENTORY[k]):
+            print(f"target not in inventory: {label}: {k}: {sn}")
+            ok = False
+base = run("baseline")
+a = all(v is None for v in base.values())
+print(f"(a) baseline {sum(v is None for v in base.values())}/{len(base)} pass: {'OK' if a else 'FAIL'}")
+ok &= a
+fired: set[tuple[str, str]] = set()
+for label, path, pairs, targets in M:
+    assert clean(), "dirty tree before mutation"
+    p = WT / path
+    text = p.read_text()
+    b = True
+    for old, new, n in pairs:
+        if text.count(old) != n:
+            print(f"    (b) {label}: {old!r} occurs {text.count(old)}x, declared {n}")
+            b = False
+        text = text.replace(old, new)
+    p.write_text(text)
+    b = b and not clean()
+    res = run(label.split()[0])
+    red = {k for k, v in res.items() if v is not None}
+    if DRY:
+        print(f"{label}: (b) {'OK' if b else 'FAIL'} red:")
+        for k in sorted(red):
+            msg, tb = res[k]
+            print(f"    {k}: {failing_line(k, tb)[:100]!r}  [{msg[:50]!r}]")
+    c = red == set(targets)
+    d = True
+    for k in targets:
+        if res.get(k) is None:
+            d = False
+            continue
+        msg, tb = res[k]
+        line = failing_line(k, tb)
+        hit = msg.startswith(("assert", "AssertionError")) and targets[k] in line and line in INVENTORY[k]
+        d &= hit
+        if hit:
+            fired.add((k, line))
+        elif not DRY:
+            print(f"    (d) miss {k}: msg={msg[:60]!r} line={line[:90]!r}")
+    subprocess.run(["git", "checkout", "--", path], check=True)
+    after = run(label.split()[0] + "-restored")
+    hyg = clean() and all(v is None for v in after.values())
+    ok &= b and c and d and hyg
+    if not DRY:
+        print(f"{label}: (b) {'OK' if b else 'FAIL'} (c) {'OK' if c else 'FAIL'} "
+              f"(d) {'OK' if d else 'FAIL'} restored-green {'OK' if hyg else 'FAIL'}")
+        if not c:
+            print(f"    red={sorted(red)} expected={sorted(targets)}")
+inventory = {(k, ln) for k, lns in INVENTORY.items() for ln in lns}
+exempt = {(k, ln) for k, ln in inventory for (ek, sn) in UNFIRED if ek == k and sn in ln}
+unfired = inventory - fired - exempt
+stale = exempt & fired
+e = not unfired and not stale
+print(f"(e) {len(fired & inventory)}/{len(inventory)} assertions fired, {len(exempt)} exempt: {'OK' if e else 'FAIL'}")
+for k, ln in sorted(unfired):
+    print(f"    unfired: {k}: {ln}")
+ok &= e
+print("ALL OK" if ok else "SOME FAILED")
+```
