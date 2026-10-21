@@ -86,6 +86,42 @@ Re-derive with `grep -rn 'BRAIN_VAULT_PATH\|brain-vault' bin scripts src/brain/t
 
 ## Mutation proofs (five clauses)
 
-Filled in after implementation: (1) passes unmutated, (2) the mutation lands,
-(3) the test goes red, (4) the failing assertion is the targeted one,
-(5) restored → green.
+Run 2026-10-21 against the fix commit `963d915`, sequentially in this worktree
+with nothing else running in it. Each mutation is a literal `str.replace` on
+the production file, asserted to match **exactly once**; it is restored with
+`git checkout -- <file>` and the tree is asserted clean before the next one.
+Every run executes **all fourteen** new tests, so clause 3 is an exact-set
+claim, not "the target went red". Clause 4 reads the JUnit failure text and
+requires the `>`-marked failing line to be the targeted assertion.
+
+Clauses: (1) all fourteen pass unmutated; (2) the mutation landed (one match,
+tree dirty); (3) the red set equals the declared set exactly; (4) each red
+test failed AT its targeted assertion; (5) restored → tree clean and all
+fourteen green.
+
+Baseline: 14/14 pass — clause 1 OK.
+
+| # | Mutation (production file) | Red set — exact | Failing assertion | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|---|---|
+| M1 | `install_config`: explicit leg `return override` (no `expanduser`) | `test_an_explicit_tilde_override_is_expanded`, both `test_setup_vault_tilde` tests | `assert resolved ==` / `assert _vault_lines(` | ✓ | ✓ | ✓ | ✓ |
+| M2 | `install_config.main` prints `_config.DEFAULT_VAULT_PATH` | `test_main_prints_the_brain_home_dotenv_vault`, `test_module_entry_point_runs_as_a_subprocess`, `test_brain_status_inspects_the_brain_home_dotenv_vault`, `test_brain_watcher_fg_resolves_…_when_unexported` | `assert capsys.readouterr().out ==` / `assert result.stdout ==` / `assert f"  vault     {vault}…"` / `assert _read_log(` | ✓ | ✓ | ✓ | ✓ |
+| M3 | `main` argc check `if not args:` | `test_main_rejects_a_wrong_argument_count[argv1]` | `assert code == 2` | ✓ | ✓ | ✓ | ✓ |
+| M4 | `monitor._vault` back to the env-only original | `test_vault_reads_brain_home_dotenv_when_nothing_is_exported`, `test_snapshot_reports_the_dotenv_vault` | `assert _vault() ==` / `assert f"vault={…}"` | ✓ | ✓ | ✓ | ✓ |
+| M5 | `brain-status.sh` back to `${BRAIN_VAULT_PATH:-$HOME/brain-vault}` | `test_brain_status_inspects_…`, `test_brain_status_still_reports_daemons_…` | `assert f"  vault     {vault}…"` / `assert "  vault     ⚠️  unresolved"` | ✓ | ✓ | ✓ | ✓ |
+| M6 | `brain-status.sh` `exit 1` after the unresolved row | `test_brain_status_still_reports_daemons_…` | `assert result.returncode == 0` | ✓ | ✓ | ✓ | ✓ |
+| M7 | `_brain-watcher-fg` resolver replaced by `$HOME/brain-vault` | `test_brain_watcher_fg_resolves_…`, `test_brain_watcher_fg_aborts_…` | `assert _read_log(` / `assert result.returncode != 0` | ✓ | ✓ | ✓ | ✓ |
+| M8 | `_brain-watcher-fg` abort branch loses its `exit 1` | `test_brain_watcher_fg_aborts_…` | `assert result.returncode != 0` | ✓ | ✓ | ✓ | ✓ |
+| M9 | resolver default bound as `Path.home() / "brain-vault"` | `test_main_prints_the_default_when_nothing_is_configured` | `assert capsys.readouterr().out ==` | ✓ | ✓ | ✓ | ✓ |
+| M10 | `main` drops the usage line on stderr | `test_main_rejects_a_wrong_argument_count[argv0]`, `[argv1]` | `assert "usage: python -m brain.install_config BRAIN_HOME" in captured.err` | ✓ | ✓ | ✓ | ✓ |
+
+Every one of the fourteen new tests is red under at least one mutation.
+
+**Mutated copy, stated:** the shell tests run the dev copy `bin/_brain-watcher-fg`,
+so M7/M8 mutate that file; its template twin is held identical by
+`tests/test_packaging_templates.py`. `brain-status` runs the package-data
+template (editable install → `ensure_shim` copies it into a tmp `$BRAIN_HOME`),
+so M5/M6 mutate the template.
+
+**Not pinned by any mutation:** the `.expanduser()` on `main`'s `BRAIN_HOME`
+argument. The shims always pass an absolute path, so no test exercises it; it
+is there to match `_brain_home_root`'s own expansion.
