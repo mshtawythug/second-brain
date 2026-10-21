@@ -5,9 +5,10 @@ per entity, so the JSON reply runs out of ``num_predict`` on both attempts and
 :func:`brain.chat.chat_json_with_client` raises
 :class:`~brain.errors.ChatOutputTruncated`. Salvaging the complete prefix of that
 reply alone would keep the head of the chunk and lose every entity after the cut,
-which is the chunk's tail. So a truncated piece is first split roughly in half at
-paragraph / sentence boundaries (the ingest chunker's fallback chain), and each
-half is extracted on its own. A piece is salvaged instead only at the bound: it
+which is the chunk's tail. So a truncated piece is first split in two at the
+paragraph / sentence / line / word boundary nearest its token midpoint
+(:func:`split_in_half`, never more than two pieces), and each half is extracted
+on its own. A piece is salvaged instead only at the bound: it
 has already been split :data:`MAX_SPLIT_DEPTH` times, it is under
 :data:`MIN_SPLIT_TOKENS`, or it will not split into two.
 
@@ -22,6 +23,7 @@ returned counts.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,6 +38,18 @@ MAX_SPLIT_DEPTH = 2
 #: A truncated piece under this many ``cl100k_base`` tokens is salvaged rather
 #: than split: halves this small barely help a model that already overran on them.
 MIN_SPLIT_TOKENS = 200
+
+#: Split boundaries, coarsest first: paragraph, sentence end, line, word.
+_BOUNDARIES = (
+    re.compile(r"\n[ \t]*\n\s*"),
+    re.compile(r"(?<=[.!?])\s+"),
+    re.compile(r"\n\s*"),
+    re.compile(r"\s+"),
+)
+
+#: A boundary is used only when each side keeps at least this share of the
+#: tokens; a lopsided paragraph cut falls through to a finer boundary.
+_MIN_SIDE_SHARE = 0.25
 
 #: The reply key holding the entity list (``_EXTRACT_SYSTEM_PROMPT``'s schema).
 _ENTITIES_KEY = "entities"
@@ -126,15 +140,61 @@ def extract_splitting_on_truncation(
 
 
 def split_in_half(text: str, *, count_tokens: Callable[[str], int]) -> list[str]:
-    """Split ``text`` into about two pieces at paragraph / sentence boundaries.
+    """Split ``text`` into at most two pieces whose concatenation is exactly ``text``.
 
-    Uses the ingest chunker's packing and fallback chain with a target of half
-    the text and no overlap, so the pieces partition the text. Greedy packing can
-    yield a third, small piece, which is harmless here.
+    The cut is the boundary nearest the token midpoint at the coarsest level
+    that leaves each side at least :data:`_MIN_SIDE_SHARE` of the tokens --
+    paragraph, then sentence, then line, then word -- and the token midpoint
+    itself when no boundary qualifies. Never more than two pieces, so the
+    recursion's call bound (1 + 2 + 4 at depth 2) holds; nothing is dropped or
+    repeated at the cut. Returns ``[text]`` when it cannot be split.
     """
-    # Late import, as in ``extract.py``: keeps :mod:`brain.graph_rag` import-cheap.
-    from ..ingest.chunker import chunk_text
+    total = count_tokens(text)
+    if total < 2:
+        return [text]
+    half = total / 2
+    for pattern in _BOUNDARIES:
+        cuts = [
+            m.end()
+            for m in pattern.finditer(text)
+            if text[: m.start()].strip() and text[m.end() :].strip()
+        ]
+        if not cuts:
+            continue
+        cut = _nearest_cut(text, cuts, half, count_tokens)
+        head_tokens = count_tokens(text[:cut])
+        if min(head_tokens, total - head_tokens) >= total * _MIN_SIDE_SHARE:
+            return [text[:cut], text[cut:]]
+    cut = _first_index_reaching(text, half, count_tokens)
+    return [text[:cut], text[cut:]] if 0 < cut < len(text) else [text]
 
-    half = max(1, (count_tokens(text) + 1) // 2)
-    chunks = chunk_text(text, target_tokens=half, overlap_tokens=0, count_tokens=count_tokens)
-    return [chunk.content for chunk in chunks]
+
+def _nearest_cut(
+    text: str, cuts: list[int], half: float, count_tokens: Callable[[str], int]
+) -> int:
+    """The cut whose prefix token count is nearest ``half`` (cuts ascending).
+
+    Binary search on the prefix count, which grows with the cut, then the
+    better of the two neighbours -- O(log n) tokenizations, not one per cut.
+    """
+    lo, hi = 0, len(cuts) - 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if count_tokens(text[: cuts[mid]]) < half:
+            lo = mid + 1
+        else:
+            hi = mid
+    neighbours = cuts[max(lo - 1, 0) : lo + 1]
+    return min(neighbours, key=lambda c: abs(count_tokens(text[:c]) - half))
+
+
+def _first_index_reaching(text: str, half: float, count_tokens: Callable[[str], int]) -> int:
+    """The smallest character index whose prefix holds at least ``half`` tokens."""
+    lo, hi = 1, len(text)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if count_tokens(text[:mid]) < half:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo

@@ -590,6 +590,28 @@ def test_extract_split_then_salvages_a_half_still_truncated_at_the_floor(
     assert len(calls) == 5
 
 
+def test_extract_worst_case_truncated_chunk_costs_seven_calls(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The REAL splitter on a ~1,400-token chunk whose replies always truncate:
+    depth 2 bounds it at 1 + 2 + 4 = 7 model calls (14 requests: each call is a
+    first attempt plus the doubled-budget retry), and the four leaves salvage."""
+    paragraphs = [
+        " ".join(["routine operational follow-up"] * n) + "." for n in (70, 9, 70, 9, 70, 9, 70)
+    ]
+    text = "Zorvex. " + "\n\n".join(paragraphs)
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(_sent_text(request))
+        return _truncated('{"entities": [{"name": "Zorvex", "type": "tool"}, {"na')
+
+    with caplog.at_level(logging.WARNING, logger="brain.graph_rag.extract"):
+        _extractor(handler).extract(text)
+    assert len(requests) == 14
+    assert "split 3 piece(s), salvaged 4 entries from 4 piece(s)" in caplog.text
+
+
 # --------------------------------------------------------------------------- #
 # Never-raise on Ollama unavailable
 # --------------------------------------------------------------------------- #

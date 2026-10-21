@@ -21,6 +21,17 @@ def test_salvage_stops_at_a_cut_between_items() -> None:
     assert salvage_array_items(text, "entities") == [{"name": "Zorvex", "type": "tool"}]
 
 
+def test_salvage_handles_compact_separators() -> None:
+    # No whitespace at all -- the form a JSON-mode model usually emits.
+    text = '{"entities":[{"name":"A"},{"name":"B"},{"na'
+    assert salvage_array_items(text, "entities") == [{"name": "A"}, {"name": "B"}]
+
+
+def test_salvage_handles_every_json_whitespace_around_separators() -> None:
+    text = '{"entities":\t[\r\n{"name":"A"}\t,\r\n{"name":"B"}\n,\n{"na'
+    assert salvage_array_items(text, "entities") == [{"name": "A"}, {"name": "B"}]
+
+
 def test_salvage_tolerates_pretty_printed_whitespace() -> None:
     text = '{\n  "entities" :\n  [\n    {"name": "Zorvex",\n     "type": "tool"}\n    ,\n    {"na'
     assert salvage_array_items(text, "entities") == [{"name": "Zorvex", "type": "tool"}]

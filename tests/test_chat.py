@@ -167,7 +167,7 @@ def test_chat_json_with_client_truncated_twice_raises_typed_error_with_partial()
         calls.append(1)
         return _raw(replies[len(calls) - 1])
 
-    with pytest.raises(ChatOutputTruncated) as excinfo:
+    with pytest.raises(EnrichmentError) as excinfo:
         chat_json_with_client(
             _client(httpx.MockTransport(handler)),
             model="m",
@@ -177,6 +177,8 @@ def test_chat_json_with_client_truncated_twice_raises_typed_error_with_partial()
             num_ctx=8192,
             num_predict=128,
         )
+    assert isinstance(excinfo.value, ChatOutputTruncated)
+    # The LAST reply (the retry at the doubled budget), not the first.
     assert excinfo.value.partial == '{"answer": "still trunc'
     assert excinfo.value.num_predict == 256
     # The partial reply is document-derived: it must never reach str()/a log line.
