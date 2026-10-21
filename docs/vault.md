@@ -152,7 +152,7 @@ brain-rebuild  # full-corpus rebuild: embeddings → summaries → search →
                #   --dry-run       print the plan; run nothing, take no lock
                #   --force         bypass the in-flight-ingest guard
                # --wiki-only is removed (it exits 2): use --only mirror.
-brain-status   # show whether the sync watcher is running.
+brain-status   # show whether the sync watcher is running, and the vault it inspected.
 ```
 
 `brain-up` is idempotent: re-running it re-uses the running sync watcher. It runs `brain-install-launchd`, which also removes the retired `com.brain.build` daemon if an older install left it behind. It does not start `brain ui`, which runs in the foreground by design; it names it instead.
@@ -161,7 +161,7 @@ Env overrides:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault directory the watcher operates against. `brain-install-launchd` (which `brain-up` runs) bakes it into the daemon plists, and when it is not exported it uses the value in `$BRAIN_HOME/.env`, the same precedence as `brain setup`. |
+| `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault directory the watcher operates against. `brain-install-launchd` (which `brain-up` runs) bakes it into the daemon plists, and when it is not exported it uses the value in `$BRAIN_HOME/.env`, the same precedence as `brain setup`. `brain-status`, `brain-monitor` and a manual `_brain-watcher-fg` run resolve it the same way, through `brain.install_config` (exported, else `$BRAIN_HOME/.env`, else the default). |
 | `BRAIN_NO_BUILD_WATCHER` | `0` | Set `1` to skip launchd supervision during `brain-up` (used by the bin-script tests). The name predates R2; there is no build watcher left to skip. |
 | `BRAIN_PY` | (unset) | Overrides the Python interpreter `brain-install-launchd` (which `brain-up` runs) writes into the daemon plists; unset, it uses the installer's own `sys.executable`. `brain-rebuild` is a Python console-script entry point that uses its venv's interpreter directly; `BRAIN_PY` does not affect it. |
 

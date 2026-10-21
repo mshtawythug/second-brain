@@ -13,6 +13,9 @@ set -euo pipefail
 # BRAIN_HOME override if the launcher set one.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BRAIN_HOME_RESOLVED="${BRAIN_HOME:-$( cd "$SCRIPT_DIR/.." && pwd )}"
+# BRAIN_PY is exported by the console-script launcher (src/brain/bin/_launcher.py)
+# and is by construction an interpreter with `brain` importable.
+PY="${BRAIN_PY:-python3}"
 
 # Pid paths default to $BRAIN_HOME/run/ — NOT /tmp. macOS's tmp_cleaner reaps
 # files left untouched for 3 days; the watch daemon writes its pid file
@@ -51,4 +54,17 @@ if [[ -f "$WIKI_PID" ]]; then
         printf '  %-9s ⛔ stopped (legacy quartz --serve was here — pid file %s)\n' \
             'wiki:' "$WIKI_PID"
     fi
+fi
+
+# The vault the installers resolve, and the one brain-up bakes into the plists
+# (brain.install_config: exported BRAIN_VAULT_PATH, else $BRAIN_HOME/.env, else
+# the default). Ask that resolver rather than restate it here. It is resolved
+# NOW: if the config changed since the last brain-up, the daemons still watch
+# the value baked then, until the next brain-up re-bakes it. Resolved after the
+# daemon rows on purpose: a broken interpreter costs the vault row, never the
+# daemon report.
+if VAULT="$("$PY" -m brain.install_config "$BRAIN_HOME_RESOLVED")" && [[ -n "$VAULT" ]]; then
+    printf '  vault     %s\n' "$VAULT"
+else
+    printf '  vault     ⚠️  unresolved — %s -m brain.install_config failed\n' "$PY"
 fi
