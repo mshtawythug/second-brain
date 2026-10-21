@@ -55,11 +55,28 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
    was the `.claude/worktrees/daemon-src` worktree, detached at `c9f6408`. **Trap:** the first attempt
    shipped the deleted `brain/wiki` package. The cause was a gitignored setuptools `build/lib` and a
    `src/secondbrain_py.egg-info` left in `daemon-src` by an earlier build: setuptools copies `build/lib`
-   into the wheel. Both were deleted and the tool was reinstalled. Before every
-   `uv tool install --force <daemon-src>`, delete `daemon-src/build` and the egg-info. Verify by diffing
-   the installed dist-info `RECORD` (its `brain/` entries) against `git ls-files src/brain`, not by the
-   version string, which still reads 0.3.0. After the reinstall:
-   - the `RECORD` matched git;
+   into the wheel. They were deleted before the second, clean install.
+
+   **Every install re-creates both directories.** On 2026-10-21, after the clean install, they were
+   back in `daemon-src`. So the delete is a standing step, not a one-off fix: before every
+   `uv tool install --force <daemon-src>`, delete `daemon-src/build` and
+   `daemon-src/src/secondbrain_py.egg-info`.
+
+   Verify by the installed file list, not by the version string, which still reads 0.3.0. The `brain/`
+   entries of the dist-info `RECORD` are a subset of `git ls-files src/brain`, with exactly two expected
+   omissions: tracked files that are not package data, `brain/graph_rag/aliases/default.yml.example` and
+   `brain/migrations/README.md`. This check prints nothing on a clean install. It was run on 2026-10-21
+   at `c9f6408`, from the repo root:
+
+   ```bash
+   R=$(ls -d ~/.local/share/uv/tools/secondbrain-py/lib/python3.12/site-packages/secondbrain_py-*.dist-info)/RECORD
+   diff <(cut -d, -f1 "$R" | grep '^brain/' | grep -v '__pycache__' | sort) \
+        <(git -C .claude/worktrees/daemon-src ls-files src/brain | sed 's|^src/||' \
+          | grep -vx 'brain/graph_rag/aliases/default.yml.example\|brain/migrations/README.md' | sort)
+   ```
+
+   After the reinstall, on 2026-10-21:
+   - the check above printed nothing;
    - launchd held only `com.brain.watcher` and `com.brain.brief`;
    - the baked vault path was unchanged;
    - the watcher was running clean;
