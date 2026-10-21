@@ -20,6 +20,16 @@ from brain.config import Config
 from brain.errors import ChatOutputTruncated, EnrichmentError, OllamaUnavailable
 
 
+def _raised(call: Any) -> BaseException | None:
+    """The exception ``call`` raised, or None -- so an unexpected exception TYPE
+    is an AssertionError at the asserting line, not an error in the test."""
+    try:
+        call()
+    except Exception as exc:  # noqa: BLE001 - returned for the caller to assert on
+        return exc
+    return None
+
+
 def _client(transport: httpx.MockTransport) -> httpx.Client:
     return httpx.Client(base_url="http://x", transport=transport)
 
@@ -224,6 +234,48 @@ def test_chat_json_with_client_truncation_then_malformed_is_not_truncation() -> 
             num_ctx=8192,
         )
     assert not isinstance(excinfo.value, ChatOutputTruncated)
+
+
+def test_chat_json_with_client_reply_nested_past_the_recursion_limit_is_malformed() -> None:
+    """REGRESSION (2026-10-21): ``json.loads`` raises RecursionError -- not a
+    JSONDecodeError, not even a ValueError -- on deeply nested output, and it
+    escaped every ``except EnrichmentError`` caller, including concept
+    extraction's never-raise boundary. It is a malformed reply."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _raw("[" * 100_000)
+
+    raised = _raised(
+        lambda: chat_json_with_client(
+            _client(httpx.MockTransport(handler)),
+            model="m",
+            messages=[{"role": "user", "content": "q"}],
+            required_keys=("answer",),
+            keep_alive="30m",
+            num_ctx=8192,
+        )
+    )
+    assert type(raised) is EnrichmentError
+
+
+def test_chat_envelope_nested_past_the_recursion_limit_is_enrichment_error() -> None:
+    """The ``/api/chat`` envelope itself nested past the limit: same class of bug
+    one layer out (``response.json()``), same answer."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"[" * 100_000)
+
+    raised = _raised(
+        lambda: chat_json_with_client(
+            _client(httpx.MockTransport(handler)),
+            model="m",
+            messages=[{"role": "user", "content": "q"}],
+            required_keys=("answer",),
+            keep_alive="30m",
+            num_ctx=8192,
+        )
+    )
+    assert type(raised) is EnrichmentError
 
 
 def test_chat_json_with_client_raises_on_missing_required_key() -> None:

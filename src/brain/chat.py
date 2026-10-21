@@ -217,6 +217,14 @@ def chat_json_with_client(
             raise
         try:
             parsed = json.loads(response_text)
+        except RecursionError:
+            # Nesting deeper than the decoder's recursion limit. Not a
+            # JSONDecodeError (not even a ValueError), so without this it
+            # escapes every caller's ``except EnrichmentError`` -- including
+            # concept extraction's never-raise boundary. Malformed, not
+            # truncated: a best-effort retry, and a plain EnrichmentError.
+            last_error = EnrichmentError("chat returned JSON nested too deeply to decode")
+            continue
         except json.JSONDecodeError as exc:
             last_error = exc
             # Truncation: the model exhausted ``num_predict`` before closing the
@@ -336,9 +344,10 @@ def _chat_once(
         raise OllamaUnavailable(f"Ollama unreachable: {exc}") from exc
     except httpx.HTTPError as exc:
         raise OllamaUnavailable(f"Ollama transport error: {exc}") from exc
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         # json.JSONDecodeError is a ValueError — a 200 OK with non-JSON body
-        # leaks as a raw decode error otherwise.
+        # leaks as a raw decode error otherwise. A body nested past the
+        # recursion limit raises RecursionError, which is neither.
         raise EnrichmentError(
             f"Ollama returned non-JSON envelope: {exc}"
         ) from exc
