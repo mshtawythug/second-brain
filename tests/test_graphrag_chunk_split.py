@@ -7,8 +7,12 @@ are synthetic (no PII).
 """
 from __future__ import annotations
 
+import logging
+import random
 from collections.abc import Callable
 from typing import Any
+
+import pytest
 
 from brain.errors import ChatOutputTruncated, EnrichmentError, OllamaUnavailable
 from brain.graph_rag.chunk_split import (
@@ -221,3 +225,88 @@ def _greedy_hostile_text() -> str:
     """Uneven paragraphs (synthetic) that a greedy half-target packer splits 3+ ways."""
     sizes = [300, 40, 300, 40, 300, 40, 300]
     return "\n\n".join(" ".join(["routine"] * n) + "." for n in sizes)
+
+
+# Synthetic vocabulary only (no PII): transcript-like and mixed-layout inputs.
+_VOCAB = (
+    "the", "review", "covered", "billing", "rollout", "platform", "follow-up", "quarterly",
+    "routine", "owner", "migration", "budget", "timeline", "vendor", "dashboard", "incident",
+    "handoff", "Zorvex", "Lumkai", "integration", "access", "audit", "backlog", "estimate",
+    "release",
+)
+
+
+def _sentence(rng: random.Random) -> str:
+    return " ".join(rng.choice(_VOCAB) for _ in range(rng.randint(4, 28))) + rng.choice(".?!")
+
+
+def _synthetic_input(rng: random.Random, target_tokens: int, count: Callable[[str], int]) -> str:
+    """A transcript (speaker lines, single newlines, the odd blank line), a
+    multi-paragraph mix, unpunctuated one-line "notes" paragraphs, or one long paragraph,
+    grown to ~``target_tokens``."""
+    kind = rng.choice(("transcript", "paragraphs", "notes", "single"))
+    parts: list[str] = []
+    text = ""
+    while count(text) < target_tokens:
+        if kind == "transcript":
+            parts.append(f"Speaker {rng.randint(1, 4)}: {_sentence(rng)}")
+            joiner = "\n"
+            if rng.random() < 0.1:
+                parts.append("")
+        elif kind == "notes":
+            # Unpunctuated one-line paragraphs: here each "\n\n" is a token of
+            # its own, which is what pushed greedy zero-overlap packing over.
+            parts.append(_sentence(rng)[:-1])
+            joiner = "\n\n"
+        elif kind == "paragraphs":
+            parts.append(" ".join(_sentence(rng) for _ in range(rng.randint(1, 8))))
+            joiner = "\n\n"
+        else:
+            parts.append(_sentence(rng))
+            joiner = " "
+        text = joiner.join(parts)
+    return text
+
+
+def _real_count() -> Callable[[str], int]:
+    from brain.enrichment import OllamaEnricher
+
+    return OllamaEnricher(host="http://x", model="m").count_tokens
+
+
+def test_split_in_half_returns_exactly_two_pieces_on_real_inputs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R1/R2 (review of 5b4940d): with the REAL tokenizer, on 300 seeded synthetic
+    transcripts, paragraph mixes, one-sentence notes and long single paragraphs
+    of 200-1,600 tokens,
+    every split is exactly two pieces that concatenate back to the input, and the
+    chunker's "unreachable" over-ceiling backstop never fires (the old greedy
+    packing with zero overlap tripped it)."""
+    count = _real_count()
+    rng = random.Random(20261021)
+    inputs = [_synthetic_input(rng, rng.randint(200, 1600), count) for _ in range(300)]
+    with caplog.at_level(logging.WARNING, logger="brain.ingest.chunker"):
+        splits = [split_in_half(text, count_tokens=count) for text in inputs]
+    assert not [r for r in caplog.records if r.name == "brain.ingest.chunker"]
+    assert [len(pieces) for pieces in splits] == [2] * len(inputs)
+    assert all("".join(pieces) == text for pieces, text in zip(splits, inputs, strict=True))
+
+
+def test_real_splitter_worst_case_is_seven_calls() -> None:
+    """The call bound with the REAL splitter and tokenizer on chunk-sized inputs
+    (1,000-1,600 tokens) whose every reply truncates: never more than
+    1 + 2 + 4 = 7 calls, and the bound is reached."""
+    count = _real_count()
+    rng = random.Random(4417)
+    per_input: list[int] = []
+    for _ in range(60):
+        calls: list[str] = []
+        extract_splitting_on_truncation(
+            _synthetic_input(rng, rng.randint(1000, 1600), count),
+            extract_entities=_always_truncates(calls),
+            split=lambda text: split_in_half(text, count_tokens=count),
+            count_tokens=count,
+        )
+        per_input.append(len(calls))
+    assert max(per_input) == 7
