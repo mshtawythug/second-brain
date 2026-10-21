@@ -180,17 +180,24 @@ range, plus the hybrid top 20 recorded in `ci.json`. Each was read.
 - **Planning query: re-pinned, not re-judged.** Pooling its range (41
   candidates) found no document primarily about its topic, and all five judged
   documents are dated 2026-08-27. Rather than judge off-topic documents
-  relevant, it moved to `after: 2026-07-24` / `before: 2026-09-02`. That is
-  the 40-day `since_days` window of the first recording (2026-09-02), the one
-  its judgments were made against. The window is placed on the column the
+  relevant, it moved to `after: 2026-07-24` / `before: 2026-09-02`. Those are
+  the dates of the 40-day `since_days` window of the first recording
+  (2026-09-02T15:46Z), but not its document set. Measured 2026-10-21: 162
+  documents fall in the new range on `coalesce(sent_at, ingested_at)`, and 137
+  of them were ingested after that recording. Each of the 137 carries a
+  `sent_at` that dates it back into the range, so the original judgments never
+  saw them. What confirms the five judgments is the 2026-10-21 re-pool of the
+  new range (below), not the dates. The window is placed on the column the
   pinned filter actually reads: `after`/`before` bind
   `coalesce(sent_at, ingested_at)` (`build_predicate` in
   `src/brain/search_predicate.py`); only `since_days` reads `ingested_at`.
   All five judged documents have a NULL `sent_at`, so the two columns agree
   for them: 2026-08-27 on both, and 5 of 5 in range under either one
   (measured 2026-10-21). Pooling the new range (raw FTS, plus the
-  hybrid top 20 of the re-recorded run) kept the same five judgments. The
-  sixth, excluded probe document is in range and stays excluded.
+  hybrid top 20 of the re-recorded run) kept the same five judgments. One
+  more document matches the topic by title, but its body is a one-line
+  synthetic ingest probe that cannot answer the query. The corpus has always
+  excluded it, it is in the new range, and it stays excluded.
 
 After the edit the check above returns no rows for either query: 27 of 27 and
 5 of 5 in range. Before re-recording, an eval of the unedited corpus against
