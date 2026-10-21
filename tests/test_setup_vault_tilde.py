@@ -72,9 +72,7 @@ def test_a_quoted_tilde_vault_is_rendered_absolute_into_a_fresh_env(
 
     _run_setup_with_vault(brain_home, Path("~/my-vault"))
 
-    assert _vault_lines(brain_home / ".env") == [
-        f"BRAIN_VAULT_PATH={fenced_home / 'my-vault'}"
-    ]
+    assert _vault_lines(brain_home / ".env") == [f"BRAIN_VAULT_PATH={fenced_home / 'my-vault'}"]
 
 
 def test_a_quoted_tilde_vault_is_appended_absolute_to_an_existing_env(
@@ -87,6 +85,4 @@ def test_a_quoted_tilde_vault_is_appended_absolute_to_an_existing_env(
 
     _run_setup_with_vault(brain_home, Path("~/my-vault"))
 
-    assert _vault_lines(brain_home / ".env") == [
-        f"BRAIN_VAULT_PATH={fenced_home / 'my-vault'}"
-    ]
+    assert _vault_lines(brain_home / ".env") == [f"BRAIN_VAULT_PATH={fenced_home / 'my-vault'}"]
