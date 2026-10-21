@@ -818,6 +818,25 @@ def test_themes_synthesize_enricher_raises_never_raises(
     assert all(t.summary is None for t in ctx.themes)
 
 
+def test_themes_synthesize_failure_warning_never_quotes_the_exception(
+    test_db: psycopg.Connection[Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """REGRESSION (2026-10-21): the summary-failed WARN logged the exception
+    message, which can quote model output. Now the class only."""
+    dana, scope, _ = _build_two_clusters(test_db)
+    sentinel = "SENTINEL-MODEL-REPLY-4417"
+
+    with caplog.at_level("WARNING", logger="brain.graph_rag.themes"):
+        graph_rag_search(
+            test_db, _make_cfg(), "", backend=FakeScopeBackend({dana: scope}),
+            mode=THEMES_MODE, person="dana lee",
+            synthesize=True, enricher=_FakeEnricher(error=RuntimeError(sentinel)),
+        )
+
+    assert sentinel not in caplog.text
+    assert "summary failed (RuntimeError)" in caplog.text
+
+
 def test_themes_synthesize_without_enricher_warns(
     test_db: psycopg.Connection[Any],
 ) -> None:

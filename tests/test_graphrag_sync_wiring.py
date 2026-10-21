@@ -1145,3 +1145,34 @@ def test_graph_enabled_default_does_not_break_ingest_when_age_missing(
         syncer.reconcile(test_db, "22222222-2222-2222-2222-222222222222")
     # AGE absent → graceful early return; reconcile_document was never invoked.
     mock_reconcile.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# Never log exception text (2026-10-21)
+# --------------------------------------------------------------------------- #
+
+
+class _SentinelConn:
+    """A connection whose every query fails with a message quoting row values,
+    the way a psycopg error's DETAIL can quote an entity name."""
+
+    autocommit = True
+
+    def execute(self, *_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(_SYNC_SENTINEL)
+
+
+_SYNC_SENTINEL = "SENTINEL-ENTITY-NAME-4417"
+
+
+@pytest.mark.parametrize("op", ["reconcile", "remove"])
+def test_sync_skip_warning_never_quotes_the_exception(
+    op: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """REGRESSION (2026-10-21): the skip WARNs logged the exception message.
+    Now the class only, with the document id."""
+    syncer = GraphSyncer(ReconcileConfig(), enabled=True, backend=AgeBackend())
+    with caplog.at_level("WARNING", logger="brain.graph_rag.sync"):
+        getattr(syncer, op)(_SentinelConn(), "doc-0001")  # type: ignore[arg-type]
+    assert _SYNC_SENTINEL not in caplog.text
+    assert f"graph sync ({op}) skipped for doc doc-0001: RuntimeError;" in caplog.text

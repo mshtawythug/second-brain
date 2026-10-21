@@ -466,6 +466,32 @@ def test_enricher_raising_is_caught_and_build_succeeds(
         assert snap["summary_members_hash"] is None
 
 
+def test_enricher_failure_warning_never_quotes_the_exception(
+    test_db: psycopg.Connection[Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """REGRESSION (2026-10-21): the summary-failed WARN logged the exception
+    message, which can quote model output. Now the class only."""
+    sentinel = "SENTINEL-MODEL-REPLY-4417"
+
+    class _SentinelSummarizer:
+        model = "fake-model:1b"
+
+        def summarize_group(
+            self, *, person: str | None, entity_names: list[str], doc_titles: list[str]
+        ) -> str | None:
+            raise RuntimeError(sentinel)
+
+    _seed_two_clusters(test_db)
+    build_communities(test_db, _cfg(), tenant="default")
+    with caplog.at_level("WARNING", logger="brain.graph_rag.communities_summary"):
+        summarize_communities(
+            test_db, _cfg(), tenant="default",
+            enricher=_SentinelSummarizer(), embedder=FakeEmbedder(),
+        )
+    assert sentinel not in caplog.text
+    assert "failed (RuntimeError)" in caplog.text
+
+
 # --------------------------------------------------------------------------- #
 # Never-raise — embedder failure
 # --------------------------------------------------------------------------- #

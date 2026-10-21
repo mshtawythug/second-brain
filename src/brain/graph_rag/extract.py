@@ -89,7 +89,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from ..config import Config
 from ..enrichment import OllamaEnricher
-from ..errors import EnrichmentError, OllamaUnavailable
+from ..errors import EnrichmentError, OllamaUnavailable, describe_failure
 from ..ollama_budget import EXTRACT_CHUNK_OVERLAP_TOKENS, EXTRACT_CHUNK_TARGET_TOKENS
 from .chunk_split import extract_splitting_on_truncation, split_in_half
 from .cooccur import DEFAULT_MAX_ENTITIES_PER_DOC
@@ -534,7 +534,7 @@ class OllamaExtractor:
                 _logger.warning(
                     "concept extraction: chunk %d failed (%s); skipping chunk",
                     chunk.index,
-                    exc,
+                    describe_failure(exc),
                 )
                 continue
             if result.truncated:
