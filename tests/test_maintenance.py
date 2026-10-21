@@ -15,10 +15,10 @@ from brain.config import Config
 
 
 def test_build_stages_canonical_order_and_ids() -> None:
-    stages = m.build_stages(vault_path=Path("/tmp/vault"), keep=3)
+    stages = m.build_stages(vault_path=Path("/tmp/vault"))
     assert [s.stage_id for s in stages] == [
         "embeddings", "summaries", "search",
-        "graph", "graph-weights", "communities", "connect", "mirror", "quartz",
+        "graph", "graph-weights", "communities", "connect", "mirror",
     ]
     assert stages[0].steps[0].argv == m.brain_argv("reembed")
     assert stages[0].steps[0].fatal is True
@@ -60,7 +60,7 @@ def test_no_stage_step_depends_on_a_bare_brain_on_path() -> None:
     Guards every stage, not just the communities one that happened to fail, so a
     newly added stage cannot silently reintroduce the PATH dependency.
     """
-    stages = m.build_stages(vault_path=Path("/tmp/vault"), keep=3)
+    stages = m.build_stages(vault_path=Path("/tmp/vault"))
     steps = [step for stage in stages for step in stage.steps]
     assert steps, "build_stages returned no steps — this guard would never fire"
     offenders = [s.argv for s in steps if s.argv[0] == "brain"]
@@ -81,17 +81,17 @@ def _ids(stages: list[m.Stage]) -> list[str]:
 
 
 def _stages() -> list[m.Stage]:
-    return m.build_stages(vault_path=Path("/tmp/v"), keep=3)
+    return m.build_stages(vault_path=Path("/tmp/v"))
 
 
-def test_select_default_runs_every_stage_except_the_opt_in_quartz() -> None:
-    """E1: the default plan is every stage but ``quartz``, and ``mirror`` is in it."""
+def test_select_default_runs_every_stage() -> None:
+    """The default plan is every registered stage, ``mirror`` included."""
     got = _ids(m.select_stages(_stages(), only=None, skip=None))
     assert got == [
         "embeddings", "summaries", "search", "graph", "graph-weights", "communities",
         "connect", "mirror",
     ]
-    assert got == [i for i in m.ALL_STAGE_IDS if i != "quartz"]
+    assert got == list(m.ALL_STAGE_IDS)
 
 
 def test_select_only_subset_preserves_registry_order() -> None:
@@ -113,33 +113,23 @@ def test_select_skip_connect_stage() -> None:
     assert "mirror" in _ids(got)
 
 
-def test_select_skip_never_brings_in_the_opt_in_quartz_stage() -> None:
-    """E1: ``--skip`` subtracts from the DEFAULT plan, so ``quartz`` stays out."""
-    assert "quartz" not in _ids(m.select_stages(_stages(), only=None, skip=["graph"]))
-    assert "quartz" not in _ids(m.select_stages(_stages(), only=None, skip=["quartz"]))
-
-
-def test_select_only_quartz_requests_the_quartz_build() -> None:
-    """E4: naming ``quartz`` is the only way to select it."""
-    assert _ids(m.select_stages(_stages(), only=["quartz"], skip=None)) == ["quartz"]
-
-
-def test_select_only_mirror_and_quartz_keeps_registry_order() -> None:
-    """E1: the vault mirror is exported before the Quartz build reads it."""
-    got = m.select_stages(_stages(), only=["quartz", "mirror"], skip=None)
-    assert _ids(got) == ["mirror", "quartz"]
-
-
 def test_only_and_skip_mutually_exclusive() -> None:
     with pytest.raises(m.SelectionError):
         m.select_stages(_stages(), only=["graph"], skip=["mirror"])
 
 
-def test_wiki_is_no_longer_a_stage_id() -> None:
-    """A10: the ``wiki`` stage is re-formed, so its old id is unknown."""
+@pytest.mark.parametrize("stage_id", ["wiki", "quartz"])
+def test_retired_wiki_stage_ids_are_unknown(stage_id: str) -> None:
+    """A10 re-formed ``wiki`` into ``mirror`` (R2); R3 deleted ``quartz`` outright.
+
+    Both old ids are unknown, and the valid-id list the error prints names
+    ``mirror`` and no longer offers ``quartz``.
+    """
     with pytest.raises(m.SelectionError) as exc:
-        m.select_stages(_stages(), only=["wiki"], skip=None)
-    assert "mirror" in str(exc.value) and "quartz" in str(exc.value)
+        m.select_stages(_stages(), only=[stage_id], skip=None)
+    assert stage_id in str(exc.value)
+    valid = str(exc.value).split("valid:", 1)[1]
+    assert "mirror" in valid and "quartz" not in valid
 
 
 def test_unknown_stage_id_errors_with_valid_list() -> None:
@@ -150,7 +140,7 @@ def test_unknown_stage_id_errors_with_valid_list() -> None:
 
 
 def _stage(stage_id: str, vault: Path = Path("/tmp/v")) -> m.Stage:
-    (stage,) = [s for s in m.build_stages(vault_path=vault, keep=3) if s.stage_id == stage_id]
+    (stage,) = [s for s in m.build_stages(vault_path=vault) if s.stage_id == stage_id]
     return stage
 
 
@@ -177,24 +167,6 @@ def test_mirror_stage_is_exactly_the_three_vault_steps() -> None:
     ]
 
 
-def test_quartz_stage_is_the_overlay_then_build_swap() -> None:
-    """E4: the two Quartz steps A10 removes from the default plan, unchanged."""
-    py = sys.executable
-    got = [(s.argv, s.fatal, s.env) for s in _stage("quartz").steps]
-    assert got == [
-        (
-            (py, "-m", "brain", "vault", "render", "--overlay", "--no-build", "--vault", "/tmp/v"),
-            False,
-            (),
-        ),
-        (
-            (py, "-m", "brain.wiki.build_swap", "--vault", "/tmp/v", "--keep", "3"),
-            True,
-            (("BRAIN_WIKI_RELOAD", "1"),),
-        ),
-    ]
-
-
 def test_default_plan_spawns_no_quartz_step() -> None:
     """E1: running the default selection never spawns ``vault render`` or ``build_swap``."""
     calls: list[tuple[str, ...]] = []
@@ -204,7 +176,7 @@ def test_default_plan_spawns_no_quartz_step() -> None:
         return 0
 
     default = m.select_stages(_stages(), only=None, skip=None)
-    m.run_stages(default, runner=fake_run, clean_cache=False, vault_path=Path("/tmp/v"))
+    m.run_stages(default, runner=fake_run)
     assert calls, "the default plan ran nothing — this guard would never fire"
     assert not [c for c in calls if "render" in c or "brain.wiki.build_swap" in c], calls
     assert (sys.executable, "-m", "brain", "vault", "prune-orphans", "--apply",
@@ -287,7 +259,7 @@ def test_run_stages_fail_fast_stops_after_first_fatal() -> None:
         return 7 if tuple(argv) == m.brain_argv("enrich", "--backfill") else 0
 
     with pytest.raises(m.StageFailed) as exc:
-        m.run_stages(selected, runner=fake_run, clean_cache=False, vault_path=Path("/tmp/v"))
+        m.run_stages(selected, runner=fake_run)
     assert exc.value.stage_id == "summaries"
     assert exc.value.exit_code == 7
     assert m.brain_argv("reembed") in calls
@@ -303,61 +275,8 @@ def test_run_stages_nonfatal_step_continues_to_prune_orphans() -> None:
         calls.append(tuple(argv))
         return 1 if "sync-summaries" in argv else 0
 
-    m.run_stages(selected, runner=fake_run, clean_cache=False, vault_path=Path("/tmp/v"))
+    m.run_stages(selected, runner=fake_run)
     assert any("prune-orphans" in c for c in calls)
-
-
-def test_run_stages_quartz_build_swap_gets_wiki_reload() -> None:
-    """E4: ``--only quartz`` runs build_swap with ``BRAIN_WIKI_RELOAD=1``."""
-    seen: list[tuple[tuple[str, ...], dict[str, str] | None]] = []
-
-    def fake_run(argv: tuple[str, ...], env: dict[str, str] | None = None) -> int:
-        seen.append((tuple(argv), env))
-        return 0
-
-    selected = m.select_stages(_stages(), only=["quartz"], skip=None)
-    m.run_stages(selected, runner=fake_run, clean_cache=False, vault_path=Path("/tmp/v"))
-    swaps = [env for argv, env in seen if "brain.wiki.build_swap" in argv]
-    assert swaps == [{"BRAIN_WIKI_RELOAD": "1"}]
-
-
-def test_run_stages_clean_cache_removes_only_parser_cache(tmp_path: Path) -> None:
-    """``--clean-cache`` wipes ``<vault>/.quartz/.cache/parser`` and nothing else.
-
-    Creates the parser cache dir plus a sibling dir under ``.quartz/.cache/``,
-    then runs the quartz stage with ``clean_cache=True`` and a no-op fake runner.
-    Asserts that the parser cache is gone and the sibling is untouched —
-    proving the ``shutil.rmtree`` target is exactly ``_PARSER_CACHE_RELPATH``.
-    """
-    vault = tmp_path / "vault"
-    parser = vault / ".quartz" / ".cache" / "parser"
-    sibling = vault / ".quartz" / ".cache" / "other"
-    parser.mkdir(parents=True)
-    (parser / "x.json").write_text("{}", encoding="utf-8")
-    sibling.mkdir(parents=True)
-    (sibling / "keep.txt").write_text("keep", encoding="utf-8")
-
-    m.run_stages(
-        [_stage("quartz", vault)],
-        runner=lambda argv, env=None: 0,
-        clean_cache=True,
-        vault_path=vault,
-    )
-    assert not parser.exists(), "parser cache dir must be wiped by --clean-cache"
-    assert sibling.exists(), "sibling cache dir must be untouched by --clean-cache"
-    assert (sibling / "keep.txt").exists(), "sibling file must survive --clean-cache"
-
-
-def test_run_stages_clean_cache_leaves_the_parser_cache_for_mirror(tmp_path: Path) -> None:
-    """The wipe belongs to the Quartz build; the mirror stage never touches it."""
-    vault = tmp_path / "vault"
-    parser = vault / ".quartz" / ".cache" / "parser"
-    parser.mkdir(parents=True)
-    m.run_stages(
-        [_stage("mirror", vault)], runner=lambda argv, env=None: 0, clean_cache=True,
-        vault_path=vault,
-    )
-    assert parser.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -458,41 +377,43 @@ def _forbid_running(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_main_wiki_only_exits_2_naming_the_replacements(
     argv: list[str], capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """E3 / R8-3: ``--wiki-only`` is removed, not aliased, and says what to use."""
+    """E3 / R8-3: ``--wiki-only`` is removed, not aliased, and names ``--only mirror``."""
     _base_env(monkeypatch)
     _forbid_running(monkeypatch)
     assert m.main(argv) == 2
     err = capsys.readouterr().err
     assert "--wiki-only" in err
-    assert "--only mirror" in err and "--only quartz" in err
+    assert "--only mirror" in err
+    assert "--only quartz" not in err, "the quartz stage was deleted at R3"
 
 
 @pytest.mark.parametrize("argv", [["--clean-cache"], ["--clean-cache", "--only", "mirror"]])
-def test_main_clean_cache_without_quartz_is_a_usage_error(
+def test_main_clean_cache_is_no_longer_an_option(
     argv: list[str], capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """E4 / R8-3: the parser cache belongs to the Quartz build, so ask for that build."""
+    """R9-3: ``--clean-cache`` only ever wiped the Quartz parser cache; it died with it.
+
+    argparse rejects the unknown flag with a usage error (exit 2) before any
+    stage, lock or ingest guard is reached.
+    """
     _base_env(monkeypatch)
     _forbid_running(monkeypatch)
-    assert m.main(argv) == 2
-    assert "--only quartz" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        m.main(argv)
+    assert exc.value.code == 2
+    assert "--clean-cache" in capsys.readouterr().err
 
 
-def test_main_only_quartz_with_clean_cache_runs_the_quartz_stage(
-    monkeypatch: pytest.MonkeyPatch,
+def test_main_only_quartz_is_a_usage_error(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """E4: a requested Quartz build runs, and ``--clean-cache`` reaches the runner."""
+    """R9-3: ``--only quartz`` exits 2 through the unknown-stage path, and runs nothing."""
     _base_env(monkeypatch)
-    monkeypatch.setattr(m, "ingest_in_flight", lambda *a, **k: False)
-    monkeypatch.setattr(m, "rebuild_lock", _noop_lock)
-    seen: list[tuple[list[str], bool]] = []
-
-    def capture(stages: list[m.Stage], **kwargs: Any) -> None:
-        seen.append(([s.stage_id for s in stages], kwargs["clean_cache"]))
-
-    monkeypatch.setattr(m, "run_stages", capture)
-    assert m.main(["--only", "quartz", "--clean-cache"]) == 0
-    assert seen == [(["quartz"], True)]
+    _forbid_running(monkeypatch)
+    assert m.main(["--only", "quartz"]) == 2
+    err = capsys.readouterr().err
+    assert "unknown stage id(s): quartz" in err
+    assert "mirror" in err
 
 
 # ---------------------------------------------------------------------------

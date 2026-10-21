@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterator, Sequence
@@ -30,21 +29,16 @@ class Step:
 
 @dataclass(frozen=True)
 class Stage:
-    """A named, selectable unit of the rebuild composed of one or more steps.
-
-    ``opt_in`` stages never run by default: only ``--only <id>`` selects them,
-    and ``--skip`` (which subtracts from the default plan) never brings them in.
-    """
+    """A named, selectable unit of the rebuild composed of one or more steps."""
 
     stage_id: str
     description: str
     steps: tuple[Step, ...]
-    opt_in: bool = False
 
 
 ALL_STAGE_IDS: tuple[str, ...] = (
     "embeddings", "summaries", "search", "graph", "graph-weights", "communities",
-    "connect", "mirror", "quartz",
+    "connect", "mirror",
 )
 
 
@@ -69,17 +63,15 @@ def brain_argv(*args: str) -> tuple[str, ...]:
     return (sys.executable, "-m", "brain", *args)
 
 
-def build_stages(*, vault_path: Path, keep: int) -> list[Stage]:
+def build_stages(*, vault_path: Path) -> list[Stage]:
     """Construct the canonical stage list in dependency order.
 
-    Spec §9.4 A10 (phase 8, R2 "Dormant"): the old ``wiki`` stage is split. Its
-    three vault steps become ``mirror``, which keeps running by default:
-    ``prune-orphans`` is a deleter that lives or dies with the People Hub
-    emitter, so its argv and ``fatal=False`` are unchanged. The two Quartz steps
-    become the opt-in ``quartz`` stage (ruling R8-2), so a Quartz build runs
-    only when requested with ``--only quartz``. R3 deletes that stage.
+    Spec §9.4 A10: the old ``wiki`` stage was split at R2 (phase 8). Its three
+    vault steps are ``mirror``, which runs by default: ``prune-orphans`` is a
+    deleter that lives or dies with the People Hub emitter, so its argv and
+    ``fatal=False`` are unchanged. The two Quartz steps went to an opt-in
+    ``quartz`` stage at R2 and were deleted with the wiki at R3 (phase 9).
     """
-    py = sys.executable
     mirror_steps = (
         Step(brain_argv("vault", "export", "--to", str(vault_path))),
         Step(brain_argv("vault", "sync-summaries", "--vault", str(vault_path)), fatal=False),
@@ -89,16 +81,6 @@ def build_stages(*, vault_path: Path, keep: int) -> list[Stage]:
                 "--vault", str(vault_path),
             ),
             fatal=False,
-        ),
-    )
-    quartz_steps = (
-        Step(
-            brain_argv("vault", "render", "--overlay", "--no-build", "--vault", str(vault_path)),
-            fatal=False,
-        ),
-        Step(
-            (py, "-m", "brain.wiki.build_swap", "--vault", str(vault_path), "--keep", str(keep)),
-            env=(("BRAIN_WIKI_RELOAD", "1"),),
         ),
     )
     return [
@@ -136,16 +118,10 @@ def build_stages(*, vault_path: Path, keep: int) -> list[Stage]:
             "connect",
             "recompute proactive auto-link suggestions",
             # Non-fatal: a connect-refresh failure (e.g. graph unbuilt) must not
-            # abort the rebuild — suggestions are an enhancement, like the wiki.
+            # abort the rebuild — suggestions are an enhancement.
             (Step(brain_argv("connect", "refresh"), fatal=False),),
         ),
         Stage("mirror", "vault mirror: export + sync-summaries + prune-orphans", mirror_steps),
-        Stage(
-            "quartz",
-            "legacy wiki build: overlay + build_swap (opt-in, dormant since R2)",
-            quartz_steps,
-            opt_in=True,
-        ),
     ]
 
 
@@ -159,11 +135,7 @@ def select_stages(
     only: Sequence[str] | None,
     skip: Sequence[str] | None,
 ) -> list[Stage]:
-    """Select stages by --only/--skip, preserving registry order.
-
-    The default plan, and every ``--skip`` (which subtracts from it), leaves out
-    ``opt_in`` stages; ``--only`` is the one way to select them.
-    """
+    """Select stages by --only/--skip, preserving registry order."""
     if only and skip:
         raise SelectionError("--only and --skip are mutually exclusive")
     valid = {s.stage_id for s in stages}
@@ -180,12 +152,11 @@ def select_stages(
         _validate(only)
         keep = set(only)
         return [s for s in stages if s.stage_id in keep]
-    default = [s for s in stages if not s.opt_in]
     if skip:
         _validate(skip)
         drop = set(skip)
-        return [s for s in default if s.stage_id not in drop]
-    return default
+        return [s for s in stages if s.stage_id not in drop]
+    return list(stages)
 
 
 # Matches the `ingest` / `ingest-<variant>` subcommand token that follows the
@@ -282,14 +253,10 @@ def run_stages(
     stages: Sequence[Stage],
     *,
     runner: Callable[..., int] = _default_runner,
-    clean_cache: bool,
-    vault_path: Path,
 ) -> None:
     """Run selected stages in order; fail-fast on the first fatal non-zero step."""
     for stage in stages:
         typer.echo(f"▶ {stage.stage_id}: {stage.description}")
-        if stage.stage_id == "quartz" and clean_cache:
-            shutil.rmtree(vault_path / _PARSER_CACHE_RELPATH, ignore_errors=True)
         for step in stage.steps:
             env = dict(step.env) if step.env else None
             code = runner(step.argv, env=env)
@@ -302,30 +269,19 @@ def run_stages(
                 )
 
 
-# Canonical relative path for the Quartz parser cache.  This constant is the
-# single source of truth shared by run_stages (--clean-cache wipe) and the
-# static cross-file contract test (tests/test_quartz_parser_cache_static.py).
-# It must stay in sync with the default cacheDir in the Quartz overlay's
-# parse.ts and ctx.ts: <vault>/.quartz/.cache/parser.
-_PARSER_CACHE_RELPATH: Path = Path(".quartz") / ".cache" / "parser"
-
-_KEEP_DEFAULT = 3  # mirrors BRAIN_WIKI_KEEP_BUILDS default in the retired bash template
-
-
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     """Parse brain-rebuild command-line arguments."""
     p = argparse.ArgumentParser(
         prog="brain-rebuild",
         description=(
             "Full-corpus rebuild: embeddings → summaries → search → graph → weights "
-            "→ communities → connect → mirror. The legacy Quartz wiki is dormant "
-            "(R2): build it on request with --only quartz."
+            "→ communities → connect → mirror."
         ),
     )
     p.add_argument(
         "--wiki-only",
         action="store_true",
-        help="Removed at R2; exits 2. Use --only mirror or --only quartz.",
+        help="Removed; exits 2. Use --only mirror for the vault mirror.",
     )
     p.add_argument("--only", help="Comma-separated stage ids to run.")
     p.add_argument("--skip", help="Comma-separated stage ids to skip.")
@@ -338,11 +294,6 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--force",
         action="store_true",
         help="Override the in-flight-ingest guard.",
-    )
-    p.add_argument(
-        "--clean-cache",
-        action="store_true",
-        help="Wipe the Quartz parser cache before the build (requires --only quartz).",
     )
     return p.parse_args(list(argv))
 
@@ -358,20 +309,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for brain-rebuild. Returns an exit code (0 success, 1–4 error)."""
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     if args.wiki_only:
-        # R8-3: removed rather than aliased. The old stage did two jobs that are
-        # now separate stages, and an alias would silently pick one of them.
+        # R8-3: removed rather than aliased. The old stage did two jobs: the
+        # vault mirror (now ``mirror``) and the Quartz build, which was deleted
+        # with the wiki at R3. An alias would silently do only half of it.
         typer.secho(
-            "error: --wiki-only was removed when the wiki went dormant (R2). Use "
-            "--only mirror for the vault mirror, or --only quartz to build the "
-            "legacy Quartz wiki.",
+            "error: --wiki-only was removed with the Quartz wiki. Use "
+            "--only mirror for the vault mirror.",
             fg="red",
             err=True,
         )
         return 2
 
     cfg = Config.load()
-    keep = int(os.environ.get("BRAIN_WIKI_KEEP_BUILDS", str(_KEEP_DEFAULT)))
-    stages = build_stages(vault_path=cfg.vault_path, keep=keep)
+    stages = build_stages(vault_path=cfg.vault_path)
 
     try:
         selected = select_stages(
@@ -382,15 +332,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SelectionError as exc:
         typer.secho(f"error: {exc}", fg="red", err=True)
         return 2
-    if args.clean_cache and not any(s.stage_id == "quartz" for s in selected):
-        typer.secho(
-            "error: --clean-cache wipes the Quartz parser cache, so it needs the "
-            "Quartz build: add --only quartz.",
-            fg="red",
-            err=True,
-        )
-        return 2
-
     if args.dry_run:
         typer.echo("brain-rebuild plan (dry-run):")
         for i, stage in enumerate(selected, 1):
@@ -408,7 +349,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         with rebuild_lock(cfg.database_url):
-            run_stages(selected, clean_cache=args.clean_cache, vault_path=cfg.vault_path)
+            run_stages(selected)
     except RebuildLockHeld as exc:
         typer.secho(f"error: {exc}", fg="red", err=True)
         return 4
