@@ -28,6 +28,7 @@ import contextlib
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import NamedTuple
 
@@ -712,6 +713,86 @@ def test_brain_status_three_rows(
                 p.wait(timeout=5)
 
 
+def _dotenv_only_vault(tmp_path: Path) -> tuple[Path, Path]:
+    """A ``$BRAIN_HOME`` whose ``.env`` is the ONLY place a vault is named.
+
+    Returns ``(brain_home, vault)``. Nothing exports ``BRAIN_VAULT_PATH`` into an
+    interactive shell, so this is the normal state after ``brain setup --vault
+    X``. The vault lives outside ``$HOME`` (set to ``tmp_path/home`` by the
+    callers), so the default ``~/brain-vault`` is a different, absent path.
+    """
+    brain_home = tmp_path / "brain-home"
+    brain_home.mkdir()
+    vault = tmp_path / "configured-vault"
+    vault.mkdir()
+    (brain_home / ".env").write_text(f"BRAIN_VAULT_PATH={vault}\n", encoding="utf-8")
+    (tmp_path / "home").mkdir()
+    return brain_home, vault
+
+
+def _run_brain_status(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(BIN / "brain-status")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def _status_env(
+    tmp_path: Path, brain_home: Path, hermetic_pids: HermeticPids
+) -> dict[str, str]:
+    """``brain-status`` env with the vault configured ONLY in ``$BRAIN_HOME/.env``."""
+    env = os.environ.copy()
+    env.pop("BRAIN_VAULT_PATH", None)  # the session fixture exports one
+    env.update(hermetic_pids.env)
+    env["HOME"] = str(tmp_path / "home")
+    env["BRAIN_HOME"] = str(brain_home)
+    return env
+
+
+def test_brain_status_inspects_the_brain_home_dotenv_vault(
+    hermetic_pids: HermeticPids, tmp_path: Path
+) -> None:
+    """Regression: with no exported ``BRAIN_VAULT_PATH`` status read ``~/brain-vault``.
+
+    The daemons watch the vault ``brain-install-launchd`` resolved from
+    ``$BRAIN_HOME/.env``; status must inspect that one. Only the configured
+    vault has a healthy ``current/``, so the build-id line proves which vault
+    was read, and the ``vault`` row names it.
+    """
+    brain_home, vault = _dotenv_only_vault(tmp_path)
+    build_dir = _seed_healthy_current(vault)
+
+    result = _run_brain_status(_status_env(tmp_path, brain_home, hermetic_pids))
+
+    assert result.returncode == 0, result.stderr
+    assert f"  vault     {vault}\n" in result.stdout, result.stdout
+    assert f"  build-id  {build_dir.name}\n" in result.stdout, result.stdout
+
+
+def test_brain_status_still_reports_daemons_when_the_vault_cannot_be_resolved(
+    stub_dir: Path, hermetic_pids: HermeticPids, tmp_path: Path
+) -> None:
+    """A broken interpreter costs the vault rows only, never the daemon rows."""
+    brain_home, _ = _dotenv_only_vault(tmp_path)
+    _write_stub(
+        stub_dir, "python", body="#!/usr/bin/env bash\necho boom >&2\nexit 1\n"
+    )
+    env = _status_env(tmp_path, brain_home, hermetic_pids)
+    env["BRAIN_PY"] = str(stub_dir / "python")
+
+    result = _run_brain_status(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "watcher:" in result.stdout, result.stdout
+    assert "  vault     ⚠️  unresolved" in result.stdout, result.stdout
+    # No vault, so no claim about its build pointer either way.
+    assert "  current " not in result.stdout, result.stdout
+
+
 # ---------------------------------------------------------------------------
 # Tests — bin/brain-rebuild.
 # ---------------------------------------------------------------------------
@@ -907,6 +988,82 @@ def test_brain_watcher_fg_aborts_when_brain_cli_missing(
     assert not hermetic_pids.paths["watch_pid"].exists(), (
         "wrapper must NOT write a pid file when it can't actually run the watcher"
     )
+
+
+def test_brain_watcher_fg_resolves_the_brain_home_dotenv_vault_when_unexported(
+    stub_dir: Path, hermetic_pids: HermeticPids, tmp_path: Path
+) -> None:
+    """Regression: a manual run with no ``BRAIN_VAULT_PATH`` watched ``~/brain-vault``.
+
+    Under launchd the plist exports the resolved vault; by hand nothing does,
+    so the wrapper must ask the same resolver the plist value came from.
+    ``BRAIN_PY`` is the real interpreter (brain importable); ``brain`` is the
+    recording stub.
+    """
+    brain_home, vault = _dotenv_only_vault(tmp_path)
+    _write_stub(stub_dir, "brain")
+    env = _make_env(
+        stub_dir=stub_dir,
+        vault_dir=tmp_path / "unused",
+        extras={
+            **hermetic_pids.env,
+            "BRAIN_SKIP_VENV_AUTOLOAD": "1",
+            "BRAIN_HOME": str(brain_home),
+            "HOME": str(tmp_path / "home"),
+            "BRAIN_PY": sys.executable,
+        },
+    )
+    del env["BRAIN_VAULT_PATH"]
+
+    result = subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(BIN / "_brain-watcher-fg")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _read_log(stub_dir / "brain.calls") == [
+        f"vault sync --watch --vault {vault}"
+    ]
+
+
+def test_brain_watcher_fg_aborts_when_the_vault_cannot_be_resolved(
+    stub_dir: Path, hermetic_pids: HermeticPids, tmp_path: Path
+) -> None:
+    """No vault → no watcher and no pid file, rather than watching a guessed path."""
+    brain_home, _ = _dotenv_only_vault(tmp_path)
+    _write_stub(stub_dir, "brain")
+    _write_stub(
+        stub_dir, "python", body="#!/usr/bin/env bash\necho boom >&2\nexit 1\n"
+    )
+    env = _make_env(
+        stub_dir=stub_dir,
+        vault_dir=tmp_path / "unused",
+        extras={
+            **hermetic_pids.env,
+            "BRAIN_SKIP_VENV_AUTOLOAD": "1",
+            "BRAIN_HOME": str(brain_home),
+            "HOME": str(tmp_path / "home"),
+        },
+    )
+    del env["BRAIN_VAULT_PATH"]
+
+    result = subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(BIN / "_brain-watcher-fg")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "could not resolve the vault" in result.stderr, result.stderr
+    assert _read_log(stub_dir / "brain.calls") == []
+    assert not hermetic_pids.paths["watch_pid"].exists()
 
 
 def test_brain_build_fg_writes_pid_and_execs_build_watcher(

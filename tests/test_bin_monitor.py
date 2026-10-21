@@ -12,6 +12,7 @@ from brain.bin.monitor import (
     _pid_alive,
     _recent_builds,
     _recent_vault_files,
+    _vault,
     main,
 )
 
@@ -400,3 +401,52 @@ def test_snapshot_flags_a_build_pid_file_naming_no_process(
 
     assert "process count vs pid file" in out, out
     assert f"build_watcher pgrep=0  pidfile={finished.pid}" in out, out
+
+
+# ---------------------------------------------------------------------------
+# _vault — the same vault the installers bake into the plists
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def dotenv_only_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A vault named ONLY in ``$BRAIN_HOME/.env`` (as ``~/…``); returns its absolute path.
+
+    Nothing exports ``BRAIN_VAULT_PATH`` into an interactive shell, so this is
+    the normal state after ``brain setup --vault X``. ``HOME`` is fenced so the
+    ``~`` expands into ``tmp_path``, and the default vault is moved there too so
+    a regressed reader still lands on a throwaway path.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    brain_home = tmp_path / "brain-home"
+    brain_home.mkdir()
+    (brain_home / ".env").write_text("BRAIN_VAULT_PATH=~/configured-vault\n", encoding="utf-8")
+    monkeypatch.setenv("BRAIN_HOME", str(brain_home))
+    monkeypatch.delenv("BRAIN_VAULT_PATH", raising=False)
+    monkeypatch.setattr("brain.config.DEFAULT_VAULT_PATH", tmp_path / "default-vault")
+    return home / "configured-vault"
+
+
+def test_vault_reads_brain_home_dotenv_when_nothing_is_exported(
+    dotenv_only_vault: Path,
+) -> None:
+    """Regression: ``_vault`` read only the process env, else ``~/brain-vault``."""
+    assert _vault() == dotenv_only_vault
+
+
+def test_snapshot_reports_the_dotenv_vault(
+    dotenv_only_vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The snapshot banner names the vault the daemons watch, not the default."""
+    monkeypatch.setenv("BRAIN_WIKI_PORT", "18080")
+    monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
+    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
+
+    assert main([]) == 0
+
+    assert f"vault={dotenv_only_vault}\n" in capsys.readouterr().out
