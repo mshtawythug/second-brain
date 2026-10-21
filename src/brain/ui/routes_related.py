@@ -11,10 +11,8 @@ the one read this route needs beyond ``compute_related`` (the root's
 sensitivity tier) lives there as ``document_sensitivity``.
 
 Binding rule (spec §6.5): this module imports nothing from
-``brain.maintenance``, ``brain.graph_rag`` or ``brain.wiki``. The ranking it
-serves is the per-document entry point in ``brain.related``, which the old wiki
-emitter also delegates to — so the panel and the retiring precompute rank
-identically without the panel depending on the emitter.
+``brain.maintenance`` or ``brain.graph_rag``. The ranking it serves is the
+per-document entry point in ``brain.related`` (``compute_related``).
 
 THE FLOOR IS THE ONE ``brain search`` READS (ruling R1). ``compute_related``
 deliberately has no default for ``vector_sim_floor``: the cosine floor is shared

@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Two-tier acceptance harness for the user's 5-point release checklist.
+"""Two-tier acceptance harness for the user's release checklist (checks 1-3).
+
+Checks 4 (a forced Quartz build) and 5 (the Quartz build must fail loudly with no
+config) were deleted with the Quartz wiki at R3 (wiki-to-ui phase 9): the code
+they measured no longer exists. Checks 1-3 keep their numbers.
 
 WHY TWO TIERS
 -------------
-Run verbatim, all five of the user's checks measure the WRONG BINARY. ``brain``
-on PATH is the uv-tool install, which lags the repo. w-failloud proved the trap
-on check 5:
-
-    repo code      -> "wiki build aborted", exit 3, NOTHING PUBLISHED
-    installed copy -> WARNING "... skipping refresh", exit 0, PUBLISHED ANYWAY
-
-So check 5 as written prints a green-looking "build succeeded" that IS the bug a
-user is trying to detect. Tier A and Tier B exist so that result can never be
-misread:
+Run verbatim, the user's checks measure the WRONG BINARY. ``brain`` on PATH is
+the uv-tool install, which lags the repo. w-failloud proved the trap on the
+since-deleted check 5: the repo code aborted with nothing published while the
+installed copy warned, exited 0 and published anyway -- a green-looking result
+that WAS the bug. Tier A and Tier B exist so a result can never be misread:
 
     TIER A  -- runs against REPO code.  A pass says THE CODE IS RIGHT.
     TIER B  -- runs against the LIVE install. A pass says THE USER'S MACHINE
@@ -25,21 +24,13 @@ invocation targeted what you think it did.
 SAFETY (these are not incidental -- each one is a bug this harness would
 otherwise reproduce):
   * Check 2 uses a TEMP $BRAIN_HOME and never touches the real ~/.brain/.
-  * Check 5 runs against a COPY of src/ outside the tree. ``_project_dotenv()``
-    resolves relative to the module, so an IN-TREE run always finds the repo
-    .env and the no-config case becomes UNREACHABLE -- a vacuous check that
-    cannot fail. The copy is nested so the project-dotenv leg lands inside the
-    sandbox, and the check asserts the whole dotenv chain is empty before
-    trusting its own result.
-  * Check 4 uses a scratch vault, never ~/brain-vault, and does not trigger a
-    real cold build (C16: emit phase >5min vs 17-22s).
   * Check 3 restarts launchd agents BY LABEL only, never a pattern kill.
   * Nothing here writes to production Postgres (55432).
 
 USAGE
     python scripts/verify_release.py --tier A
     python scripts/verify_release.py --tier B          # only after a redeploy
-    python scripts/verify_release.py --tier A --checks 1,5
+    python scripts/verify_release.py --tier A --checks 1,2
     python scripts/verify_release.py --tier B --checks 3 --allow-restart
 """
 from __future__ import annotations
@@ -47,7 +38,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -64,7 +54,7 @@ INSTALLED_PY = (
 LAUNCHD_LABELS = ("com.brain.watcher", "com.brain.brief")
 MINIMAL_PATH = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
 
-PASS, FAIL, SKIP, BLOCKED = "PASS", "FAIL", "SKIP", "BLOCKED"
+PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 
 
 @dataclass
@@ -386,174 +376,6 @@ def check_3(tier: str, *, allow_restart: bool) -> Result:
 
 
 # ---------------------------------------------------------------------------
-# Check 4 -- a forced build emits a new dir containing a newly ingested doc
-# ---------------------------------------------------------------------------
-
-
-def check_4(tier: str, *, include_build: bool) -> Result:
-    """Scratch-vault build. Default SKIP: a real build hits C16 on this machine."""
-    if not include_build:
-        return Result(
-            4,
-            "forced build emits new dir with new doc",
-            SKIP,
-            "skipped by default (pass --include-build to run). A real build "
-            "currently hits C16 -- emit phase >5min vs 17-22s, four live timeouts "
-            "-- and this machine crashed Postgres under load today. Requires a "
-            "scratch vault with its own Quartz workspace; never ~/brain-vault.",
-            _pkg_path(_interpreter(tier)),
-            ["not executed"],
-        )
-    return Result(
-        4,
-        "forced build emits new dir with new doc",
-        BLOCKED,
-        "BLOCKED-ON-C16: a scratch-vault build needs its own Quartz workspace "
-        "(npm install) and the emit-phase defect makes the result "
-        "uninterpretable until C16 lands.",
-        _pkg_path(_interpreter(tier)),
-        [],
-    )
-
-
-# ---------------------------------------------------------------------------
-# Check 5 -- no config must FAIL LOUDLY, never publish stale
-# ---------------------------------------------------------------------------
-
-
-def check_5(tier: str) -> Result:
-    """With no reachable config, the build must abort rather than publish.
-
-    Runs against a COPY of the package outside the tree. In-tree this check is
-    VACUOUS: ``_project_dotenv()`` is resolved from the module's own location,
-    so an in-tree run always finds the repo .env and the no-config state is
-    unreachable. The copy is nested one level (``pkgroot/brain``) so the
-    project-dotenv leg lands inside the sandbox, and the probe asserts the whole
-    dotenv chain is empty before trusting the outcome.
-    """
-    if tier == "A":
-        source = REPO_ROOT / "src" / "brain"
-    else:
-        probe = _pkg_path(INSTALLED_PY)
-        if not probe.startswith("/"):
-            return Result(
-                5,
-                "no config fails loudly",
-                FAIL,
-                f"cannot resolve installed package: {probe}",
-            )
-        source = Path(probe)
-
-    with tempfile.TemporaryDirectory() as sandbox:
-        root = Path(sandbox)
-        pkgroot = root / "pkgroot"
-        pkgroot.mkdir()
-        shutil.copytree(source, pkgroot / "brain")
-        fake_home = root / "home"
-        (fake_home / "logs").mkdir(parents=True)
-        vault = root / "vault"
-        vault.mkdir()
-
-        code = (
-            _PKG_PROBE + "\n"
-            "from pathlib import Path\n"
-            "from brain.config import _brain_home_dotenv, _project_dotenv\n"
-            "from dotenv import find_dotenv\n"
-            "reach = []\n"
-            "if _brain_home_dotenv().exists(): reach.append(str(_brain_home_dotenv()))\n"
-            "if _project_dotenv().exists(): reach.append(str(_project_dotenv()))\n"
-            "c = find_dotenv(usecwd=True)\n"
-            "if c: reach.append(c)\n"
-            "print('REACHABLE_DOTENV=' + (','.join(reach) if reach else '(none)'))\n"
-            # Do NOT import BrainWikiConfigError up front: on an install that
-            # predates the fix the class does not exist, and a hard import would
-            # abort with an ImportError before measuring the behaviour we care
-            # about. Catch broadly and classify by class NAME instead, so the
-            # same probe works against old and new code alike.
-            "import brain.wiki.errors as _err\n"
-            "print('HAS_CONFIG_ERROR_CLASS=%s' % hasattr(_err, 'BrainWikiConfigError'))\n"
-            "from brain.wiki.build_swap import _refresh_pre_build_adornments\n"
-            "try:\n"
-            f"    _v = Path({str(vault)!r})\n"
-            "    _refresh_pre_build_adornments(_v, refresh_related_inline=False)\n"
-            "except Exception as exc:\n"
-            "    print('OUTCOME=RAISED')\n"
-            "    print('EXC_TYPE=' + type(exc).__name__)\n"
-            "    print('MESSAGE=' + str(exc).splitlines()[0])\n"
-            "else:\n"
-            "    print('OUTCOME=PROCEEDED_WOULD_PUBLISH_STALE')\n"
-        )
-        proc = _run(
-            _interpreter(tier),
-            code,
-            env={
-                "HOME": str(fake_home),
-                "PATH": MINIMAL_PATH,
-                "PYTHONPATH": str(pkgroot),
-                "BRAIN_HOME": str(fake_home),
-            },
-            cwd=root,
-        )
-
-    lines = [ln for ln in proc.stdout.splitlines() if "=" in ln]
-    pkg = next((ln[4:] for ln in lines if ln.startswith("PKG=")), "(unresolved)")
-    reachable = next((ln for ln in lines if ln.startswith("REACHABLE_DOTENV=")), "")
-
-    if reachable != "REACHABLE_DOTENV=(none)":
-        return Result(
-            5,
-            "no config fails loudly",
-            FAIL,
-            f"CHECK IS VACUOUS -- config was still reachable ({reachable}). "
-            "The sandbox leaked a .env; the result proves nothing.",
-            pkg,
-            lines + [proc.stderr.strip()[:200]],
-        )
-    has_class = "HAS_CONFIG_ERROR_CLASS=True" in proc.stdout
-    exc_type = next(
-        (ln.split("=", 1)[1] for ln in lines if ln.startswith("EXC_TYPE=")), ""
-    )
-    if exc_type == "BrainWikiConfigError":
-        return Result(
-            5,
-            "no config fails loudly",
-            PASS,
-            "with no reachable config the build ABORTED instead of publishing stale",
-            pkg,
-            lines,
-        )
-    if "OUTCOME=PROCEEDED_WOULD_PUBLISH_STALE" in proc.stdout:
-        stale = (
-            "build PROCEEDED with no config -- this is the user's original incident: "
-            "a green-looking success that publishes a stale wiki."
-        )
-        if not has_class:
-            stale += (
-                " This copy PREDATES the fix (brain.wiki.errors has no "
-                "BrainWikiConfigError) -- it needs the redeploy in task #38."
-            )
-        return Result(5, "no config fails loudly", FAIL, stale, pkg, lines)
-    if exc_type:
-        return Result(
-            5,
-            "no config fails loudly",
-            FAIL,
-            f"aborted, but with an unexpected {exc_type} rather than "
-            f"BrainWikiConfigError -- the abort may be incidental, not the guard",
-            pkg,
-            lines,
-        )
-    return Result(
-        5,
-        "no config fails loudly",
-        FAIL,
-        f"indeterminate: {_last_error_line(proc)}",
-        pkg,
-        lines,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 
@@ -561,13 +383,10 @@ def check_5(tier: str) -> Result:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="verify_release.py",
-        description="Two-tier acceptance harness for the 5-point release checklist.",
+        description="Two-tier acceptance harness for the release checklist (checks 1-3).",
     )
     parser.add_argument("--tier", choices=["A", "B"], required=True)
-    parser.add_argument("--checks", default="1,2,3,4,5")
-    parser.add_argument(
-        "--include-build", action="store_true", help="run check 4's scratch build"
-    )
+    parser.add_argument("--checks", default="1,2,3")
     parser.add_argument(
         "--allow-restart",
         action="store_true",
@@ -599,10 +418,6 @@ def main(argv: list[str] | None = None) -> int:
         results.append(check_2(args.tier))
     if 3 in wanted:
         results.append(check_3(args.tier, allow_restart=args.allow_restart))
-    if 4 in wanted:
-        results.append(check_4(args.tier, include_build=args.include_build))
-    if 5 in wanted:
-        results.append(check_5(args.tier))
 
     if args.json:
         print(json.dumps([r.__dict__ for r in results], indent=2))
@@ -616,7 +431,7 @@ def main(argv: list[str] | None = None) -> int:
 
     failed = [r for r in results if r.status == FAIL]
     print("\n" + "-" * 78)
-    counts = {s: sum(1 for r in results if r.status == s) for s in (PASS, FAIL, SKIP, BLOCKED)}
+    counts = {s: sum(1 for r in results if r.status == s) for s in (PASS, FAIL, SKIP)}
     print(f"tier {args.tier}: " + "  ".join(f"{k}={v}" for k, v in counts.items()))
     if args.tier == "A":
         print("NOTE: tier A says nothing about the user's machine. Run tier B after #38.")

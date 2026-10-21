@@ -1,14 +1,14 @@
 """Shared path / wiki-link helpers used by the vault renderers.
 
 Both helpers are pure (no I/O, no DB) and small. Three rendering surfaces
-hand-rolled the same logic before this module existed:
+hand-rolled the same logic before this module existed; two remain:
 
-- :mod:`brain.wiki.build_homepage` — recent-rail bullet renderer
 - :mod:`brain.people` — People Hub per-person + index pages
 - :mod:`brain.vault.daily_index` — daily-notes index renderer
 
-Centralizing here means a future change (say, switching to ``.markdown``
-extension support) flips one place rather than three.
+(The third, the wiki homepage's recent-rail renderer, was deleted with the
+Quartz wiki at R3.) Centralizing here means a future change (say, switching to
+``.markdown`` extension support) flips one place.
 
 :func:`assert_within_vault` joined them in F8 as the pure, framework-free
 form of the path-traversal guard the authoring commands hand-rolled. It

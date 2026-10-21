@@ -5,7 +5,7 @@ description: >
   re-embedding, corpus backfills, summary mirror sync, derived-link rebuild,
   People Hub regeneration, and embedder swaps. Use this skill when the user
   asks whether the brain is healthy, asks to rebuild embeddings, asks to
-  resync summaries to the wiki, asks to regenerate the people pages, asks
+  resync summaries to the vault, asks to regenerate the people pages, asks
   to refresh derived links or directory, or reports a brain CLI error that
   suggests an ops-level repair. Also covers first-time provisioning
   (`brain setup`), the zero-Ollama sandbox (`brain demo`), and the retrieval
@@ -14,7 +14,7 @@ description: >
   vault directory refresh / setup / demo / eval.
   MANDATORY TRIGGERS: brain doctor, is my brain healthy, brain status,
   rebuild embeddings, reembed, brain reembed, backfill the brain, backfill
-  tags, backfill search, sync summaries, sync summaries to wiki, regenerate
+  tags, backfill search, sync summaries, sync summaries to vault, regenerate
   people pages, refresh derived links, refresh directory, relink, switch
   embedder, ollama down, postgres down, brain init, brain analyze, analyze
   tables, refresh planner stats, chunks stats warn, set up my brain, brain
@@ -38,14 +38,13 @@ infrastructure* underneath.
 ## First-run provisioning — `brain setup`
 
 The one-command installer: provisions `$BRAIN_HOME`, installs shims, starts
-Postgres via Docker, and optionally configures the wiki (Caddy + Quartz) and the
-Claude Code skill. Use it when the user has no working brain yet — not as a
+Postgres via Docker, and optionally installs the Claude Code skill. Use it when the user has no working brain yet — not as a
 repair for one that already works (that is `brain doctor`).
 
 ```bash
 brain setup --dry-run                  # print every planned action, touch nothing
 brain setup --profile minimal          # Postgres + FTS only; no Ollama, no models
-brain setup --profile full --daemons   # + graph / wiki / launchd daemons (full only)
+brain setup --profile full --daemons   # + graph / launchd daemons (full only)
 ```
 
 `--profile standard` is the default (adds Ollama hybrid search); run
@@ -90,11 +89,12 @@ The single entry point for "is the brain healthy?". Verifies:
 - Embedder runtime: Ollama daemon + model loaded (`arctic` / `qwen3`), or
   Voyage API key (`voyage`).
 - `gws` CLI present (used by Gmail ingest + directory refresh).
-- `npx` present (soft check — Quartz / wiki render is optional).
 - Enrich model loaded in Ollama (`BRAIN_ENRICH_MODEL`, default `llama3.1:8b`).
 
-Exit 1 on hard failure. Missing Ollama models, missing `npx`, missing enrich
-model are soft warnings (exit 0).
+- A leftover retired `com.brain.build` daemon — WARN; `brain-up` removes it.
+
+Exit 1 on hard failure. Missing Ollama models and a missing enrich model are
+soft warnings (exit 0).
 
 ```bash
 brain doctor
@@ -160,7 +160,7 @@ convergence is a no-op.
 
 ## Summary mirror sync — `brain vault sync-summaries`
 
-Q2-SUMMARY-WIKI: when `documents.summary` is populated (by ingest or `brain
+When `documents.summary` is populated (by ingest or `brain
 enrich --backfill`) but the on-disk vault mirror's `summary:` frontmatter is
 missing or stale, this command rewrites the frontmatter atomically.
 
@@ -215,20 +215,20 @@ Directory rebuild only (steps 1 + 3 above). No linker pass, no fence rewrite,
 no People Hub emit. Use when you only edited `_people.yml` and don't need a
 full relink. Soft-fails on missing `gws` and exits 0.
 
-## Wiki build (Quartz blue/green) — dormant since R2
+## Vault-sync daemons and full rebuild — `bin/` scripts
 
-Nothing rebuilds the wiki by default (`com.brain.build` is retired); Caddy serves the last build.
+The user reads in `brain ui`. The Quartz wiki was retired at R3: nothing to build.
 
 ```bash
-bin/brain-up                                   # start the vault-sync watcher (launchd)
-bin/brain-status                               # pid + current symlink + .build-id ("build: dormant")
-bin/brain-rebuild --only quartz                # rebuild the dormant wiki (atomic swap)
-bin/brain-rebuild --only quartz --clean-cache  # wipe parser cache and rebuild from cold
-bin/brain-down                                 # stop the watcher (Caddy keeps serving last-good)
+bin/brain-up                        # start the vault-sync watcher + 07:00 brief job (launchd)
+bin/brain-status                    # is the sync watcher running?
+bin/brain-rebuild --dry-run         # print the full-corpus rebuild plan
+bin/brain-rebuild --only mirror     # vault export + sync-summaries + prune-orphans only
+bin/brain-down                      # stop the watcher
 ```
 
-A stale build is expected since R2. `--wiki-only` is gone (exits 2): use
-`--only mirror` or `--only quartz`.
+`--wiki-only` exits 2: use `--only mirror`. Old-wiki leftovers (`<vault>/.quartz/`,
+`$BRAIN_HOME/Caddyfile`, a running Caddy) are the user's to delete by hand.
 
 ## Init / migrations — `brain init`
 
@@ -296,5 +296,5 @@ generic error; don't collapse them into "it failed".
 - **Never run destructive ops on the production DB without explicit user approval.** That includes `DROP`, `TRUNCATE`, unbounded `DELETE`, `docker compose down -v`, `rm -rf data/postgres/`, `brain setup --reset`, and `brain uninstall` (which tears down runtime state and supervised daemons — never reach for it on "clean up my brain").
 - **Migrations are additive-only.** Schema changes go in a new numbered file under `src/brain/migrations/`. Never edit a shipped migration.
 - **`brain doctor` is the diagnostic; the remediation is in the printed line.** If the line doesn't tell you what to do, ask the user before guessing — don't go straight to a reset.
-- **Soft warnings are warnings, not failures.** Missing `npx`, missing Ollama enrich model — note them, don't escalate.
+- **Soft warnings are warnings, not failures.** Missing `gws`, missing Ollama enrich model — note them, don't escalate.
 - **Idempotency means run-once vs. run-many is the same.** All backfills and the relink are safe to rerun. If a run errors midway, fix the root cause and rerun.

@@ -5,9 +5,9 @@ because conftest is already far past the 800-line ceiling.
 
 **Why ``monkeypatch`` is not enough.** ``Config.load()`` publishes every key
 from the dotenv chain into the process env with ``os.environ.setdefault``. That
-is intended production behaviour: code outside ``brain.config`` (e.g.
-``maintenance.py``'s ``BRAIN_WIKI_KEEP_BUILDS``) and child processes (the wiki
-build that ``wiki/build_swap.py`` spawns) read those knobs from ``os.environ``.
+is intended production behaviour: code outside ``brain.config`` and child
+processes (``brain-rebuild``'s stage subprocesses; before R3, also the Quartz
+wiki build) read those knobs from ``os.environ``.
 ``monkeypatch`` undoes only the names it was handed, and a
 ``delenv(..., raising=False)`` of an absent name records nothing. So a test
 that loads config from a ``.env`` it wrote leaks whatever keys that file held.

@@ -311,7 +311,7 @@ def test_stale_sweep_skips_a_file_owned_by_another_live_row(
     ``iter_orphan_mirror_files`` consults ``_owned_vault_paths``;
     ``iter_stale_mirror_files`` did not, and both feed the same
     ``path.unlink()`` loop behind ``prune-orphans --apply --include-stale`` —
-    which ``brain-rebuild`` runs UNATTENDED in its wiki stage. So doc B's bytes
+    which ``brain-rebuild`` runs UNATTENDED in its ``mirror`` stage. So doc B's bytes
     landing on doc A's mirror path made A's only on-disk copy automatically
     deletable.
 

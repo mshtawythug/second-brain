@@ -187,7 +187,6 @@ def test_no_broad_template_glob() -> None:
 # audits missed because these helpers are leading-underscore "internal" and
 # weren't on the user-facing wrapper list.
 _FG_HELPER_PAIRS = [
-    ("_brain-build-fg", "_brain-build-fg.sh"),
     ("_brain-watcher-fg", "_brain-watcher-fg.sh"),
 ]
 

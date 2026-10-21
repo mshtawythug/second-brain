@@ -91,23 +91,36 @@ def test_readme_embeds_both_gifs() -> None:
     assert "](docs/assets/usage.gif)" in text, "README does not embed the usage GIF"
 
 
+#: The GIF regenerators under ``bin/``. ``bin/brain-wiki-gif`` was deleted with
+#: the Quartz wiki at R3 (wiki-to-ui phase 9), so it must appear nowhere here.
+GIF_REGENERATORS = (
+    "bin/brain-demo-gif",
+    "bin/brain-usage-gif",
+    "bin/brain-mcp-gif",
+    "bin/brain-graphrag-gif",
+    "bin/brain-ask-gif",
+    "bin/brain-proactivity-gif",
+)
+
+
+def test_gif_regenerator_list_matches_bin() -> None:
+    """The list above is the set on disk, so a new or deleted regenerator fails here."""
+    on_disk = {f"bin/{p.name}" for p in (REPO_ROOT / "bin").glob("brain-*-gif")}
+    assert on_disk == set(GIF_REGENERATORS), on_disk ^ set(GIF_REGENERATORS)
+
+
 def test_contributing_documents_all_regenerators() -> None:
     text = CONTRIBUTING.read_text(encoding="utf-8")
     # Every GIF regenerator under bin/ must be named in the "Docs assets" section
     # so contributors know which script rebuilds which asset. Substring checks on
-    # the seven script names stay robust to prose/formatting changes.
-    for script in (
-        "bin/brain-demo-gif",
-        "bin/brain-usage-gif",
-        "bin/brain-mcp-gif",
-        "bin/brain-graphrag-gif",
-        "bin/brain-ask-gif",
-        "bin/brain-wiki-gif",
-        "bin/brain-proactivity-gif",
-    ):
+    # the script names stay robust to prose/formatting changes.
+    for script in GIF_REGENERATORS:
         assert script in text, (
             f"CONTRIBUTING 'Docs assets' does not mention regenerator {script}"
         )
+    assert "brain-wiki-gif" not in text and "wiki.gif" not in text, (
+        "CONTRIBUTING still documents the deleted rendered-wiki GIF"
+    )
 
 
 # --------------------------------------------------------------------------- #

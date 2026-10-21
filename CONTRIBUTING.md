@@ -258,14 +258,13 @@ mypy src/ && pytest` gate green, no PII, and docs updated (README / `docs/` /
 
 ## Docs assets
 
-The docs embed **seven** generated GIFs, each rebuilt by its own script under
-`bin/`. Six are [VHS](https://github.com/charmbracelet/vhs) terminal recordings
-driven by a tape in `docs/assets/*.tape`; the seventh (the wiki clip) is a
-Playwright **browser** capture of the rendered Quartz site, not a VHS tape. The
-GIFs live across `README.md`, `docs/graphrag.md`, `docs/cli-reference.md`, and
-`docs/vault-and-wiki.md`. Every regenerator needs Docker plus either
-`brew install vhs` (the six VHS ones) or Node (the wiki one); a few need more, as
-noted below (Ollama, the Apache AGE image, ffmpeg).
+The docs embed **six** generated GIFs, each rebuilt by its own script under
+`bin/`. All six are [VHS](https://github.com/charmbracelet/vhs) terminal
+recordings driven by a tape in `docs/assets/*.tape`. The GIFs live across
+`README.md`, `docs/graphrag.md`, and `docs/cli-reference.md`. Every regenerator
+needs Docker plus `brew install vhs`; a few need more, as noted below (Ollama,
+the Apache AGE image, ffmpeg). (The seventh, a browser capture of the rendered
+Quartz wiki, was deleted with the wiki at R3.)
 
 - **Hero / demo** — `bin/brain-demo-gif` → `docs/assets/demo.gif` (README, "See
   it in 60 seconds"), from `docs/assets/demo.tape`. Records the `brain demo`
@@ -294,11 +293,6 @@ noted below (Ollama, the Apache AGE image, ffmpeg).
   `docs/assets/proactivity.gif` (`docs/cli-reference.md`), from
   `docs/assets/proactivity.tape`. Records `brain brief` + `brain resurface`;
   additionally needs Ollama.
-- **Rendered wiki** — `bin/brain-wiki-gif` (with
-  `bin/brain-wiki-gif-capture.cjs`) → `docs/assets/wiki.gif`
-  (`docs/vault-and-wiki.md`). A Playwright **browser** capture of the built
-  Quartz wiki (graph view, backlinks, People Hub) — **not** a VHS tape. Needs
-  Node + Playwright (auto-installed) and Docker.
 
 If a CLI or UI change makes any GIF stale, regenerate it with the matching
 script.
@@ -339,16 +333,13 @@ src/brain/
   setup.py            — `brain setup` orchestration (preflight, compose render, init, doctor)
   uninstall.py        — `brain uninstall` (removes launchd plists + runtime state)
   cli_claude.py       — `brain claude install-skill` (installs the Claude Code skill)
-  templates/          — packaged docker-compose.yml.j2, env.example, AGE Dockerfile, skill, Caddyfile
+  templates/          — packaged docker-compose.yml.j2, env.example, AGE Dockerfile, skill, launchd plists + bin wrappers
   ingest/             — extractors per file type + chunker + Embedder Protocol + graph sync hook
   vault/              — vault-model modules (slug, templates, frontmatter, export, links, resolver, sync, rename, graph, watch, paths)
-  wiki/               — wiki rendering + serve (build_swap, build_watcher, build_partial, edit_classifier, fastpath_manifest, fastpath_state, build_homepage, build_people, build_related, slug)
-  quartz_overrides/   — Quartz overlay applied to <vault>/.quartz at render time
   graph_rag/          — GraphRAG package: backend (AGE), schema (frozen value objects), extractor (Ollama), cooccur, weighting, traversal, router, communities, sync, reconcile
   eval/               — retrieval + answer eval harness (metrics, baselines, corpus, runner, answer_eval for `brain eval --answer`)
 src/brain/migrations/ — numbered SQL files (001..023) packaged inside the brain package + schema_migrations tracking
 bin/                  — brain-up / brain-down / brain-rebuild / brain-status convenience scripts
-quartz.config.ts      — sample Quartz v4 config (copy into <vault>/.quartz/)
 skills/               — Claude Code skills, one directory per skill (installed by bin/brain-skills-sync)
 tests/                — real-DB pattern, fake embedder fixture, one test module per source module (~290 modules)
 ```

@@ -1365,8 +1365,8 @@ def iter_clobbered_mirror_files(
     writer computed the same deterministic mirror path as an existing document
     and overwrote it, then its own row went away (rolled back, or written to a
     different database). ``brain doctor`` counts zero ghost rows for it — the
-    file exists, so the row's ``vault_path`` still resolves — while the vault
-    and any published wiki quietly serve the wrong document's content.
+    file exists, so the row's ``vault_path`` still resolves — while the vault,
+    read in Obsidian or any editor, quietly serves the wrong document's content.
 
     The repair is ``brain vault export --force``, which rewrites the file from
     its owning row. Deleting is never correct here, which is exactly why these
@@ -1419,7 +1419,7 @@ def iter_stale_mirror_files(
     as the orphan/clobbered split); this helper did not,
     and both feed the same ``path.unlink()`` loop behind
     ``brain vault prune-orphans --apply --include-stale`` — which
-    :mod:`brain.maintenance` runs UNATTENDED as a step of the wiki stage. So
+    :mod:`brain.maintenance` runs UNATTENDED as a step of the ``mirror`` stage. So
     the guard has to be on both iterators or it is on neither.
     """
     ingested_dir = vault_path / _INGESTED_DIR_NAME

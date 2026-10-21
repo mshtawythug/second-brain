@@ -1,8 +1,9 @@
 """A shared backstop wait for tests that poll for work done on another thread.
 
 Importable as ``from tests.thread_wait import wait_for``. Not a ``test_*``
-module, so pytest does not collect it. One definition serves the vault-watcher,
-``brain vault sync --watch`` and wiki build-watcher tests, and
+module, so pytest does not collect it. One definition serves the vault-watcher
+and ``brain vault sync --watch`` tests (and served the wiki build-watcher
+tests until R3 deleted them), and
 ``tests/test_thread_wait.py`` guards every importer: no call site may pass a
 timeout, and no test module may define or re-export its own copy.
 """

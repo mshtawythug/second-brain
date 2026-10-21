@@ -18,7 +18,8 @@ from types import ModuleType
 
 #: Packages a read-only UI surface must never import (spec §6.5): each one is a
 #: build or maintenance path, and the UI is the reader, not the builder.
-FORBIDDEN_PACKAGES = ("brain.maintenance", "brain.graph_rag", "brain.wiki")
+#: (``brain.wiki`` was on this list until the package was deleted at R3.)
+FORBIDDEN_PACKAGES = ("brain.maintenance", "brain.graph_rag")
 
 
 def absolute_imports(module: ModuleType) -> set[str]:

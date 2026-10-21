@@ -73,7 +73,7 @@ narrowest scope that satisfies the user's ask:
 Always run with `--dry-run` first when the scope might be broader than the
 user expected. Cap with `--max 100` for safety. Note: **drafts are now
 included** (Q1-A change) — they ingest with `documents.draft=TRUE` and are
-hidden from the wiki but visible to `brain search` / `brain recall` /
+hidden from `brain ui`'s browseable views but visible to `brain search` / `brain recall` /
 `brain show`.
 
 The summary line is `N ingested (M draft)` when drafts are present.

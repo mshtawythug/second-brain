@@ -1,4 +1,4 @@
-"""brain-up — start the supervised vault-sync watcher (the wiki is dormant since R2)."""
+"""brain-up — start the supervised vault-sync watcher and daily-brief job."""
 import sys
 
 from ._launcher import exec_shim

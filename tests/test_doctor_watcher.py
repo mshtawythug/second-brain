@@ -1,4 +1,4 @@
-"""Phase 8 T4: `brain doctor` reports the vault-sync watcher, a retired daemon, a dormant wiki.
+"""Phase 8 T4: `brain doctor` reports the vault-sync watcher and a retired daemon.
 
 - **A9's doctor half (Q8, R8-5).** No watcher → WARN, never FAIL. A machine that
   never opted into daemons is not broken. An installed watcher that is down
@@ -8,15 +8,14 @@
 - **The retired ``com.brain.build`` (E8).** A leftover plist is one WARN from
   its own check, whether it is loaded or not, and never a FAIL or an OK from
   the ``daemons`` status loop.
-- **Dormant wiki (R8-4).** At R2 nothing rebuilds the wiki by default, so its
-  age is no longer a fault. Both former FAIL branches are OK, and both name
-  ``brain-rebuild --only quartz``.
+- **No wiki check (R3, phase 9).** Phase 8's dormant-wiki freshness check
+  (R8-4) was deleted with the wiki; what survives is that no daemon line is
+  coupled to it.
 """
 
 from __future__ import annotations
 
 import plistlib
-import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -25,8 +24,7 @@ import pytest
 
 from brain import doctor_watcher, maintenance
 from brain.bin.launchd import _INSTALLED_LABELS, _RETIRED_LABELS
-from brain.config import Config
-from brain.doctor_runtime import runtime_doctor_checks, wiki_freshness_doctor_check
+from brain.doctor_runtime import runtime_doctor_checks
 from brain.doctor_watcher import (
     WATCHER_LABEL,
     WATCHER_STATES,
@@ -35,7 +33,6 @@ from brain.doctor_watcher import (
     watcher_doctor_check,
     watcher_state,
 )
-from tests.test_doctor_runtime import _write_build
 
 _BUILD = "com.brain.build"
 _WATCH_CMD = "/usr/bin/python3 /x/bin/brain vault sync --watch --vault /v"
@@ -76,10 +73,8 @@ def _checks(
     tmp_path: Path, *, listed: tuple[str, ...], platform: str = "darwin", **kw: Any
 ) -> dict[str, list[Any]]:
     """``runtime_doctor_checks`` with ``launchctl list`` answering ``listed``."""
-    cfg = Config(database_url="postgresql://synthetic/x", vault_path=tmp_path / "vault")
     with patch("brain.doctor_runtime.subprocess.run", return_value=_Listed(*listed)):
         checks = runtime_doctor_checks(
-            cfg,
             launchd_dir=tmp_path / "agents",
             launchctl="launchctl",
             platform=platform,
@@ -274,54 +269,28 @@ def test_the_retired_check_is_macos_only(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# dormant wiki freshness (R8-4)
+# no wiki coupling (R8-4 at R2; the check itself deleted at R3)
 # ---------------------------------------------------------------------------
 
 
-def test_an_old_wiki_build_is_dormant_not_failing(tmp_path: Path) -> None:
-    """The 12-day age that used to FAIL is the expected state at R2."""
-    _write_build(tmp_path / ".quartz" / "builds", "20260726-090000-aaaaaa", age_days=12,
-                 complete=True)
+def test_a_signal_restarted_daemon_warns_and_no_wiki_check_remains(tmp_path: Path) -> None:
+    """The ``wiki_stale`` coupling went at R2 and the wiki check at R3.
 
-    (check,) = wiki_freshness_doctor_check(tmp_path, now=time.time())
-
-    assert check.status == "ok"
-    assert "dormant" in check.detail
-    assert "brain-rebuild --only quartz" in check.detail
-    assert check.remedy == "brain-rebuild --only quartz"
-
-
-def test_a_workspace_that_never_built_is_dormant_not_failing(tmp_path: Path) -> None:
-    """The former "NO completed build" FAIL, and its bare ``brain-rebuild`` remedy."""
-    _write_build(tmp_path / ".quartz" / "builds", "20260807-090000-ffffff", age_days=0,
-                 complete=False)
-
-    (check,) = wiki_freshness_doctor_check(tmp_path, now=time.time())
-
-    assert check.status == "ok"
-    assert "dormant" in check.detail and "never built" in check.detail
-    assert "brain-rebuild --only quartz" in check.detail
-    assert check.remedy == "brain-rebuild --only quartz"
-
-
-def test_a_dormant_wiki_never_turns_the_daemons_line_red(tmp_path: Path) -> None:
-    """The ``wiki_stale`` coupling is gone: a signal-restarted daemon over an old wiki WARNs."""
-    vault = tmp_path / "vault"
-    _write_build(vault / ".quartz" / "builds", "20260726-090000-aaaaaa", age_days=30,
-                 complete=True)
+    A signal-restarted watcher WARNs on the ``daemons`` line with no wiki
+    wording, and the runtime check set has no ``wiki build`` entry at all.
+    """
     _plist(tmp_path / "agents", WATCHER_LABEL)
     killed = _Listed(WATCHER_LABEL)
     killed.stdout = f"PID\tStatus\tLabel\n4242\t-15\t{WATCHER_LABEL}\n"
-    cfg = Config(database_url="postgresql://synthetic/x", vault_path=vault)
 
     with patch("brain.doctor_runtime.subprocess.run", return_value=killed):
         checks = runtime_doctor_checks(
-            cfg, launchd_dir=tmp_path / "agents", launchctl="launchctl", platform="darwin"
+            launchd_dir=tmp_path / "agents", launchctl="launchctl", platform="darwin"
         )
 
     by_name = {c.check: c for c in checks}
     assert by_name["daemons"].status == "warn", by_name["daemons"].detail
-    assert by_name["wiki build"].status == "ok"
+    assert "wiki build" not in by_name
     assert "wiki" not in by_name["daemons"].detail.lower()
 
 

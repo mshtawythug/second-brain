@@ -18,7 +18,7 @@
 #
 #   * BARE `pytest`, no extra flags — in the `test` job. pyproject.toml's
 #     `addopts` already carries `--cov=brain --cov-fail-under=85` and already
-#     deselects the six gated markers, so CI runs exactly what a contributor
+#     deselects the five gated markers, so CI runs exactly what a contributor
 #     runs locally. Do NOT add `--no-cov` there (as eval.yml/benchmark.yml
 #     deliberately do) — the coverage floor is the entire point of that job.
 #     The `browser` job is the one deliberate exception, and it is narrow: it
@@ -27,8 +27,6 @@
 #     comment for the full argument.
 #
 #     Marker exclusions inherited from pyproject.toml, and why each stays out:
-#       - `e2e`       needs a Node toolchain + the live ~/brain-vault/.quartz/
-#                     workspace; non-hermetic by construction.
 #       - `benchmark` loads a 50k-entity graph; gated in benchmark.yml.
 #       - `eval`      needs a live corpus + Ollama; gated in eval.yml.
 #       - `phase3`    needs the optional migration-021 doc_date column, so v1/v2

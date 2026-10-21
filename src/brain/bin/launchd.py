@@ -32,7 +32,8 @@ from ._launcher import ensure_shim
 _INSTALLED_LABELS = ("com.brain.watcher", "com.brain.brief")
 # Retired at R2 (wiki-to-ui phase 8): the Quartz rebuild daemon. It is never
 # installed again; install_plists boots out and deletes a leftover one, and
-# uninstall still sweeps it. Its template and _brain-build-fg wrapper stay until R3.
+# uninstall still sweeps it. Its template and _brain-build-fg wrapper were deleted
+# with the wiki at R3 (phase 9); the sweep stays for upgraded machines (R9-1).
 _RETIRED_LABELS = ("com.brain.build",)
 # Every label brain has ever installed: what uninstall_plists sweeps.
 _ALL_LABELS = _INSTALLED_LABELS + _RETIRED_LABELS

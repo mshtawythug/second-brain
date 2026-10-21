@@ -1,7 +1,7 @@
 """Agent identity — who is asking, as opposed to which surface asked (F10).
 
 ``source`` on ``search_queries`` / ``interactions`` already records the
-SURFACE (``cli`` / ``mcp`` / ``wiki``). This module supplies the other axis:
+SURFACE (``cli`` / ``mcp`` / ``ui``). This module supplies the other axis:
 the ACTOR. Two agents both talking over MCP are indistinguishable by
 ``source``, and "is the research agent's hit rate worse than the capture
 agent's" is the question ``brain usage`` exists to answer.

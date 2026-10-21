@@ -40,7 +40,6 @@ def _run_setup_with_vault(brain_home: Path, vault_override: Path) -> None:
             brain_home_override=brain_home,
             vault_override=vault_override,
             pg_port=0,
-            skip_wiki=True,
             skip_skill=True,
         )
 

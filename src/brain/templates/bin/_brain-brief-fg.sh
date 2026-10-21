@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-shot wrapper for the daily brief, intended to run under launchd's
-# StartCalendarInterval (07:00 local). Unlike _brain-watcher-fg / _brain-build-fg
+# StartCalendarInterval (07:00 local). Unlike _brain-watcher-fg
 # this does NOT supervise a long-running daemon and writes no pid file — it runs
 # `brain brief --wiki` once and exits. launchd's StandardOut/ErrorPath capture
 # the digest + any warnings.

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Stop the second-brain vault-sync watcher, and any legacy wiki build watcher (dormant since R2).
-# Idempotent — safe to re-run.
+# Stop the second-brain vault-sync watcher. Idempotent — safe to re-run.
 #
-# Caddy is intentionally left running: it keeps serving the last-good build
-# from <vault>/.quartz/current so brain.test stays healthy across restarts.
+# Legacy cleanup (wiki-to-ui phase 9, ruling R9-1): the Quartz wiki was deleted
+# at R3, but a machine upgraded from an older install can still run its build
+# watcher or a pre-blue/green `quartz --serve`. The bootout, pid-file and
+# orphan sweeps for those stay so `brain-down` still stops them. Nothing here
+# starts or serves the wiki, and a Caddy you started by hand is not touched.
 #
 # Env overrides (default to the production values when unset — production
 # behavior is unchanged unless you explicitly set these; mirrors the
@@ -29,7 +31,7 @@ BRAIN_HOME_RESOLVED="${BRAIN_HOME:-$( cd "$SCRIPT_DIR/.." && pwd )}"
 # daemon's pid file; $BRAIN_HOME/run/ is not reaped. Must match the fg
 # wrappers' defaults. Overridable (unset = unchanged) for hermetic tests.
 WATCH_PID="${BRAIN_WATCH_PID:-$BRAIN_HOME_RESOLVED/run/brain-watch.pid}"   # `brain vault sync --watch`
-BUILD_PID="${BRAIN_BUILD_PID:-$BRAIN_HOME_RESOLVED/run/brain-build.pid}"   # `python -m brain.wiki.build_watcher`
+BUILD_PID="${BRAIN_BUILD_PID:-$BRAIN_HOME_RESOLVED/run/brain-build.pid}"   # legacy: the retired build watcher
 WIKI_PID="${BRAIN_WIKI_PID:-$BRAIN_HOME_RESOLVED/run/brain-wiki.pid}"      # legacy: pre-blue/green `npx quartz --serve`
 PKILL="${BRAIN_PKILL:-pkill}"                          # orphan-sweep binary (tests stub it)
 
@@ -76,7 +78,7 @@ stop_one() {
 }
 
 stop_one "$WATCH_PID" 'watcher (vault sync)'
-stop_one "$BUILD_PID" 'build watcher'
+stop_one "$BUILD_PID" 'build watcher (legacy)'
 # Belt-and-suspenders: only stop a legacy wiki pid file if a stale install
 # left one behind. Brand-new clones won't have this file.
 stop_one "$WIKI_PID"  'wiki (legacy quartz --serve)'
@@ -86,4 +88,3 @@ stop_one "$WIKI_PID"  'wiki (legacy quartz --serve)'
 "$PKILL" -f 'brain vault sync --watch' 2>/dev/null || true
 
 echo '🧠 brain is down'
-echo '   (caddy left running — brain.test continues to serve last good build)'

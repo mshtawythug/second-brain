@@ -1,21 +1,16 @@
-"""Tests for ``brain.vault.daily_index`` and the P4.1 home-page door wiring.
+"""Tests for ``brain.vault.daily_index`` and its ``brain daily`` wiring.
 
 Two layers under test:
 
 1. ``regenerate_daily_index(vault_path)`` — pure-function content writer.
    Idempotency, ordering, frontmatter preservation, and empty-folder
    behaviour are exercised directly without going through the CLI.
-2. The Quartz transformer + ``brain daily`` integration — verified via
-   static-source assertions on the TypeScript files (the .ts is a
-   template file that runs inside the Quartz workspace, not from the
-   brain repo) and a CLI smoke test that the regen helper is called on
-   both the existing-note and fresh-note branches of ``brain daily``.
+2. ``brain daily`` integration — a CLI smoke test that the regen helper is
+   called on both the existing-note and fresh-note branches.
 
-The Quartz transformer ordering check (``EmptyDoorFilter`` after
-``CrawlLinks``) is asserted statically against ``quartz.config.ts``;
-that's the canonical place the ordering contract lives, and putting
-``EmptyDoorFilter`` before ``CrawlLinks`` would silently no-op rather
-than crashing — a static check is the only line of defence.
+The static checks on the Quartz ``emptyDoorFilter.ts`` transformer were deleted
+with the Quartz overlay at R3 (wiki-to-ui phase 9). ``daily_index.py`` itself
+survives (spec §9.3 trap 2): ``brain daily`` runs it unconditionally.
 """
 from __future__ import annotations
 
@@ -32,22 +27,6 @@ from brain import vault as vault_module
 from brain.cli import app
 from brain.vault.daily_index import regenerate_daily_index
 from brain.vault.frontmatter import dump_frontmatter, parse_frontmatter
-
-# Repo-root anchored path for the static .ts source assertions. The
-# Quartz overrides are templates installed into a vault's `.quartz/`
-# workspace at render time; they don't compile from the brain repo, so
-# the assertions are textual rather than via TS imports.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_TRANSFORMER_PATH = (
-    _REPO_ROOT
-    / "src" / "brain" / "quartz_overrides"
-    / "quartz"
-    / "plugins"
-    / "transformers"
-    / "emptyDoorFilter.ts"
-)
-_QUARTZ_CONFIG_PATH = _REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz.config.ts"
-
 
 # ---------------------------------------------------------------------------
 # regenerate_daily_index — pure-function tests (no DB, no CLI)
@@ -236,87 +215,6 @@ def test_regen_daily_index_recursive_year_folder(tmp_path: Path) -> None:
     assert "[[daily/2026/2026-04-29|2026-04-29]]" in body
     # Flat (no year folder) — path is just ``daily/<stem>``.
     assert "[[daily/2025-12-25|2025-12-25]]" in body
-
-
-# ---------------------------------------------------------------------------
-# emptyDoorFilter.ts — static-source assertions
-# ---------------------------------------------------------------------------
-
-
-def test_emptyDoorFilter_options_shape() -> None:
-    """The transformer must expose ``folders: string[]`` and
-    ``pageSlugs: string[]`` options. The default config protects only
-    ``daily/`` and the ``index`` slug — both are wired by
-    ``quartz.config.ts`` so a regression there silently disables the
-    feature."""
-    src = _TRANSFORMER_PATH.read_text(encoding="utf-8")
-    assert "folders: string[]" in src
-    assert "pageSlugs: string[]" in src
-    # Default option values — strict regex so a typo (e.g. "daily" vs
-    # "Daily") is caught.
-    assert re.search(
-        r"const\s+defaultOptions[^=]*=\s*\{[^}]*folders:\s*\[\s*\"daily\"\s*\]",
-        src,
-        flags=re.DOTALL,
-    )
-    assert re.search(
-        r"pageSlugs:\s*\[\s*\"index\"\s*\]",
-        src,
-    )
-
-
-def test_emptyDoorFilter_walks_hast_tree() -> None:
-    """Sanity check: the implementation walks the rehype hast tree
-    (`tagName === "li"`, `tagName === "a"`, `properties.href`)."""
-    src = _TRANSFORMER_PATH.read_text(encoding="utf-8")
-    assert 'tagName === "li"' in src
-    assert 'tagName === "a"' in src
-    assert '"href"' in src or "['href']" in src
-    # Recursive `<li>` filter signature — distinguishes this transformer's
-    # contract (drop only matching list items, walk into others).
-    assert "stripEmptyDoorListItems" in src
-
-
-def test_emptyDoorFilter_uses_ctx_argv_directory() -> None:
-    """The transformer reads the vault root via Quartz's
-    ``ctx.argv.directory`` once per build. If a future Quartz version
-    renames this field the failure here will pin the breakage to this
-    spot rather than a silent mis-classification at runtime."""
-    src = _TRANSFORMER_PATH.read_text(encoding="utf-8")
-    assert "ctx.argv.directory" in src
-
-
-def test_emptyDoorFilter_registered_after_CrawlLinks() -> None:
-    """``Plugin.EmptyDoorFilter()`` MUST appear AFTER ``Plugin.CrawlLinks``
-    in the transformer list — otherwise it walks unresolved markdown URLs
-    instead of rehype-resolved ``<a href>`` strings and silently no-ops.
-
-    Static check on ``quartz.config.ts``: substring index of
-    ``Plugin.CrawlLinks(`` must come before ``Plugin.EmptyDoorFilter(``.
-    """
-    src = _QUARTZ_CONFIG_PATH.read_text(encoding="utf-8")
-    crawl_idx = src.find("Plugin.CrawlLinks(")
-    empty_idx = src.find("Plugin.EmptyDoorFilter(")
-    assert crawl_idx != -1, "Plugin.CrawlLinks not registered"
-    assert empty_idx != -1, "Plugin.EmptyDoorFilter not registered"
-    assert crawl_idx < empty_idx, (
-        f"EmptyDoorFilter registered before CrawlLinks "
-        f"(crawl={crawl_idx}, empty={empty_idx}) — would silently no-op."
-    )
-
-
-def test_emptyDoorFilter_exported_from_transformer_barrel() -> None:
-    """The barrel re-export ``index.ts`` must surface ``EmptyDoorFilter``
-    under ``Plugin.*`` so ``quartz.config.ts`` can register it."""
-    barrel = (
-        _REPO_ROOT
-        / "src" / "brain" / "quartz_overrides"
-        / "quartz"
-        / "plugins"
-        / "transformers"
-        / "index.ts"
-    ).read_text(encoding="utf-8")
-    assert 'export { EmptyDoorFilter } from "./emptyDoorFilter"' in barrel
 
 
 # ---------------------------------------------------------------------------

@@ -222,7 +222,8 @@ def test_regenerate_picks_up_a_tier_change(
     This is the path ``brain mark-confidential`` depends on: it issues a direct
     UPDATE and then calls ``regenerate_vault_file(..., force=True)``. If the
     mirror did not pick the change up, a document would be confidential in the
-    database and still fully indexed on the published wiki.
+    database while its vault file still said otherwise to every reader of the
+    vault (the published Quartz wiki, until R3 deleted it).
     """
     vault = tmp_path / "vault"
     doc_id = _seed_ingested(

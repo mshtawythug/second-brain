@@ -16,7 +16,7 @@ is HTML, and the client must render them as text.
 
 NO GRAPH SURFACE MAY TRIGGER A BUILD (spec §6.5). This module reads the
 ``links`` / ``derived_links`` tables as they are and imports nothing from
-``brain.maintenance``, ``brain.graph_rag`` or ``brain.wiki``; an empty corpus is
+``brain.maintenance`` or ``brain.graph_rag``; an empty corpus is
 reported as ``corpus_linked: false`` rather than repaired.
 
 Confidentiality follows ``/links``: gated on ``serve_confidential_titles``.

@@ -154,8 +154,8 @@ def retired_daemon_doctor_check(*, launchd_dir: Path, platform: str) -> list[_Do
         _check(
             "retired daemon",
             "warn",
-            f"{', '.join(leftover)} is still installed, but the Quartz wiki has been "
-            f"dormant since R2 and nothing should rebuild it",
+            f"{', '.join(leftover)} is still installed, but the Quartz wiki it "
+            f"rebuilt was deleted (R3) and nothing should run it",
             "brain-install-launchd",
         )
     ]

@@ -500,7 +500,8 @@ def serve(
 
     Foreground-only by design: no PID file, no launchd plist. Daemonizing a
     *write-capable* HTTP server that could outlive the user's attention is a bad
-    idea — the read-only wiki is the surface that gets a daemon.
+    idea. The daemons are the vault-sync watcher and the daily brief, which
+    serve nothing (the read-only wiki that once had one was deleted at R3).
     """
     try:
         _run(

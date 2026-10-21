@@ -194,7 +194,7 @@ def usage(
     """Show how much this brain is being read from and written to.
 
     Counts searches, document opens, feedback events and ingests over the
-    trailing window, broken down by day, by surface (cli / mcp / wiki) and by
+    trailing window, broken down by day, by surface (cli / mcp / ui) and by
     agent. A document with no ``agent_id`` is reported as ``(unattributed)``
     rather than being folded into a surface — every pre-027 row is genuinely
     unattributed, and saying so is more useful than guessing.

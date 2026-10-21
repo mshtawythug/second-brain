@@ -241,7 +241,6 @@ def _run_setup_state_creation(brain_home: Path) -> None:
             non_interactive=True,
             brain_home_override=brain_home,
             pg_port=0,
-            skip_wiki=True,
             skip_skill=True,
         )
 

@@ -9,9 +9,9 @@ wave to emit ``summary:`` into per-doc frontmatter, but every doc
 ingested BEFORE that change has stale on-disk frontmatter — the DB
 carries a summary, but the ``.md`` file under ``<vault>/_ingested/``
 (or the user-authored vault tier) doesn't yet. This one-shot module
-reconciles the on-disk frontmatter for those rows so the Quartz
-``SummaryLede`` component has something to render after the next
-``brain vault render`` pass.
+reconciles the on-disk frontmatter for those rows so every reader of the
+vault files sees the summary (it was written for the Quartz ``SummaryLede``
+component, retired with the wiki at R3).
 
 Idempotent: rerunning on a synced vault is a fast NO-OP (every row
 returns ``unchanged``). Non-destructive: only the ``summary:`` key is

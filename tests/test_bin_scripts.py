@@ -3,24 +3,22 @@
 These tests drive each script as a real subprocess against a pristine
 ``$BRAIN_VAULT_PATH`` under ``tmp_path``, with stub ``brain`` /
 ``python`` executables on ``PATH`` (and via ``BRAIN_PY``) so the scripts
-exercise their full control flow without needing a real Quartz
-install, the brain CLI, or network access.
+exercise their full control flow without needing the brain CLI or network
+access.
 
 The stubs append every invocation to a per-test log file so individual
-tests can assert on which subcommands ran (``brain vault sync --watch``,
-``python -m brain.wiki.build_swap``, …) and which did not. This keeps
-the tests black-box: they verify the bash logic via observable side
-effects rather than introspecting the script source.
+tests can assert on which subcommands ran (``brain vault sync --watch``, …)
+and which did not. This keeps the tests black-box: they verify the bash
+logic via observable side effects rather than introspecting the script
+source.
 
 A few invariants the suite enforces:
 
-- ``brain-up`` never spawns ``python -m brain.wiki.build_swap`` when
-  ``current/`` is healthy (the cold-start short-circuit).
+- ``brain-up`` delegates supervision to ``brain-install-launchd`` and, since
+  the Quartz wiki was deleted (R3, phase 9), builds, curls and opens nothing.
 - ``brain-down`` kills every PID in every PID file we know about
-  (``brain-watch``, ``brain-build``, plus the legacy ``brain-wiki``).
-- ``brain-status`` reports rows for both watcher and build watcher.
-- ``brain-rebuild`` is a one-shot (no ``brain-down`` / ``brain-up``
-  bounce, just one ``build_swap`` call).
+  (``brain-watch``, plus the legacy ``brain-build`` and ``brain-wiki``).
+- ``brain-rebuild`` plans its stages without running anything on --dry-run.
 """
 from __future__ import annotations
 
@@ -127,11 +125,10 @@ def stub_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def vault_dir(tmp_path: Path) -> Path:
-    """Tmp ``$BRAIN_VAULT_PATH`` with an empty ``.quartz`` workspace.
+    """Tmp ``$BRAIN_VAULT_PATH`` with an empty, leftover ``.quartz`` directory.
 
-    The workspace is populated minimally so ``cold_start_build`` can
-    locate it; tests that need a healthy ``current/`` symlink seed one
-    explicitly inside the test body.
+    An upgraded machine still has one (the wiki's workspace is never removed
+    for the user, plan §6), so the scripts must ignore it.
     """
     v = tmp_path / "vault"
     v.mkdir()
@@ -179,9 +176,8 @@ def _make_env(
     Resets ``PATH`` to ``stub_dir`` + the bare-essential system bins
     (``/usr/bin``, ``/bin``) so the scripts can't accidentally pick up
     the developer's real ``brain`` / ``python``. ``BRAIN_PY`` points at
-    the stub so the cold-start build + build-watcher commands flow
-    through it. ``BRAIN_OPEN_BROWSER=0`` skips the 30s ``wait_for_url``
-    + browser-open dance during tests. ``BRAIN_LAUNCHCTL`` defaults to the
+    the stub so any ``$BRAIN_PY -m …`` a wrapper runs flows through it.
+    ``BRAIN_LAUNCHCTL`` defaults to the
     ``launchctl`` stub ``stub_dir`` is seeded with, because this env drops the
     conftest layers that would otherwise keep a script off the real binary.
     """
@@ -189,7 +185,6 @@ def _make_env(
         "PATH": f"{stub_dir}:/usr/bin:/bin",
         "HOME": str(vault_dir.parent),
         "BRAIN_VAULT_PATH": str(vault_dir),
-        "BRAIN_OPEN_BROWSER": "0",
         "BRAIN_PY": str(stub_dir / "python"),
         "BRAIN_LAUNCHCTL": str(stub_dir / "launchctl"),
     }
@@ -234,99 +229,6 @@ def _read_log(path: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_brain_up_skips_cold_start_when_current_healthy(
-    stub_dir: Path,
-    vault_dir: Path,
-    hermetic_pids: HermeticPids,
-) -> None:
-    """Healthy ``current/`` symlink → no cold-start ``build_swap`` call.
-
-    Seeds a populated ``.quartz/current → builds/<id>/`` tree, runs
-    ``brain-up`` with ``BRAIN_NO_BUILD_WATCHER=1`` so the test doesn't
-    leave a long-running watcher process behind, and asserts that
-    neither ``python -m brain.wiki.build_swap`` nor
-    ``python -m brain.wiki.build_watcher`` were invoked.
-    """
-    _seed_healthy_current(vault_dir)
-    _write_stub(stub_dir, "brain")
-    _write_stub(stub_dir, "python")
-
-    env = _make_env(
-        stub_dir=stub_dir,
-        vault_dir=vault_dir,
-        # The cold start is opt-in at R2 (phase 8 T5); this test exercises it.
-        extras={
-            **hermetic_pids.env,
-            "BRAIN_NO_BUILD_WATCHER": "1",
-            "BRAIN_NO_OVERLAY": "1",
-            "BRAIN_WIKI_BUILD": "1",
-        },
-    )
-    result = subprocess.run(  # noqa: S603 — list-form, no shell
-        [str(BIN / "brain-up")],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-
-    # The script may exit non-zero from `wait_for_url` warning, but the
-    # code paths we care about run before any failure. We assert on
-    # observable side effects instead of the exit code.
-    assert "skipping cold-start build" in result.stdout, result.stdout
-
-    python_calls = _read_log(stub_dir / "python.calls")
-    assert not any("build_swap" in c for c in python_calls), python_calls
-    assert not any("build_watcher" in c for c in python_calls), python_calls
-
-
-def test_brain_up_runs_cold_start_when_current_missing(
-    stub_dir: Path,
-    vault_dir: Path,
-    hermetic_pids: HermeticPids,
-) -> None:
-    """Empty ``.quartz/`` → cold-start ``build_swap`` runs synchronously.
-
-    The python stub records its argv; we assert that the cold-start
-    build was invoked exactly once with ``--vault <vault>`` and
-    ``--keep <KEEP>``. ``BRAIN_NO_BUILD_WATCHER=1`` keeps Watcher B
-    out of the picture so the test only sees the cold-start call.
-    """
-    # vault_dir has an empty .quartz/ fixture — no current symlink.
-    _write_stub(stub_dir, "brain")
-    _write_stub(stub_dir, "python")
-
-    env = _make_env(
-        stub_dir=stub_dir,
-        vault_dir=vault_dir,
-        # The cold start is opt-in at R2 (phase 8 T5); this test exercises it.
-        extras={
-            **hermetic_pids.env,
-            "BRAIN_NO_BUILD_WATCHER": "1",
-            "BRAIN_NO_OVERLAY": "1",
-            "BRAIN_WIKI_BUILD": "1",
-        },
-    )
-    result = subprocess.run(  # noqa: S603 — list-form, no shell
-        [str(BIN / "brain-up")],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-
-    assert "running first-time build" in result.stdout, result.stdout
-    python_calls = _read_log(stub_dir / "python.calls")
-    build_swap_calls = [c for c in python_calls if "brain.wiki.build_swap" in c]
-    assert len(build_swap_calls) == 1, python_calls
-    assert "--vault" in build_swap_calls[0]
-    assert str(vault_dir) in build_swap_calls[0]
-    # Build watcher must NOT be called when BRAIN_NO_BUILD_WATCHER=1.
-    assert not any("build_watcher" in c for c in python_calls), python_calls
-
-
 def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
     stub_dir: Path,
     vault_dir: Path,
@@ -344,12 +246,10 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
 
     The test stubs launchctl into a tmp dir, points BRAIN_LAUNCHD_DIR at
     a tmp directory (so we don't drop plists into the developer's real
-    ~/Library/LaunchAgents), seeds a healthy current/ to short-circuit
-    cold-start, and verifies launchctl was called with `bootstrap` for
-    com.brain.watcher AND com.brain.brief, and never for com.brain.build,
-    which is retired at R2 (phase 8 T2).
+    ~/Library/LaunchAgents), and verifies launchctl was called with
+    `bootstrap` for com.brain.watcher AND com.brain.brief, and never for
+    com.brain.build, which is retired at R2 (phase 8 T2).
     """
-    _seed_healthy_current(vault_dir)
     _write_stub(stub_dir, "brain")
     _write_stub(stub_dir, "python")
     _write_stub(stub_dir, "launchctl", body=_launchctl_stub_body(stub_dir, print_succeeds=False))
@@ -366,7 +266,6 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
         # point so brain-up.sh resolves it without needing the venv on PATH.
         extras={
             **hermetic_pids.env,
-            "BRAIN_NO_OVERLAY": "1",
             "BRAIN_LAUNCHD_DIR": str(launchd_dir),
             "BRAIN_LAUNCHCTL": str(stub_dir / "launchctl"),
             "BRAIN_INSTALL_LAUNCHD": str(repo_root / ".venv" / "bin" / "brain-install-launchd"),
@@ -381,9 +280,7 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
         check=False,
     )
 
-    # brain-up may exit non-zero from wait_for_url's 30s timeout warning
-    # (no Caddy in the test environment) — that's fine; we assert on the
-    # observable side effect of install-launchd having fired.
+    # Assert on the observable side effect of install-launchd having fired.
     launchctl_calls = _read_log(stub_dir / "launchctl.calls")
     bootstrap_calls = [c for c in launchctl_calls if c.startswith("bootstrap ")]
     assert len(bootstrap_calls) == 2, (
@@ -412,23 +309,22 @@ def _run_brain_up_for_reading(
     hermetic_pids: HermeticPids,
     *,
     open_browser: str | None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``brain-up`` with a healthy build and stubbed ``curl`` / ``open``.
+    """Run ``brain-up`` with stubbed ``brain`` / ``python`` / ``curl`` / ``open``.
 
-    ``open_browser`` is the value of ``BRAIN_OPEN_BROWSER``; ``None`` UNSETS it,
-    which is the case that matters — the default is what the daily loop gets.
-    ``curl`` exits 0 so ``wait_for_url`` succeeds at once, and both openers log
-    instead of opening anything.
+    ``open_browser`` is the value of ``BRAIN_OPEN_BROWSER``; ``None`` UNSETS it.
+    Since R3 (phase 9) brain-up reads it no more: both values must open
+    nothing. Every stub logs its argv instead of acting.
     """
-    _seed_healthy_current(vault_dir)
     for name in ("brain", "python", "curl", "open", "xdg-open"):
         _write_stub(stub_dir, name)
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=vault_dir,
-        extras={**hermetic_pids.env, "BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
+        extras={**hermetic_pids.env, "BRAIN_NO_BUILD_WATCHER": "1", **(extra_env or {})},
     )
-    env.pop("BRAIN_OPEN_BROWSER")
+    env.pop("BRAIN_OPEN_BROWSER", None)
     if open_browser is not None:
         env["BRAIN_OPEN_BROWSER"] = open_browser
     return subprocess.run(  # noqa: S603 — list-form, no shell
@@ -441,37 +337,46 @@ def _run_brain_up_for_reading(
     )
 
 
-def test_brain_up_does_not_open_the_wiki_by_default(
-    stub_dir: Path, vault_dir: Path, hermetic_pids: HermeticPids
+@pytest.mark.parametrize("open_browser", [None, "1"])
+def test_brain_up_opens_nothing_and_builds_nothing(
+    stub_dir: Path, vault_dir: Path, hermetic_pids: HermeticPids, open_browser: str | None
 ) -> None:
-    """Phase 7 (R1, E1): the daily loop no longer puts the wiki in front of you.
+    """R3 (phase 9): no overlay, no Quartz build, no wiki in a browser — ever.
 
-    Before R1 every ``brain-up`` waited for Caddy and opened the wiki. Since R2
-    (phase 8) the wiki is also dormant; Caddy still serves its last build.
+    Phase 7 (R1) made opening the wiki opt-in (``BRAIN_OPEN_BROWSER=1``) and
+    phase 8 (R2) made the overlay and cold-start build opt-in
+    (``BRAIN_WIKI_BUILD=1``). R3 deleted all three, so neither variable revives
+    them: brain-up calls no ``brain vault render``, runs no ``build_swap``,
+    curls nothing and opens nothing.
     """
+    # With BRAIN_OPEN_BROWSER=1, also set the R2 build opt-in: neither revives.
+    extra_env = {"BRAIN_WIKI_BUILD": "1"} if open_browser else None
     result = _run_brain_up_for_reading(
-        stub_dir, vault_dir, hermetic_pids, open_browser=None
+        stub_dir, vault_dir, hermetic_pids, open_browser=open_browser, extra_env=extra_env
     )
 
     assert result.returncode == 0, result.stderr
     opened = _read_log(stub_dir / "open.calls") + _read_log(stub_dir / "xdg-open.calls")
-    assert opened == [], f"brain-up opened the wiki by default: {opened}"
+    assert opened == [], f"brain-up opened something: {opened}"
+    assert _read_log(stub_dir / "curl.calls") == []
+    assert not [c for c in _read_log(stub_dir / "brain.calls") if "render" in c]
+    assert not [c for c in _read_log(stub_dir / "python.calls") if "build_swap" in c]
 
 
-def test_brain_up_banner_names_brain_ui_before_the_wiki(
+def test_brain_up_banner_names_brain_ui_and_no_wiki(
     stub_dir: Path, vault_dir: Path, hermetic_pids: HermeticPids
 ) -> None:
-    """E2: the banner tells you where to read, and the wiki line is demoted."""
+    """E2 (phase 7) + R3: the banner says where to read, and names no wiki or build."""
     result = _run_brain_up_for_reading(
         stub_dir, vault_dir, hermetic_pids, open_browser=None
     )
 
-    lines = result.stdout.splitlines()
-    read = [i for i, line in enumerate(lines) if line.strip().startswith("read:")]
-    wiki = [i for i, line in enumerate(lines) if line.strip().startswith("wiki")]
-    assert read and "brain ui" in lines[read[0]], result.stdout
-    assert wiki and read[0] < wiki[0], result.stdout
-    assert "legacy" in lines[wiki[0]], result.stdout
+    lines = [line.strip() for line in result.stdout.splitlines()]
+    read = [line for line in lines if line.startswith("read:")]
+    assert read and "brain ui" in read[0], result.stdout
+    assert not [line for line in lines if line.startswith(("wiki", "build:"))], result.stdout
+    lowered = result.stdout.lower()
+    assert "quartz" not in lowered and "8080" not in lowered and "dormant" not in lowered
 
 
 def test_brain_up_banner_says_where_to_look_when_a_pid_is_not_written_yet(
@@ -481,8 +386,8 @@ def test_brain_up_banner_says_where_to_look_when_a_pid_is_not_written_yet(
 
     The ``?`` fallback used to be masked by ``wait_for_url``'s 30s wait, which
     gave launchd time to write the pid files. Since R1 that wait only runs on
-    ``BRAIN_OPEN_BROWSER=1``, so on the default path the banner prints straight
-    after bootstrap and a missing pid file is the common case, not a race.
+    ``BRAIN_OPEN_BROWSER=1``, and since R3 it is gone, so the banner prints
+    straight after bootstrap and a missing pid file is the common case.
     """
     result = _run_brain_up_for_reading(
         stub_dir, vault_dir, hermetic_pids, open_browser=None
@@ -493,64 +398,6 @@ def test_brain_up_banner_says_where_to_look_when_a_pid_is_not_written_yet(
     )
     assert "pid ?" not in result.stdout, result.stdout
     assert "brain-status" in vault_line, vault_line
-
-
-def test_brain_up_still_opens_the_wiki_on_request(
-    stub_dir: Path, vault_dir: Path, hermetic_pids: HermeticPids
-) -> None:
-    """E3: demoted, not removed — ``BRAIN_OPEN_BROWSER=1`` keeps the old behaviour."""
-    result = _run_brain_up_for_reading(
-        stub_dir, vault_dir, hermetic_pids, open_browser="1"
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert _read_log(stub_dir / "open.calls") == ["http://localhost:8080"]
-
-
-def test_brain_up_aborts_when_cold_start_fails(
-    stub_dir: Path,
-    vault_dir: Path,
-    hermetic_pids: HermeticPids,
-) -> None:
-    """A failing cold-start build aborts brain-up with a non-zero exit code.
-
-    Stubs the python interpreter to exit 1 on the build_swap invocation
-    so the script's ``|| return 1`` path is exercised end-to-end.
-    """
-    _write_stub(stub_dir, "brain")
-    _write_stub(
-        stub_dir,
-        "python",
-        body=(
-            "#!/usr/bin/env bash\n"
-            f"echo \"$@\" >> {stub_dir}/python.calls\n"
-            "echo 'simulated build failure' >&2\n"
-            "exit 1\n"
-        ),
-    )
-
-    env = _make_env(
-        stub_dir=stub_dir,
-        vault_dir=vault_dir,
-        # The cold start is opt-in at R2 (phase 8 T5); this test exercises it.
-        extras={
-            **hermetic_pids.env,
-            "BRAIN_NO_BUILD_WATCHER": "1",
-            "BRAIN_NO_OVERLAY": "1",
-            "BRAIN_WIKI_BUILD": "1",
-        },
-    )
-    result = subprocess.run(  # noqa: S603 — list-form, no shell
-        [str(BIN / "brain-up")],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert "aborting brain-up" in result.stderr, result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +424,8 @@ def test_brain_down_kills_all_three_pids(
 
     1. All three processes are no longer running (``kill -0`` fails).
     2. All three (tmp) pid files are gone.
-    3. The ``caddy left running`` reassurance line is in stdout.
+    3. Since R3 the old ``caddy left running`` line is gone: brain-down no
+       longer speaks for a wiki server.
     4. (Isolation regression) the orphan sweep went through the STUB ``pkill``
        with the watcher patterns — proving the real ``pkill`` binary was never
        invoked, so a live install's `brain vault sync --watch` /
@@ -630,7 +478,7 @@ def test_brain_down_kills_all_three_pids(
         for key in ("watch_pid", "build_pid", "wiki_pid"):
             assert not hermetic_pids.paths[key].exists(), key
 
-        assert "caddy left running" in result.stdout, result.stdout
+        assert "caddy" not in result.stdout.lower(), result.stdout
 
         # --- Isolation regression -------------------------------------------
         # The orphan sweep went through the STUB pkill (logged), so the REAL
@@ -657,20 +505,24 @@ def test_brain_down_kills_all_three_pids(
 # ---------------------------------------------------------------------------
 
 
-def test_brain_status_three_rows(
+def test_brain_status_rows_and_no_quartz_readout(
     stub_dir: Path,  # noqa: ARG001 — fixture forces test isolation
     vault_dir: Path,
     hermetic_pids: HermeticPids,
     tmp_path: Path,
 ) -> None:
-    """Live ``watch`` + ``build`` pids + a stale ``wiki`` pid render three rows.
+    """Live ``watch`` + legacy ``wiki`` pids render two rows; nothing reads Quartz.
 
     Runs HERMETICALLY (BRAIN_WATCH_PID/BRAIN_BUILD_PID/BRAIN_WIKI_PID point at a
     tmp pid dir), so the test reads its own tmp pid files instead of the global
     ``/tmp/brain-*.pid`` a live ``brain-up`` install owns — it RUNS (never
-    skips) on CI and on a dev box alike. Seeds a healthy ``current/`` symlink so
-    the build-id readback line fires too, and asserts that all three labels
-    (``watcher``, ``build``, ``wiki``) appear in stdout.
+    skips) on CI and on a dev box alike.
+
+    R3 (wiki-to-ui phase 9, ruling R9-6): the build-watcher row, the
+    ``.quartz/current`` build-id readback and the wiki-URL probe are gone. A
+    healthy leftover ``current/`` and a live legacy build pid are seeded, as an
+    upgraded machine has them, and neither may surface. The legacy
+    ``quartz --serve`` row stays (R9-1).
     """
     _seed_healthy_current(vault_dir)
     procs: list[subprocess.Popen[bytes]] = []
@@ -694,15 +546,16 @@ def test_brain_status_three_rows(
             check=False,
         )
 
+        assert result.returncode == 0, result.stderr
         assert "watcher:" in result.stdout, result.stdout
-        assert "build:" in result.stdout, result.stdout
         assert "wiki:" in result.stdout, result.stdout
-        # Build-id line surfaces from the seeded symlink.
-        assert "build-id" in result.stdout, result.stdout
+        for gone in ("build:", "build-id", "current", "wiki url"):
+            assert gone not in result.stdout, (gone, result.stdout)
         # Finding #2: status must report the ACTUAL spawned PIDs — proving it
         # read OUR tmp override paths (BRAIN_*_PID), not the global /tmp files.
-        for key, pid in pid_by_key.items():
-            assert str(pid) in result.stdout, (key, pid, result.stdout)
+        for key in ("watch_pid", "wiki_pid"):
+            assert str(pid_by_key[key]) in result.stdout, (key, result.stdout)
+        assert str(pid_by_key["build_pid"]) not in result.stdout, result.stdout
         # Isolation regression: status read the tmp pid files, never /tmp.
         for key in ("watch_pid", "build_pid", "wiki_pid"):
             assert tmp_path in hermetic_pids.paths[key].parents, key
@@ -759,18 +612,19 @@ def test_brain_status_inspects_the_brain_home_dotenv_vault(
     """Regression: with no exported ``BRAIN_VAULT_PATH`` status read ``~/brain-vault``.
 
     The daemons watch the vault ``brain-install-launchd`` resolved from
-    ``$BRAIN_HOME/.env``; status must inspect that one. Only the configured
-    vault has a healthy ``current/``, so the build-id line proves which vault
-    was read, and the ``vault`` row names it.
+    ``$BRAIN_HOME/.env``; status must inspect that one, and the ``vault`` row
+    names it. (The build-id line that used to corroborate it was deleted with
+    the wiki at R3: a leftover ``current/`` in the vault is seeded and must not
+    surface.)
     """
     brain_home, vault = _dotenv_only_vault(tmp_path)
-    build_dir = _seed_healthy_current(vault)
+    _seed_healthy_current(vault)
 
     result = _run_brain_status(_status_env(tmp_path, brain_home, hermetic_pids))
 
     assert result.returncode == 0, result.stderr
     assert f"  vault     {vault}\n" in result.stdout, result.stdout
-    assert f"  build-id  {build_dir.name}\n" in result.stdout, result.stdout
+    assert "build-id" not in result.stdout, result.stdout
 
 
 # Two ways the resolver call can yield no vault: the interpreter fails, or it
@@ -789,7 +643,7 @@ _UNRESOLVING_PYTHONS = pytest.mark.parametrize(
 def test_brain_status_still_reports_daemons_when_the_vault_cannot_be_resolved(
     stub_dir: Path, hermetic_pids: HermeticPids, tmp_path: Path, python_body: str
 ) -> None:
-    """A broken interpreter costs the vault rows only, never the daemon rows."""
+    """A broken interpreter costs the vault row only, never the daemon rows."""
     brain_home, _ = _dotenv_only_vault(tmp_path)
     _write_stub(stub_dir, "python", body=python_body)
     env = _status_env(tmp_path, brain_home, hermetic_pids)
@@ -860,14 +714,12 @@ def test_brain_rebuild_dry_run_lists_stages(tmp_path: Path) -> None:
         # Phase: launchd supervision (2026-05-08). The wrappers are
         # foreground entrypoints that the LaunchAgent plists exec; the
         # install/uninstall scripts manage the plists in
-        # ~/Library/LaunchAgents/. All four ship under bin/ and must
-        # parse + be executable.
+        # ~/Library/LaunchAgents/. They ship under bin/ and must parse + be
+        # executable. (`_brain-build-fg` and `brain-verify-fastpath` were
+        # deleted with the Quartz wiki at R3, phase 9.)
         "_brain-watcher-fg",
-        "_brain-build-fg",
         "brain-install-launchd",
         "brain-uninstall-launchd",
-        # T7: end-to-end fastpath verification script.
-        "brain-verify-fastpath",
         # v0.3.0 postmortem: the local reproduction of .github/workflows/ci.yml.
         # Its agreement with that workflow is pinned separately in
         # tests/test_bin_brain_ci.py; this entry only keeps it parseable and +x.
@@ -897,15 +749,14 @@ def test_bin_script_is_executable_and_parses(name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tests — launchd-friendly foreground wrappers (`_brain-{watcher,build}-fg`).
+# Tests — the launchd-friendly foreground wrapper (`_brain-watcher-fg`).
 # ---------------------------------------------------------------------------
 #
 # These wrappers exist so a LaunchAgent can supervise the daemons end-to-end
 # (KeepAlive=true). They write the pid file so `brain-status` keeps working
 # unchanged, then `exec` the underlying watcher. Tests use the same stub
-# pattern as the rest of this file: a stub `brain` / `python` on PATH (with
-# BRAIN_PY for the build wrapper, mirroring brain-up) records argv to a log
-# file we can assert on. Because exec replaces the wrapper's process image
+# pattern as the rest of this file: a stub `brain` on PATH records argv to a
+# log file we can assert on. Because exec replaces the wrapper's process image
 # with the stub's, the wrapper still completes cleanly when the stub exits 0.
 
 
@@ -1074,49 +925,6 @@ def test_brain_watcher_fg_aborts_when_the_vault_cannot_be_resolved(
     assert "could not resolve the vault" in result.stderr, result.stderr
     assert _read_log(stub_dir / "brain.calls") == []
     assert not hermetic_pids.paths["watch_pid"].exists()
-
-
-def test_brain_build_fg_writes_pid_and_execs_build_watcher(
-    stub_dir: Path,
-    vault_dir: Path,
-    hermetic_pids: HermeticPids,
-    tmp_path: Path,
-) -> None:
-    """Wrapper writes /tmp/brain-build.pid then execs `python -m brain.wiki.build_watcher`.
-
-    Mirrors the watcher-fg test but for the build daemon. Asserts the
-    invocation includes the env-driven `--vault` and `--keep` args that
-    `bin/brain-up` historically passed by hand.
-    """
-    _write_stub(stub_dir, "python")
-    env = _make_env(
-        stub_dir=stub_dir,
-        vault_dir=vault_dir,
-        extras={**hermetic_pids.env, "BRAIN_WIKI_KEEP_BUILDS": "5"},
-    )
-
-    result = subprocess.run(  # noqa: S603 — list-form, no shell
-        [str(BIN / "_brain-build-fg")],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-
-    assert hermetic_pids.paths["build_pid"].exists(), "wrapper must write the pid file"
-    pid_content = hermetic_pids.paths["build_pid"].read_text().strip()
-    assert pid_content.isdigit(), pid_content
-    # Isolation regression: the wrapper wrote to the tmp pid path, never /tmp.
-    assert tmp_path in hermetic_pids.paths["build_pid"].parents
-
-    python_calls = _read_log(stub_dir / "python.calls")
-    build_lines = [c for c in python_calls if "brain.wiki.build_watcher" in c]
-    assert len(build_lines) == 1, python_calls
-    assert "--vault" in build_lines[0]
-    assert str(vault_dir) in build_lines[0]
-    assert "--keep 5" in build_lines[0], build_lines[0]
 
 
 # ---------------------------------------------------------------------------
