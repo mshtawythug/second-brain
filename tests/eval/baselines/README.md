@@ -28,7 +28,9 @@ well; the means fell from 0.4834 / 0.5835 / 0.7267 to 0.2589 / 0.3697 / 0.5852
 second re-record the same day followed a ranking change, so for the current
 means see "Vector-leg candidate pool" under "Known retrieval issues" below. The golden judgments predate ~30% of the document set, so the
 absolute scores understate quality until `golden_corpus.yaml` is re-judged
-against the new documents.
+against the new documents. As of 2026-10-21 only the two `recency` rows have
+been (see "Re-judged 2026-10-21" in (2)); the other 29 rows' judgments still
+predate those documents.
 
 **2. Two `recency` queries were clock-dependent until 2026-10-15**, when they
 were pinned to absolute dates (see "The fix" and "Applied" below). They filtered on
@@ -62,9 +64,11 @@ same happened on most days a brief landed, and an exit 3 in which only that
 ("quarterly planning review …") had 3 briefs in its top 20 and was not moved by
 those 6.
 
-**Since the pin, that reading is wrong.** Both `recency` queries now end at
-`before: 2026-10-15`, so a newly synced brief, dated on or after that day, is
-outside their range and cannot compete. A pinned row moves only when the
+**Since the pin, that reading is wrong.** Both `recency` queries now end at a
+`before` that is already past (`2026-10-15` for the daily-brief query; since
+the 2026-10-21 re-pin below, `2026-09-02` for the planning query), so a newly
+synced brief, dated on or after that day, is outside their range and cannot
+compete. A pinned row moves only when the
 document set changes *inside* its range, or, rarely, through the approximate
 vector leg (see "The fix" below). An exit 3 in which only a `recency` row moved
 is therefore **no longer automatically the known drift: investigate it** before
@@ -157,11 +161,47 @@ That was measured, not inferred from the ingest gap: the gap is in
 there (29 documents fall in [2026-09-01, 2026-09-21) on that column). The
 reachable judged sets were checked under both filters and are identical: 10 of
 28 and 0 of 5, the same documents, so the conversion lost no reachable
-judgment. Both rows stay
-capped until they are re-judged. The means are unchanged at
+judgment. Both rows stayed
+capped until the 2026-10-21 re-judge below. The means were unchanged at
 **0.2724 / 0.3826 / 0.7089**, and only the second query's top 20 moved: four
 Krisp meetings ingested 2026-10-05 but sent in July and August dropped out
-under the new filter column. That row still scores 0.0.
+under the new filter column. That row still scored 0.0.
+
+**Re-judged 2026-10-21**, on the document set of that day (2,011 documents),
+with the code at `6948c6f`. Before the edit the check above still found 18 of
+28 and 5 of 5 judged documents out of range. Candidates for both queries were
+pooled the same way as the rest of the corpus: raw Postgres FTS over the
+range, plus the hybrid top 20 recorded in `ci.json`. Each was read.
+
+- **Daily-brief query** (range unchanged, 2026-09-05 to 2026-10-15). The
+  judged set is now the 27 brief notes dated inside the range: the 10 judged
+  briefs still in range were kept, the 18 outside it were dropped, and 17 were
+  added. No pooled non-brief document is a daily digest. Recall@20 is capped at
+  20/27 by construction.
+- **Planning query: re-pinned, not re-judged.** Pooling its range (41
+  candidates) found no document primarily about its topic, and all five judged
+  documents are dated 2026-08-27. Rather than judge off-topic documents
+  relevant, it moved to `after: 2026-07-24` / `before: 2026-09-02`. That is
+  the 40-day `since_days` window of the first recording (2026-09-02), the one
+  its judgments were made against. Pooling the new range (raw FTS, plus the
+  hybrid top 20 of the re-recorded run) kept the same five judgments. The
+  sixth, excluded probe document is in range and stays excluded.
+
+After the edit the check above returns no rows for either query: 27 of 27 and
+5 of 5 in range. Before re-recording, an eval of the unedited corpus against
+the 2026-10-15 baseline moved no row by more than `1e-4`. So the re-record
+moved only these two rows, and every other row's metrics and top 20 are
+identical:
+
+| Query | nDCG@5 | MRR | Recall@20 |
+|---|---|---|---|
+| Daily brief | 0.3601 → 1.0 | 0.5 → 1.0 | 0.2143 → 0.7407 |
+| Planning | 0.0 → 1.0 | 0.0 → 1.0 | 0.0 → 1.0 |
+| **Mean (31 queries)** | 0.2724 → **0.3253** | 0.3826 → **0.4310** | 0.7089 → **0.7581** |
+
+Both rows now sit at their ceilings, so from here they can only register a
+regression. The planning query's five judged documents are near-identical
+records, so that row mostly exercises the date filter.
 
 For a query still on `since_days`, re-derive the window before you re-record.
 It is a property of the document set, not of the code:
@@ -245,10 +285,12 @@ you find one, re-record.
   `ci.json` was re-recorded for the ranking change (first for the exact scan,
   then for the iterative scan, whose metrics are identical): the means went
   from 0.2589 / 0.3697 / 0.5852 to 0.2779 / 0.3826 / 0.7112, on the same
-  document set and the same window as in (2). The current committed means,
-  re-recorded 2026-10-15 when the recency queries were pinned in (2), and
-  unchanged from the 2026-10-14 re-record for the synced daily briefs, are
-  **0.2724 / 0.3826 / 0.7089**. The same
+  document set and the same window as in (2). The means re-recorded
+  2026-10-15 when the recency queries were pinned in (2), unchanged from the
+  2026-10-14 re-record for the synced daily briefs, were
+  **0.2724 / 0.3826 / 0.7089**. The 2026-10-21 re-judge of the two `recency`
+  rows in (2) moved them to **0.3253 / 0.4310 / 0.7581**, with no other row
+  changed. The same
   HNSW shape remains in `related.py` and `connect.py`; those are unmeasured
   follow-ups.
 
