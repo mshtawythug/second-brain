@@ -65,6 +65,22 @@ def test_salvage_skips_the_key_appearing_earlier_as_a_value() -> None:
 
 
 def test_salvage_stops_at_a_malformed_separator() -> None:
-    # Two items with no comma between them: stop rather than guess.
+    # Two items with no comma between them: an item is kept only once a "," or
+    # "]" follows it, so neither is -- stop rather than guess.
     text = '{"entities": [{"name": "A"} {"name": "B"}]}'
-    assert salvage_array_items(text, "entities") == [{"name": "A"}]
+    assert salvage_array_items(text, "entities") == []
+
+
+def test_salvage_drops_a_trailing_scalar_cut_at_the_end() -> None:
+    # "12" decodes cleanly but may be the head of "123": no "," or "]" seen yet.
+    assert salvage_array_items('{"entities": [1, 2, 12', "entities") == [1, 2]
+
+
+def test_salvage_stops_at_an_item_nested_past_the_recursion_limit() -> None:
+    text = '{"entities": [{"name": "A"}, ' + "[" * 100_000
+    outcome: object
+    try:
+        outcome = salvage_array_items(text, "entities")
+    except RecursionError as exc:  # asserted on below, as an AssertionError
+        outcome = exc
+    assert outcome == [{"name": "A"}]
