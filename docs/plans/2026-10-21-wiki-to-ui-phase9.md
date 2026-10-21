@@ -131,7 +131,9 @@ reached through `templates/bin/_brain-build-fg.sh` and `bin/_brain-build-fg` (C5
   `test_contentindex_slim.py`, `test_explorer_filter.py`, `test_explorer_groupfn.py`,
   `test_graph_chip_toggle.py`, `test_graph_label_placement.py`,
   `test_graph_workbench_static.py`, `test_verify_fastpath_static.py`,
-  `test_doctor_npx_check.py`, and `test_search_size_budget.py`. Each is read before it is
+  `test_doctor_npx_check.py`, `test_search_size_budget.py`, and — decided during execution
+  (C7) — `test_bin_scripts_r2.py`, whose one surviving test (phase 8's dormant-build status
+  row) was replaced in `test_bin_scripts.py`. Each is read before it is
   deleted, to confirm it covers *only* Quartz assets or `brain.wiki` code (§9.3 trap 1).
 - **`test_build_related_signal.py` is NOT deleted wholesale** (§9.3 trap 5): it drives
   `brain.related._iter_hybrid_neighbors`. Only the cases that call `regenerate_related_json`
@@ -141,7 +143,7 @@ reached through `templates/bin/_brain-build-fg.sh` and `bin/_brain-build-fg` (C5
 
 `test_doctor_runtime.py` (the EXIT_CONFIG_ERROR cases and wiki freshness), `test_doctor_watcher.py`
 (its `wiki_freshness_doctor_check` import), `test_maintenance.py`, `test_bin_scripts.py`,
-`test_bin_scripts_r2.py`, `test_bin_monitor.py`, `test_bin_launchd.py`,
+`test_bin_monitor.py`, `test_bin_launchd.py`,
 `test_bin_launchd_retired.py` (prose saying the template stays "until R3"),
 `test_packaging_templates.py` (the `_brain-build-fg` row), `test_setup.py`,
 `test_setup_daemons.py`, `test_setup_dotenv_knobs.py` and `test_setup_dotenv_provision.py`
