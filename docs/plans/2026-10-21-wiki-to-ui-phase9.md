@@ -240,5 +240,54 @@ over-800 row set is **re-derived on the final tree**, never edited by hand from 
 
 ## 9. Closeout
 
-*(Filled in after C8: commit list with SHAs, lines deleted, test results with exit codes,
-residue grep output, and anything deferred.)*
+**Built 2026-10-21 on `feat/wiki-to-ui-phase9`.** The commit order differs from §4's table in
+one respect: the CLI removal (§4 C1) shipped **inside** the package-deletion commit, because
+`cli.py` turned out to be the last importer of `brain.wiki`. A12 is satisfied most directly when
+the importing statement and the module leave in one commit, and the pre-commit `mypy src/` gate
+refused a split anyway (the orphaned `wiki/install.py` imported the deleted overlay module).
+
+| Commit | What |
+|---|---|
+| `06bad1e` | this plan |
+| `4f8dbf0` | `brain-rebuild`: the opt-in `quartz` stage, `--clean-cache` and `Stage.opt_in` deleted (R9-3) |
+| `6074b97` | `brain setup`: wiki install, Caddy / Quartz-SHA / wiki-port preflights, `offer_wiki`, `--skip-wiki` / `--wiki-port` (R9-5) |
+| `57f564c` | `brain doctor`: wiki-build check deleted; `EXIT_CONFIG_ERROR` special case deleted (R9-4, regression test mutation-checked) |
+| `9657733` | `brain-up` / `brain-down`; the `com.brain.build` template, both `_brain-build-fg` wrappers, `brain-verify-fastpath` |
+| `885b5a6` | `src/brain/wiki/`, `quartz_overrides/`, `vault/quartz_overlay.py`, `brain vault render`, `brain wiki install`, the `quartz/npx` probe, root `quartz.config.ts`, `Caddyfile.j2`, `check_index_size.py`, verify_release checks 4–5, the smoke scripts' Quartz steps, their tests; `_iter_hybrid_neighbors` to `tests/related_harness.py` (R9-12) |
+| `6238fc9` | `brain-monitor` / `brain-status` Quartz half, `brain-monitor probe` (R9-6) |
+| `cbe2f54` | docs, skills, CLAUDE.md, spec row-9 exit note, CHANGELOG |
+| `a4d9963` | merge of `second-brain/master` (`6ba3084`: PR #41, PR #42), conflicts resolved toward R3 |
+
+**Size.** `git diff --shortstat 6948c6f cbe2f54` (phase 9's own commits, before the merge):
+243 files, +1,414 / −53,773; `src` −24,693, `tests` −26,213. 172 files deleted.
+
+**A12 probe.** `python -c "import brain.cli"` passed after every commit; the `sys.modules` diff
+went from five wiki/Quartz modules (§3.1) to **none**.
+
+**Verification.**
+- `ruff check` and `mypy src/` (216 source files) clean at every commit and after the merge.
+- Targeted slices per commit, each green; the new guards were mutation-checked (re-adding the
+  exit-3 special case, a wiki curl in `brain-up`, and the previous `brain-monitor` /
+  `brain-status` each turned their tests red).
+- Before the merge, one broad run of the default suite in the sibling DB: **8,559 passed, 3
+  skipped, 1 failed**. The failure is `test_skills_sync_is_not_drifted`, which compares the
+  repo's skills with the copies installed in `~/.claude/skills` on this machine. It skips where
+  none are installed (CI), and clears after `bin/brain-skills-sync`, which writes outside the
+  repo and is left to the operator.
+- After the merge: the affected slices (bin scripts, monitor, install_config, setup tilde,
+  packaging templates, reading-surface pointers, docs assets, launchd) green; `pytest
+  --collect-only` collects 8,829 tests with no error.
+- Built wheel: 39 `brain/ui/static/**` assets, nothing under `wiki/` or `quartz_overrides/`.
+
+**Residue (§7), by class.** `git grep -n 'brain\.wiki\|quartz_overrides\|quartz_overlay'`
+still hits prose only: provenance ("ported from `brain.wiki.build_homepage`", the
+`linkKindMark.ts` origin of `render.py`'s link kinds), confidentiality rationale written when
+Quartz published the vault (R9-7(ii); the gates stay), the `import_rules.py` note on why
+`brain.wiki` left its forbidden list, and the legacy sweeps (R9-1: `brain-down`'s
+`pkill -f brain.wiki.build_watcher`, the `com.brain.build` bootout and plist sweep, the
+doctor WARN, `uninstall.py`'s `Caddyfile`/`build`). The `.quartz` walk skips stay (R9-8). The
+`'wiki'` value in the frozen migrations' CHECK lists stays (migrations are never edited).
+
+**Owed after merge (R9-11).** Auto-memory: delete `quartz.md`; update `vault.md`, `cli.md` and
+the `MEMORY.md` index lines that describe the wiki, `brain vault render`, `brain wiki install`,
+the `quartz` stage or `--clean-cache`.
