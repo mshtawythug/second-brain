@@ -41,8 +41,7 @@ async def health(request: Request) -> JSONResponse:
             # BRAIN_USER_EMAIL takes effect on the next page load. (The retired
             # Quartz wiki baked the same value in at build time and needed a full
             # rebuild to change it.) Putting it on the note payload instead would
-            # repeat one
-            # constant on every note fetch for no gain.
+            # repeat one constant on every note fetch for no gain.
             #
             # Not a disclosure: this is the operator's own address, returned to
             # the operator, on a surface that already reports the vault path.
