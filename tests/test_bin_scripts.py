@@ -504,20 +504,24 @@ def test_brain_down_kills_all_three_pids(
 # ---------------------------------------------------------------------------
 
 
-def test_brain_status_three_rows(
+def test_brain_status_rows_and_no_quartz_readout(
     stub_dir: Path,  # noqa: ARG001 — fixture forces test isolation
     vault_dir: Path,
     hermetic_pids: HermeticPids,
     tmp_path: Path,
 ) -> None:
-    """Live ``watch`` + ``build`` pids + a stale ``wiki`` pid render three rows.
+    """Live ``watch`` + legacy ``wiki`` pids render two rows; nothing reads Quartz.
 
     Runs HERMETICALLY (BRAIN_WATCH_PID/BRAIN_BUILD_PID/BRAIN_WIKI_PID point at a
     tmp pid dir), so the test reads its own tmp pid files instead of the global
     ``/tmp/brain-*.pid`` a live ``brain-up`` install owns — it RUNS (never
-    skips) on CI and on a dev box alike. Seeds a healthy ``current/`` symlink so
-    the build-id readback line fires too, and asserts that all three labels
-    (``watcher``, ``build``, ``wiki``) appear in stdout.
+    skips) on CI and on a dev box alike.
+
+    R3 (wiki-to-ui phase 9, ruling R9-6): the build-watcher row, the
+    ``.quartz/current`` build-id readback and the wiki-URL probe are gone. A
+    healthy leftover ``current/`` and a live legacy build pid are seeded, as an
+    upgraded machine has them, and neither may surface. The legacy
+    ``quartz --serve`` row stays (R9-1).
     """
     _seed_healthy_current(vault_dir)
     procs: list[subprocess.Popen[bytes]] = []
@@ -541,15 +545,16 @@ def test_brain_status_three_rows(
             check=False,
         )
 
+        assert result.returncode == 0, result.stderr
         assert "watcher:" in result.stdout, result.stdout
-        assert "build:" in result.stdout, result.stdout
         assert "wiki:" in result.stdout, result.stdout
-        # Build-id line surfaces from the seeded symlink.
-        assert "build-id" in result.stdout, result.stdout
+        for gone in ("build:", "build-id", "current", "wiki url"):
+            assert gone not in result.stdout, (gone, result.stdout)
         # Finding #2: status must report the ACTUAL spawned PIDs — proving it
         # read OUR tmp override paths (BRAIN_*_PID), not the global /tmp files.
-        for key, pid in pid_by_key.items():
-            assert str(pid) in result.stdout, (key, pid, result.stdout)
+        for key in ("watch_pid", "wiki_pid"):
+            assert str(pid_by_key[key]) in result.stdout, (key, result.stdout)
+        assert str(pid_by_key["build_pid"]) not in result.stdout, result.stdout
         # Isolation regression: status read the tmp pid files, never /tmp.
         for key in ("watch_pid", "build_pid", "wiki_pid"):
             assert tmp_path in hermetic_pids.paths[key].parents, key

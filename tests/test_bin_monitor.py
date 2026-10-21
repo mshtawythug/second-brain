@@ -1,16 +1,12 @@
 """Tests for brain.bin.monitor — cross-platform shims and core logic."""
 
 import os
-import subprocess
 from pathlib import Path
 
 import pytest
 
 from brain.bin.monitor import (
-    _current_build_id,
-    _filter_build_log_line,
     _pid_alive,
-    _recent_builds,
     _recent_vault_files,
     main,
 )
@@ -47,42 +43,9 @@ def test_pid_alive_handles_garbage_content(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_current_build_id_returns_none_when_missing(tmp_path: Path) -> None:
-    assert _current_build_id(tmp_path) == "(none)"
-
-
-def test_current_build_id_reads_file(tmp_path: Path) -> None:
-    quartz = tmp_path / ".quartz" / "current"
-    quartz.mkdir(parents=True)
-    (quartz / ".build-id").write_text("build-2026-05-11-1234")
-    assert _current_build_id(tmp_path) == "build-2026-05-11-1234"
-
-
 # ---------------------------------------------------------------------------
 # _recent_builds
 # ---------------------------------------------------------------------------
-
-
-def test_recent_builds_sorted_chronological_last_n(tmp_path: Path) -> None:
-    builds = tmp_path / ".quartz" / "builds"
-    builds.mkdir(parents=True)
-    for name in ["build-001", "build-003", "build-002", "build-005", "build-004"]:
-        (builds / name).mkdir()
-    result = _recent_builds(tmp_path, n=3)
-    assert result == ["build-003", "build-004", "build-005"]
-
-
-def test_recent_builds_empty_when_no_builds_dir(tmp_path: Path) -> None:
-    assert _recent_builds(tmp_path) == []
-
-
-def test_recent_builds_returns_all_when_fewer_than_n(tmp_path: Path) -> None:
-    builds = tmp_path / ".quartz" / "builds"
-    builds.mkdir(parents=True)
-    (builds / "build-001").mkdir()
-    (builds / "build-002").mkdir()
-    result = _recent_builds(tmp_path, n=5)
-    assert result == ["build-001", "build-002"]
 
 
 # ---------------------------------------------------------------------------
@@ -140,23 +103,6 @@ def test_recent_vault_files_respects_limit(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_filter_build_log_line_drops_noise() -> None:
-    assert _filter_build_log_line("LaTeX-incompatible input on line 3") is False
-    assert _filter_build_log_line("") is False  # blank line
-    assert _filter_build_log_line("   ") is False  # whitespace only
-    assert _filter_build_log_line("Cleaned output directory /tmp/foo") is False
-    assert _filter_build_log_line("No character metrics for font X") is False
-    assert _filter_build_log_line("Warning: couldn't find git repository") is False
-    assert _filter_build_log_line("Parsing input files using worker pool") is False
-
-
-def test_filter_build_log_line_keeps_signal() -> None:
-    assert _filter_build_log_line("[build] starting build-001") is True
-    assert _filter_build_log_line("error: something broke") is True
-    assert _filter_build_log_line("[quartz] Done in 3.2s") is True
-    assert _filter_build_log_line("brain: writing 47 files") is True
-
-
 # ---------------------------------------------------------------------------
 # main — help + snapshot smoke
 # ---------------------------------------------------------------------------
@@ -174,10 +120,8 @@ def test_main_snapshot_returns_zero_with_no_daemons(
 ) -> None:
     """Snapshot mode must not crash when daemons are stopped and vault is empty."""
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
-    monkeypatch.setenv("BRAIN_WIKI_PORT", "18080")
     # Remove any stale /tmp pid files from view by patching the constants.
     monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
-    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
     monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
 
     rc = main([])
@@ -190,7 +134,6 @@ def test_main_status_alias_returns_zero(
     """'status' is a recognised alias for snapshot."""
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
-    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
     monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
 
     rc = main(["status"])
@@ -216,32 +159,18 @@ def test_main_tail_positional_alias_errors_without_logs(
 ) -> None:
     """'brain-monitor tail' (positional) must be accepted and route to tail mode.
 
-    When no logs exist, _tail() returns 1 — that's the correct fast-exit path.
+    When no log exists, _tail() returns 1 — that's the correct fast-exit path.
     """
 
     monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
     rc = main(["tail"])
-    assert rc == 1  # both logs absent → "no logs to tail"
-
-
-def test_main_probe_positional_timeout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """'brain-monitor probe 5' (positional timeout, bash compat) must be accepted.
-
-    Probe exits 1 immediately because the build watcher is not running.
-    """
-    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
-    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
-    rc = main(["probe", "5"])
-    # No watcher running → _probe returns 1 without touching the vault.
-    assert rc == 1
+    assert rc == 1  # sync-watcher log absent → "no log to tail"
 
 
 # ---------------------------------------------------------------------------
 # Unknown-argument rejection — regression for parse_known_args silent-swallow.
-# Any unrecognised flag / word outside the narrow probe-timeout carve-out
-# must still cause exit 2, not be silently ignored.
+# Any unrecognised flag / word must cause exit 2, not be silently ignored.
+# (The narrow `probe <N>` carve-out went with `probe` at R3.)
 # ---------------------------------------------------------------------------
 
 
@@ -276,127 +205,53 @@ def test_main_rejects_unknown_flag_after_snapshot() -> None:
 def test_main_rejects_extra_positional_after_non_probe_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Extra positional args are only valid for probe, not for other commands."""
+    """Extra positional args are never valid (``probe <N>`` was the only one, R3)."""
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
-    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
     monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
 
     rc = main(["snapshot", "extra"])
     assert rc == 2
 
 
-def test_main_probe_rejects_non_digit_extra() -> None:
-    """'probe --flag' must be rejected even though 'probe 60' is valid."""
-    rc = main(["probe", "--no-such"])
-    assert rc == 2
-
-
-def test_main_probe_rejects_multiple_extra_positionals(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """'probe 60 extra' (two extra tokens) must be rejected."""
-    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
-    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
-    rc = main(["probe", "5", "extra"])
-    assert rc == 2
-
-
 # ---------------------------------------------------------------------------
-# Phase 8 T5 (R8-7): the build watcher is dormant at R2.
+# R3 (wiki-to-ui phase 9, ruling R9-6): the Quartz build half is gone.
 # ---------------------------------------------------------------------------
 
 
-def test_probe_says_the_build_is_dormant_and_how_to_build(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """``probe`` is positional (there is no ``--probe``) and already exits 1 at once
-    on a dead build pid. What changes is the advice: ``brain-up`` no longer starts a
-    build watcher, so "start with brain-up" would send the user nowhere.
+def test_probe_command_is_gone(capsys: pytest.CaptureFixture[str]) -> None:
+    """``probe`` only ever timed the Quartz build watcher's rebuild; R3 deleted it.
+
+    It is rejected by ``choices=`` (exit 2), and the help no longer offers it.
     """
-    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
-    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
-
-    rc = main(["probe"])
-
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "dormant" in err
-    assert "brain-rebuild --only quartz" in err and "BRAIN_WIKI_BUILD" in err
-    assert "start with brain-up" not in err
+    assert main(["probe"]) == 2
+    assert "probe" not in capsys.readouterr().err.split("choose from", 1)[-1]
+    assert main(["--help"]) == 0
+    assert "probe" not in capsys.readouterr().out
 
 
-def test_snapshot_labels_a_stopped_build_watcher_dormant(
+def test_snapshot_reports_no_build_watcher_even_over_a_leftover_quartz_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A stopped build watcher is the R2 resting state, not a pid/process mismatch."""
+    """An upgraded vault keeps its ``.quartz`` until the user deletes it (plan §6).
+
+    The snapshot must not report on it: no build-watcher row, no current build,
+    no recent builds, no wiki URL, no build log. The sync-watcher half stays.
+    """
+    builds = tmp_path / ".quartz" / "builds" / "20260501-000000-deadbe"
+    builds.mkdir(parents=True)
+    (builds / ".build-id").write_text("20260501-000000-deadbe\n", encoding="utf-8")
+    (tmp_path / ".quartz" / "current").symlink_to(Path("builds") / builds.name)
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
-    monkeypatch.setenv("BRAIN_WIKI_PORT", "18080")
     monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
     monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
-    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
     (tmp_path / "watch.pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
-    monkeypatch.setattr(
-        "brain.bin.monitor._pgrep_count", lambda pattern: 1 if "vault sync" in pattern else 0
-    )
+    monkeypatch.setattr("brain.bin.monitor._pgrep_count", lambda pattern: 1)
 
     assert main([]) == 0
 
     out = capsys.readouterr().out
-    (build,) = [line for line in out.splitlines() if "build watcher" in line]
-    # The state column, not the line: tmp paths in it can contain any word.
-    assert build.split("pid=")[0].split("build watcher", 1)[1].strip() == "dormant (R2)", out
+    assert "sync watcher" in out and "running" in out, out
+    for gone in ("build watcher", "current build", "recent builds", "wiki url", "build-log"):
+        assert gone not in out, f"{gone!r} survived R3: {out}"
     assert "process count vs pid file" not in out, out
-
-
-def _snapshot_with_build_watchers(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    *,
-    build_seen: int,
-    build_pid_text: str | None,
-) -> str:
-    """A snapshot with one healthy sync watcher, so only the build half can flag."""
-    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
-    monkeypatch.setenv("BRAIN_WIKI_PORT", "18080")
-    monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
-    monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
-    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
-    (tmp_path / "watch.pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
-    if build_pid_text is not None:
-        (tmp_path / "build.pid").write_text(build_pid_text, encoding="utf-8")
-    monkeypatch.setattr(
-        "brain.bin.monitor._pgrep_count",
-        lambda pattern: 1 if "vault sync" in pattern else build_seen,
-    )
-
-    assert main([]) == 0
-    return capsys.readouterr().out
-
-
-def test_snapshot_flags_an_orphaned_second_build_watcher(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Two build watchers is an orphan whatever R2 expects (phase-8 audit)."""
-    out = _snapshot_with_build_watchers(
-        tmp_path, monkeypatch, capsys, build_seen=2, build_pid_text=None
-    )
-
-    assert "process count vs pid file" in out, out
-    assert "build_watcher pgrep=2  pidfile=-" in out, out
-
-
-def test_snapshot_flags_a_build_pid_file_naming_no_process(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """A pid file with no matching process is a stale pid, which is still worth a line."""
-    finished = subprocess.Popen(["/usr/bin/true"])  # noqa: S603 — fixed argv
-    finished.wait()
-
-    out = _snapshot_with_build_watchers(
-        tmp_path, monkeypatch, capsys, build_seen=0, build_pid_text=f"{finished.pid}\n"
-    )
-
-    assert "process count vs pid file" in out, out
-    assert f"build_watcher pgrep=0  pidfile={finished.pid}" in out, out
