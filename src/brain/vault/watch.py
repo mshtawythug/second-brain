@@ -35,7 +35,8 @@ Concurrency invariants worth restating:
   and enqueues under ``state.lock``; the drain and the overflow flush keep each
   entry's delete/move job; a timer that cannot start delivers its job directly,
   and a scheduling error never escapes into the observer thread. A superseded
-  move is delivered first, and a drained (closed) watcher accepts no event.
+  move is delivered first, and a drained (closed) watcher accepts no event. A
+  rename onto a different document deletes the old row (``move_identity``).
   These are the 2026-10-22 race fixes, reasoned at ``_fire``,
   ``_supersede_pending`` and the drain; CLAUDE.md's ceiling table records them.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
@@ -95,6 +96,7 @@ from ..ingest import Embedder
 from ..log_rotation import default_log_dir, start_background_rotator
 from .debounce_timer import DebounceTimer, TimerFactory, daemon_timer
 from .derived_links.fence import strip_fence
+from .move_identity import is_another_document
 from .sync import SyncReport, sync_one_file, sync_vault
 
 if TYPE_CHECKING:
@@ -1127,15 +1129,21 @@ def _handle_move(
     src_rel = _vault_relative_posix(src_abs, config.vault_path)
     dst_rel = _vault_relative_posix(dst_abs, config.vault_path)
     if src_rel is not None and dst_rel is not None and src_rel != dst_rel:
-        # Preserve the document id (and every incoming ``links`` row) by
-        # moving ``vault_path`` in place instead of delete + re-insert. The
-        # worker connection is autocommit, so this commits immediately — the
-        # same single-statement footprint as ``_handle_delete``'s DELETE.
-        conn.execute(
-            "UPDATE documents SET vault_path = %s "
-            "WHERE kind = 'vault' AND vault_path = %s",
-            (dst_rel, src_rel),
-        )
+        if is_another_document(conn, src_rel, dst_abs):
+            # brain (2026-10-22): src was re-populated by a DIFFERENT document
+            # before the rename (a coalesced delete/upsert + move). Renaming the
+            # old row onto dst would give dst the wrong identity and collide on
+            # documents_vault_path_idx: delete it instead; dst syncs by its own id.
+            _handle_delete(conn, src_abs, config.vault_path, graph_syncer=graph_syncer)
+        else:
+            # Preserve the document id (and every incoming ``links`` row) by
+            # moving ``vault_path`` in place instead of delete + re-insert. The
+            # worker connection is autocommit, so this commits immediately —
+            # the same single-statement footprint as ``_handle_delete``'s DELETE.
+            conn.execute(
+                "UPDATE documents SET vault_path = %s WHERE kind = 'vault' AND vault_path = %s",
+                (dst_rel, src_rel),
+            )
 
     # Refresh content / mirror bookkeeping on the destination. This matches
     # the row by frontmatter id and updates it in place (full-sync
