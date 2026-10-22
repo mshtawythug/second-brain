@@ -30,6 +30,13 @@ _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "publish-age-image.yml"
 _DOCKERFILE_PATHS = "src/brain/templates/docker/age/**"
 _WORKFLOW_PATH = ".github/workflows/publish-age-image.yml"
 _NOT_PR = "github.event_name != 'pull_request'"
+_CONCURRENCY_GROUP = (
+    "publish-age-image-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}"
+)
+_JOB_NAME = (
+    "${{ github.event_name == 'pull_request' && 'Build-check AGE image (amd64, no push)' "
+    "|| 'Build + push multi-arch AGE image' }}"
+)
 
 
 def _workflow() -> dict[Any, Any]:
@@ -81,13 +88,27 @@ def test_master_push_trigger_is_unchanged() -> None:
 
 
 def test_concurrency_group_keeps_pr_runs_away_from_the_master_publish() -> None:
+    """PRs get one group per ref; EVERY non-PR run shares the single publish group.
+
+    Both halves matter. A static group lets a PR run cancel an in-flight master
+    publish. A group keyed on the event or the ref for non-PR runs (for example
+    ``${{ github.event_name }}-${{ github.ref }}``) puts a master push and an
+    ``age-image-*`` tag push in different groups, so they can race to push the
+    same fixed image tag. Substring checks cannot tell these apart, so the
+    expression is pinned exactly.
+    """
     concurrency = _workflow()["concurrency"]
-    group = str(concurrency["group"])
-    assert "${{" in group and "github.event_name" in group and "github.ref" in group, (
-        f"concurrency group {group!r} must separate PR runs (per ref) from publishes. "
-        "A static group lets a PR run cancel an in-flight master publish."
+    assert concurrency["group"] == _CONCURRENCY_GROUP, (
+        f"concurrency group must be exactly {_CONCURRENCY_GROUP!r}: per ref for PRs, "
+        f"one shared group for every publish. Got {concurrency['group']!r}"
     )
     assert concurrency.get("cancel-in-progress") is True
+
+
+def test_job_name_says_what_a_pr_run_does() -> None:
+    """A PR run only build-checks amd64, so its check must not claim to push."""
+    name = _workflow()["jobs"]["publish"]["name"]
+    assert name == _JOB_NAME, f"job name must be exactly {_JOB_NAME!r}; got {name!r}"
 
 
 @pytest.mark.parametrize("uses_prefix", ["docker/setup-qemu-action@", "docker/login-action@"])

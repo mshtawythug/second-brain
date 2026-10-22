@@ -171,3 +171,42 @@ and checked to have landed: dropping `|| true` (eval), adding `--build`
   - the image ref in an `env:` key;
   - `up -d --build` restored to ci.yml's comment.
   The 13th, the image ref in a comment only, stays green, as intended. The unmutated copy passes 18/18.
+
+**Review round 2 (2026-10-22).**
+- **CHANGELOG `[Unreleased]`.** New section "Fixed — the `full` profile pulled
+  the old AGE image". It supersedes the 0.3.0 "keep running their current
+  image" note (Risk 4).
+- **The tag scan is no longer vacuous.** It must actually match every known
+  live tag site:
+  - `docker-compose.age-test.yml`
+  - `src/brain/templates/docker-compose.yml.j2`
+  - `bin/brain-graphrag-gif`
+  - `.github/workflows/publish-age-image.yml`
+  
+  It must also match every known prose site (the template, both `env.example`
+  files).
+- **The tag scan needs a git checkout.** It lists files with `git ls-files`.
+  That is acceptable here: CI and every developer run from a clone. The
+  mutation proof indexes its archive copy with `git init` + `git add -A` for
+  the same reason.
+- **The concurrency group is pinned exactly.** A substring check let the
+  auditor's mutation N1 pass:
+  `publish-age-image-${{ github.event_name }}-${{ github.ref }}`. That gives a
+  master push and an `age-image-*` tag push separate groups, so they could
+  race to push the same image tag.
+- **The job name is now event-aware.** It reads "Build-check AGE image (amd64,
+  no push)" on PRs. Nothing gates on the check name: `release.yml` waits on
+  ci.yml runs only, and master has no branch protection or rulesets.
+
+Round 2 mutation rows, each in an indexed `git archive` copy of `81aedcc`:
+
+| Mutation | Result |
+|---|---|
+| Tag regex matches nothing | red |
+| Prose regex matches nothing | red |
+| `git ls-files` listing filtered to nothing | red |
+| `bin/` treated as history | red |
+| **N1:** `group: publish-age-image-${{ github.event_name }}-${{ github.ref }}` | green (7/7) under the old substring test; red under the pinned test |
+| Old static job name | red under the new job-name test |
+
+The unmutated copy passes.
