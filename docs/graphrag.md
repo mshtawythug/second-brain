@@ -36,6 +36,16 @@ you don't have an LLM available locally. No raw Cypher is ever accepted or
 shown; every command takes structured params and the backend injects the
 tenant + traversal caps.
 
+**Concurrent writers.** Graph writes in a tenant take turns on one lock. Those
+writers are the vault watcher, `brain-mcp`, ingest, `brain vault
+relink-derived`, `brain graphrag build` / `refresh` / `aliases apply` and
+`communities build`. So a `build --backfill` can run while the watcher is
+live. Each document's graph write waits for the other writer's current
+document, and neither one deadlocks. Concept extraction (the model call) runs
+before a document takes the lock, so nothing waits on another document's LLM
+call. Details: `src/brain/graph_rag/write_lock.py` and
+`docs/plans/2026-10-22-graph-entities-deadlock.md`.
+
 ## Enabling GraphRAG
 
 GraphRAG is on by default after `brain setup` (the one-liner installer). The

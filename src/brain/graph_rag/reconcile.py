@@ -124,7 +124,7 @@ from .cooccur import (
     cooccurrence_counts,
     to_contributions,
 )
-from .extract import EntityExtractor
+from .extract import EntityExtractor, ExtractedEntity
 from .person_resolver import ResolvedPerson, default_person_resolver
 from .relational import (
     delete_doc_relational,
@@ -137,6 +137,7 @@ from .relational import (
 )
 from .schema import EdgeContribution, EntityMention, GraphEntity
 from .weighting import DEFAULT_GENERIC_DF, suppress_ver
+from .write_lock import acquire_graph_write_lock
 
 __all__ = [
     "CONCEPTS_ASPECT",
@@ -441,6 +442,16 @@ def reconcile_document(
                 person_count=len(persons),
             )
 
+        # Extract BEFORE the graph write lock and any write: the model call must
+        # never hold a lock (write_lock.py). Never-raise: an Ollama outage yields
+        # [] (WARN) and the watermark marks the doc concept-indexed-empty until
+        # `brain graphrag build --concepts --force` (spec §7 / §17b decision 7).
+        extracted: list[ExtractedEntity] = []
+        if concept_stale:
+            assert extractor is not None  # narrowed by concepts_active
+            extracted = extractor.extract(fetch_doc_content(conn, document_id))
+        acquire_graph_write_lock(conn, tenant_id)
+
         # --- People relational rewrite (only when its watermark is stale). ---
         person_entities: list[GraphEntity] = []
         person_mentions: list[EntityMention] = []
@@ -485,13 +496,6 @@ def reconcile_document(
         concept_mentions: list[EntityMention] = []
         concept_contributions: list[EdgeContribution] = []
         if concept_stale:
-            assert extractor is not None  # narrowed by concepts_active
-            content = fetch_doc_content(conn, document_id)
-            # OllamaExtractor.extract is never-raise: an Ollama outage yields []
-            # (logged WARN). The watermark is still written, marking the doc
-            # concept-indexed-empty; `brain graphrag build --concepts --force`
-            # re-extracts it once Ollama is back (spec §7 / §17b decision 7).
-            extracted = extractor.extract(content)
             concept_entities = upsert_concept_entities(conn, tenant_id, extracted)
             concept_mentions, concept_contributions = build_concept_rows(
                 extracted,
@@ -625,6 +629,7 @@ def remove_document(
     cfg = config if config is not None else ReconcileConfig()
     tenant_id = cfg.tenant_id
     with conn.transaction():
+        acquire_graph_write_lock(conn, tenant_id)
         delete_doc_relational(conn, tenant_id, document_id)
         relationship_count = _recompute_aggregates(
             conn, tenant_id, cfg.generic_df_ratio
