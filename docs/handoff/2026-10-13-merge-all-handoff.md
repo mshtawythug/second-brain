@@ -154,7 +154,7 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
   proofs and the old tests' demonstrated false passes are in
   `docs/plans/2026-10-22-vault-watcher-absence-tests.md`. The build-watcher half is moot, because
   `tests/wiki/test_build_watcher.py` was deleted with the wiki at R3 (`885b5a6`).
-- *[Both FIXED 2026-10-22 on `fix/vault-watcher-fire-race` (PR number below). `_fire` now acts only
+- *[Both FIXED 2026-10-22 by PR #49 (`fix/vault-watcher-fire-race`). `_fire` now acts only
   on its own entry and enqueues under the lock, and the comment is corrected. Plan and mutation
   proofs: `docs/plans/2026-10-22-vault-watcher-fire-race.md`.]* Two production items in
   `src/brain/vault/watch.py`, found while reviewing those tests. Both were for the follow-up watcher
