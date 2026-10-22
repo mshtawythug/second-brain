@@ -34,8 +34,10 @@ Concurrency invariants worth restating:
 - A debounce timer's ``_fire`` acts only on its OWN ``pending_timers`` entry
   and enqueues under ``state.lock``; the drain and the overflow flush keep each
   entry's delete/move job; a timer that cannot start delivers its job directly,
-  and a scheduling error never escapes into the observer thread. This is the
-  2026-10-22 race fix, reasoned at ``_fire``; CLAUDE.md's ceiling table records it.
+  and a scheduling error never escapes into the observer thread. A superseded
+  move is delivered first, and a drained (closed) watcher accepts no event.
+  These are the 2026-10-22 race fixes, reasoned at ``_fire``,
+  ``_supersede_pending`` and the drain; CLAUDE.md's ceiling table records them.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
   spamming events can't OOM the process; on overflow we trigger an
   immediate full sync and clear the buffer.
@@ -184,6 +186,10 @@ class _WatcherState:
     lock: threading.Lock = field(default_factory=threading.Lock)
     stop_event: threading.Event = field(default_factory=threading.Event)
     jobs: queue.Queue[_Job | None] = field(default_factory=queue.Queue)
+    # Set by the shutdown drain under ``lock``: a closed watcher arms no timer
+    # and enqueues nothing, so no job can land behind the sentinel.
+    closed: bool = False
+    dropped_after_close: int = 0
     # ``processed`` and ``errors`` accumulate over the watcher's lifetime
     # so the final shutdown report can summarize "watched 14 files; 1
     # error". Only the worker thread touches them, so no lock is needed.
@@ -627,10 +633,10 @@ def _schedule_debounced(
     Each new event for the same path resets the debounce timer to
     ``config.debounce_ms`` from now. Once the path goes ``debounce_ms``
     without a new event, the timer fires and enqueues a job. ``dest`` is the
-    rename destination for a ``move`` action (``None`` otherwise); the
-    debounce is keyed on ``path`` (the source), so repeated moves of the same
-    source coalesce and the last one's destination wins — the desired
-    outcome for a burst of rename events.
+    rename destination for a ``move`` action (``None`` otherwise), keyed on
+    ``path`` (the source). Repeated reports of the same move coalesce; a
+    pending move superseded by a different job is delivered first
+    (``_supersede_pending``); a closed watcher schedules nothing.
 
     If the pending-timer dict overflows (a misbehaving editor or a
     bulk-replace operation), we fall back to "trigger an immediate full
@@ -645,9 +651,9 @@ def _schedule_debounced(
         # superseded, flushed by overflow, or drained at shutdown. Act only if
         # the entry is still OUR timer: popping by path stole a successor's
         # entry, producing two jobs and an orphan the drain never saw. Whoever
-        # removed our entry covers it: a successor, the drain (this very job),
-        # or the overflow flush (the full sync covers upserts; the flush
-        # enqueues each delete/move job itself). So returning loses nothing.
+        # removed our entry covers it: a successor (enqueuing a superseded move
+        # first), the drain (this very job), or the overflow flush (full sync
+        # for upserts, each delete/move job itself). So returning loses nothing.
         # Check, pop and enqueue under one lock so a shutdown drain can never
         # slip between the pop and the put, which leaves the job behind the
         # sentinel. ``jobs`` is unbounded, so ``put`` never blocks.
@@ -660,6 +666,14 @@ def _schedule_debounced(
 
     job = _Job(action=action, abs_path=path, dest_path=dest)
     with state.lock:
+        if state.closed:
+            # brain (2026-10-22): an observer that outlived observer.join(5.0)
+            # delivered this after the drain. Drop it, logged once; the next
+            # startup sync_vault reconciles the path (deletes only with prune).
+            state.dropped_after_close += 1
+            if state.dropped_after_close == 1:
+                logger.warning("vault watcher: dropping events after shutdown")
+            return
         overflowing = len(state.pending_timers) - (path in state.pending_timers) >= _MAX_PENDING
         if not overflowing:
             # Build AND start the timer BEFORE touching the existing entry, so a
@@ -673,15 +687,11 @@ def _schedule_debounced(
                 # "can't start new thread": no timer, so no debounce. The newest
                 # event wins at once, as debounce would have let it: supersede
                 # the pending entry and deliver this job now (2026-10-22, PR #49).
-                existing = state.pending_timers.pop(path, None)
-                if existing is not None:
-                    existing[0].cancel()
+                _supersede_pending(state, path, job, config)
                 logger.exception("vault watcher: debounce timer failed to start; enqueued directly")
                 _enqueue(state, job, config=config)
                 return
-        existing = state.pending_timers.pop(path, None)
-        if existing is not None:
-            existing[0].cancel()
+        _supersede_pending(state, path, job, config)
         if overflowing:
             # Buffer overflow → drop everything, queue a full-vault sync.
             # That sync (prune=False) covers upserts only: it cannot remove a
@@ -708,6 +718,21 @@ def _schedule_debounced(
         state.pending_timers[path] = (timer, job)
 
 
+def _supersede_pending(state: _WatcherState, path: Path, job: _Job, config: WatchConfig) -> None:
+    """Pop and cancel ``path``'s pending entry; the caller holds ``state.lock``.
+
+    A pending ``move`` superseded by a DIFFERENT job is enqueued first, so
+    last-wins never loses an in-place rename (2026-10-22). Every other pair
+    coalesces; docs/plans/2026-10-22-vault-watcher-shutdown-mixed-actions.md.
+    """
+    existing = state.pending_timers.pop(path, None)
+    if existing is None:
+        return
+    existing[0].cancel()
+    if existing[1].action == "move" and existing[1] != job:
+        _enqueue(state, existing[1], config=config)
+
+
 def _drain_pending_timers(state: _WatcherState, config: WatchConfig) -> None:
     """Cancel every pending debounce timer and enqueue its pending job.
 
@@ -722,6 +747,7 @@ def _drain_pending_timers(state: _WatcherState, config: WatchConfig) -> None:
         for pending, _job in entries:
             pending.cancel()
         state.pending_timers.clear()
+        state.closed = True  # nothing may be armed or enqueued after this drain
     for _timer, job in entries:
         _enqueue(state, job, config=config)
 
@@ -734,8 +760,9 @@ def _enqueue(
 ) -> None:
     """Push a job onto the worker queue, after the optional test hook.
 
-    Called under ``state.lock`` by ``_fire`` and the overflow flush, so the
-    hook must never take that lock.
+    Called under ``state.lock`` by ``_fire``, the overflow flush,
+    ``_supersede_pending`` and the start() fallback, so the hook must never
+    take that lock. The drain calls it after releasing the lock.
     """
     if config.on_event is not None:
         try:
