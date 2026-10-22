@@ -2,10 +2,12 @@
 
 Plan: ``docs/plans/2026-10-22-vault-watcher-startup-blind.md``. The syncer is
 a recording fake whose FIRST call blocks until released, which pins a request
-"in flight" while the test submits more. No DB: the lane's connection is a
-fake from an injected factory. Every list assertion waits on a FIFO barrier (a
-``remove``, which is never deduped) rather than on a call count, so a mutant
-that changes the count still fails at the targeted assertion.
+"in flight" while the test submits more. L1-L10 use no DB: the lane's
+connection is a fake from an injected factory. Every list assertion waits on a
+FIFO barrier (a ``remove``, which is never deduped) rather than on a call
+count, so a mutant that changes the count still fails at the targeted
+assertion. L11 is the one DB test: a real ``GraphSyncer`` on the lane, against
+PR #53's per-tenant graph write lock.
 """
 
 from __future__ import annotations
@@ -272,3 +274,61 @@ def test_an_idle_lane_closes_at_once() -> None:
     wait_for(lambda: ("remove", token) in syncer.calls)  # the lane is now idle
 
     assert lane.close(1.0) is True, "closing an idle lane did not wake its thread"
+
+
+# ---------------------------------------------------------------------------
+# L11: the lane composes with PR #53's per-tenant graph write lock. A REAL
+# GraphSyncer reconcile runs on the lane's own autocommit connection (its write
+# transaction takes the tenant lock; the extraction runs with no transaction
+# open), waits behind another session holding that lock, and completes once
+# it is released. The backend is #53's NullBackend: only the relational write
+# path, and its lock, are under test.
+# ---------------------------------------------------------------------------
+
+
+def _watermarks(conn: Any, document_id: str) -> int:
+    row = conn.execute(
+        "SELECT count(*) FROM graph_index_state WHERE document_id = %s", (document_id,)
+    ).fetchone()
+    return int(row[0])
+
+
+def _advisory_waiters(conn: Any) -> int:
+    row = conn.execute(
+        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+    ).fetchone()
+    return int(row[0])
+
+
+def test_lane_reconcile_waits_on_the_tenant_write_lock(test_db: Any) -> None:
+    """L11: a real reconcile on the lane waits behind the tenant lock, then completes."""
+    from brain.db import connect_raw
+    from brain.graph_rag.reconcile import ReconcileConfig
+    from brain.graph_rag.sync import GraphSyncer
+    from brain.graph_rag.write_lock import acquire_graph_write_lock
+    from tests.conftest import TEST_DATABASE_URL
+    from tests.graph_fakes import NullBackend, seed_note_doc
+
+    doc = seed_note_doc(test_db, "lane-doc")
+    syncer = GraphSyncer(
+        ReconcileConfig(tenant_id="default", generic_df_ratio=1.0),
+        enabled=True,
+        backend=NullBackend(),  # type: ignore[arg-type]
+    )
+    lane = GraphLane(syncer, lambda: connect_raw(TEST_DATABASE_URL))
+    holder = psycopg.connect(TEST_DATABASE_URL, autocommit=True, connect_timeout=5)
+    try:
+        with holder.transaction():
+            acquire_graph_write_lock(holder, "default")
+            lane.start()
+            lane.reconcile(None, doc)  # type: ignore[arg-type]
+            waited = _settled(lambda: _advisory_waiters(holder) >= 1)
+            written_while_held = _watermarks(test_db, doc)
+        done = _settled(lambda: _watermarks(test_db, doc) >= 1)
+    finally:
+        holder.close()
+        lane.close(WAIT_FOR_BACKSTOP_S)
+
+    assert waited, "the lane's reconcile did not wait on the tenant write lock"
+    assert written_while_held == 0, "the lane reconciled while another writer held the lock"
+    assert done, "the lane's reconcile never completed after the tenant lock was released"

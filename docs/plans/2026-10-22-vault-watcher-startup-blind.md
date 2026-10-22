@@ -189,6 +189,7 @@ injected slow syncer (a `GraphSyncTarget` whose `reconcile` blocks on an
 | L8 | lane: `close(0.05)` with a reconcile in flight and a remove queued reports the remove as undrained | a lost remove is never silent |
 | L9 | lane: a `conn_factory` that raises leads to a logged error, an exited thread, and no-op submits | a failed connect cannot wedge the lane |
 | L10 | lane: an idle lane closes at once (`close(1.0) is True`) | `close` wakes the thread (audit F1) |
+| L11 | lane + PR #53: a real `GraphSyncer` reconcile on the lane waits while another session holds the tenant graph write lock, writes nothing until it is released, then completes | the lane's autocommit connection composes with the tenant lock (merge of master `8711ff0`) |
 | W3 | `run_watcher` whose observer factory raises leaks no lane thread | the lane starts only after setup |
 | W3b | `run_watcher` whose `observer.start()` raises leaks no lane thread | the lane starts last |
 | W4 | a delete's remove queued behind a blocked reconcile at shutdown is logged with its document id and `brain graphrag build` | undrained removes are named |
@@ -389,3 +390,23 @@ only. All 53 mutants are OK.
 | H4b | the lane starts right after the startup sync (round 1's position) | W3, W3b |
 | R1 | the warning names a plain `brain graphrag build` | W4 |
 | R2 | a failed connect's ERROR hides the dropped removes | L9 "the failed connect did not name the removes it dropped" |
+
+### Merge of master `8711ff0` (PR #53, the graph write lock)
+
+PR #53 makes every graph write transaction take a per-tenant advisory lock
+(`brain.graph_rag.write_lock.acquire_graph_write_lock`), and splits
+`reconcile_document` into a short read transaction, an extraction with no
+transaction open, and a write transaction that takes the lock. The lane composes
+with it unchanged. The lane is the watcher's only graph writer, and its reconciles
+wait behind any tenant-wide writer (`graphrag refresh`, `build --force`). That wait
+happens on the lane thread, so the event worker never waits. Only the handoff
+conflicted, and the merge kept both sides.
+
+L11 runs a real `GraphSyncer` (with #53's `NullBackend`) on the lane while another
+session holds the tenant lock. Mutation proof, in a `git archive` copy:
+
+| Mutant | L11 result |
+|---|---|
+| none | passes |
+| M2: the lock statement becomes a no-op | red at "the lane's reconcile did not wait on the tenant write lock" |
+| M1: the lane leaves `autocommit` off | **survives, and this is expected.** #53's contract makes `reconcile_document` open a top-level `conn.transaction()` as its first database action, even on an idle `autocommit=False` connection. So the lock composes either way. The lane's autocommit matters only for the AGE bootstrap (`GraphSyncer._age_ready` runs only on autocommit), and L6 pins it. |
