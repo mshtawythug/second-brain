@@ -90,9 +90,51 @@ are expected to pass before the fix as well.
 
 ## Mutation proof (five clauses)
 
-Recorded below after implementation. Each mutation is applied with `sed` to a
-copy-free working tree (one at a time, reverted with `git checkout -- <file>`),
-and the declared count is checked with `git diff --stat`.
+Run 2026-10-22 against commit `7b3b6a5` (the fix commit; this section was
+written after it). A scratchpad harness (not checked in) ran sequentially in the
+worktree, with no other suite running. For each mutation it read the pristine
+file, required the `old` text to occur exactly the declared number of times,
+wrote the mutant, recorded `git diff --numstat`, ran the eight new tests, and
+restored the pristine bytes in a `finally`. After the run, `git diff --stat -- src`
+was empty. A mutation counts only if its target test fails, and fails at the
+`>` line of the assertion it targets, not at an earlier line or an exception.
+
+1. **Passes unmutated:** 8 passed.
+2. **Mutation lands the declared count:** every row below was applied 1/1, with numstat `1 1`.
+3. **Guard goes red / 4. at the targeted assertion / 5. one entry per claim:**
+
+| # | Claim | Mutation (1 line) | Red | Target fails at |
+|---|---|---|---|---|
+| M1 | top-level `.quartz` left out | `VAULT_BACKUP_SKIP_DIRS` → `frozenset()` | 5 (leaves_out, not_walked, file_count, skip_reported, restore) | `assert leaked == []` |
+| M2 | pruned, not listed then filtered (B4) | `tar_vault` takes an `rglob` + post-filter entry list (membership unchanged) | 1 (not_walked only) | `assert entered == []` |
+| M3 | top level only (B2) | `if here == vault_path:` → `if True:` | 2 (nested, file_count) | `assert "notes/.quartz/keep.md" in names` |
+| M4 | other dotted dirs kept (B1) | skip set `{".quartz", ".obsidian"}` | 2 (dotted, file_count) | `assert ".obsidian/app.json" in names` |
+| M5 | `file_count` = what the tar holds (B6) | `file_count` from an unfiltered `rglob` count | 2 (file_count, not_walked) | `assert result.manifest.vault_file_count == len(_FILES_KEPT)`. The preceding `regular == _FILES_KEPT` passed, so the test reached the count. |
+| M6 | skip is reported (B7) | `for name in vault_skipped:` → `for name in ():` | 1 | `assert [step for step in steps if ".quartz" in step] == [_QUARTZ_SKIP_STEP]` |
+| M7 | no report without a workspace (B7) | `for name in vault_skipped:` → `for name in (".quartz",):` | 1 | `assert _QUARTZ_SKIP_STEP not in steps` |
+| M8 | restore never deletes an existing `.quartz` (B8) | `_move_vault_aside`: `vault_path.rename(aside)` → `shutil.rmtree(vault_path)` | 2 (new restore test, plus the existing `test_vault_moved_aside_not_deleted`) | `assert aside.is_file()` |
+
+What this does not prove (written down rather than guarded): the probe in M2
+observes `os.scandir`. A future walk built on `os.listdir` would bypass it.
+`os.walk` and `pathlib` (3.11–3.13) both list through `os.scandir`, and the
+probe's second assertion (`notes/` was opened) would go red if the walk stopped
+calling it, so a probe that went blind would fail rather than pass silently.
+
+## Verification
+
+- `ruff check` (src + tests): clean. `mypy src/`: no issues in 218 source files.
+- `ruff format --check`: **the repository is not format-clean, and this PR does
+  not try to make it so.** `ruff format --check src tests` on this branch reports 689 of 726 files would be reformatted,
+  and CI does not run the formatter. All three touched Python files already had
+  formatter hunks at the base. Each still has the same number of hunks, and
+  none of them is in a line this PR added: 3 in `create.py`, 3 in
+  `test_backup_create.py`, 8 in `test_restore_swap.py`. Reformatting the files
+  would bury a 65-line fix in unrelated churn.
+- Targeted tests, run serially on the test DB (port 5434), with no full suite
+  locally (CI is the full-suite evidence): every `tests/test_backup_*.py`,
+  `tests/test_cli_backup.py` and `tests/test_restore_*.py` module, 181 passed.
+- `create.py` was 314 lines and is 374 after the change, under the 800 ceiling (re-derive with `wc -l src/brain/backup/create.py`). It is not in
+  CLAUDE.md's over-800 table, and neither is any other touched file.
 
 ## Risks
 
