@@ -99,7 +99,7 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
 | # | Item | Status on 2026-10-21 |
 |---|---|---|
 | 1 | Phase 9 (delete the wiki) | **DONE:** PR #43, merge `cf0d209`. The user gave the word on 2026-10-21, and RA-8 was rejected (plan `docs/plans/2026-10-21-wiki-to-ui-phase9.md` §0). |
-| 2 | Golden corpus re-judge | **DONE:** PR #41 (`eec002f`) re-judged the two pinned recency rows and re-pinned the planning row to `after: 2026-07-24` / `before: 2026-09-02`. The means at `eec002f` were 0.3253/0.4310/0.7581 (nDCG@5/MRR/Recall@20; re-derive from `tests/eval/baselines/ci.json` at that commit). **The other 29 rows: DONE 2026-10-22** by the PR from `eval/rejudge-golden-corpus-2026-10-22`. See "Remains the user's" item 4. |
+| 2 | Golden corpus re-judge | **DONE:** PR #41 (`eec002f`) re-judged the two pinned recency rows and re-pinned the planning row to `after: 2026-07-24` / `before: 2026-09-02`. The means at `eec002f` were 0.3253/0.4310/0.7581 (nDCG@5/MRR/Recall@20; re-derive from `tests/eval/baselines/ci.json` at that commit). **The other 29 rows: DONE 2026-10-22** by PR #50. See "Remains the user's" item 4. |
 | 3 | Lower `OLLAMA_CONTEXT_LENGTH` | **DONE:** "Done on 2026-10-21" item 1. |
 | 4 | Restart Claude Desktop | **DONE:** "Done on 2026-10-21" item 11, after the `c9f6408` reinstall (item 9). |
 | 5 | Check `ollama ps` after an ingest | **DONE:** "Done on 2026-10-21" item 8. |
@@ -124,10 +124,9 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
    at the last wiki build. Delete them, or leave them; either is safe.
 4. ~~**Re-judge the other 29 golden rows.** Only the two recency rows were re-judged (PR #41). The
    re-judging procedure and the read-only range check are in `tests/eval/baselines/README.md`.~~
-   **Done 2026-10-22** by the PR from `eval/rejudge-golden-corpus-2026-10-22`. 15 rows gained
-   judgments (+67), 14 are unchanged and none was removed. `ci.json` was re-recorded against
-   2,068 documents, and the means went 0.3253/0.4310/0.7581 → 0.3191/0.4645/0.7176
-   (nDCG@5/MRR/Recall@20). See README (1),
+   **Done 2026-10-22** by PR #50. 15 rows gained judgments (+67), 14 are unchanged and none was
+   removed. `ci.json` was re-recorded against 2,068 documents, and the means went
+   0.3253/0.4310/0.7581 → 0.3191/0.4645/0.7176 (nDCG@5/MRR/Recall@20). See README (1),
    "Re-judged 2026-10-22", and `docs/plans/2026-10-22-golden-corpus-rejudge.md`.
 5. **Optional: reboot to release swap.** macOS swap grew to roughly 30 GB under parallel-agent memory
    pressure on 2026-10-21. Re-check with `sysctl vm.swapusage`.
@@ -242,7 +241,7 @@ Merged to `second-brain/master` (all through the rule-14 review + audit loop at 
 *(History. The status of each item on 2026-10-21 is in the table in "Closed out 2026-10-21" above.)*
 
 1. *[DONE 2026-10-21: PR #43, `cf0d209`.]* **Phase 9 (delete the wiki).** Gated on the user's word (spec Q12) and RA-8.
-2. *[DONE: the two recency rows were re-judged 2026-10-21 in PR #41 (`eec002f`), and the other 29 on 2026-10-22 in the PR from `eval/rejudge-golden-corpus-2026-10-22`.]* **Golden corpus.** As measured in `tests/eval/baselines/README.md` (`3612d0f`, 2026-10-15), the two
+2. *[DONE: the two recency rows were re-judged 2026-10-21 in PR #41 (`eec002f`), and the other 29 on 2026-10-22 in PR #50.]* **Golden corpus.** As measured in `tests/eval/baselines/README.md` (`3612d0f`, 2026-10-15), the two
    pinned recency rows can reach only 10 of 28 and 0 of 5 of their judged docs. Re-judge them by hand,
    and re-derive the counts with the read-only SQL check in that README.
 3. *[DONE 2026-10-21: lowered to 8192; backup `~/.brain/backups/launchagents_20261021T164217Z/`.]* **Optional: lower `OLLAMA_CONTEXT_LENGTH`** in `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`, so

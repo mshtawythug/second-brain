@@ -44,17 +44,17 @@ all read-only:
 - the row's own judgments
 
 A row with a `source_filter` was pooled inside that source only. Some rows'
-judged sets had been built by listing every document of a kind: standups,
-refinement sessions, first 1:1s and the peer-group series. Those were listed
-again by title over the new transcripts. Each row's own rule was applied
+judged sets had been built by listing every document of a kind: rows 14, 15,
+16, 29 and 30. Those were listed again by title over the new transcripts. Each row's own rule was applied
 unchanged: its `notes`, and the corpus header's "primarily about the topic".
 
 A Krisp ingest ran during the work: 2,029 documents at the start, **2,068** at
-the re-record. Its 55 new transcripts were judged too. The re-record waited
+the re-record. The ingest's 55 transcripts were judged too: 16 were already
+in the starting 2,029 and 39 arrived during the work. The re-record waited
 until the count had been flat for 15 minutes with no ingest running.
 
-- **15 rows gained judgments, +67 in all.** 38 of the 67 are in the
-  every-standup row, which kept its rule and went from 15 to 53 judged. Its
+- **15 rows gained judgments, +67 in all.** 38 of the 67 are in
+  row 15, which kept its rule and went from 15 to 53 judged. Its
   Recall@20 is now capped at 20/53 by construction.
 - **14 rows are unchanged.**
 - **No judgment was removed.** Every judged prefix still resolves to exactly

@@ -40,7 +40,7 @@ assumed:
 | **J1** | Which rows? | **The 29 non-recency rows.** The two pinned `recency` rows were re-judged on 2026-10-21 and are left alone unless a check below finds one broken (a judged id that no longer resolves, or one that falls outside the range). |
 | **J2** | What is pooled for each row? | **The union of five channels**, each run against the prod DB read-only: (1) the hybrid ranking as `brain eval` calls it (`hybrid_search` with the config's halflife, snippet context and vector floor, and the row's own filters), taken to depth 30, deeper than the 20 that are scored; (2) an any-term FTS leg, `ts_rank` over `documents.tsv` with the query's lexemes OR'd, top 30, which finds lexical matches that the hybrid leg's AND-ed `plainto_tsquery` misses; (3) the same leg with the lexemes AND-ed, top 15; (4) an exact vector leg, the query embedded by the configured embedder and each document scored by its best chunk's cosine with a sequential scan (no HNSW), top 30; (5) the row's existing judgments. A row with a `source_filter` is pooled inside that source only, since nothing outside it can be retrieved. |
 | **J3** | And rows whose existing notes say the set was *enumerated* (every document of a kind)? | **Re-enumerated as well.** Those rows' judged sets were built by listing every document of the kind, not from a ranking. They get a sixth channel: a title and content-type listing for the kind, read in full, so a new document of that kind is found even when no ranking channel surfaces it. |
-| **J4** | What makes a document relevant? | **The rule each row already states, applied unchanged.** The corpus header says a candidate is kept only when the document is *primarily* about the query topic, and each row's `notes` record the exclusions it makes (passing mentions, title-only matches with stub or synthetic bodies, invitations versus reminders, and so on). A new candidate is judged by the same rule as the old ones. Each candidate is read (title, content type, source, date, auto-summary, and the body where those leave it open). |
+| **J4** | What makes a document relevant? | **The rule each row already states, applied unchanged.** The corpus header says a candidate is kept only when the document is *primarily* about the query topic, and each row's `notes` record the per-row exclusions it makes. A new candidate is judged by the same rule as the old ones. Each candidate is read (title, content type, source, date, auto-summary, and the body where those leave it open). |
 | **J5** | Are existing judgments re-opened? | **Only on evidence.** An existing judgment is kept unless reading it again shows it fails the row's own rule. Any removal is counted and its reason recorded in the local `notes`. A judged id that no longer resolves is removed and counted separately. |
 | **J6** | Duplicates (the same content ingested twice, or a PDF export beside its markdown)? | **Judged on their own.** Existing rows already count a PDF export and its markdown separately, so a new duplicate of a relevant document is relevant too. |
 | **J7** | Confidential or draft documents? | **Judged like any other.** `brain eval` does not filter on sensitivity, and the prod DB holds no drafts today (measured). Excluding a retrievable relevant document would penalize the ranker for returning it. |
@@ -102,7 +102,8 @@ another of the user's sessions ran during this work, taking the count from
 moved between runs a few minutes apart. The final record waited until two
 conditions held: no `brain ingest-stdin` process was running, and the count
 and the newest `ingested_at` / `updated_at` had not changed for 15 minutes.
-The ingest's 55 new transcripts were judged like the rest.
+The ingest's 55 transcripts were judged like the rest: 16 were already in the starting
+2,029 (ingested before the 17:39:50Z backup) and 39 arrived during the work.
 
 **Per-row changes** (row = 0-based index in the corpus file; counts only):
 
@@ -133,6 +134,12 @@ The ingest's 55 new transcripts were judged like the rest.
 - **When the 67 additions were ingested:** 20 before 2026-10-05 (they existed
   but no channel of the original pool had reached them), 35 from 2026-10-05
   to 2026-10-21, and 12 on 2026-10-22.
+- Row 15's off-intent neighbours, the six id prefixes named in
+  `docs/specs/2026-10-13-search-vector-leg-design.md` §6 (`f25525e1`,
+  `559bbf47`, `2414da2a`, `a1a4afd3`, `2ece0575`, `ced40638`), were all in
+  row 15's pool (hybrid and vector legs) and were assessed and rejected under
+  the row's own rule; they stay unjudged. This discharges that spec's §8
+  follow-up.
 - The local corpus file records the reason for each change in that row's
   `notes`, under "RE-JUDGED 2026-10-22". Those notes stay local.
 
