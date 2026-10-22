@@ -26,7 +26,9 @@ def is_another_document(conn: psycopg.Connection[Any], src_rel: str, dst_abs: Pa
     An id-less dst is NOT another document: ``_sync_one``'s recovery branch
     identifies an id-less file by its path, so the rename is kept (see the
     ruling in the plan). Ids compare as UUIDs, because ``documents.id`` is one
-    and an id differing only in case is the same document.
+    and an id differing only in case is the same document. An id that is not
+    a UUID cannot name a document, so it is unproven like an id-less one: the
+    row is kept (its backlinks too) and the sync reports the bad id.
     """
     dst_id = read_frontmatter_id(dst_abs)
     if dst_id is None:
@@ -41,4 +43,4 @@ def is_another_document(conn: psycopg.Connection[Any], src_rel: str, dst_abs: Pa
     try:
         return uuid.UUID(dst_id) != uuid.UUID(row_id)
     except ValueError:
-        return dst_id != row_id
+        return False

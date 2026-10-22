@@ -8,6 +8,7 @@ import yaml
 from brain.vault.frontmatter import (
     dump_frontmatter,
     parse_frontmatter,
+    read_frontmatter_id,
     rewrite_tags,
 )
 
@@ -366,3 +367,66 @@ def test_rewrite_tags_idempotent_after_canonicalization(tmp_path: Path) -> None:
 
     assert changed is False
     assert path.read_bytes() == before_bytes
+
+
+# ---------------------------------------------------------------------------
+# read_frontmatter_id: the id the vault watcher compares before a rename
+# (docs/plans/2026-10-22-vault-watcher-move-identity.md). Every unusable input
+# reads as None, and it never raises: a raise inside the watcher's move
+# handler would abort the rename.
+# ---------------------------------------------------------------------------
+
+_VALID_ID = "7c2a8b9f-3d4e-4f5a-9b8c-1d2e3f4a5b6c"
+
+
+def _read_without_raising(path: Path) -> str | None:
+    raised: Exception | None = None
+    result: str | None = None
+    try:
+        result = read_frontmatter_id(path)
+    except Exception as exc:  # the assertion below reports it
+        raised = exc
+    assert raised is None, f"read_frontmatter_id raised {type(raised).__name__}"
+    return result
+
+
+def test_read_frontmatter_id_returns_a_valid_id(tmp_path: Path) -> None:
+    path = tmp_path / "n.md"
+    path.write_text(dump_frontmatter({"id": _VALID_ID, "title": "N"}, "body\n"))
+
+    assert read_frontmatter_id(path) == _VALID_ID
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "no frontmatter at all\n",
+        "---\ntitle: N\n---\nbody\n",
+        "---\nid: 123\ntitle: N\n---\nbody\n",
+        '---\nid: ""\ntitle: N\n---\nbody\n',
+    ],
+    ids=["no-frontmatter", "no-id", "int-id", "empty-id"],
+)
+def test_read_frontmatter_id_is_none_without_a_usable_id(tmp_path: Path, text: str) -> None:
+    path = tmp_path / "n.md"
+    path.write_text(text)
+
+    assert _read_without_raising(path) is None
+
+
+def test_read_frontmatter_id_is_none_for_malformed_yaml(tmp_path: Path) -> None:
+    path = tmp_path / "n.md"
+    path.write_text("---\nid: [unclosed\ntitle: N\n---\nbody\n")
+
+    assert _read_without_raising(path) is None
+
+
+def test_read_frontmatter_id_is_none_for_invalid_utf8(tmp_path: Path) -> None:
+    path = tmp_path / "n.md"
+    path.write_bytes(b"---\nid: \xff\xfe\n---\nbody\n")
+
+    assert _read_without_raising(path) is None
+
+
+def test_read_frontmatter_id_is_none_for_a_missing_file(tmp_path: Path) -> None:
+    assert _read_without_raising(tmp_path / "missing.md") is None

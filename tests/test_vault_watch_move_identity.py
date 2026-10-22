@@ -20,6 +20,7 @@ from typing import Any
 import psycopg
 
 from brain.vault.frontmatter import dump_frontmatter, read_frontmatter_id
+from brain.vault.move_identity import is_another_document
 from brain.vault.sync import sync_vault
 from brain.vault.watch import WatchConfig, _Job, _WatcherState, _worker_loop
 
@@ -152,3 +153,57 @@ def test_rename_with_a_differently_cased_id_is_the_same_document(
     assert state.errors == 0
     assert _rows_at(test_db, "b2.md") == [b_id], "a case-only id difference broke the rename"
     assert _incoming(test_db, a_id, b_id) == 1, "a case-only id difference destroyed the backlink"
+
+
+def test_rename_with_a_non_uuid_id_keeps_the_row_and_its_backlinks(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """(e) An id that is not a UUID cannot name a document: the row must survive.
+
+    Treating it as "another document" would DELETE the row, cascading away
+    its backlinks, while the follow-up sync still fails on the bad id. The
+    row is kept for the user to fix the id; the sync reports the error.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    a_id, b_id = _linked_pair(test_db, fake_embedder, vault, str(uuid.uuid4()))
+    _write(vault / "b.md", {"id": "not-a-uuid", "title": "B"}, "b body\n")
+
+    (vault / "b.md").rename(vault / "b2.md")
+    state = _move_through_worker(test_db, fake_embedder, vault, vault / "b.md", vault / "b2.md")
+
+    assert _rows_at(test_db, "b2.md") == [b_id], "a non-UUID id deleted the renamed row"
+    assert _incoming(test_db, a_id, b_id) == 1, "a non-UUID id destroyed the backlink"
+    assert state.errors == 1, "the sync of the bad id was not reported"
+
+
+def test_rename_onto_malformed_frontmatter_stays_in_place(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """(f) A destination whose frontmatter does not parse cannot prove anything.
+
+    The id reads as None, so the rename stays in place, keeping the row and
+    its backlink; the sync then reports the malformed frontmatter itself.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    a_id, b_id = _linked_pair(test_db, fake_embedder, vault, str(uuid.uuid4()))
+    (vault / "b.md").write_text("---\nid: [unclosed\ntitle: B\n---\nb body\n")
+
+    (vault / "b.md").rename(vault / "b2.md")
+    _move_through_worker(test_db, fake_embedder, vault, vault / "b.md", vault / "b2.md")
+
+    assert _rows_at(test_db, "b2.md") == [b_id], "malformed frontmatter broke the rename"
+    assert _incoming(test_db, a_id, b_id) == 1, "malformed frontmatter destroyed the backlink"
+
+
+def test_no_row_at_src_is_not_another_document(test_db: psycopg.Connection, tmp_path: Path) -> None:
+    """With no vault row at src there is nothing to protect: not another document."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    dst = vault / "q.md"
+    _write(dst, {"id": str(uuid.uuid4()), "title": "Q"}, "q body\n")
+
+    assert is_another_document(test_db, "never-synced.md", dst) is False, (
+        "a src with no vault row was treated as another document"
+    )

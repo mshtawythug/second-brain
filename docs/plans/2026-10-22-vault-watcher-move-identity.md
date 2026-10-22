@@ -40,7 +40,8 @@ frontmatter id with the id of the vault row at src:
 - **The ids are equal**, or there is no row at src: it is a plain rename. Keep
   the in-place `UPDATE`, which keeps the document id and every incoming
   backlink. This is the common case, and it is unchanged.
-- **Q has no frontmatter id.** Keep the rename (the ruling below).
+- **Q has no frontmatter id, or one that cannot be read or is not a UUID.**
+  Keep the rename (the ruling below).
 
 **The comparison is UUID-normalised.** `documents.id` is a `uuid` column, and
 `sync` passes the frontmatter id straight to Postgres. A frontmatter id that
@@ -81,6 +82,22 @@ Two alternatives were rejected:
 - **Treating id-less as a different document:** it contradicts the recovery
   branch, and it loses the backlinks of a failed write-back.
 
+**An unparseable id is unproven, like an id-less one** (PR #52 review item 1,
+audit F1). A non-empty id that is not a UUID cannot name a document:
+`documents.id` is a `uuid` column, so the sync that follows fails on it either
+way. The first version of `is_another_document` treated it as "another
+document". That DELETED the row at src, cascading away its backlinks, while the
+sync still failed, so the user lost the backlinks of the document whose id
+they had mistyped. The reviewer showed it:
+
+- **base:** the row is kept at `b2.md` with backlink count 1;
+- **the first head:** the row is deleted and the count drops to 0.
+
+`except ValueError: return False` keeps the row for the user to fix the id.
+The same holds for an unreadable file or malformed frontmatter:
+`read_frontmatter_id` returns None and the rename stays in place, and in each
+case `sync_one_file` reports the error itself.
+
 The residue that remains is a brand-new, never-synced, id-less B that
 replaces P and is renamed within one debounce window. It adopts A's id, as it
 did before. It is recorded in the handoff.
@@ -98,10 +115,17 @@ after coalescing.
 | (b) | A same-id rename b → b2, with `a → b` linking | b's row id unchanged, now at b2; the incoming backlink `a → b` survives |
 | (c) | An id-less rename: b's id stripped from disk (a failed write-back), renamed b → b2 | Renamed in place: same row id at b2, the backlink survives, and the sync writes the id back |
 | (d) | A same document whose frontmatter id differs only in case | Renamed in place, and the backlink survives |
+| (e) | b's id edited to `"not-a-uuid"`, renamed b → b2, with `a → b` linking | The row is still at b2 with b's id; the backlink survives; `errors == 1` (the sync reports the bad id) |
+| (f) | b's frontmatter made unparseable, renamed b → b2 | Renamed in place; the backlink survives |
+| unit | `is_another_document(conn, "never-synced.md", <file with a valid id>)` | `False`: no row at src, so nothing to protect |
+| unit | `read_frontmatter_id` (in `tests/test_vault_frontmatter.py`) | A valid id is returned. No frontmatter, no id, `id: 123`, `id: ""`, malformed YAML, invalid UTF-8 and a missing file each give `None`, without raising |
 
 (a) is the bug, so it is RED at `7acf133`. (b), (c) and (d) are characterisation
-tests of behaviour that must not change, so they pass at `7acf133`. The
-mutants below show each can fail.
+tests of behaviour that must not change, so they pass at `7acf133`. (e) is
+RED at `2d1c81c`, the first head of this PR: "a non-UUID id deleted the renamed
+row". It was run in a `git archive` copy of `2d1c81c` with the new test files
+added, and the other 40 tests passed there. The mutants below show that each
+test can fail.
 
 ## Ceiling
 
@@ -160,9 +184,21 @@ followed by a descriptive hop for this commit. The growth is recorded inline at
 
 ### Mutation matrix (five clauses), in a `git archive` copy only
 
-The harness was the PR #51 design, with the move-identity file added (it is
-DB-backed, so the test-DB env is set). The snapshot was `git stash create`
-`c58a540`, archived and extracted, so the live worktree was never mutated.
+The harness was the PR #51 design, with the move-identity and frontmatter test
+files added (DB-backed, so the test-DB env is set). The run of record used the
+`git stash create` snapshot `f74e970`, archived and extracted, so the live
+worktree was never mutated.
+
+**The clause (d) check was too loose until this round (audit F3).** It matched
+the predicted text against the JUnit failure message AND its traceback text.
+The traceback also lists the test's earlier source lines, so a prediction
+naming an assertion that had PASSED could still match. N3's row said "broke the
+rename", while the real failure was the backlink assertion. The judge now reads
+the failure **message only**. The whole matrix, including all 22 mutants from
+PRs #49 and #51, was re-run under it, and every earlier prediction still holds.
+Only N3's text changed. It fails at "a case-only id difference destroyed the
+backlink", because Postgres lowercases the re-inserted uppercase id, so the
+row's id survives but the cascade took the backlink.
 
 - **(b)** Each edit's `str.count` is asserted to be its declared 1.
 - **(c), (d)** One run per mutant over all three test files, with per-test
@@ -173,35 +209,54 @@ DB-backed, so the test-DB env is set). The snapshot was `git stash create`
 - **Restoration:** the archive was restored byte-identical, and the harness
   asserts it.
 
-**All 26 mutants OK:** N1-N4 new, plus all 22 from PRs #49 and #51, re-run
-against this code.
+**All 31 mutants OK, under the strict judge:** N1-N9 new, plus all 22 from PRs
+#49 and #51, re-run against this code.
 
-| Mutant | Edit | Failing tests (exactly) |
+| Mutant | Edit | Failing tests (exactly), with the message |
 |---|---|---|
 | N1 | always rename (`if is_another_document(...)` becomes `if False:`) | (a) "the previous document's row was renamed onto the destination" |
-| N2 | an id-less destination counts as another document | (c) "an id-less rename did not keep the row" |
-| N3 | compare ids as raw strings, not UUIDs | (d) "a case-only id difference broke the rename" |
+| N2 | an id-less destination counts as another document | (c) "an id-less rename did not keep the row"; (f) "malformed frontmatter broke the rename" |
+| N3 | compare ids as raw strings, not UUIDs | (d) "a case-only id difference destroyed the backlink"; (e) "a non-UUID id deleted the renamed row" |
 | N4 | the different-document branch skips `_handle_delete` | (a) "the deleted document's row survived" |
+| N5 | a non-UUID id counts as another document (the first head's bug) | (e) "a non-UUID id deleted the renamed row" |
+| N6 | no row at src counts as another document | unit "a src with no vault row was treated as another document" |
+| N7 | `read_frontmatter_id` stops catching `yaml.YAMLError` | unit (malformed YAML) "read_frontmatter_id raised ..."; (f) "malformed frontmatter broke the rename" |
+| N8 | stops catching `OSError` | unit (missing file) "read_frontmatter_id raised FileNotFoundError" |
+| N9 | stops catching `ValueError` | unit (invalid UTF-8) "read_frontmatter_id raised UnicodeDecodeError" |
 
 **Each claim has its own killing mutant (clause e):**
 
 - "a different document is not renamed onto": N1 → (a);
 - "its old row is deleted": N4 → (a);
-- "id-less keeps the rename": N2 → (c);
-- "ids compare as UUIDs": N3 → (d).
+- "id-less keeps the rename": N2 → (c), (f);
+- "ids compare as UUIDs": N3 → (d);
+- "a non-UUID id keeps the row": N5 → (e);
+- "no row at src is nothing to protect": N6 → unit;
+- "an unreadable destination never raises": N7 / N8 / N9 → the unit tests.
 
 The same-id common case (b) is held by every mutant except those that break it.
 
-**Equivalent mutant, recorded rather than tested:** changing "no row at src →
-False" to True. With no row at src, the `UPDATE` and `_handle_delete(src)` are
-both no-ops, so no test can tell them apart. The `return False` stays, because
-it skips a pointless delete.
+**N6 was first recorded here as an equivalent mutant.** Through the watcher, a
+src with no row makes the `UPDATE` and `_handle_delete(src)` both no-ops, so no
+watcher test can tell them apart. The audit (F2) pointed out that a direct unit
+test of `is_another_document` can, and N6 is now killed by one.
+
+**Branch coverage of the new code** (`pytest --cov-branch` over the
+move-identity and frontmatter tests):
+
+- `brain/vault/move_identity.py`: 100% (18 statements, 4 branches, none
+  missed).
+- `read_frontmatter_id` (`frontmatter.py` lines 79-93): every line covered.
+
+The module's remaining misses (line 66, and lines 218-225 in
+`rewrite_sensitivity`) are pre-existing code outside this change.
 
 ### Stability and suites
 
-- The four move-identity tests, plus the race and timer files, passed 5 runs in
-  a row (36 passed each).
-- Run once, serially: the watcher, sync and docs-guard files gave 391 passed.
+- The move-identity tests, plus the race and timer files, passed 5 runs in a
+  row: 36 passed each in round 1, and 73 passed each in round 2 (which adds `test_vault_frontmatter.py`).
+- Run once, serially: the watcher, sync and docs-guard files gave 391 passed
+  in round 1, and 428 in round 2 (with `test_vault_frontmatter.py` added).
   They include `test_vault_watcher.py`, `test_vault_sync.py` (because
   `frontmatter.py` changed) and `test_reading_surface_pointers.py`.
 - The full suite was not run locally; CI is the full-suite evidence.
