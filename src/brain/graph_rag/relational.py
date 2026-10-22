@@ -19,7 +19,7 @@ from .schema import EdgeContribution, EntityMention, EntitySummary, GraphStats
 
 __all__ = [
     "delete_doc_relational",
-    "fetch_doc_content",
+    "fetch_doc_content_at",
     "fetch_doc_meta",
     "graph_stats",
     "index_state",
@@ -47,17 +47,27 @@ def fetch_doc_meta(
     return (str(row[0]), str(row[1]))
 
 
-def fetch_doc_content(conn: psycopg.Connection[Any], document_id: str) -> str:
-    """Return a document's body text (for concept extraction; spec §4 D4).
+def fetch_doc_content_at(
+    conn: psycopg.Connection[Any], document_id: str, content_hash: str
+) -> str | None:
+    """Return a document's body IF it still has ``content_hash``, else ``None``.
 
-    Fetched lazily — only when the concept aspect is stale and about to extract —
-    so the person-only path never pays to load a (potentially large) body.
+    For concept extraction (spec §4 D4). The caller read ``content_hash``
+    earlier. Pinning the body read to that hash means the two always describe
+    the same body. A bare second read could pair one edit's hash with another
+    edit's body; an edit and a byte-identical revert around it would then index
+    the edit's body under the reverted hash, a watermark nothing ever flags
+    stale. ``None`` means the document was edited or deleted in between.
+    Called only when the concept aspect is stale, so an up-to-date or
+    person-only document never loads its (potentially large) body.
     """
     row = conn.execute(
-        "SELECT content FROM documents WHERE id = %s",
-        (document_id,),
+        "SELECT content FROM documents WHERE id = %s AND content_hash = %s",
+        (document_id, content_hash),
     ).fetchone()
-    return str(row[0]) if row is not None and row[0] is not None else ""
+    if row is None:
+        return None
+    return str(row[0]) if row[0] is not None else ""
 
 
 def read_doc_mentions(

@@ -44,6 +44,7 @@ from .extract import EntityExtractor
 from .person_resolver import prebuilt_directory_resolver
 from .reconcile import ReconcileConfig, ReconcileResult, reconcile_document
 from .schema import GraphEntity
+from .write_lock import acquire_graph_write_lock
 
 __all__ = ["BuildResult", "ProgressCallback", "build_graph"]
 
@@ -198,6 +199,7 @@ def build_graph(
         # resumable (each document commits in its own transaction) — only the
         # clear/restore must be atomic together.
         with conn.transaction():
+            acquire_graph_write_lock(conn, config.tenant_id)
             # 1. RELATIONAL clean: recompute graph_relationships from the CURRENT
             #    contributions (drops aggregate rows stranded by deleted docs) and
             #    GC orphan entities (zero remaining mentions). Reuses the same

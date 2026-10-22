@@ -72,6 +72,7 @@ from ..db import ensure_embedding_column
 from ..errors import GraphTenantError, describe_failure
 from ..ingest import Embedder
 from ..sensitivity import not_confidential_sql
+from .write_lock import acquire_graph_write_lock
 
 __all__ = [
     "CommunitySummaryResult",
@@ -290,6 +291,7 @@ def _run_summary_phase(
 
     if writes:
         with conn.transaction():
+            acquire_graph_write_lock(conn, tenant)
             for community_key, summary, model, members_hash in writes:
                 conn.execute(
                     "UPDATE graph_communities SET "
@@ -434,6 +436,7 @@ def _run_embedding_phase(
             [str(summary) for _key, summary in pending], input_type="document"
         )
         with conn.transaction():
+            acquire_graph_write_lock(conn, tenant)
             for (community_key, _summary), vector in zip(
                 pending, vectors, strict=True
             ):

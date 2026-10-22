@@ -11,6 +11,8 @@ import yaml
 from brain.errors import GraphReconcileError
 from brain.person_name import humanize_person_name
 
+from ..write_lock import acquire_graph_write_lock
+
 if TYPE_CHECKING:
     from ..backends.base import GraphBackend
     from ..reconcile import ReconcileConfig
@@ -180,6 +182,7 @@ def apply_aliases(
             continue
         try:
             with conn.transaction():  # SAVEPOINT
+                acquire_graph_write_lock(conn, tenant_id)
                 dst_id = _upsert_entity(conn, tenant_id, rule.to_type, rule.to_key)
                 mentions_repointed += _repoint_mentions(
                     conn, tenant_id, src_id, dst_id
@@ -497,6 +500,7 @@ def merge_aliases(
     captured: dict[str, AliasResult] = {}
     try:
         with conn.transaction():
+            acquire_graph_write_lock(conn, tenant_id)
             res = apply_aliases(conn, tenant_id, rules, dry_run=False)
             if dry_run:
                 # Record the counters BEFORE unwinding so the dry-run summary

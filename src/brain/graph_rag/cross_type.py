@@ -50,6 +50,7 @@ import psycopg
 
 from .aliases import AliasResult, AliasRule, _validate_alias_graph, merge_aliases
 from .schema import GraphEntity
+from .write_lock import acquire_graph_write_lock
 
 if TYPE_CHECKING:
     from .backends.base import GraphBackend
@@ -289,6 +290,7 @@ def _restore_winner_display_names(
     if not winner_names:
         return
     with conn.transaction():
+        acquire_graph_write_lock(conn, tenant_id)
         corrected: list[GraphEntity] = []
         for (entity_type, canonical_key), name in winner_names.items():
             row = conn.execute(
