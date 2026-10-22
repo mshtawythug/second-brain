@@ -10,10 +10,14 @@
 #     `-m benchmark`. Local use of the gate is manual only.
 #
 #   * PINNED Apache AGE image. The gate REQUIRES AGE (not stock pgvector), so we
-#     build + start the custom PG16 + pgvector 0.8.2 + AGE 1.5.0-rc0 image from
-#     the canonical Dockerfile via docker-compose.age-test.yml (the same image +
-#     port 5434 + db `second_brain_test` the local test suite uses). The image
-#     tag is pinned in that compose file (second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2).
+#     start the custom PG16 + pgvector 0.8.6 + AGE 1.5.0-rc0 image via
+#     docker-compose.age-test.yml (the same image + port 5434 + db
+#     `second_brain_test` the local test suite uses). The image tag is pinned in
+#     that compose file's `image:` line. PULL-FIRST, like ci.yml:
+#     `pull --quiet || true` fetches the public prebuilt image, then a plain
+#     `up -d` (no `--build`) starts it. Only on a registry miss does `up -d`
+#     compile AGE from the canonical Dockerfile (the compose `build:` stanza).
+#     Locked by tests/test_age_image_pull_first_contract.py.
 #     A GitHub Actions `services:` block can't `build:` an image inline, so we
 #     bring it up with compose instead of as a service container.
 #
@@ -61,9 +65,14 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Build + start the pinned AGE test instance
-        # TODO flip to pull-first once ghcr.io/mshtawythug/second-brain-age is public
-        run: docker compose -f docker-compose.age-test.yml up -d --build
+      - name: Pull the pinned AGE image (falls back to a local build)
+        # `|| true`: on a registry miss the following `up -d` compiles AGE from
+        # src/brain/templates/docker/age/Dockerfile instead. Slower, still green.
+        run: docker compose -f docker-compose.age-test.yml pull --quiet || true
+
+      - name: Start the AGE test instance
+        # No `--build`: it would recompile AGE over the image just pulled.
+        run: docker compose -f docker-compose.age-test.yml up -d
 
       - name: Install package (with dev extras)
         run: pip install -e ".[dev]"

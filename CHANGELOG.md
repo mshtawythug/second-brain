@@ -221,6 +221,31 @@ wiki-as-fallback option, RA-8, was declined).
   `since_days` until you convert them, and converting one needs a baseline
   re-record. How to choose the dates: `tests/eval/baselines/README.md` (2).
 
+### Fixed — the `full` profile pulled the old AGE image
+
+- **`brain setup --profile full` named the AGE image tag `pgv0.8.2`.** The
+  0.3.0 bump moved the image to `pgvector/pgvector:0.8.6-pg16` but left the
+  old tag in the compose template that `brain setup` renders into
+  `$BRAIN_HOME/docker-compose.yml`. That tag still exists on GHCR, so a full
+  install pulled the 0.8.2 image. If the pull failed, the local build compiled
+  0.8.6 and labelled it `pgv0.8.2`. The template now names
+  `pg16-v1.5.0-rc0-pgv0.8.6`, matching the Dockerfile. `bin/brain-graphrag-gif`
+  had the same stale tag and is fixed too.
+- **What this does to an existing full install.** Nothing changes until you
+  re-run `brain setup --profile full`. Run it with the stack stopped: while
+  Postgres is up, the port preflight stops setup before it writes anything.
+  The re-run rewrites `$BRAIN_HOME/docker-compose.yml`, then runs
+  `docker compose pull` and `up -d` itself. So in that same run it pulls the
+  0.8.6 image and recreates the Postgres container. The major version stays
+  PostgreSQL 16, so the data directory is used as it is. The `vector`
+  extension in each database stays at 0.8.2 until you run
+  `ALTER EXTENSION vector UPDATE;` there. Check with
+  `SELECT extversion FROM pg_extension WHERE extname = 'vector';`.
+- This supersedes the 0.3.0 note that "existing local deployments keep running
+  their current image until you rebuild deliberately". It still holds for a
+  deployment whose compose file `brain setup` does not render, such as a
+  repo-root `docker-compose.override.yml`.
+
 ### Fixed
 
 - **`brain backup` archived the leftover Quartz workspace.** Every full backup

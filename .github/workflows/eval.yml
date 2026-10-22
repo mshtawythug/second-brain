@@ -15,11 +15,15 @@
 #
 #   * PINNED Apache AGE image, same as benchmark.yml. One of the eval-marked
 #     tests (test_graphrag_concept_gate) reaches the AGE-backed graph layer, so
-#     we bring up the custom PG16 + pgvector 0.8.2 + AGE image via
+#     we bring up the custom PG16 + pgvector 0.8.6 + AGE image via
 #     docker-compose.age-test.yml (port 5434, db `second_brain_test`) — the same
 #     instance the local test suite uses. A GitHub Actions `services:` block
 #     can't `build:` an image inline, so compose is used instead of a service
-#     container.
+#     container. PULL-FIRST, like ci.yml: `pull --quiet || true` fetches the
+#     public prebuilt image named by the compose `image:` line, then a plain
+#     `up -d` (no `--build`) starts it. Only on a registry miss does `up -d`
+#     compile AGE from the compose `build:` stanza. Locked by
+#     tests/test_age_image_pull_first_contract.py.
 #
 #   * The regression gate step (`brain eval --baseline ci --diff --fail-below`)
 #     is CONDITIONAL, and on a GitHub-hosted runner the condition is NEVER
@@ -37,7 +41,7 @@
 #          runs before Config.load() and before any DB connection, so this
 #          alone exits 1.
 #       2. An initialised schema. This job brings the AGE instance up with
-#          `up -d --build` and never runs `brain init`, so `documents` does
+#          `up -d` and never runs `brain init`, so `documents` does
 #          not exist. Resolving an expected-id prefix would raise
 #          UndefinedTable.
 #       3. Populated documents whose UUIDs match the baseline's. The baseline
@@ -89,9 +93,14 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Build + start the pinned AGE test instance
-        # TODO flip to pull-first once ghcr.io/mshtawythug/second-brain-age is public
-        run: docker compose -f docker-compose.age-test.yml up -d --build
+      - name: Pull the pinned AGE image (falls back to a local build)
+        # `|| true`: on a registry miss the following `up -d` compiles AGE from
+        # src/brain/templates/docker/age/Dockerfile instead. Slower, still green.
+        run: docker compose -f docker-compose.age-test.yml pull --quiet || true
+
+      - name: Start the AGE test instance
+        # No `--build`: it would recompile AGE over the image just pulled.
+        run: docker compose -f docker-compose.age-test.yml up -d
 
       - name: Install package (with dev extras)
         run: pip install -e ".[dev]"
