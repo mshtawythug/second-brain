@@ -191,15 +191,29 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        to the flush regressed the same way. The flush now enqueues every flushed delete/move job,
        plus the overflowing call's own, BEFORE the full sync.
      - The plan (`docs/plans/2026-10-22-vault-watcher-fire-race.md`) now lists all four removers
-       of `pending_timers` entries as a closed list, each with its proof. The one known gap is
-       item 3.
-  2. **Still open: a job can land after the sentinel through the observer.** `run_watcher` gives
-     `observer.join` 5s. If the observer thread outlives that, an event it delivers after the drain
-     arms a timer that nobody drains. This predates PR #49.
-  3. **Still open: debouncing is keyed by path, and the last event wins across actions.** Example: a
-     `move` is keyed on its src, and within `debounce_ms` the src is recreated. The move becomes an
-     upsert of src, and the destination is not synced, with the same consequences as item 1's move
-     case. This predates PR #49 and was found in its review.
+       of `pending_timers` entries as a closed list, each with its proof. The one known gap was
+       item 3, now closed by PR #51; `docs/plans/2026-10-22-vault-watcher-shutdown-mixed-actions.md`
+       carries the current list.
+  2. ~~**A job can land after the sentinel through the observer.**~~ *[FIXED by PR #51
+     (`fix/vault-watcher-shutdown-and-mixed-actions`).]* `run_watcher` gives `observer.join` 5s. If
+     the observer thread outlived that, an event it delivered after the drain armed a timer that
+     nobody drained. The drain now sets `_WatcherState.closed` under the lock. A closed watcher arms
+     no timer and enqueues nothing, and logs the drop once. The next startup `sync_vault`
+     reconciles the path, though a delete is pruned only with prune on.
+  3. ~~**Debouncing is keyed by path, and the last event wins across actions.**~~ *[FIXED by PR
+     #51.]* Example: a `move` keyed on its src, then the src recreated within `debounce_ms`,
+     became an upsert of src, and the destination was not synced. A pending `move` superseded by a
+     DIFFERENT job is now enqueued first, under the lock. Every other action pair still coalesces,
+     the atomic-save delete+create collapse included. The pair table is in
+     `docs/plans/2026-10-22-vault-watcher-shutdown-mixed-actions.md`.
+  4. **Still open: a coalesced move can carry the wrong document's row.** A pending `upsert` or
+     `delete` of P is coalesced into a later `move` P → Q. If P had been re-populated by a
+     DIFFERENT document (another frontmatter id, B) before the rename, `_handle_move` renames the
+     previous document's row (A) to Q. Syncing Q then either hits `documents_vault_path_idx` (Q
+     carries id B) or adopts A's id (Q is id-less). Coalescing stays the default, because it keeps
+     A's backlinks in the common same-id atomic save. The case predates PR #51 (via upsert →
+     move), and PR #51 neither introduced nor widened it (PR #51 audit, F1). A fix would have
+     `_handle_move` compare the destination's frontmatter id with the row's id before renaming.
 - *[FIXED 2026-10-22 on branch `fix/graph-entities-deadlock`.]* **`graph_entities` deadlocks
   between graph writers.** On prod, `brain graphrag build --backfill --concepts` died with
   `DeadlockDetected` in `upsert_concept_entities` against the vault watcher. This is the same class
