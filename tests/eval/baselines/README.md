@@ -26,11 +26,64 @@ drift (2) alone.* Ingests added 608 documents to the document set (Krisp on
 well; the means fell from 0.4834 / 0.5835 / 0.7267 to 0.2589 / 0.3697 / 0.5852
 (nDCG@5 / MRR / Recall@20). Those are no longer the committed file's means: a
 second re-record the same day followed a ranking change, so for the current
-means see "Vector-leg candidate pool" under "Known retrieval issues" below. The golden judgments predate ~30% of the document set, so the
-absolute scores understate quality until `golden_corpus.yaml` is re-judged
-against the new documents. As of 2026-10-21 only the two `recency` rows have
-been (see "Re-judged 2026-10-21" in (2)); the other 29 rows' judgments still
-predate those documents.
+means see "Vector-leg candidate pool" under "Known retrieval issues" below.
+The golden judgments predated ~30% of the document set, so the absolute
+scores understated quality until `golden_corpus.yaml` was re-judged against
+the new documents. The two `recency` rows were re-judged on 2026-10-21
+(see "Re-judged 2026-10-21" in (2)), and the other 29 on 2026-10-22 (see
+"Re-judged 2026-10-22" below).
+
+**Re-judged 2026-10-22: the 29 non-recency rows.** The code was at
+`bb004fe`. The plan is `docs/plans/2026-10-22-golden-corpus-rejudge.md`, and
+it records the final document count. Each row was pooled from five channels,
+all read-only:
+
+- the hybrid ranking, as `brain eval` calls it, to depth 30
+- an any-term FTS leg
+- an all-term FTS leg
+- an exact vector leg, with no index
+- the row's own judgments
+
+A row with a `source_filter` was pooled inside that source only. Rows 14, 15,
+16 and 30 had judged sets built by listing every document of a kind, and
+those were listed again by title over the new transcripts. Row 29 is
+judged by topic, not enumerated; besides its five channels, the new
+transcripts were searched for it by body keyword, not by title. Each row's
+own rule was applied unchanged: its `notes`, and the corpus header's
+"primarily about the topic".
+
+A Krisp ingest ran during the work: 2,029 documents at the start, **2,068** at
+the re-record. The ingest's 55 transcripts were judged too: 16 were already
+in the starting 2,029 and 39 arrived during the work. The re-record waited
+until the count had been flat for 15 minutes with no ingest running.
+
+- **15 rows gained judgments, +67 in all.** 38 of the 67 are in
+  row 15, which kept its rule and went from 15 to 53 judged. Its
+  Recall@20 is now capped at 20/53 by construction.
+- **14 rows are unchanged.**
+- **No judgment was removed.** Every judged prefix still resolves to exactly
+  one document, and the two `recency` rows' judgments are all still in range.
+- **20 of the 67 additions predate the 2026-10-05 ingest.** No channel of the
+  original pool had reached them. Of the rest, 35 were ingested from
+  2026-10-05 to 2026-10-21 and 12 on 2026-10-22.
+
+The document set's growth moves rows on its own. On the final document set,
+an eval of the unedited corpus against the `bb004fe` baseline moved 8 rows,
+and the means by -0.0210 / -0.0066 / -0.0000 (nDCG@5 / MRR / Recall@20). That
+is the growth, not the re-judge. An eval of the re-judged corpus against the
+new `ci.json`, run right after it was recorded, moved no row by more than
+`1e-4`.
+
+| | nDCG@5 | MRR | Recall@20 |
+|---|---|---|---|
+| `bb004fe` (31 queries) | 0.3253 | 0.4310 | 0.7581 |
+| **2026-10-22 re-record** | **0.3191** | **0.4645** | **0.7176** |
+
+Recall@20 falls wherever a larger judged set includes documents that rank
+below 20. That is the judgments catching up with the document set, not search
+getting worse. MRR rises where a row's top-ranked document was relevant but
+unjudged. Treat these means as a new starting point, not as a point on the
+same trend line as the old ones.
 
 **2. Two `recency` queries were clock-dependent until 2026-10-15**, when they
 were pinned to absolute dates (see "The fix" and "Applied" below). They filtered on
@@ -302,7 +355,9 @@ you find one, re-record.
   2026-10-14 re-record for the synced daily briefs, were
   **0.2724 / 0.3826 / 0.7089**. The 2026-10-21 re-judge of the two `recency`
   rows in (2) moved them to **0.3253 / 0.4310 / 0.7581**, with no other row
-  changed. The same
+  changed. The 2026-10-22 re-judge of the other 29 rows in (1),
+  on a document set that had grown to 2,068, moved them to
+  **0.3191 / 0.4645 / 0.7176**. The same
   HNSW shape remains in `related.py` and `connect.py`; those are unmeasured
   follow-ups.
 

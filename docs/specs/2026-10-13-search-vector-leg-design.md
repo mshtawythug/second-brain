@@ -536,6 +536,11 @@ D's two triggers (§5) answer different failures:
   corpus, not of the pool. If q15 is re-judged against the full pool (the ~30% unjudged
   caveat), assess these explicitly rather than inheriting their absence from the
   HNSW-era pool.
+  *Discharged 2026-10-22 by PR #50 (the golden-corpus re-judge): q15 (row 15) was
+  pooled from hybrid, FTS and exact-vector legs, all six prefixes named in §6
+  (`f25525e1`, `559bbf47`, `2414da2a`, `a1a4afd3`, `2ece0575`, `ced40638`) were in
+  that pool, and each was assessed and rejected under the row's own rule. They stay
+  unjudged. See `docs/plans/2026-10-22-golden-corpus-rejudge.md`, Results.*
 
 ## 9. Implementation shape
 
