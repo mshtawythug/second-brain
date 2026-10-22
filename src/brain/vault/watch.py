@@ -37,6 +37,8 @@ Concurrency invariants worth restating:
   and a scheduling error never escapes into the observer thread. A superseded
   move is delivered first, and a drained (closed) watcher accepts no event. A
   rename onto a different document deletes the old row (``move_identity``).
+  Graph syncs run on one background lane (``graph_lane``), so a slow startup
+  reconcile never delays observing the vault.
   These are the 2026-10-22 race fixes, reasoned at ``_fire``,
   ``_supersede_pending`` and the drain; CLAUDE.md's ceiling table records them.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
@@ -96,11 +98,12 @@ from ..ingest import Embedder
 from ..log_rotation import default_log_dir, start_background_rotator
 from .debounce_timer import DebounceTimer, TimerFactory, daemon_timer
 from .derived_links.fence import strip_fence
+from .graph_lane import GraphLane
 from .move_identity import is_another_document
 from .sync import SyncReport, sync_one_file, sync_vault
 
 if TYPE_CHECKING:
-    from ..graph_rag.sync import GraphSyncer
+    from .graph_lane import GraphSyncTarget
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +120,9 @@ _Action = Literal["upsert", "delete", "move"]
 # loop) outpaces this, we fall back to a full vault sync to recover —
 # conceptually an admission-control valve, not a normal code path.
 _MAX_PENDING = 1000
+
+# How long shutdown waits for the graph lane's in-flight reconcile to finish.
+_LANE_CLOSE_TIMEOUT_S = 10.0
 
 
 @dataclass
@@ -192,6 +198,8 @@ class _WatcherState:
     # and enqueues nothing, so no job can land behind the sentinel.
     closed: bool = False
     dropped_after_close: int = 0
+    # The graph lane run_watcher built, if any (tests barrier on it).
+    graph_lane: GraphLane | None = None
     # ``processed`` and ``errors`` accumulate over the watcher's lifetime
     # so the final shutdown report can summarize "watched 14 files; 1
     # error". Only the worker thread touches them, so no lock is needed.
@@ -215,7 +223,7 @@ def run_watcher(
     config: WatchConfig,
     observer_factory: Callable[[], BaseObserver] | None = None,
     install_signal_handlers: bool = True,
-    graph_syncer: GraphSyncer | None = None,
+    graph_syncer: GraphSyncTarget | None = None,
     enable_log_rotation: bool = False,
 ) -> SyncReport:
     """Block until SIGINT/SIGTERM, watching ``config.vault_path``.
@@ -259,6 +267,12 @@ def run_watcher(
     if enable_log_rotation:
         start_background_rotator(default_log_dir())
 
+    # brain (2026-10-22, startup blind): every graph sync goes through ONE lane
+    # thread (``graph_lane``), so the startup sync's graph pass only enqueues
+    # and the watcher goes live once the file reconcile is done.
+    lane = GraphLane(graph_syncer, conn_factory) if graph_syncer is not None else None
+    state.graph_lane = lane
+
     # 1. Startup sync. Use a short-lived connection scoped to this call —
     #    we don't want to hold a connection while parked on the stop event.
     startup_conn = conn_factory()
@@ -272,7 +286,7 @@ def run_watcher(
             dry_run=False,
             link_rewrite=config.link_rewrite,
             owner_participants=config.owner_participants,
-            graph_syncer=graph_syncer,
+            graph_syncer=lane,
         )
     finally:
         startup_conn.close()
@@ -285,7 +299,7 @@ def run_watcher(
     worker_conn.autocommit = True
     worker_thread = threading.Thread(
         target=_worker_loop,
-        args=(worker_conn, embedder, config, state, graph_syncer),
+        args=(worker_conn, embedder, config, state, lane),
         name="brain-vault-watcher-worker",
         daemon=True,
     )
@@ -350,6 +364,10 @@ def run_watcher(
         for sig in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[sig] = signal.signal(sig, _signal_handler)
 
+    # Start the lane LAST, right before the stop-wait whose finally closes it,
+    # so no setup failure can leak its thread; requests just queue until now.
+    if lane is not None:
+        lane.start()
     try:
         # Block until a signal (or test) flips the stop_event.
         state.stop_event.wait()
@@ -388,6 +406,19 @@ def run_watcher(
                 logger.debug(
                     "vault watcher: worker connection already closed"
                 )
+        # After the worker, so every live graph request is in: drops pending
+        # reconciles (redone by the next startup), drains removes.
+        if lane is not None and not lane.close(timeout=_LANE_CLOSE_TIMEOUT_S):
+            undrained = lane.undrained_removes()
+            logger.warning(
+                "vault watcher: graph lane still finishing a reconcile; %d graph "
+                "remove(s) not applied (%s): their AGE Document vertices stay until "
+                "`brain graphrag build --force` (re-extracts concepts for every document "
+                "when concepts are on); aggregates and orphan entities heal at the next "
+                "graph reconcile or with `brain graphrag refresh`",
+                len(undrained),
+                ", ".join(undrained) or "none",
+            )
 
     logger.info(
         "vault watcher: stopped after %d events (%d errors)",
@@ -779,7 +810,7 @@ def _worker_loop(
     embedder: Embedder,
     config: WatchConfig,
     state: _WatcherState,
-    graph_syncer: GraphSyncer | None = None,
+    graph_syncer: GraphSyncTarget | None = None,
 ) -> None:
     """Consume jobs serially. Owns the DB connection.
 
@@ -1027,7 +1058,7 @@ def _handle_delete(
     abs_path: Path,
     vault_path: Path,
     *,
-    graph_syncer: GraphSyncer | None = None,
+    graph_syncer: GraphSyncTarget | None = None,
 ) -> None:
     """Remove the vault-tier ``documents`` row for ``abs_path``.
 
@@ -1091,7 +1122,7 @@ def _handle_move(
     state: _WatcherState,
     src_abs: Path,
     dst_abs: Path,
-    graph_syncer: GraphSyncer | None = None,
+    graph_syncer: GraphSyncTarget | None = None,
 ) -> None:
     """Handle a within-vault markdown rename WITHOUT destroying incoming links.
 

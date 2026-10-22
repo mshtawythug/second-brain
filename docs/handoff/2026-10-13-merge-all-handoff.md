@@ -219,6 +219,43 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
      - **Residue, still open and pre-existing:** a brand-new, never-synced, id-less file that
        replaces P and is renamed within one debounce window still adopts A's id. Nothing
        distinguishes it from A's own file after a failed id write-back.
+  5. ~~**The vault watcher was blind for hours after a restart (production, 2026-10-22).**~~
+     *[FIXED by PR #54 (`fix/vault-watcher-startup-blind`).]* The startup `sync_vault`'s graph pass
+     (step 7) ran Ollama concept extraction for each new, un-watermarked Krisp document, at about
+     8-10 min each. The observer and worker start only after the startup sync, so edits went
+     unwatched for about 6h.
+     - **The fix:** every graph reconcile and remove the watcher issues goes through one
+       `GraphLane` thread with its own connection (`brain/vault/graph_lane.py`). The startup pass
+       only enqueues, and the watcher is live as soon as the file reconcile is done.
+     - **Unchanged:** there is still one graph writer per process, and `sync_vault` and the
+       `brain vault sync` CLI are still synchronous.
+     - **Plan:** `docs/plans/2026-10-22-vault-watcher-startup-blind.md`.
+     - **With PR #53's per-tenant write lock:** the lane's reconciles take the tenant lock like
+       every graph writer, so they wait behind a tenant-wide writer (`graphrag refresh`, `build
+       --force`, ...). That wait happens on the lane thread. The event worker never waits on the
+       model call or on the tenant lock; a delete of a document being written waits for that one
+       write transaction (and, until the follow-up lands, can deadlock as its victim).
+     - **Known lock cycle, being fixed by the follow-up to PR #53 (not in #54):** the lane's write
+       transaction (`rewrite_doc_relational` DELETEs graph mention rows, then INSERTs whose FK
+       check locks `documents` row X) against the worker's `_handle_delete` DELETE of `documents`
+       X, whose `ON DELETE CASCADE` reaches the same graph rows. Reproduced by the PR #54 reviewer
+       with millisecond windows; Postgres picks the worker as the victim. The fix is in
+       `graph_rag`: `ReconcilePlan.is_current` reads `documents` X `FOR KEY SHARE`, so the lane
+       locks X before it touches any graph row. That also closes #53's same-document residual.
+     - **Side effect:** the graph now lags while a large startup backlog drains. It is
+       best-effort: the lane catches up by itself, and `brain graphrag build --backfill`
+       reconciles whatever is behind its watermark (`--force` for a full mirror rebuild).
+  6. **Deferred: a targeted repair for lost graph removes.** When the watcher's shutdown times
+     out behind a long reconcile (PR #54), the removes queued behind it are not applied. A
+     startup self-heal was declined, because every per-doc relational graph table cascades on
+     documents delete, so nothing relational records a lost remove.
+     - **What happens today:** the shutdown WARNING names the document ids. Their ghost AGE
+       `Document` vertices stay until `brain graphrag build --force`, which, with concepts on,
+       re-extracts every document. Aggregates and orphan entities heal at the next graph
+       reconcile or with `brain graphrag refresh`.
+     - **The cheap repair:** a `brain graphrag remove <id>` command that calls
+       `graph_rag.reconcile.remove_document` for the logged ids. It is robust to an
+       already-deleted `documents` row, and it is not built yet.
 - *[FIXED 2026-10-22 on branch `fix/graph-entities-deadlock`.]* **`graph_entities` deadlocks
   between graph writers.** On prod, `brain graphrag build --backfill --concepts` died with
   `DeadlockDetected` in `upsert_concept_entities` against the vault watcher. This is the same class
