@@ -15,6 +15,7 @@ deduped), never after a guess at timing.
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import time
@@ -24,7 +25,8 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
-from watchdog.events import FileCreatedEvent, FileModifiedEvent
+import pytest
+from watchdog.events import FileCreatedEvent, FileDeletedEvent, FileModifiedEvent
 
 from brain.vault.frontmatter import dump_frontmatter
 from brain.vault.watch import WatchConfig, run_watcher
@@ -170,11 +172,15 @@ def _lane_threads() -> set[threading.Thread]:
 
 
 def test_watcher_is_live_while_the_startup_graph_reconcile_runs(
-    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """W1: the observer starts, and a live edit is synced, while the reconcile blocks.
 
-    After shutdown, the lane this watcher started is no longer running.
+    After shutdown, the lane this watcher started is no longer running, and it
+    closed cleanly: no "still finishing" warning for an idle lane.
     """
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -195,9 +201,16 @@ def test_watcher_is_live_while_the_startup_graph_reconcile_runs(
             "a live edit was not synced while the startup graph reconcile was running"
         )
         assert not syncer.release.is_set(), "fixture: the reconcile must still be blocked"
+        syncer.release.set()
+        # Park the lane (idle, waiting for work) so the shutdown below must WAKE
+        # it: a close that does not notify then times out deterministically.
+        assert _drain_lane(syncer), "the graph lane never drained"
     finally:
-        _stop(syncer, thread)
+        with caplog.at_level(logging.WARNING, logger="brain.vault.watch"):
+            _stop(syncer, thread)
 
+    still_finishing = [r for r in caplog.records if "graph lane still finishing" in r.getMessage()]
+    assert not still_finishing, "run_watcher's close of an idle graph lane timed out"
     ours = _lane_threads() - lanes_before
     assert _eventually(lambda: not any(t.is_alive() for t in ours)), (
         "run_watcher returned with its graph lane still running (never closed)"
@@ -272,4 +285,73 @@ def test_edit_while_its_reconcile_is_pending_is_reconciled_with_the_edit(
     )
     assert threads == {_LANE_THREAD}, (
         f"a graph reconcile ran off the lane thread: {sorted(threads)!r}"
+    )
+
+
+def test_a_failed_setup_leaks_no_lane_thread(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """W3: if run_watcher fails before observing, it has not started a lane thread."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write(vault / "n.md", {"id": str(uuid.uuid4()), "title": "N"}, "n\n")
+    lanes_before = _lane_threads()
+    syncer = _SlowGraphSyncer()
+
+    def _broken_observer() -> Any:
+        raise RuntimeError("synthetic observer failure")
+
+    raised: Exception | None = None
+    try:
+        run_watcher(
+            _conn_factory(),
+            embedder=fake_embedder,
+            config=WatchConfig(vault_path=vault, debounce_ms=10),
+            observer_factory=_broken_observer,
+            install_signal_handlers=False,
+            graph_syncer=syncer,  # type: ignore[arg-type]
+        )
+    except RuntimeError as exc:
+        raised = exc
+    leaked = _lane_threads() - lanes_before
+    syncer.release.set()
+
+    assert raised is not None, "fixture: the observer factory must fail"
+    assert not leaked, "run_watcher failed during setup and leaked a graph lane thread"
+
+
+def test_undrained_removes_at_shutdown_are_logged(
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    tmp_path: Path,
+    mocker: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """W4: a remove still queued behind an in-flight reconcile at shutdown is logged.
+
+    It names the document and the repair command, instead of vanishing.
+    """
+    mocker.patch("brain.vault.watch._LANE_CLOSE_TIMEOUT_S", 0.05)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    doomed_id = str(uuid.uuid4())
+    _write(vault / "doomed.md", {"id": doomed_id, "title": "Doomed"}, "d\n")
+    syncer = _SlowGraphSyncer()
+    thread = _start(vault, fake_embedder, syncer)
+    try:
+        assert syncer.entered.wait(WAIT_FOR_BACKSTOP_S), "the startup graph reconcile never ran"
+        assert _eventually(_observer_live), "the observer never started"
+        (vault / "doomed.md").unlink()
+        _Observer.instances[0].inject(FileDeletedEvent(str(vault / "doomed.md")))
+        assert _eventually(lambda: _state().processed >= 1), "the worker never handled the delete"
+
+        with caplog.at_level(logging.WARNING, logger="brain.vault.watch"):
+            _state().stop_event.set()  # the reconcile is STILL blocked: close times out
+            thread.join(timeout=WAIT_FOR_BACKSTOP_S * 3)
+    finally:
+        syncer.release.set()
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(doomed_id in m and "brain graphrag build" in m for m in warnings), (
+        f"an undrained graph remove was not logged with its id and the repair: {warnings!r}"
     )

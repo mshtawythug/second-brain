@@ -121,6 +121,9 @@ _Action = Literal["upsert", "delete", "move"]
 # conceptually an admission-control valve, not a normal code path.
 _MAX_PENDING = 1000
 
+# How long shutdown waits for the graph lane's in-flight reconcile to finish.
+_LANE_CLOSE_TIMEOUT_S = 10.0
+
 
 @dataclass
 class WatchConfig:
@@ -287,8 +290,6 @@ def run_watcher(
         )
     finally:
         startup_conn.close()
-    if lane is not None:
-        lane.start()
 
     # 2. Worker thread. Owns the long-lived DB connection and consumes
     #    jobs from the queue. ``daemon=True`` so a crashing worker
@@ -347,6 +348,10 @@ def run_watcher(
         "vault watcher: scoped polling on top-level dirs: %s",
         ", ".join(scheduled_names) or "(none)",
     )
+    # Start the lane only now, after the setup that can raise, so a failed
+    # start never leaks its thread and connection.
+    if lane is not None:
+        lane.start()
     observer.start()
 
     # 4. Signal handlers. SIGINT for Ctrl-C, SIGTERM for systemd /
@@ -403,8 +408,14 @@ def run_watcher(
                 )
         # After the worker, so every live graph request is in: drops pending
         # reconciles (redone by the next startup), drains removes.
-        if lane is not None and not lane.close(timeout=10.0):
-            logger.warning("vault watcher: graph lane still finishing a reconcile")
+        if lane is not None and not lane.close(timeout=_LANE_CLOSE_TIMEOUT_S):
+            undrained = lane.undrained_removes()
+            logger.warning(
+                "vault watcher: graph lane still finishing a reconcile; %d graph "
+                "remove(s) not applied (%s); repair with `brain graphrag build`",
+                len(undrained),
+                ", ".join(undrained) or "none",
+            )
 
     logger.info(
         "vault watcher: stopped after %d events (%d errors)",

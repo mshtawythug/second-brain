@@ -20,6 +20,8 @@ from typing import Any, Literal, Protocol
 
 import psycopg
 
+from ..errors import describe_failure
+
 logger = logging.getLogger(__name__)
 
 _Op = Literal["reconcile", "remove"]
@@ -42,8 +44,10 @@ class GraphLane:
       is queued again, so an edit landing mid-reconcile is reconciled after it.
     * ``remove`` is never deduped and keeps its place relative to reconciles.
     * ``close`` drops pending reconciles (the next startup sync reconciles every
-      walked document again), drains pending removes (cheap, and not redone by
-      a later startup), and ignores later requests.
+      walked document again) and ignores later requests. Pending removes are
+      drained only if the in-flight reconcile finishes within the timeout; a
+      later startup does NOT redo them, so any left undrained are reported by
+      :meth:`undrained_removes` for the caller to log.
 
     The caller's connection is ignored on purpose: graph work runs on the
     lane's own connection, never on the worker's.
@@ -84,12 +88,13 @@ class GraphLane:
             self._cond.notify()
 
     def close(self, timeout: float) -> bool:
-        """Stop accepting work, drop pending reconciles, drain removes, then join.
+        """Stop accepting work, drop pending reconciles, then join (draining removes).
 
         Returns True if the lane thread exited within ``timeout``. An in-flight
         reconcile is allowed to finish; if it outlives ``timeout`` the daemon
         thread is left to finish (or to die with the process, which rolls its
-        transaction back).
+        transaction back), and the removes still queued behind it are NOT
+        applied: :meth:`undrained_removes` names them.
         """
         with self._cond:
             self._closing = True
@@ -99,6 +104,11 @@ class GraphLane:
             self._thread.join(timeout)
         return not self._thread.is_alive()
 
+    def undrained_removes(self) -> list[str]:
+        """Document ids of removes still queued (not applied), in queue order."""
+        with self._cond:
+            return [d for o, d in self._pending if o == "remove"]
+
     def _next(self) -> tuple[_Op, str] | None:
         with self._cond:
             while not self._pending and not self._closing:
@@ -106,7 +116,16 @@ class GraphLane:
             return self._pending.popleft() if self._pending else None
 
     def _run(self) -> None:
-        conn = self._conn_factory()
+        try:
+            conn = self._conn_factory()
+        except psycopg.Error as exc:
+            # Without a connection the lane can do nothing: close it (before
+            # logging, so the log line proves it) so later submits are no-ops.
+            with self._cond:
+                self._closing = True
+                self._pending.clear()
+            logger.error("vault watcher: graph lane could not connect: %s", describe_failure(exc))
+            return
         try:
             conn.autocommit = True
             while (item := self._next()) is not None:
@@ -116,10 +135,13 @@ class GraphLane:
                         self._syncer.reconcile(conn, document_id)
                     else:
                         self._syncer.remove(conn, document_id)
-                except Exception:  # one bad request must not stop the lane
-                    logger.exception("vault watcher: graph %s failed for doc %s", op, document_id)
+                except Exception as exc:  # one bad request must not stop the lane
+                    # Class only: a message can quote row values (CLAUDE.md logging rule).
+                    logger.warning(
+                        "vault watcher: graph %s failed for doc %s: %s",
+                        op,
+                        document_id,
+                        describe_failure(exc),
+                    )
         finally:
-            try:
-                conn.close()
-            except psycopg.Error:
-                logger.debug("vault watcher: graph lane connection already closed")
+            conn.close()  # psycopg's close is idempotent and does not raise

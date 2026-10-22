@@ -10,11 +10,15 @@ that changes the count still fails at the targeted assertion.
 
 from __future__ import annotations
 
+import logging
 import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
+
+import psycopg
+import pytest
 
 from brain.vault.graph_lane import GraphLane
 from tests.thread_wait import WAIT_FOR_BACKSTOP_S, wait_for
@@ -182,10 +186,17 @@ def test_syncer_gets_the_lanes_own_connection() -> None:
     )
 
 
-def test_a_failing_request_does_not_stop_the_lane() -> None:
-    """L7: one request raising must not stop the lane; the next one still runs."""
+def test_a_failing_request_does_not_stop_the_lane(caplog: pytest.LogCaptureFixture) -> None:
+    """L7: one request raising must not stop the lane; the next one still runs.
+
+    The failure is logged by class only: an exception message can quote row
+    values, which must never reach a WARNING log.
+    """
     syncer = _Syncer(raise_first=True)
-    with _lane(syncer) as (lane, _conn):
+    with (
+        caplog.at_level(logging.WARNING, logger="brain.vault.graph_lane"),
+        _lane(syncer) as (lane, _conn),
+    ):
         lane.reconcile(None, "a")  # type: ignore[arg-type]
         lane.reconcile(None, "b")  # type: ignore[arg-type]
         token = f"barrier-{uuid.uuid4()}"
@@ -195,6 +206,10 @@ def test_a_failing_request_does_not_stop_the_lane() -> None:
     assert processed and ("reconcile", "b") in syncer.calls, (
         f"the lane stopped after one failing request: {syncer.calls!r}"
     )
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "RuntimeError" in logged and "synthetic reconcile failure" not in logged, (
+        f"the failure was not logged by class only: {logged!r}"
+    )
 
 
 def _settled(predicate: Any) -> bool:
@@ -203,3 +218,52 @@ def _settled(predicate: Any) -> bool:
     except AssertionError:
         return False
     return True
+
+
+def test_close_reports_removes_left_undrained_by_a_timeout() -> None:
+    """L8: a remove still queued when close times out is reported, not silently lost."""
+    syncer = _Syncer()
+    with _lane(syncer) as (lane, _conn):
+        _a_in_flight(lane, syncer)
+        lane.remove(None, "gone")  # type: ignore[arg-type]
+        timed_out = lane.close(0.05) is False
+        undrained = lane.undrained_removes()
+
+    assert timed_out, "fixture: close must time out while a reconcile is in flight"
+    assert undrained == ["gone"], f"the undrained remove was not reported: {undrained!r}"
+
+
+def test_a_failed_connect_disables_the_lane(caplog: pytest.LogCaptureFixture) -> None:
+    """L9: a lane that cannot connect logs it and turns later submits into no-ops."""
+
+    def _refuse() -> Any:
+        raise psycopg.OperationalError("synthetic connect failure")
+
+    lane = GraphLane(_Syncer(), _refuse)  # type: ignore[arg-type]
+    with caplog.at_level(logging.ERROR, logger="brain.vault.graph_lane"):
+        lane.start()
+        # The lane marks itself closed BEFORE it logs, so the record proves it.
+        logged = _settled(
+            lambda: any("could not connect" in r.getMessage() for r in caplog.records)
+        )
+    lane.remove(None, "late")  # type: ignore[arg-type]  # no close() first
+    queued = lane.undrained_removes()
+    exited = lane.close(WAIT_FOR_BACKSTOP_S)
+
+    assert logged, "the failed connect was not logged"
+    assert queued == [], "a submit after a failed connect was queued"
+    assert exited, "the lane thread did not exit after a failed connect"
+
+
+def test_an_idle_lane_closes_at_once() -> None:
+    """L10: closing an idle lane wakes its thread; it must not wait out the timeout."""
+    syncer = _Syncer()
+    syncer.release.set()
+    conn = _Conn()
+    lane = GraphLane(syncer, lambda: conn)  # type: ignore[arg-type,return-value]
+    lane.start()
+    token = f"barrier-{uuid.uuid4()}"
+    lane.remove(None, token)  # type: ignore[arg-type]
+    wait_for(lambda: ("remove", token) in syncer.calls)  # the lane is now idle
+
+    assert lane.close(1.0) is True, "closing an idle lane did not wake its thread"

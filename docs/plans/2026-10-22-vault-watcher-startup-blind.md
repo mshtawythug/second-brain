@@ -84,14 +84,53 @@ The constraints come from the code:
   - pending `reconcile`s are DROPPED. The next startup's step 7 reconciles every
     walked document again, so nothing is lost; the graph only lags until the
     next start.
-  - pending `remove`s are DRAINED. They are cheap, and the next startup only
-    removes graph rows for pruned documents, so a dropped remove would leave
-    stale graph rows.
+  - pending `remove`s are drained, **but only if the in-flight reconcile
+    finishes within the timeout.** They are cheap, and the next startup does
+    NOT redo them: it only removes graph rows for pruned documents. So when
+    `close` times out, the removes still queued are not applied.
+    `GraphLane.undrained_removes()` names them, and `run_watcher` logs a
+    WARNING with their count, their document ids and the repair command
+    (`brain graphrag build`). In exactly this PR's scenario (an 8-10 minute
+    extraction in flight), a routine launchd restart or reinstall hits this
+    case. That made it the review's LOW-MEDIUM finding.
   - requests after `close` are ignored.
-  - an in-flight reconcile is allowed to finish. `close` waits up to `timeout`
-    and returns whether the thread exited. If it did not, `run_watcher` logs and
-    leaves the daemon thread. That is the same trade-off the worker's 10s join
-    already makes, and an aborted transaction rolls back.
+  - an in-flight reconcile is allowed to finish. `close` waits up to
+    `_LANE_CLOSE_TIMEOUT_S` (10s) and returns whether the thread exited. If it
+    did not, `run_watcher` logs and leaves the daemon thread. That is the same
+    trade-off the worker's 10s join already makes, and an aborted transaction
+    rolls back.
+  - an IDLE lane closes at once: `close` notifies the waiting thread (L10, W1).
+
+**Ruling: no startup self-heal for a lost remove** (the review's preferred
+option, evaluated and declined).
+
+- **The cheap query does not exist.** Every per-document relational graph table
+  (`graph_entity_mentions`, `graph_edge_contributions`, `graph_index_state`) is
+  `REFERENCES documents(id) ON DELETE CASCADE`. Once a document row is gone,
+  its relational graph rows went with it, and nothing relational is left to
+  say "this document still has graph state".
+- **What a lost remove leaves stale** is the AGE mirror (the `Document` vertex
+  and its edges) plus the tenant aggregates and orphan entities, which only a
+  remove or reconcile recomputes. Finding those needs a Cypher scan through
+  the graph backend. That is `graph_rag`'s domain, and this PR does not touch
+  `graph_rag`.
+- **Applying the removes at shutdown** on a second connection would put two
+  graph writers in one process (the deadlock class PR #53 addresses), or wait
+  out the in-flight reconcile.
+- **So** the lost removes are named in a WARNING with the repair command, and
+  `remove_document` is idempotent, so the repair is safe to run at any time.
+
+**Lane robustness (review items 2-4):**
+
+- **A failed connect** is logged (`describe_failure`, class only), and the lane
+  marks itself closed and clears its queue, so later submits are no-ops (L9).
+- **A failing request** is logged by class only: an exception message can
+  quote row values (L7).
+- **`lane.start()` runs just before `observer.start()`**, after the setup that
+  can raise, so a failed setup never leaks the lane's thread and connection
+  (W3).
+- **The `except` around the lane's `conn.close()` is gone** (audit F2). psycopg's
+  `close` is idempotent and does not raise, so the branch was dead.
 
 ### Same-path ordering: a file edited while its startup reconcile is pending
 
@@ -119,7 +158,7 @@ injected slow syncer (a `GraphSyncTarget` whose `reconcile` blocks on an
 
 | Id | Test | Claim |
 |---|---|---|
-| W1 | while the startup reconcile is blocked, the observer starts, and an injected event's file is synced to the DB. After shutdown, no lane thread is alive | the watcher is not blind during a slow startup reconcile (RED at `8ad72f6`), and `run_watcher` closes its lane |
+| W1 | while the startup reconcile is blocked, the observer starts, and an injected event's file is synced to the DB. After shutdown, no lane thread is alive, and no "still finishing" warning was logged | the watcher is not blind during a slow startup reconcile (RED at `8ad72f6`), and `run_watcher` closes its lane cleanly |
 | W2a | X's reconcile is IN FLIGHT when X is edited: X is reconciled again afterwards and sees the edit, and every reconcile ran on the lane thread | same-path ordering; the worker never runs graph syncs |
 | W2b | X's reconcile is still PENDING when X is edited: X is reconciled exactly once, on the edited content | same-path ordering, deduped |
 | L1 | lane: a reconcile for a pending document is deduped; FIFO order is kept | dedupe |
@@ -128,7 +167,12 @@ injected slow syncer (a `GraphSyncTarget` whose `reconcile` blocks on an
 | L4 | lane: `close` drops pending reconciles, drains pending removes, and ignores later requests | shutdown |
 | L5 | lane: `close(timeout)` returns False while a reconcile is in flight, and the thread then finishes and exits | bounded shutdown |
 | L6 | lane: the syncer is called with the LANE's connection (autocommit), not the caller's | its own connection, never the worker's |
-| L7 | lane: a request that raises is logged, and the next request still runs | one failure never stops the lane |
+| L7 | lane: a request that raises is logged by class only, and the next request still runs | one failure never stops the lane; no content in logs |
+| L8 | lane: `close(0.05)` with a reconcile in flight and a remove queued reports the remove as undrained | a lost remove is never silent |
+| L9 | lane: a `conn_factory` that raises leads to a logged error, an exited thread, and no-op submits | a failed connect cannot wedge the lane |
+| L10 | lane: an idle lane closes at once (`close(1.0) is True`) | `close` wakes the thread (audit F1) |
+| W3 | `run_watcher` whose observer factory raises leaks no lane thread | the lane starts only after setup |
+| W4 | a delete's remove queued behind a blocked reconcile at shutdown is logged with its document id and `brain graphrag build` | undrained removes are named |
 
 ## Ceiling
 
@@ -242,3 +286,55 @@ are rejected, and the archive was restored byte-identical.
   field. The lane itself lives in the new leaf `graph_lane.py` (125 lines).
 - **`sync.py`:** 1,817, net-zero (type annotations only).
 - Both CLAUDE.md rows are promoted, with descriptive hops for this commit.
+
+### Round 2: the PR #54 review and audit
+
+New tests L8, L9 and W3/W4 went RED against `64e5911` first, each for its
+reason:
+
+- L8: no `undrained_removes`;
+- L9: the failed connect was not logged;
+- W3: "leaked a graph lane thread";
+- W4: no `_LANE_CLOSE_TIMEOUT_S`.
+
+L10 and the W1 clean-close assertion were added for audit F1.
+
+**Two weak tests found by the matrix, both fixed:**
+
+- **W1 caught MB (`close` without `notify`) only by timing.** A lane still busy
+  at shutdown sees `_closing` without needing a wake-up. W1 now parks the lane
+  with a barrier before stopping, so a `close` that does not wake it times out
+  every time.
+- **L9 called `close()` before its late submit,** which masked H2 (a failed
+  connect that keeps accepting work). The lane now marks itself closed BEFORE
+  it logs the connect failure. L9 waits for that log record and submits
+  without closing first.
+
+**The matrix run of record:** strict judge, snapshot `4b7562a`, `git archive`
+copy only. All 50 mutants are OK.
+
+| Mutant | Edit | Failing tests (exactly) |
+|---|---|---|
+| MB | `close` does not `notify` (audit F1) | L10 "closing an idle lane did not wake its thread"; W1 "run_watcher's close of an idle graph lane timed out" |
+| H1 | the connect is outside the guard | L9 "the failed connect was not logged" |
+| H2 | a failed connect keeps accepting work | L9 "a submit after a failed connect was queued" |
+| H3 | `undrained_removes` returns `[]` | L8 "the undrained remove was not reported"; W4 "an undrained graph remove was not logged with its id and the repair" |
+| H4 | the lane starts before the setup that can raise | W3 "run_watcher failed during setup and leaked a graph lane thread" |
+| H5 | the shutdown warning omits the ids | W4 |
+| H6 | a request failure logs the exception itself, not `describe_failure` | L7 "the failure was not logged by class only" |
+
+The run also confirmed five further G kills, each at a targeted assertion, and
+they are now predicted:
+
+- G1 → W4 "the observer never started";
+- G3 → W4 "the startup graph reconcile never ran";
+- G2 → W4 (its removes bypass the lane);
+- G9 → L8 and W4 (removes dropped);
+- G10 → L9 (the late submit is accepted).
+
+`graph_lane.py` is at 100% branch coverage over the lane and startup tests.
+
+**Ceiling:** `watch.py` is now 1,195 lines (1,184 after round 1). The extra
+lines are the `_LANE_CLOSE_TIMEOUT_S` constant, the undrained-removes warning,
+and starting the lane just before the observer. `graph_lane.py` is 147 lines.
+The CLAUDE.md growth record covers both.
