@@ -52,7 +52,7 @@ DB_URL="postgresql://brain:brain@localhost:${DB_PORT}/${DB_NAME}"
 # The custom PG16 + pgvector + Apache AGE image (GraphRAG needs AGE). Pulled from
 # GHCR; the same ref docker-compose.age-test.yml uses. NEVER the stock pgvector
 # prod image, which has no graph extension.
-AGE_IMAGE="ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2"
+AGE_IMAGE="ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.6"
 # Ollama models this recorder hard-requires (see header).
 EMBED_MODEL="snowflake-arctic-embed2"
 EXTRACT_MODEL="llama3.1:8b"   # == config.DEFAULT_GRAPH_EXTRACT_MODEL

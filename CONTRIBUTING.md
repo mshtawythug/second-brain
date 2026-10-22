@@ -39,14 +39,19 @@ instance, separate from any production database, on **port 5434**
 (database `second_brain_test`, user/password `brain`/`brain`):
 
 ```bash
+docker compose -f docker-compose.age-test.yml pull
 docker compose -f docker-compose.age-test.yml up -d
 ```
 
-This pulls the prebuilt multi-arch Apache AGE image from GHCR
-(`ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.6`). If that image
-is unavailable, add `--build` to compile AGE locally from the pinned Dockerfile
-(`src/brain/templates/docker/age/`) — slower, but produces the identical
-pinned image:
+`pull` fetches the prebuilt multi-arch Apache AGE image from GHCR
+(`ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.6`), and refreshes
+it if an older copy of that tag is already cached. A bare `up -d` reuses whatever
+copy is cached, so run `pull` first. This is the same pull-first order CI uses.
+If the image cannot be pulled, `up -d` compiles AGE locally from the pinned
+Dockerfile (`src/brain/templates/docker/age/`) instead. That is slower, but it
+produces an image under the same pinned tag. To force the local compile even
+when the image is available (for example after editing the Dockerfile), add
+`--build`:
 
 ```bash
 docker compose -f docker-compose.age-test.yml up -d --build

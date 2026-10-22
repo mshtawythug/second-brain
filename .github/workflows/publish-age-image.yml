@@ -27,6 +27,15 @@
 # (~10-20 min for the AGE compile). It is cached (type=gha, mode=max) and this
 # workflow runs rarely (only when the Dockerfile changes or an age-image-* tag
 # is pushed), so the cost is acceptable.
+#
+# PR LEG (build check, never a publish): ci.yml, eval.yml and benchmark.yml all
+# PULL this image first, so none of them builds the Dockerfile while the pull
+# succeeds. A Dockerfile edit that keeps the same tag (a new apt package, a build
+# flag) would otherwise never be built on its own PR. On a pull_request touching
+# the Dockerfile directory or this workflow, the job builds linux/amd64 only,
+# skips QEMU and the GHCR login, and does not push. The push trigger below and
+# everything it does are unchanged. Locked by
+# tests/test_publish_age_image_workflow_contract.py.
 # =============================================================================
 name: publish-age-image
 
@@ -38,14 +47,20 @@ on:
       - master
     paths:
       - "src/brain/templates/docker/age/**"
+  pull_request:
+    paths:
+      - "src/brain/templates/docker/age/**"
+      - ".github/workflows/publish-age-image.yml"
   workflow_dispatch:
 
 # Serialize builds: all runs push the SAME fixed image tag, so overlapping
 # master-Dockerfile pushes (or a dispatch overlapping a push) would otherwise race
 # duplicate ~20-min QEMU builds to the same ref. A single static group (not
 # ref-scoped) with cancel-in-progress keeps at most one build in flight, newest wins.
+# PR runs get their own per-ref group, so a PR build check can never cancel an
+# in-flight publish (and a newer push to the same PR replaces the older check).
 concurrency:
-  group: publish-age-image
+  group: publish-age-image-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
   cancel-in-progress: true
 
 permissions:
@@ -63,12 +78,16 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up QEMU (arm64 emulation)
+        # PRs build amd64 only, natively on the amd64 runner: no emulation needed.
+        if: github.event_name != 'pull_request'
         uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
+        # PRs never push, so they need no registry credentials.
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -88,12 +107,12 @@ jobs:
             type=raw,value=pg16-v1.5.0-rc0-pgv0.8.6
             type=raw,value=latest
 
-      - name: Build + push (linux/amd64, linux/arm64)
+      - name: Build (PR, amd64, no push) or build + push (linux/amd64, linux/arm64)
         uses: docker/build-push-action@v7
         with:
           context: src/brain/templates/docker/age
-          platforms: linux/amd64,linux/arm64
-          push: true
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

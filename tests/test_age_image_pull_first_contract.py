@@ -2,21 +2,26 @@
 
 ``docker-compose.age-test.yml`` has both ``image:`` (the prebuilt multi-arch image
 on GHCR) and ``build:`` (the canonical Dockerfile). A workflow that runs
-``up -d --build`` compiles Apache AGE from C source on every run and never uses
-the published image. A workflow that pulls without ``|| true`` fails the job
-when the registry misses, even though the ``build:`` fallback would have worked.
-This module pins the shape ``ci.yml`` already uses, for every workflow that
+``up -d --build``, or a separate ``build`` step, compiles Apache AGE from C source
+on every run and never uses the published image. A workflow that pulls without
+``|| true`` fails the job when the registry misses, even though the ``build:``
+fallback would have worked. This module pins one shape for every workflow that
 names the compose file:
 
 1. a ``docker compose -f docker-compose.age-test.yml pull ... || true`` step;
-2. then an ``up -d`` step with no ``--build``. With no local image, Compose's
-   default ``pull_policy`` (``missing``) builds from ``build:``, which is the
-   fallback.
+2. then an ``up -d`` step with no ``--build``. With no ``pull_policy`` set, ``up``
+   uses a local image when one exists. When none exists it tries the registry
+   and builds from ``build:`` only if that pull fails. That is the fallback.
+   (Checked on Compose v5.1.4: an absent pullable image was pulled, and an
+   unpullable ref was built.) The explicit pull step is what refreshes a
+   mutable tag that is already cached, and it is visible as its own step.
 
 The pulled ref and the built ref are the same string because both come from
 the compose ``image:`` line. That only holds while no workflow names the image
 ref itself, so that is pinned too. Whether the tag matches the Dockerfile pins
 is ``test_packaging_templates.py::test_age_image_version_pins_agree_everywhere``.
+The PR-time build of the Dockerfile itself lives in ``publish-age-image.yml``
+and is pinned by ``test_publish_age_image_workflow_contract.py``.
 
 Pure reads of tracked files: no database, no network.
 """
@@ -75,7 +80,7 @@ def test_discovery_covers_every_known_age_workflow() -> None:
 
 @pytest.mark.parametrize("workflow", _age_workflows(), ids=lambda p: p.name)
 def test_age_db_is_pulled_first_with_a_build_fallback(workflow: Path) -> None:
-    """A tolerant ``pull`` comes first, then a plain ``up -d``. ``--build`` never appears."""
+    """A tolerant ``pull`` comes first, then a plain ``up -d``. Nothing forces a build."""
     steps = _steps(workflow)
     compose_runs = [(i, _run(s)) for i, s in enumerate(steps) if _COMPOSE_CMD in _run(s)]
 
@@ -96,30 +101,43 @@ def test_age_db_is_pulled_first_with_a_build_fallback(workflow: Path) -> None:
     up_index, _ = ups[0]
     assert pull_index < up_index, f"{workflow.name}: the pull step must come before `up -d`"
 
-    building = [run for _, run in compose_runs if "--build" in run]
+    building = [
+        run for _, run in compose_runs if "--build" in run or f"{_COMPOSE_CMD} build" in run
+    ]
     assert not building, (
-        f"{workflow.name}: `--build` rebuilds AGE over the pulled image, which undoes the "
-        f"pull. Without a local image, `up -d` already builds from `build:`. "
-        f"Got: {building!r}"
+        f"{workflow.name}: `--build` or a `{_COMPOSE_CMD} build` step compiles AGE even "
+        f"when the pull succeeded, which undoes the pull. `up -d` already builds from "
+        f"`build:` when the pull missed. Got: {building!r}"
     )
 
 
 @pytest.mark.parametrize("workflow", _age_workflows(), ids=lambda p: p.name)
 def test_workflow_takes_the_image_ref_only_from_compose(workflow: Path) -> None:
-    """No step names the image itself, so the pulled tag is always the one compose would build."""
-    hardcoded = [run for run in map(_run, _steps(workflow)) if _IMAGE_REPO in run]
-    assert not hardcoded, (
-        f"{workflow.name} names {_IMAGE_REPO} directly. The ref must come only from "
-        f"{_COMPOSE_NAME}'s `image:` line, or the pull and the build can drift apart. "
-        f"Got: {hardcoded!r}"
+    """No key in the workflow names the image, so the pulled tag is the one compose builds.
+
+    The whole parsed document is checked (``run:``, ``env:``, ``with:``, anything),
+    and comments are not, because a comment does not change what gets pulled.
+    """
+    parsed = yaml.safe_dump(yaml.safe_load(workflow.read_text(encoding="utf-8")))
+    assert _IMAGE_REPO not in parsed, (
+        f"{workflow.name} names {_IMAGE_REPO} outside a comment. The ref must come only "
+        f"from {_COMPOSE_NAME}'s `image:` line, or the pull and the build can drift apart."
     )
 
 
 @pytest.mark.parametrize("workflow", _age_workflows(), ids=lambda p: p.name)
-def test_pull_first_todo_is_gone(workflow: Path) -> None:
+def test_no_workflow_text_still_describes_build_first(workflow: Path) -> None:
+    """The TODO, and any prose or command still saying ``up -d --build``, are gone.
+
+    Checked against the raw text, comments included: a header comment that says
+    the other workflows ``up -d --build`` misleads the next reader just as much.
+    """
     text = workflow.read_text(encoding="utf-8")
     assert "TODO flip to pull-first" not in text, (
         f"{workflow.name} still carries the pull-first TODO. The image is public now."
+    )
+    assert "up -d --build" not in text, (
+        f"{workflow.name} still mentions `up -d --build`. Every AGE workflow pulls first."
     )
 
 

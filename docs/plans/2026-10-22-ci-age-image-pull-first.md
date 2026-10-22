@@ -48,48 +48,83 @@ Use the idiom `ci.yml` already uses, so all three workflows share one shape:
 
 - `pull || true`: when the registry misses, the pull does not fail the job.
 - `up -d` without `--build`: `--build` would rebuild over the pulled image and
-  undo the change. With no local image, Compose's default `pull_policy`
-  (`missing`) builds from the `build:` stanza. That is the fallback.
+  undo the change. With no `pull_policy` set, `up` reuses a local copy of the
+  tag when one exists. When none exists, it tries the registry and builds from
+  `build:` only if that pull fails. That is the fallback. This was checked on
+  Compose v5.1.4 with a throwaway project that had both `image:` and `build:`:
+  an absent, pullable image was pulled and not built; an unpullable ref
+  printed "must be built from source" and was then built. The Compose source
+  (`ensureImagesExists`: pull the required images, then build what is still
+  missing) agrees. The old `ci.yml` header said a bare `up` "builds rather
+  than pulls"; that was wrong and has been corrected. The explicit pull step
+  does not depend on this `up`-time behaviour. It also refreshes a cached copy
+  of the mutable tag, which a bare `up` would reuse.
 - The compose service has both `image:` and `build:`. A pull fetches the
   `image:` ref, and a fallback build tags its result with that same ref. One
   string names both paths, so the two cannot drift apart in the workflows.
+- **The PR-time Dockerfile build moves to `publish-age-image.yml` (review
+  round 1).** Before this change, eval and benchmark (`up -d --build`) were
+  the only workflows that built the Dockerfile on a PR, and the publish
+  workflow had no `pull_request` trigger. Pull-first removed the last PR-time
+  build. The publish workflow now has a `pull_request` leg, with `paths:` set
+  to `src/brain/templates/docker/age/**` and the workflow file itself. On that
+  leg it builds `linux/amd64` only, skips QEMU and the GHCR login, and does not
+  push. The concurrency group is per ref for PRs (`publish-age-image-<ref>`)
+  and stays a single group for publishes (`publish-age-image-publish`), so a PR
+  run cannot cancel a master publish. The master leg is unchanged: same push
+  `paths:`, multi-arch, pushed, `type=gha` cache.
 
 ## Files
 
 | File | Change |
 |---|---|
-| `tests/test_age_image_pull_first_contract.py` (new, `nodb`) | Written first, and fails first. It finds every workflow that names `docker-compose.age-test.yml`, and the set must include ci/eval/benchmark. Each must run a compose `pull … \|\| true` step before an `up -d` step that has no `--build`. No workflow may name the image ref directly. No workflow may still carry the pull-first TODO. The compose service must keep both `image:` and `build:`. |
-| `.github/workflows/eval.yml` | Two steps in place of one. Remove the TODO. Correct the header comment that said `up -d --build`. |
-| `.github/workflows/benchmark.yml` | The same as eval.yml. Correct the header's "build + start" prose and its stale `pgv0.8.2` tag. |
+| `tests/test_age_image_pull_first_contract.py` (new, `nodb`) | Written first, and fails first. It finds every workflow that names `docker-compose.age-test.yml`, and the set must include ci/eval/benchmark. Each must run a compose `pull … \|\| true` step before an `up -d` step. Neither `--build` nor a compose `build` step is allowed. The image ref may not appear anywhere in the parsed workflow (`run:`, `env:`, `with:`; comments do not count). Neither the TODO nor the text `up -d --build` may appear, comments included. The compose service must keep both `image:` and `build:`. |
+| `tests/test_publish_age_image_workflow_contract.py` (new, `nodb`) | The PR leg: the trigger and both paths; no push, amd64 only; QEMU and login skipped; a non-static concurrency group. Also that the master leg is unchanged: push paths, cache, context, tags, labels. |
+| `tests/test_packaging_templates.py` | New `test_every_tracked_age_image_tag_matches_the_dockerfile_pins`: every `second-brain-age:pg16-…` tag and every `pgvector X.Y.Z +` phrase in a tracked file outside `docs/`, `CHANGELOG.md` and the migrations must match the Dockerfile pins. |
+| `.github/workflows/eval.yml`, `benchmark.yml` | Two steps in place of one. Remove the TODO. Correct header prose (`up -d --build`, the stale `pgv0.8.2` / `pgvector 0.8.2`). |
+| `.github/workflows/ci.yml` | Header now describes all three AGE workflows as pulling first, gives the accurate `up` behaviour, and says "becomes private again". |
+| `.github/workflows/publish-age-image.yml` | The PR build-check leg described above. |
+| `bin/brain-graphrag-gif`, `src/brain/templates/docker-compose.yml.j2`, `src/brain/templates/env.example`, `.env.example` | Stale `pgv0.8.2` tag and `pgvector 0.8.2` prose → `0.8.6`. The 0.8.2 → 0.8.6 bump (`63e1c92`) missed these. None was meant to stay old: the "production stays on 0.8.2" note in `63e1c92` is about the machine-local, gitignored `docker-compose.override.yml`, which none of these files feeds. |
+| `CONTRIBUTING.md` | Contributors run `pull`, then `up -d`. `--build` is described as forcing a local compile. |
 | `CLAUDE.md`, `AGENTS.md` | "Eval gate (CI)" step 1 now describes pull-first with a build fallback. The two files hold the same paragraph. |
 
-Out of scope: the local instructions (`CONTRIBUTING.md`, `tests/conftest.py`,
-`tests/test_maintenance.py`, the compose header) keep `up -d --build`. It is
+Out of scope: `tests/conftest.py`, `tests/test_maintenance.py`, the compose
+header, and the `env.example` "Start it" lines keep `up -d --build`. It is
 still a correct local command. The historical specs are not edited.
 
 ## Risks
 
-1. **A pulled image older than the Dockerfile. The version pin covers part of
-   this, and part is left over.** The tag encodes the pins
-   (`pg16-v<AGE ref>-pgv<pgvector>`).
-   `tests/test_packaging_templates.py::test_age_image_version_pins_agree_everywhere`
-   fails when the Dockerfile `FROM`/`AGE_REF` and the compose tag disagree. So
-   a version bump without a tag bump cannot pass CI.
-   **Left over:** a Dockerfile edit that changes no version (a new apt
-   package, a build flag, a `RUN` tweak) keeps the same tag. The pull then
-   succeeds against the previously published image. That PR's CI never builds
-   the changed Dockerfile, and a broken edit can go green. `publish-age-image.yml`
-   rebuilds and re-pushes the same mutable tag on the next master push that
-   touches `src/brain/templates/docker/age/**`, so the next master run would
-   catch it, one merge late. `ci.yml` already had this exposure. Changing
-   eval/benchmark adds no new kind of risk. Workaround: a PR that edits the
-   Dockerfile should bump the tag, or be checked locally with `up -d --build`.
-   A paths-filtered forced build is a possible follow-up. It is not done here.
+1. **A pulled image older than the Dockerfile.** The tag encodes the pins
+   (`pg16-v<AGE ref>-pgv<pgvector>`), and
+   `test_age_image_version_pins_agree_everywhere` fails when the Dockerfile and
+   the compose tag disagree. So a version bump without a tag bump cannot pass
+   CI. A Dockerfile edit that changes no version (an apt package, a build flag)
+   keeps the same tag. Its PR therefore pulls the previously published image in
+   ci, eval and benchmark.
+   **The first draft of this plan said "`ci.yml` already had this exposure, so
+   nothing new." That was false.** Before this change, eval and benchmark built
+   the Dockerfile on every PR, and they were the only PR-time build. Removing
+   them would have opened the gap. The `pull_request` leg of
+   `publish-age-image.yml` closes it: any PR touching the Dockerfile directory
+   builds it (amd64).
+   **Left over:** that build checks that the image *builds*. Tests still run
+   against the pulled image, so a Dockerfile edit that builds but breaks AGE at
+   runtime is caught only after merge, when `publish-age-image.yml` re-pushes
+   the tag and the next ci run pulls it. An arm64-only build failure is also
+   caught only on the master publish. Bumping the tag on such edits makes the
+   PR's ci fall back to building that Dockerfile and test it.
 2. **The image goes private again, or GHCR is down.** `|| true` falls through
    to the `build:` fallback. CI is slower but still correct.
 3. **The tag is mutable.** A digest pin would make it immutable, but the build
    fallback cannot produce a digest ref. The trade-off is accepted, the same as
    in `ci.yml`.
+4. **`brain setup --profile full` re-renders `$BRAIN_HOME/docker-compose.yml`
+   on every run.** With the template tag corrected, an existing full-profile
+   install that re-runs setup moves from pgvector 0.8.2 to 0.8.6 at its next
+   `pull`/`up` (the same minor). Fresh installs are unaffected. Before this
+   change their pull got the old 0.8.2 image, while the build fallback built
+   0.8.6 content under the 0.8.2 tag, which mislabelled it. The maintainer's
+   own prod container is not rendered from this template.
 
 ## Verification
 
@@ -107,3 +142,21 @@ and checked to have landed: dropping `|| true` (eval), adding `--build`
 (benchmark, then ci), hard-coding the image ref (eval), deleting the compose
 `build:` stanza, restoring the TODO (benchmark), and swapping the pull/up order
 (eval). Each one turns exactly one test red. The unmutated copy passes 11/11.
+
+**Review round 1 results (2026-10-22).**
+- Red first: 7 failed before the fixes:
+  - `up -d --build` in ci.yml's header (the old line 66);
+  - all five PR-leg rules in `publish-age-image.yml`;
+  - the tag scan, which named all five stale sites.
+- After the fixes these pass, run one after another:
+  - the pull-first contract, the publish contract, `test_packaging_templates`, `test_eval_workflow_contract` and `test_ci_workflow` (57);
+  - the reading-surface, docs-asset, `brain-ci` and repo-hygiene tests (116);
+  - the setup, dotenv, config and log-rotation tests (121), on a sibling test DB.
+- actionlint 1.7.7 is clean on all four workflows. `ruff check` and `mypy src/` are clean.
+- Mutation proof: 13 mutations, each in a fresh `git archive` copy and each checked to land. 12 turn exactly one test red:
+  - eight on the publish workflow: no PR trigger, no workflow path, a static group, login on PRs, QEMU on PRs, push on PRs, multi-arch PR build, master cache changed;
+  - the master push `paths:` widened;
+  - a separate compose `build` step;
+  - the image ref in an `env:` key;
+  - `up -d --build` restored to ci.yml's comment.
+  The 13th, the image ref in a comment only, stays green, as intended. The unmutated copy passes 18/18.

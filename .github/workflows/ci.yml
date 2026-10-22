@@ -62,12 +62,17 @@
 #     `second_brain_test`) — the same instance the local suite uses, and the
 #     same pattern as eval.yml/benchmark.yml. A GitHub Actions `services:`
 #     block can't `build:` an image inline, so compose is used instead of a
-#     service container. Unlike those two workflows this one PULLS first rather
-#     than `up -d --build`: ci.yml runs on every PR, so it is the workflow that
-#     most needs the fast path. Compose v2 builds rather than pulls on a bare
-#     `up` when both `image:` and `build:` are present, hence the explicit pull
-#     step; `|| true` preserves the local-build fallback the compose file
-#     promises if GHCR is unreachable or the image is still private.
+#     service container. All three AGE workflows PULL first: an explicit
+#     `pull --quiet || true` step, then a plain `up -d` (no `--build`). With no
+#     `pull_policy` set, `up` reuses any local copy of the tag; with none, it
+#     tries the registry and builds from `build:` only when that pull fails.
+#     The explicit step does not rely on that `up`-time behaviour, refreshes a
+#     cached copy of the mutable tag, and shows the pull as its own step.
+#     `|| true` preserves the local-build fallback the compose file promises if
+#     GHCR is unreachable or the image becomes private again. Because none of
+#     the three builds the Dockerfile while the pull succeeds, the PR-time build
+#     check of the Dockerfile lives in publish-age-image.yml's pull_request leg.
+#     Locked by tests/test_age_image_pull_first_contract.py.
 #
 #   * DB SAFETY: DATABASE_URL/TEST_DATABASE_URL are pinned to port 5434 and a
 #     `*_test` database. tests/conftest.py aborts at collection time if either
