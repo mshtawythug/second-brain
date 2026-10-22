@@ -269,11 +269,15 @@ Mutations are applied only in a `git archive` copy, never in this worktree.
 | mutation | expected red |
 |---|---|
 | base `94dd1cb` (no lock, extraction inside the write section) | D1, D2, D3 |
-| drop the `acquire_graph_write_lock` call in `reconcile_document` | D2, W1 |
-| move extraction back after the person upserts (lock kept) | D3 |
-| drop the call in each of W2-W10, one at a time | that writer's lock test only |
-| make `acquire_graph_write_lock` key on a constant instead of the tenant | the per-tenant test |
-| remove the not-in-a-transaction guard | the guard test |
+| `d8baa50` (round one: extraction inside the open transaction, no re-check) | D4, D5, D6 |
+| M1 drop the `acquire_graph_write_lock` call in `reconcile_document` | D2, W1 |
+| M2 move the extraction into the write transaction, after the lock | D3, D4, D5, D6 |
+| M15 move the extraction into the read transaction | D4 |
+| M14 drop the `is_current` re-check | D5, D6 |
+| M16 make `is_current` treat a deleted document as current | D6 |
+| M3-M11 drop the call in each of W2-W10, one at a time | that writer's lock test only |
+| M12 key `acquire_graph_write_lock` on a constant instead of the tenant | the per-tenant test |
+| M13 remove the not-in-a-transaction guard | the guard test |
 
 D1 is not expected to go red under either single mutation of W1. Either
 change alone breaks its cycle: without the lock the backfill holds nothing
@@ -281,6 +285,36 @@ during extraction, and without the reorder the watcher parks on the lock before
 writing. Its red is the base code.
 
 ## Results
+
+### Review round (PR #53, at `a97eb86`)
+
+The reviewer's items 1-4 and audit finding F1 are fixed by `a97eb86`. The
+numbers below are for that commit; round one's are kept under them.
+
+**RED first.** `src/` at `d8baa50` with the new tests: D4, D5 and D6 fail, and
+the other 16 pass.
+
+- D4: `locks held during the model call: [('relation', 'AccessShareLock'), ...]`.
+- D5: "the stale reconcile overwrote the newer edit's graph". This is the
+  audit's probe, adopted.
+- D6: `ForeignKeyViolation` on `graph_entity_mentions`.
+
+**GREEN.** The two files (19 tests) pass 5 runs of 5. The graph and docs-guard
+files (1,246 tests) pass. `ruff check` and `mypy src/` are clean.
+`reconcile.py` is 716 lines.
+
+**Mutations.** Each ran in a fresh archive copy of `a97eb86` with its own
+venv. Every row of the table above turned exactly its predicted tests red:
+
+- M1: D2 `DeadlockDetected`; W1 `DID NOT RAISE LockNotAvailable`.
+- M2: D3 "waited behind a model call"; D5 "the newer reconcile hung"; D6 FK
+  violation; D4 `('advisory', 'ExclusiveLock')` among the locks held.
+- M15: D4 only (`AccessShareLock`s held).
+- M14: D5 "overwrote the newer edit's graph", plus D6.
+- M16: D6 only, with `ForeignKeyViolation`.
+- M3-M13: the same reds as in round one.
+
+### Round one (at `b998798`)
 
 Measured on 2026-10-22 against the AGE test instance (port 5434), in a sibling
 database. The fix is commit `b998798`.
