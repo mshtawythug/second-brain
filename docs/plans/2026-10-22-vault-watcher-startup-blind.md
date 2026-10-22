@@ -192,7 +192,7 @@ injected slow syncer (a `GraphSyncTarget` whose `reconcile` blocks on an
 | L11 | lane + PR #53: a real `GraphSyncer` reconcile on the lane waits while another session holds the tenant graph write lock, writes nothing until it is released, then completes | the lane's autocommit connection composes with the tenant lock (merge of master `8711ff0`) |
 | W3 | `run_watcher` whose observer factory raises leaks no lane thread | the lane starts only after setup |
 | W3b | `run_watcher` whose `observer.start()` raises leaks no lane thread | the lane starts last |
-| W4 | a delete's remove queued behind a blocked reconcile at shutdown is logged with its document id and `brain graphrag build` | undrained removes are named |
+| W4 | a delete's remove queued behind a blocked reconcile at shutdown is logged with its document id and `brain graphrag build --force` | undrained removes are named |
 
 ## Ceiling
 
@@ -208,14 +208,26 @@ injected slow syncer (a `GraphSyncTarget` whose `reconcile` blocks on an
 
 ## Risks
 
-- **The graph lags while the backlog runs.** It is best-effort and recomputable
-  (`brain graphrag build`), and file content and search are never deferred.
+- **The graph lags while the backlog runs.** It is best-effort: the lane catches
+  up by itself, and `brain graphrag build --backfill` reconciles whatever is
+  behind its watermark (`--force` for a full mirror rebuild). File content and
+  search are never deferred.
 - **New in-process concurrency: document writes (worker) alongside graph writes
-  (lane).** The graph mention tables reference `documents ON DELETE CASCADE`, so
-  a worker delete and a lane reconcile of the same document can lock-wait on
-  each other, though not in a cycle. This is the same pattern that already
-  exists between processes (MCP or ingest writing documents while the watcher
-  reconciles). There is still only one graph WRITER per watcher process.
+  (lane), including a lock cycle.** The graph mention tables reference
+  `documents ON DELETE CASCADE`. The lane's write transaction
+  (`rewrite_doc_relational`) DELETEs a document's graph mention rows, then
+  INSERTs rows whose FK check locks `documents` row X. The worker's
+  `_handle_delete` DELETEs `documents` X, and its cascade reaches the same graph
+  rows. Each can hold what the other needs, so this is a deadlock cycle, not just
+  a lock wait. *(This bullet said "though not in a cycle" until the PR #54
+  review of `8073bfb`, which reproduced the cycle with millisecond windows;
+  Postgres picks the worker as the victim.)* It is **not fixed in #54**. It is
+  being fixed in `graph_rag` by **the follow-up to PR #53**:
+  `ReconcilePlan.is_current` reads `documents` X `FOR KEY SHARE`, so the lane
+  locks X before it touches any graph row. That also closes #53's
+  same-document residual. The same pattern already exists between processes
+  (MCP or ingest writing documents while the watcher reconciles). There is still
+  only one graph WRITER per watcher process.
 - **An in-flight reconcile at shutdown** can outlive `run_watcher` as a daemon
   thread. The process exit aborts it, and the transaction rolls back.
 
@@ -399,7 +411,9 @@ PR #53 makes every graph write transaction take a per-tenant advisory lock
 transaction open, and a write transaction that takes the lock. The lane composes
 with it unchanged. The lane is the watcher's only graph writer, and its reconciles
 wait behind any tenant-wide writer (`graphrag refresh`, `build --force`). That wait
-happens on the lane thread, so the event worker never waits. Only the handoff
+happens on the lane thread. The event worker never waits on the model call or on the
+tenant lock; a delete of a document being written waits for that one write transaction
+(and, until the follow-up lands, can deadlock as its victim; see Risks). Only the handoff
 conflicted, and the merge kept both sides.
 
 L11 runs a real `GraphSyncer` (with #53's `NullBackend`) on the lane while another

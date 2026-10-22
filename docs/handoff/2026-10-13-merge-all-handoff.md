@@ -232,9 +232,19 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
      - **Plan:** `docs/plans/2026-10-22-vault-watcher-startup-blind.md`.
      - **With PR #53's per-tenant write lock:** the lane's reconciles take the tenant lock like
        every graph writer, so they wait behind a tenant-wide writer (`graphrag refresh`, `build
-       --force`, ...). That wait happens on the lane thread; the event worker never waits.
+       --force`, ...). That wait happens on the lane thread. The event worker never waits on the
+       model call or on the tenant lock; a delete of a document being written waits for that one
+       write transaction (and, until the follow-up lands, can deadlock as its victim).
+     - **Known lock cycle, being fixed by the follow-up to PR #53 (not in #54):** the lane's write
+       transaction (`rewrite_doc_relational` DELETEs graph mention rows, then INSERTs whose FK
+       check locks `documents` row X) against the worker's `_handle_delete` DELETE of `documents`
+       X, whose `ON DELETE CASCADE` reaches the same graph rows. Reproduced by the PR #54 reviewer
+       with millisecond windows; Postgres picks the worker as the victim. The fix is in
+       `graph_rag`: `ReconcilePlan.is_current` reads `documents` X `FOR KEY SHARE`, so the lane
+       locks X before it touches any graph row. That also closes #53's same-document residual.
      - **Side effect:** the graph now lags while a large startup backlog drains. It is
-       best-effort and recomputable with `brain graphrag build`.
+       best-effort: the lane catches up by itself, and `brain graphrag build --backfill`
+       reconciles whatever is behind its watermark (`--force` for a full mirror rebuild).
   6. **Deferred: a targeted repair for lost graph removes.** When the watcher's shutdown times
      out behind a long reconcile (PR #54), the removes queued behind it are not applied. A
      startup self-heal was declined, because every per-doc relational graph table cascades on
