@@ -249,6 +249,8 @@ re-run on a `git stash create` snapshot (`eefb528`) of this round's tree, with a
 clean control, both negative controls rejected, and the archive restored
 byte-identical.
 
+**Correction, recorded later (PR #52 audit F3).** This matrix's clause (d) check matched each prediction against the JUnit failure message AND its traceback text. The traceback also lists the test's earlier source lines, so a prediction naming an assertion that had passed could still match. In PR #52 the judge was narrowed to the failure message only, and every mutant above was re-run under it (`docs/plans/2026-10-22-vault-watcher-move-identity.md`, Proof). Every prediction in this table still holds, so no claim here was false; it was only checked loosely.
+
 **Every earlier claim still holds against the new code:** M0 to ME re-ran with
 their earlier kills intact. The A3 additions under M0, MA and MC are expected:
 those mutants let a stale `_fire` enqueue, so a late fire after shutdown now
