@@ -219,6 +219,19 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
      - **Residue, still open and pre-existing:** a brand-new, never-synced, id-less file that
        replaces P and is renamed within one debounce window still adopts A's id. Nothing
        distinguishes it from A's own file after a failed id write-back.
+  5. ~~**The vault watcher was blind for hours after a restart (production, 2026-10-22).**~~
+     *[FIXED by PR #54 (`fix/vault-watcher-startup-blind`).]* The startup `sync_vault`'s graph pass
+     (step 7) ran Ollama concept extraction for each new, un-watermarked Krisp document, at about
+     8-10 min each. The observer and worker start only after the startup sync, so edits went
+     unwatched for about 6h.
+     - **The fix:** every graph reconcile and remove the watcher issues goes through one
+       `GraphLane` thread with its own connection (`brain/vault/graph_lane.py`). The startup pass
+       only enqueues, and the watcher is live as soon as the file reconcile is done.
+     - **Unchanged:** there is still one graph writer per process, and `sync_vault` and the
+       `brain vault sync` CLI are still synchronous.
+     - **Plan:** `docs/plans/2026-10-22-vault-watcher-startup-blind.md`.
+     - **Side effect:** the graph now lags while a large startup backlog drains. It is
+       best-effort and recomputable with `brain graphrag build`.
 
 ## Status on 2026-10-16: DONE except items that need the user
 
