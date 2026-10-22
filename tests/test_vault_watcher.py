@@ -219,9 +219,13 @@ _UNFIRED_DEBOUNCE_MS = 3_600_000
 
 
 def _pending(state: _WatcherState) -> dict[Path, threading.Timer]:
-    """Snapshot ``state.pending_timers`` under the lock the watcher uses."""
+    """Snapshot path -> armed timer under the lock the watcher uses.
+
+    Each ``state.pending_timers`` entry is ``(timer, pending job)``; these
+    tests reason about the timers.
+    """
     with state.lock:
-        return dict(state.pending_timers)
+        return {path: timer for path, (timer, _job) in state.pending_timers.items()}
 
 
 def _assert_superseded_never_fire(superseded: list[threading.Timer], events: list[Any]) -> None:

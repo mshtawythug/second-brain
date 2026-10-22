@@ -70,13 +70,16 @@ class _Rig:
         self.timers.append(timer)
         return timer
 
-    def schedule(self, path: Path) -> _ManualTimer:
-        _schedule_debounced(self.config, self.state, "upsert", path)
+    def schedule(
+        self, path: Path, action: Any = "upsert", dest: Path | None = None
+    ) -> _ManualTimer:
+        _schedule_debounced(self.config, self.state, action, path, dest)
         return self.timers[-1]
 
     def pending(self) -> dict[Path, Any]:
+        """Path -> its armed timer (each entry also carries its pending job)."""
         with self.state.lock:
-            return dict(self.state.pending_timers)
+            return {path: timer for path, (timer, _job) in self.state.pending_timers.items()}
 
     def queued(self) -> list[_Job | None]:
         """Everything on the job queue, in order (consumes it)."""
@@ -193,4 +196,65 @@ def test_fire_that_lost_to_overflow_adds_nothing(tmp_path: Path, mocker: Any) ->
 
     assert rig.queued() == [_Job(action="upsert", abs_path=tmp_path)], (
         "a fire that lost to the overflow flush still enqueued its own job"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The drain delivers the REAL pending job (PR #49 audit, 2026-10-22).
+#
+# Before this, ``pending_timers`` kept only the timer, so the shutdown drain
+# enqueued an ``upsert`` for every pending path. A pending ``delete`` became a
+# stale upsert, which the worker skips, and the row survived. A pending
+# ``move`` upserted its vanished source, and the destination was never synced.
+# The identity check made this worse for a ``delete`` whose ``_fire`` loses
+# the lock to the drain: at ``a6a76fe`` that late fire still enqueued its
+# delete, and now it returns, so the drain's job has to be the right one.
+# ---------------------------------------------------------------------------
+
+
+def test_drain_enqueues_a_pending_delete_as_delete(tmp_path: Path) -> None:
+    """A ``delete`` still pending at shutdown is drained as a ``delete``."""
+    gone = tmp_path / "deleted.md"
+    rig = _Rig(tmp_path)
+    rig.schedule(gone, "delete")
+
+    rig.shut_down()
+
+    assert rig.queued() == [_Job(action="delete", abs_path=gone), None], (
+        "the drain did not enqueue the pending delete as a delete"
+    )
+
+
+def test_drain_enqueues_a_pending_move_with_its_destination(tmp_path: Path) -> None:
+    """A ``move`` still pending at shutdown is drained as that ``move``, dest included."""
+    src = tmp_path / "old.md"
+    dst = tmp_path / "new.md"
+    rig = _Rig(tmp_path)
+    rig.schedule(src, "move", dst)
+
+    rig.shut_down()
+
+    assert rig.queued() == [_Job(action="move", abs_path=src, dest_path=dst), None], (
+        "the drain did not enqueue the pending move with its destination"
+    )
+
+
+def test_delete_fire_that_loses_to_the_drain_is_not_lost(tmp_path: Path) -> None:
+    """The auditor's replay: a ``delete`` whose ``_fire`` lost the lock to the drain.
+
+    The losing fire returns, because the drain owns the path's event now. So
+    the drain must have enqueued the delete itself, before the sentinel, and
+    nothing may follow the sentinel.
+    """
+    gone = tmp_path / "deleted.md"
+    rig = _Rig(tmp_path)
+    timer = rig.schedule(gone, "delete")
+
+    rig.shut_down()  # the drain wins the lock: cancel (too late), enqueue, sentinel
+    timer.fire()  # the delete's already-running _fire now gets the lock
+
+    jobs = rig.queued()
+    assert jobs[-1] is None, f"a job landed behind the shutdown sentinel: {jobs!r}"
+    assert jobs == [_Job(action="delete", abs_path=gone), None], (
+        f"the delete that lost to the drain was not delivered as a delete: {jobs!r}"
     )
