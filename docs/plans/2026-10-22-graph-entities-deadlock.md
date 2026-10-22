@@ -164,8 +164,8 @@ ceiling (797 -> 716 lines).
 
 **No retry (candidate 4).** Graph writers can no longer deadlock with each
 other, so a retry would only hide a regression of that invariant. It would also
-redo the model call. The only remaining deadlock (Residuals, below) is a
-same-document race.
+redo the model call. The same-document race that remained was closed by the
+follow-up (Residuals, "Same-document delete vs. reconcile").
 
 ## Closed list of writers
 
@@ -210,9 +210,9 @@ uniform: every graph write transaction takes the lock.
   delete (`vault/delete.py`, `vault/watch.py`, `_capture_command.py`, the
   ingest content-hash replacement). Each is one autocommit statement that
   touches only the deleted document's rows, and the graph sync runs after it
-  commits (W2). Its one deadlock is the residual below. Closing it would need
-  every document delete to take the lock, which reaches `vault/watch.py`, out of
-  scope here (PR #51 owns that file).
+  commits (W2). Its one deadlock with a reconcile was closed by the follow-up
+  PR (`fix/graph-reconcile-doc-key-share`) without touching any delete site;
+  see "Same-document delete vs. reconcile" below.
 - **DDL:** AGE `bootstrap` (labels and indexes) and
   `db.ensure_embedding_column` on `graph_entities.embedding` /
   `graph_communities.summary_embedding`. These are idempotent catalog changes at
@@ -235,20 +235,72 @@ its `name` for that moment (e.g. `Acmeplatform` for `AcmePlatform`), and an
 upsert by that writer can refresh the name, which W7 then restores. Only a
 display name is affected, and only until W7 commits. This predates this PR.
 
-**Same-document delete vs. reconcile.**
+**Same-document delete vs. reconcile: FIXED** by the follow-up PR, branch
+`fix/graph-reconcile-doc-key-share` (base `8711ff0`).
 
-A document that is **deleted at the same moment it is reconciled** can still
-deadlock against the cascade. The reconcile deletes the document's mention rows
-and then inserts new ones; the insert's FK check takes `KEY SHARE` on the
-`documents` row. If the delete's cascade lands between those two statements, it
-waits on the reconcile's mention locks while the reconcile waits on the deleted
-`documents` row. The window is between two consecutive statements on one
-document. Postgres detects it, and a re-run resumes from the per-document
-watermarks. Locking the `documents` row `FOR KEY SHARE` before the graph lock
-would order it, but the delete would then wait out a whole reconcile.
+*The cycle.* The PR #54 reviewer reproduced it with the watcher's GraphLane.
+The same cycle exists across processes, e.g. `brain-mcp` or the CLI
+reconciling against the watcher's or `brain rm`'s delete.
+
+1. The reconcile's `rewrite_doc_relational` DELETEs X's old mention rows.
+2. `DELETE FROM documents WHERE id = X` takes X's tuple lock. Its ON DELETE
+   CASCADE waits on those rows.
+3. The reconcile's next INSERT runs its FK check (`FOR KEY SHARE` on X) and
+   waits on the delete.
+
+Postgres aborts whichever backend's `deadlock_timeout` fires first. The
+reproduction aborted the worker; in this PR's 5 red runs it aborted the delete
+4 times and the reconcile once.
+
+*The fix.* `ReconcilePlan.is_current` is the write transaction's first
+statement after the graph write lock. It now reads the row `FOR KEY SHARE`
+(`relational.key_share_doc_meta`), so the reconcile holds X's key-share lock
+before it touches any graph row. A DELETE that comes later waits for the short
+write transaction while holding nothing the reconcile needs. A DELETE that
+came first and committed leaves no row, and the plan is skipped. The old note
+above weighed "the delete would then wait out a whole reconcile". That cost is
+now only the write phase, because the model call runs before this transaction
+opens.
+
+*Why it cannot deadlock elsewhere.* The lock order is now: graph write lock,
+then the document's `KEY SHARE`, then graph rows. A cycle would need a
+transaction that holds a `documents` row lock that conflicts with `KEY SHARE`
+(a DELETE or a `SELECT ... FOR UPDATE`) and then waits for the graph write
+lock or a graph row. None exists:
+
+- Every document DELETE runs on an autocommit connection, and graph sync runs
+  only after it commits. That covers `vault/delete.py`, `vault/watch.py`,
+  `vault/sync.py`'s prune, `_capture_command.py`, and ingest's content-hash
+  replacement. The last is inside the ingest transaction, but the graph sync
+  is post-commit.
+- `ingest`'s `SELECT draft, tags ... FOR UPDATE` transaction writes no graph
+  table.
+- A plain UPDATE of `documents` takes `FOR NO KEY UPDATE`, which does not
+  conflict with `KEY SHARE`. Every unique index on `documents` except the
+  primary key is partial (`documents_vault_path_idx`,
+  `documents_content_hash_ingested_idx`, `documents_content_hash_stdin_idx`,
+  `uq_documents_gmail_thread`), so no UPDATE counts as a key update unless it
+  changes `id`, and none does.
+
+*W2 (`remove_document`) needs no document lock.* It only DELETEs the
+document's graph rows and inserts none that reference `documents`, so it never
+waits on the document row. A concurrent cascade waits on W2's deleted rows, and
+W2 then commits.
+
+*Found while checking, NOT fixed: `merge_aliases` (W5/W6) has the same shape.*
+`_repoint_mentions` INSERTs dst-keyed mentions for every document of a source
+entity. On conflict it DO-UPDATEs the existing dst row, without an FK check.
+It then DELETEs the source rows. Suppose a document X is deleted between those
+two statements. The cascade waits on the dst row the alias updated, and the
+alias's DELETE of X's source row waits on the cascade. It needs an alias apply
+or a cross-type collapse concurrent with deleting a document that mentions the
+merged entity. The fix shape is the same: lock the affected documents
+`FOR KEY SHARE`, in id order, right after the graph write lock in
+`merge_aliases`. A follow-up.
+
 Separately, `build_graph` already raises `GraphReconcileError` if a document is
-deleted between id enumeration and its reconcile. That is pre-existing and
-unchanged here. Both are follow-ups.
+deleted between id enumeration and its reconcile's read phase. That is
+pre-existing and still a follow-up.
 
 ## Tests
 
@@ -269,6 +321,7 @@ seconds instead of hanging CI.
 | D6 a plan whose document was deleted writes nothing | `test_a_reconcile_whose_document_was_deleted_writes_nothing` |
 | D7 one edit's concepts are never indexed under another edit's hash | `test_the_plan_never_pairs_one_edits_hash_with_another_edits_body` |
 | D8 an indexed document is planned without reading its body | `test_an_indexed_document_is_planned_without_reading_its_body` |
+| D9 a rewrite and a concurrent document DELETE do not deadlock | `test_a_rewrite_and_a_concurrent_document_delete_do_not_deadlock` |
 
 `tests/test_graphrag_write_lock.py` holds the lock contract. Unit tests cover
 the guard and per-tenant scope. One test per writer W1-W10 holds the tenant's
@@ -293,6 +346,9 @@ Mutations are applied only in a `git archive` copy, never in this worktree.
 | `c1ebc63` (interim: hash and body in one SELECT, read eagerly) | D8 |
 | M17 drop the hash pin from the body read | D7 |
 | M18 read the body even when nothing is stale | D8 |
+| `8711ff0` (no document lock before the rewrite) | D9 |
+| M19 drop `FOR KEY SHARE` from `key_share_doc_meta` | D9 |
+| M20 make `is_current` use the unlocked `fetch_doc_meta` | D9 |
 | M3-M11 drop the call in each of W2-W10, one at a time | that writer's lock test only |
 | M12 key `acquire_graph_write_lock` on a constant instead of the tenant | the per-tenant test |
 | M13 remove the not-in-a-transaction guard | the guard test |
@@ -303,6 +359,19 @@ during extraction, and without the reorder the watcher parks on the lock before
 writing. Its red is the base code.
 
 ## Results
+
+### Follow-up: document `KEY SHARE` (branch `fix/graph-reconcile-doc-key-share`, at `80a57bf`)
+
+**RED.** `src/` at `8711ff0` with the new test: D9 fails in 5 of 5 runs with
+`DeadlockDetected`. The victim was the document DELETE 4 times and the
+reconcile once, so neither side is guaranteed.
+
+**GREEN.** The two files (22 tests) pass 5 runs of 5.
+
+**Mutations.** Each ran in a fresh archive copy of `80a57bf`; unmutated, all
+22 pass. M19 and M20 each turn only D9 red. M14 (drop the re-check) now also
+turns D9 red, since the re-check is where the lock is taken. Every other row
+is unchanged from round 2.
 
 ### Review round 2 (PR #53, at `32c4a4e`)
 

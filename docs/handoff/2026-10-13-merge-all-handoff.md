@@ -219,7 +219,7 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
      - **Residue, still open and pre-existing:** a brand-new, never-synced, id-less file that
        replaces P and is renamed within one debounce window still adopts A's id. Nothing
        distinguishes it from A's own file after a failed id write-back.
-- *[FIXED 2026-10-22 on branch `fix/graph-entities-deadlock`.]* **`graph_entities` deadlocks
+- *[FIXED 2026-10-22 by PR #53 (`fix/graph-entities-deadlock`, merged as `8711ff0`).]* **`graph_entities` deadlocks
   between graph writers.** On prod, `brain graphrag build --backfill --concepts` died with
   `DeadlockDetected` in `upsert_concept_entities` against the vault watcher. This is the same class
   as the memory note on `relink-derived` hanging against the watcher and `brain-mcp`.
@@ -237,9 +237,15 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
   - Plan, root cause and mutation proofs: `docs/plans/2026-10-22-graph-entities-deadlock.md`.
   - The prod backfill can be re-run once this is merged and the daemon install is updated. The
     per-document watermarks resume it.
-  - **Still open (recorded in the plan, "Residuals"):**
-    1. A document deleted at the same moment it is reconciled can still deadlock against the
-       `documents` cascade. This is a same-document, two-statement window.
+  - **Residuals (recorded in the plan, "Residuals"):**
+    1. ~~A document deleted at the same moment it is reconciled can still deadlock against the
+       `documents` cascade.~~ *[FIXED by the follow-up `fix/graph-reconcile-doc-key-share`.]*
+       The reconcile's write transaction now locks the document row `FOR KEY SHARE` (in
+       `ReconcilePlan.is_current`) before it touches a graph row. So a concurrent
+       `DELETE FROM documents` waits instead of deadlocking with its cascade. This also closes
+       the PR #54 reviewer's GraphLane-vs-worker cycle. In the reproduction Postgres picked the
+       worker as the victim; in this fix's red runs the victim was the delete 4 times and the
+       reconcile once. Either side can be chosen.
     2. `build_graph` raises `GraphReconcileError` if a document is deleted between id enumeration
        and its reconcile's read phase. This predates the fix. A deletion after the read phase is
        now skipped.
@@ -247,6 +253,11 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        still be overtaken. The next build re-indexes it.
     4. The cross-type collapse window between W6 and W7 is pre-existing and cosmetic (a display
        name only).
+    5. **Still open, found while fixing item 1:** `merge_aliases` (alias apply, cross-type
+       collapse) has the same shape against a concurrent document delete. `_repoint_mentions`
+       DO-UPDATEs a dst row without an FK check, then DELETEs the source rows. The fix shape is to
+       lock the affected documents `FOR KEY SHARE`, in id order, right after the graph write
+       lock.
 
 ## Status on 2026-10-16: DONE except items that need the user
 
