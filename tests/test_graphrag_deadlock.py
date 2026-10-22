@@ -32,7 +32,6 @@ All entities are synthetic (alpha / bravo / gamma / gate); no PII.
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import threading
 from collections.abc import Callable, Sequence
@@ -46,23 +45,18 @@ from brain.graph_rag.reconcile import (
     ResolvedPerson,
     reconcile_document,
 )
+from tests.graph_concurrency import (
+    TEST_DATABASE_URL,
+    WAIT_S,
+    Worker,
+    connect_worker,
+    is_waiting_on_lock,
+    join_workers,
+)
 from tests.graph_fakes import NullBackend, seed_note_doc, static_resolver
 from tests.thread_wait import wait_for
 
-TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql://brain:brain@localhost:5434/second_brain_test",
-)
-
 TENANT = "default"
-
-#: Upper bound on any single statement in a worker. A regression that turns a
-#: deadlock into an unbounded wait fails here, not by hanging CI.
-_STATEMENT_TIMEOUT = "20s"
-
-#: Deadline for every condition wait and thread join, in seconds.
-_WAIT_S = 15.0
-
 
 # --------------------------------------------------------------------------- #
 # Test doubles
@@ -86,24 +80,6 @@ class _HookExtractor:
         return list(self._entities)
 
 
-class _Worker(threading.Thread):
-    """Run ``fn`` on a thread; keep its result or exception for the test."""
-
-    def __init__(self, fn: Callable[[], Any]) -> None:
-        super().__init__(daemon=True)
-        self._fn = fn
-        self.error: BaseException | None = None
-        self.finished = threading.Event()
-
-    def run(self) -> None:
-        try:
-            self._fn()
-        except BaseException as exc:  # noqa: BLE001 - surfaced by the test
-            self.error = exc
-        finally:
-            self.finished.set()
-
-
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -112,12 +88,6 @@ def _cfg(*, concepts: bool = False) -> ReconcileConfig:
     return ReconcileConfig(
         tenant_id=TENANT, generic_df_ratio=1.0, concepts_enabled=concepts
     )
-
-
-def _connect() -> psycopg.Connection[Any]:
-    conn = psycopg.connect(TEST_DATABASE_URL, autocommit=True, connect_timeout=5)
-    conn.execute(f"SET statement_timeout = '{_STATEMENT_TIMEOUT}'")
-    return conn
 
 
 def _seed_persons(conn: psycopg.Connection[Any], keys: Sequence[str]) -> None:
@@ -140,19 +110,6 @@ def _seed_persons(conn: psycopg.Connection[Any], keys: Sequence[str]) -> None:
             "VALUES (%s, %s, %s, 1, 'people')",
             (TENANT, row[0], anchor),
         )
-
-
-def _is_waiting_on_lock(observer: psycopg.Connection[Any], pid: int) -> bool:
-    row = observer.execute(
-        "SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s", (pid,)
-    ).fetchone()
-    return row is not None and row[0] == "Lock"
-
-
-def _join(*workers: _Worker) -> None:
-    for worker in workers:
-        worker.join(_WAIT_S * 2)
-        assert not worker.is_alive(), "a reconcile worker hung"
 
 
 def _mentioned_keys(conn: psycopg.Connection[Any], document_id: str) -> set[str]:
@@ -199,12 +156,12 @@ def test_backfill_concept_upsert_vs_watcher_recompute_does_not_deadlock(
     _seed_persons(test_db, ["alpha"])
     backfill_doc = seed_note_doc(test_db, "backfill-doc")
     watcher_doc = seed_note_doc(test_db, "watcher-doc")
-    backfill_conn, watcher_conn, observer = _connect(), _connect(), _connect()
+    backfill_conn, watcher_conn, observer = connect_worker(), connect_worker(), connect_worker()
     try:
         watcher_conn.execute("SET deadlock_timeout = '10s'")
         watcher_pid = watcher_conn.info.backend_pid
         in_extract = threading.Event()
-        watcher: _Worker | None = None
+        watcher: Worker | None = None
 
         def park_until_watcher_waits_or_ends() -> None:
             in_extract.set()
@@ -213,10 +170,10 @@ def test_backfill_concept_upsert_vs_watcher_recompute_does_not_deadlock(
             # The watcher is parked on a lock, or has already committed.
             wait_for(
                 lambda: watcher.finished.is_set()
-                or _is_waiting_on_lock(observer, watcher_pid)
+                or is_waiting_on_lock(observer, watcher_pid)
             )
 
-        backfill = _Worker(
+        backfill = Worker(
             lambda: reconcile_document(
                 backfill_conn,
                 backfill_doc,
@@ -228,8 +185,8 @@ def test_backfill_concept_upsert_vs_watcher_recompute_does_not_deadlock(
             )
         )
         backfill.start()
-        assert in_extract.wait(_WAIT_S), "backfill never reached its extraction"
-        watcher = _Worker(
+        assert in_extract.wait(WAIT_S), "backfill never reached its extraction"
+        watcher = Worker(
             lambda: reconcile_document(
                 watcher_conn,
                 watcher_doc,
@@ -240,7 +197,7 @@ def test_backfill_concept_upsert_vs_watcher_recompute_does_not_deadlock(
             )
         )
         watcher.start()
-        _join(backfill, watcher)
+        join_workers(backfill, watcher)
 
         assert backfill.error is None, f"backfill failed: {backfill.error!r}"
         assert watcher.error is None, f"watcher failed: {watcher.error!r}"
@@ -271,7 +228,7 @@ def test_two_full_reconciles_do_not_deadlock_in_the_tenant_recompute(
     _seed_persons(test_db, ["aaa-gate", "p-alpha", "p-bravo"])
     doc_one = seed_note_doc(test_db, "doc-one")
     doc_two = seed_note_doc(test_db, "doc-two")
-    gate, conn_one, conn_two, observer = _connect(), _connect(), _connect(), _connect()
+    gate, conn_one, conn_two, observer = (connect_worker() for _ in range(4))
     try:
         gate.autocommit = False
         gate.execute(
@@ -280,8 +237,8 @@ def test_two_full_reconciles_do_not_deadlock_in_the_tenant_recompute(
             (TENANT, "aaa-gate"),
         )
 
-        def reconcile(conn: psycopg.Connection[Any], doc: str, key: str) -> _Worker:
-            return _Worker(
+        def reconcile(conn: psycopg.Connection[Any], doc: str, key: str) -> Worker:
+            return Worker(
                 lambda: reconcile_document(
                     conn,
                     doc,
@@ -294,13 +251,13 @@ def test_two_full_reconciles_do_not_deadlock_in_the_tenant_recompute(
         first = reconcile(conn_one, doc_one, "p-alpha")
         first.start()
         # The first reconcile is parked on the gate.
-        wait_for(lambda: _is_waiting_on_lock(observer, conn_one.info.backend_pid))
+        wait_for(lambda: is_waiting_on_lock(observer, conn_one.info.backend_pid))
         second = reconcile(conn_two, doc_two, "p-bravo")
         second.start()
         # The second reconcile is parked (on the gate at 94dd1cb, on the lock now).
-        wait_for(lambda: _is_waiting_on_lock(observer, conn_two.info.backend_pid))
+        wait_for(lambda: is_waiting_on_lock(observer, conn_two.info.backend_pid))
         gate.rollback()
-        _join(first, second)
+        join_workers(first, second)
 
         assert first.error is None, f"first reconcile failed: {first.error!r}"
         assert second.error is None, f"second reconcile failed: {second.error!r}"
@@ -326,10 +283,10 @@ def test_concept_extraction_holds_no_graph_lock(
     _seed_persons(test_db, ["alpha"])
     extracting_doc = seed_note_doc(test_db, "extracting-doc")
     writer_doc = seed_note_doc(test_db, "writer-doc")
-    extracting_conn, writer_conn = _connect(), _connect()
+    extracting_conn, writer_conn = connect_worker(), connect_worker()
     try:
         writer_conn.execute("SET lock_timeout = '3s'")
-        writer = _Worker(
+        writer = Worker(
             lambda: reconcile_document(
                 writer_conn,
                 writer_doc,
@@ -341,9 +298,9 @@ def test_concept_extraction_holds_no_graph_lock(
 
         def run_the_writer_to_completion() -> None:
             writer.start()
-            assert writer.finished.wait(_WAIT_S), "the concurrent writer hung"
+            assert writer.finished.wait(WAIT_S), "the concurrent writer hung"
 
-        extracting = _Worker(
+        extracting = Worker(
             lambda: reconcile_document(
                 extracting_conn,
                 extracting_doc,
@@ -355,7 +312,7 @@ def test_concept_extraction_holds_no_graph_lock(
             )
         )
         extracting.start()
-        _join(extracting)
+        join_workers(extracting)
 
         assert writer.error is None, (
             f"a graph write waited behind a model call: {writer.error!r}"
@@ -408,9 +365,9 @@ def test_a_stale_reconcile_never_overwrites_a_newer_edit(
     notice the edit once it holds the lock, and write nothing.
     """
     doc = seed_note_doc(test_db, "edited-doc")
-    older_conn, newer_conn, edit_conn = _connect(), _connect(), _connect()
+    older_conn, newer_conn, edit_conn = connect_worker(), connect_worker(), connect_worker()
     try:
-        newer = _Worker(
+        newer = Worker(
             lambda: reconcile_document(
                 newer_conn,
                 doc,
@@ -424,9 +381,9 @@ def test_a_stale_reconcile_never_overwrites_a_newer_edit(
         def edit_then_run_the_newer_reconcile() -> None:
             _edit_body(edit_conn, doc, "edited body v2")
             newer.start()
-            assert newer.finished.wait(_WAIT_S), "the newer reconcile hung"
+            assert newer.finished.wait(WAIT_S), "the newer reconcile hung"
 
-        older = _Worker(
+        older = Worker(
             lambda: reconcile_document(
                 older_conn,
                 doc,
@@ -438,7 +395,7 @@ def test_a_stale_reconcile_never_overwrites_a_newer_edit(
             )
         )
         older.start()
-        _join(older)
+        join_workers(older)
 
         assert newer.error is None, f"newer reconcile failed: {newer.error!r}"
         assert older.error is None, f"older reconcile failed: {older.error!r}"
@@ -465,7 +422,7 @@ def test_a_reconcile_whose_document_was_deleted_writes_nothing(
     on the foreign key.
     """
     doc = seed_note_doc(test_db, "deleted-doc")
-    reconcile_conn, delete_conn = _connect(), _connect()
+    reconcile_conn, delete_conn = connect_worker(), connect_worker()
     try:
 
         def delete_the_document() -> None:
@@ -501,7 +458,7 @@ def test_extraction_runs_with_no_transaction_or_lock_open(
     The hook inspects the reconciling backend from an observer connection.
     """
     doc = seed_note_doc(test_db, "doc")
-    reconcile_conn, observer = _connect(), _connect()
+    reconcile_conn, observer = connect_worker(), connect_worker()
     seen: dict[str, Any] = {}
     try:
         pid = reconcile_conn.info.backend_pid
@@ -569,7 +526,7 @@ def test_the_plan_never_pairs_one_edits_hash_with_another_edits_body(
     v1 = test_db.execute("SELECT content FROM documents WHERE id = %s", (doc,)).fetchone()
     assert v1 is not None
     v1_body = str(v1[0])
-    edit_conn, reconcile_conn = _connect(), _connect()
+    edit_conn, reconcile_conn = connect_worker(), connect_worker()
     try:
 
         def edit_to_v2(
@@ -691,7 +648,7 @@ def test_a_rewrite_and_a_concurrent_document_delete_do_not_deadlock(
     doc = seed_note_doc(test_db, "deleted-while-rewritten")
     persons = static_resolver([ResolvedPerson("alpha", "Alpha"), ResolvedPerson("bravo", "Bravo")])
     reconcile_document(test_db, doc, backend=NullBackend(), config=_cfg(), person_resolver=persons)
-    gate, lane_conn, worker_conn, observer = _connect(), _connect(), _connect(), _connect()
+    gate, lane_conn, worker_conn, observer = (connect_worker() for _ in range(4))
     try:
         gate.autocommit = False
         locked = gate.execute(
@@ -700,7 +657,7 @@ def test_a_rewrite_and_a_concurrent_document_delete_do_not_deadlock(
         ).fetchall()
         assert len(locked) == 1, "the setup must leave X exactly one contribution row"
 
-        lane = _Worker(
+        lane = Worker(
             lambda: reconcile_document(
                 lane_conn,
                 doc,
@@ -712,14 +669,14 @@ def test_a_rewrite_and_a_concurrent_document_delete_do_not_deadlock(
         )
         lane.start()
         # The rewrite deleted X's mentions and is parked on the gate.
-        wait_for(lambda: _is_waiting_on_lock(observer, lane_conn.info.backend_pid))
-        worker = _Worker(
+        wait_for(lambda: is_waiting_on_lock(observer, lane_conn.info.backend_pid))
+        worker = Worker(
             lambda: worker_conn.execute("DELETE FROM documents WHERE id = %s", (doc,))
         )
         worker.start()
-        wait_for(lambda: _is_waiting_on_lock(observer, worker_conn.info.backend_pid))
+        wait_for(lambda: is_waiting_on_lock(observer, worker_conn.info.backend_pid))
         gate.rollback()
-        _join(lane, worker)
+        join_workers(lane, worker)
 
         assert worker.error is None, f"the document DELETE failed: {worker.error!r}"
         assert lane.error is None, f"the reconcile failed: {lane.error!r}"
