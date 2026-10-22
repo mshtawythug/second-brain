@@ -234,4 +234,37 @@ writing. Its red is the base code.
 
 ## Results
 
-(Filled in below as the work lands.)
+Measured on 2026-10-22 against the AGE test instance (port 5434), in a sibling
+database. The fix is commit `b998798`.
+
+**RED on the base.** Base `src/` at `94dd1cb` with the new tests on top: all
+three regressions fail, 5 runs of 5.
+
+- D1 fails with `DeadlockDetected ... while inserting index tuple ... in
+  relation "graph_entities"`, with the backfill as the victim. That is the
+  reported crash.
+- D2 fails with `DeadlockDetected ... while updating tuple`.
+- D3 fails with `LockNotAvailable ... while inserting index tuple`: the
+  concurrent writer waited behind the extraction.
+
+**GREEN on the fix.** Both new files (16 tests) pass 5 runs of 5. The graph
+test files (`tests/test_graphrag_*.py`, `tests/test_graph_*.py`,
+`tests/test_cli_graph*.py`, `tests/test_mcp_graphrag.py`: 1,128 tests) pass.
+`ruff check` and `mypy src/` are clean.
+
+**Mutations.** Each ran in a fresh `git archive` copy of `b998798`, with its
+own editable venv, never in the worktree. The harness checks that each
+replacement matches exactly once, that the file changed, and that `brain`
+imports from the copy.
+
+| mutation | predicted red | observed red | failing assertion |
+|---|---|---|---|
+| none | none | none (16 passed) | |
+| M1 no lock in `reconcile_document` | D2, W1 | D2, W1 | `DeadlockDetected`; `DID NOT RAISE LockNotAvailable` |
+| M2 extraction after the person writes | D3 | D3 | "a graph write waited behind a model call: LockNotAvailable" |
+| M3-M11 no lock in W2-W10, one at a time | that writer only | that writer only, each | `DID NOT RAISE LockNotAvailable`; W10: "the embedding write did not wait on the graph lock" |
+| M12 constant key | key test, other-tenant test | the same two | key mismatch in `pg_locks`; `LockNotAvailable` across tenants |
+| M13 no transaction guard | guard test | guard test | `DID NOT RAISE GraphReconcileError` |
+
+As the mutation plan predicted, D1 stays green under M1 and under M2 alone. Its
+red is the base, where both are reverted.

@@ -200,6 +200,24 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
      `move` is keyed on its src, and within `debounce_ms` the src is recreated. The move becomes an
      upsert of src, and the destination is not synced, with the same consequences as item 1's move
      case. This predates PR #49 and was found in its review.
+- *[FIXED 2026-10-22 on branch `fix/graph-entities-deadlock`.]* **`graph_entities` deadlocks
+  between graph writers.** On prod, `brain graphrag build --backfill --concepts` died with
+  `DeadlockDetected` in `upsert_concept_entities` against the vault watcher. This is the same class
+  as the memory note on `relink-derived` hanging against the watcher and `brain-mcp`.
+  - Cause: every non-deferred reconcile runs a tenant-wide `UPDATE graph_entities SET doc_count`.
+    That row-locks every entity in the tenant while the transaction still holds its own upserted
+    rows. The concept extractor (a model call) also ran inside that transaction.
+  - Fix: every graph write transaction now takes a per-tenant advisory lock before its first graph
+    write (`src/brain/graph_rag/write_lock.py`; closed writer list W1-W10). The extraction now runs
+    before the lock.
+  - Plan, root cause and mutation proofs: `docs/plans/2026-10-22-graph-entities-deadlock.md`.
+  - The prod backfill can be re-run once this is merged and the daemon install is updated. The
+    per-document watermarks resume it.
+  - **Still open (recorded in the plan, "Residual"):**
+    1. A document deleted at the same moment it is reconciled can still deadlock against the
+       `documents` cascade. This is a same-document, two-statement window.
+    2. `build_graph` raises `GraphReconcileError` if a document is deleted between id enumeration
+       and its reconcile. This predates the fix.
 
 ## Status on 2026-10-16: DONE except items that need the user
 
