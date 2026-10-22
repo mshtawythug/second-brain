@@ -355,8 +355,8 @@ they are now predicted:
 
 **Ceiling:** `watch.py` is now 1,198 lines: 1,184 after round 1, 1,195 after round 2, then +3 in round 3 for the reworded repair line. The extra
 lines are the `_LANE_CLOSE_TIMEOUT_S` constant, the undrained-removes warning,
-and starting the lane just before the observer. `graph_lane.py` is 147 lines.
-The CLAUDE.md growth record covers both.
+and starting the lane last. `graph_lane.py` stays a small leaf, well under
+800 (take its count from `wc -l`). The CLAUDE.md growth record covers both.
 
 ### Round 3: the PR #54 review and re-audit of `f0ed695`
 
