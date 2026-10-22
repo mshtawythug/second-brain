@@ -144,8 +144,15 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
   full backup carries about 11 GB of dead build output (measured 2026-10-21).
 - `graph_runner` has no `degraded` tolerance. This is deliberate, and the reason is in its module
   docstring (PR #37 left it out on purpose).
-- Watcher burst/stale-event tests that `sleep` and then assert ABSENCE can false-PASS under load. The
-  vault-watcher half of this class is still open. The build-watcher half is moot, because
+- ~~Watcher burst/stale-event tests that `sleep` and then assert ABSENCE can false-PASS under load.~~
+  *[FIXED 2026-10-22, on branch `test/vault-watcher-absence-sync`, in the commit that wrote this
+  note.]* The vault-watcher half had seven such tests in `tests/test_vault_watcher.py`. Each now
+  asserts absence only on proof the watcher got past the point in question. The four
+  debounce/filter tests use a one-hour debounce, so `pending_timers` is exact right after
+  `inject()`, and the burst tests join every superseded timer. The three stale-event tests drain
+  `_worker_loop` synchronously. `src/brain/vault/watch.py` is unchanged. Inventory, mutation
+  proofs and the old tests' demonstrated false passes are in
+  `docs/plans/2026-10-22-vault-watcher-absence-tests.md`. The build-watcher half is moot, because
   `tests/wiki/test_build_watcher.py` was deleted with the wiki at R3 (`885b5a6`).
 
 ## Status on 2026-10-16: DONE except items that need the user
@@ -261,7 +268,9 @@ left out of #37 on purpose.
   guard in `tests/test_thread_wait.py` covers every importer. That guard also found a site PR #31's
   per-file guard could not see: `tests/test_cli_vault_watch.py` imported the helper through the test
   module and passed `timeout=5.0`.
-- *[Still open for the vault watcher on 2026-10-21. The build-watcher half is moot after R3.]* Watcher burst/stale-event tests that `sleep` then assert ABSENCE can false-PASS under load. The
+- *[Vault-watcher half FIXED 2026-10-22 on `test/vault-watcher-absence-sync`: see "Follow-ups
+  still open" above and `docs/plans/2026-10-22-vault-watcher-absence-tests.md`. The build-watcher
+  half is moot after R3.]* Watcher burst/stale-event tests that `sleep` then assert ABSENCE can false-PASS under load. The
   build watcher's `test_ignores_*` and coalescing tests are in the same class (listed in the
   2026-10-16 plan).
 - ~~`qwen3` (non-default embedder) still inherits the server's 65536 context for embeddings.~~ Addressed

@@ -11,6 +11,9 @@ Conventions:
 - ``WatchConfig(debounce_ms=10)`` keeps tests sub-second; we still wait
   on explicit synchronization points (queue.join() / threading.Events)
   rather than ``time.sleep`` to avoid flakiness.
+- A test that asserts something did NOT happen must hold that assertion
+  on proof the watcher got past the point in question, never after a
+  sleep: see "Absence on proof" below.
 - ``install_signal_handlers=False`` is set everywhere — the test itself
   drives shutdown via ``state.stop_event.set()`` so pytest's signal
   handling stays untouched.
@@ -54,6 +57,7 @@ from brain.vault.watch import (
 
 # The shared backstop wait (PR #31's, moved 2026-10-16); its call-site
 # guard covers every importer, in tests/test_thread_wait.py.
+from tests.thread_wait import WAIT_FOR_BACKSTOP_S
 from tests.thread_wait import wait_for as _wait_for
 
 # ---------------------------------------------------------------------------
@@ -193,6 +197,65 @@ def _wait_for_observer(
         f"watcher did not start observer within {timeout}s "
         "(backstop, not a latency assertion)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Absence on proof, not after a sleep (2026-10-22).
+#
+# A test that sleeps and then asserts something did NOT happen passes
+# vacuously when the timer or worker thread simply has not run yet, which
+# under full-suite load is routine. The debounce tests below therefore use
+# a debounce no timer can reach during a test. ``inject()`` classifies and
+# schedules synchronously on the test thread, so when it returns, an
+# accepted event is provably still in ``state.pending_timers``: it cannot
+# have fired and left. The shutdown drain then turns each pending timer into
+# exactly one enqueued job, and ``thread.join()`` is a full barrier. Plan:
+# docs/plans/2026-10-22-vault-watcher-absence-tests.md.
+# ---------------------------------------------------------------------------
+
+#: One hour. Long enough that no debounce timer fires on its own in a test;
+#: the shutdown drain cancels every pending one, so none outlives the test.
+_UNFIRED_DEBOUNCE_MS = 3_600_000
+
+
+def _pending(state: _WatcherState) -> dict[Path, threading.Timer]:
+    """Snapshot ``state.pending_timers`` under the lock the watcher uses."""
+    with state.lock:
+        return dict(state.pending_timers)
+
+
+def _assert_superseded_never_fire(superseded: list[threading.Timer], events: list[Any]) -> None:
+    """Prove that no superseded debounce timer has fired, or ever will.
+
+    A terminated ``Timer`` was either cancelled or has already run ``_fire``,
+    and ``_fire`` calls the ``on_event`` hook before it returns. So once each
+    one is joined, "dead" plus "no event recorded" means it never fired. A
+    superseded timer still alive after the backstop is armed: it is a second
+    job for the same burst, merely not due yet.
+    """
+    for i, timer in enumerate(superseded):
+        timer.join(timeout=WAIT_FOR_BACKSTOP_S)
+        assert not timer.is_alive(), (
+            f"superseded debounce timer #{i} is still armed: it will fire a "
+            "second job for a burst that must collapse to one"
+        )
+    assert events == [], f"a superseded debounce timer fired: {events!r}"
+
+
+def _stop_watcher(
+    state: _WatcherState, thread: threading.Thread, result_q: queue.Queue[Any]
+) -> None:
+    """Stop the watcher and wait for ``run_watcher`` to return, as a barrier.
+
+    ``run_watcher`` drains every pending debounce timer (each becomes one
+    ``on_event`` call plus one job) before it returns, so after this the
+    recorded events are final.
+    """
+    state.stop_event.set()
+    thread.join(timeout=WAIT_FOR_BACKSTOP_S)
+    assert not thread.is_alive(), "watcher did not stop (backstop)"
+    kind, payload = result_q.get_nowait()
+    assert kind == "ok", payload
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +442,15 @@ def test_single_create_event_triggers_one_sync(
 def test_burst_of_modifies_collapses_to_one_sync(
     test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
 ) -> None:
-    """5 rapid events on the same path should produce one job."""
+    """5 rapid events on the same path should produce one job.
+
+    Each event must cancel the timer the previous one armed. Until
+    2026-10-22 this test waited for the first event, slept 0.1s and
+    asserted that no more had arrived. A superseded timer that was never
+    cancelled passes that whenever its thread is late. Now each armed timer
+    is captured (none can fire on its own: ``_UNFIRED_DEBOUNCE_MS``), and
+    every superseded one must be dead without having fired.
+    """
     vault = tmp_path / "vault"
     vault.mkdir()
     note = vault / "burst.md"
@@ -389,7 +460,7 @@ def test_burst_of_modifies_collapses_to_one_sync(
     events: list[tuple[str, Path]] = []
     config = WatchConfig(
         vault_path=vault,
-        debounce_ms=50,
+        debounce_ms=_UNFIRED_DEBOUNCE_MS,
         on_event=lambda action, path: events.append((action, path)),
     )
 
@@ -399,26 +470,32 @@ def test_burst_of_modifies_collapses_to_one_sync(
         config=config,
     )
     observer = _wait_for_observer(result_q=result_q)
+    state = observer.handler._state
 
-    # Inject 5 modifies in rapid succession — each one resets the timer,
-    # so only the LAST should actually fire.
+    # Inject 5 modifies in rapid succession. Each one re-arms the debounce;
+    # capture the timer it armed (deterministic: none can fire yet).
+    timers: list[threading.Timer] = []
     for _ in range(5):
         observer.inject(FileModifiedEvent(str(note)))
+        timers.append(_pending(state)[note])
+    assert len({id(t) for t in timers}) == 5, "each event must re-arm the debounce"
 
-    _wait_for(lambda: len(events) >= 1)
-    # Allow a little slack for any spurious extras to arrive.
-    time.sleep(0.1)
-    assert len(events) == 1, f"expected 1 collapsed event, got {events!r}"
+    _assert_superseded_never_fire(timers[:-1], events)
+    assert _pending(state) == {note: timers[-1]}
 
-    state = observer.handler._state
-    state.stop_event.set()
-    thread.join(timeout=5.0)
+    _stop_watcher(state, thread, result_q)
+    assert events == [("upsert", note)], f"expected 1 collapsed event, got {events!r}"
 
 
 def test_multi_path_bursts_yield_one_sync_per_path(
     test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
 ) -> None:
-    """Two paths each getting bursts produce exactly two enqueued jobs."""
+    """Two paths each getting bursts produce exactly two enqueued jobs.
+
+    Same proof shape as ``test_burst_of_modifies_collapses_to_one_sync``:
+    the superseded timers of BOTH bursts must be dead without having fired,
+    and each path keeps exactly its own last timer.
+    """
     vault = tmp_path / "vault"
     vault.mkdir()
     a = vault / "a.md"
@@ -429,7 +506,7 @@ def test_multi_path_bursts_yield_one_sync_per_path(
     events: list[tuple[str, Path]] = []
     config = WatchConfig(
         vault_path=vault,
-        debounce_ms=50,
+        debounce_ms=_UNFIRED_DEBOUNCE_MS,
         on_event=lambda action, path: events.append((action, path)),
     )
 
@@ -439,86 +516,96 @@ def test_multi_path_bursts_yield_one_sync_per_path(
         config=config,
     )
     observer = _wait_for_observer(result_q=result_q)
-
-    for _ in range(3):
-        observer.inject(FileModifiedEvent(str(a)))
-    for _ in range(3):
-        observer.inject(FileModifiedEvent(str(b)))
-
-    _wait_for(lambda: len(events) >= 2)
-    time.sleep(0.1)
-    assert len(events) == 2
-    paths = sorted(p.name for _, p in events)
-    assert paths == ["a.md", "b.md"]
-
     state = observer.handler._state
-    state.stop_event.set()
-    thread.join(timeout=5.0)
+
+    armed: dict[Path, list[threading.Timer]] = {a: [], b: []}
+    for path in (a, b):
+        for _ in range(3):
+            observer.inject(FileModifiedEvent(str(path)))
+            armed[path].append(_pending(state)[path])
+
+    _assert_superseded_never_fire(armed[a][:-1] + armed[b][:-1], events)
+    assert _pending(state) == {a: armed[a][-1], b: armed[b][-1]}
+
+    _stop_watcher(state, thread, result_q)
+    assert sorted(events) == [("upsert", a), ("upsert", b)], events
+
+
+def _assert_ignored_by_watcher(
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    vault: Path,
+    ignored: Path,
+) -> None:
+    """Inject an event for ``ignored`` and prove it never became a job.
+
+    ``inject()`` runs classify and schedule on this thread, and with
+    ``_UNFIRED_DEBOUNCE_MS`` an accepted event cannot have fired and left
+    ``pending_timers`` by the time it returns. So an empty ``pending_timers``
+    right after ``inject()`` is exact, not a sleep's guess. A control note
+    injected through the same handler proves the probe sees an accepted
+    event. The shutdown drain (every pending timer becomes one job) makes
+    the final event list exact.
+    """
+    events: list[Any] = []
+    config = WatchConfig(
+        vault_path=vault,
+        debounce_ms=_UNFIRED_DEBOUNCE_MS,
+        on_event=lambda a, p: events.append((a, p)),
+    )
+
+    thread, result_q = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer(result_q=result_q)
+    state = observer.handler._state
+
+    observer.inject(FileModifiedEvent(str(ignored)))
+    assert _pending(state) == {}, f"{ignored.name} was accepted for sync; the filter must drop it"
+    assert events == []
+
+    # Positive control: the same probe sees an event the filter accepts.
+    control = vault / "control.md"
+    _write(control, {"id": str(uuid.uuid4()), "title": "Control"}, "c\n")
+    observer.inject(FileModifiedEvent(str(control)))
+    assert set(_pending(state)) == {control}, "probe cannot see an accepted event"
+
+    _stop_watcher(state, thread, result_q)
+    assert events == [("upsert", control)], events
 
 
 def test_watcher_ignores_template_events(
     test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
 ) -> None:
-    """Events under ``_templates/`` never enqueue jobs."""
+    """Events under ``_templates/`` never enqueue jobs.
+
+    Until 2026-10-22 this slept 0.1s and asserted no event, which passes
+    whenever the timer thread is late; see ``_assert_ignored_by_watcher``.
+    """
     vault = tmp_path / "vault"
     vault.mkdir()
     (vault / "_templates").mkdir()
     template = vault / "_templates" / "daily.md"
     template.write_text("# {{date}}")
 
-    events: list[Any] = []
-    config = WatchConfig(
-        vault_path=vault,
-        debounce_ms=10,
-        on_event=lambda a, p: events.append((a, p)),
-    )
-
-    thread, result_q = _start_watcher(
-        conn_factory=_conn_factory(test_db),
-        embedder=fake_embedder,
-        config=config,
-    )
-    observer = _wait_for_observer(result_q=result_q)
-
-    observer.inject(FileModifiedEvent(str(template)))
-    time.sleep(0.1)
-    assert events == []
-
-    state = observer.handler._state
-    state.stop_event.set()
-    thread.join(timeout=5.0)
+    _assert_ignored_by_watcher(test_db, fake_embedder, vault, template)
 
 
 def test_watcher_ignores_non_md_files(
     test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
 ) -> None:
-    """Non-``.md`` files never enqueue jobs."""
+    """Non-``.md`` files never enqueue jobs.
+
+    Same proof shape as ``test_watcher_ignores_template_events``.
+    """
     vault = tmp_path / "vault"
     vault.mkdir()
     swap = vault / "note.md.swp"
     swap.write_text("vim swap")
 
-    events: list[Any] = []
-    config = WatchConfig(
-        vault_path=vault,
-        debounce_ms=10,
-        on_event=lambda a, p: events.append((a, p)),
-    )
-
-    thread, result_q = _start_watcher(
-        conn_factory=_conn_factory(test_db),
-        embedder=fake_embedder,
-        config=config,
-    )
-    observer = _wait_for_observer(result_q=result_q)
-
-    observer.inject(FileModifiedEvent(str(swap)))
-    time.sleep(0.1)
-    assert events == []
-
-    state = observer.handler._state
-    state.stop_event.set()
-    thread.join(timeout=5.0)
+    _assert_ignored_by_watcher(test_db, fake_embedder, vault, swap)
 
 
 def test_delete_event_removes_row(
@@ -586,66 +673,42 @@ def test_stale_delete_event_preserves_existing_file(
     Regression: live test on 2026-05-01 confirmed ``brain tag <vault-doc>
     +foo`` could leave the file written but the DB row gone, causing the
     next ``brain tag <id> -foo`` to fail with ``document not found``.
+
+    Drives the worker synchronously (``_run_events_through_worker``). Until
+    2026-10-22 this ran the threaded watcher, waited for the job to be
+    ENQUEUED and then slept 0.5s before asserting the row survived. A
+    worker that deletes the row passes that whenever it is slower than the
+    sleep. The re-stat guard lives in ``_worker_loop``, and when the drain
+    returns the job has been processed.
     """
     vault = tmp_path / "vault"
     vault.mkdir()
     note = vault / "still-here.md"
     note_id = str(uuid.uuid4())
     _write(note, {"id": note_id, "title": "Still Here"}, "x\n")
-
-    events: list[Any] = []
-    config = WatchConfig(
-        vault_path=vault,
-        debounce_ms=10,
-        on_event=lambda a, p: events.append((a, p)),
-    )
-
-    thread, result_q = _start_watcher(
-        conn_factory=_conn_factory(test_db),
-        embedder=fake_embedder,
-        config=config,
-    )
-    observer = _wait_for_observer(result_q=result_q)
-
-    # Confirm startup sync inserted the row.
-    _wait_for(
-        lambda: test_db.execute(
-            "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
-        ).fetchone()[0]
-        == 1
-    )
+    sync_vault(test_db, embedder=fake_embedder, vault_path=vault)
+    count_sql = "SELECT count(*) FROM documents WHERE id = %s"
+    assert test_db.execute(count_sql, (note_id,)).fetchone()[0] == 1
 
     # The file is still on disk — DO NOT unlink. This is the difference
     # vs. ``test_delete_event_removes_row``: a real deletion follows
     # ``note.unlink()``; a stale deletion does not.
     assert note.exists(), "test setup must leave the file in place"
+    event = FileDeletedEvent(str(note))
+    assert _classify_event(event, vault) == [("delete", note, None)]
 
-    observer.inject(FileDeletedEvent(str(note)))
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    state = _run_events_through_worker(test_db, fake_embedder, config, event)
 
-    # Wait for the worker to drain the event queue. The on_event hook
-    # fires when a job is enqueued (post-debounce); poll for it before
-    # asserting on DB state so we don't race the worker.
-    _wait_for(lambda: ("delete", note) in events)
-
-    # Give the worker a brief moment to actually process the dequeued
-    # job. We can't sync on the row's deletion because it shouldn't
-    # happen, so a short bounded wait is the right shape here.
-    deadline = time.monotonic() + 0.5
-    while time.monotonic() < deadline:
-        time.sleep(0.02)
-
-    # The fix: stale delete events must NOT remove the row.
-    count = test_db.execute(
-        "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
-    ).fetchone()[0]
+    # The drain has returned, so the stale delete has been processed (as
+    # the upsert it degrades to): nothing about it is still in flight.
+    assert state.errors == 0
+    assert state.processed == 1, "the stale delete never reached the worker"
+    count = test_db.execute(count_sql, (note_id,)).fetchone()[0]
     assert count == 1, (
         f"stale delete event removed the row despite the file still existing "
         f"(count={count}); watcher should re-stat the path before DELETE"
     )
-
-    state = observer.handler._state
-    state.stop_event.set()
-    thread.join(timeout=5.0)
 
 
 def test_stale_upsert_event_for_vanished_file(
@@ -654,15 +717,26 @@ def test_stale_upsert_event_for_vanished_file(
     """A spurious 'created' fsevent for a vanished file must be a no-op.
 
     Symmetric to the delete-side fix in ``ecef181``. Without this guard
-    the worker calls ``sync_one_file`` which raises ``FileNotFoundError``,
-    which the outer ``try/except Exception`` catches and counts as
-    ``state.errors``. That's noisy + cluttering: we processed an event for
-    a path that doesn't exist on disk; nothing is wrong, just stale.
+    the worker calls ``sync_one_file`` on a path that is gone, and the
+    shutdown report miscounts a phantom event: nothing is wrong, just stale.
+
+    This docstring used to say the unguarded ``sync_one_file`` raises
+    ``FileNotFoundError``, which the outer ``except`` counts in
+    ``state.errors``. It does not today: it records "file does not exist"
+    in its report and returns, so the unguarded worker counts the phantom
+    as PROCESSED work instead. Measured 2026-10-22 by deleting the guard:
+    ``processed`` 0 → 1, ``errors`` unchanged. The ``errors`` assertion
+    stays as the second half of "neither processed nor errored".
 
     Trigger scenarios in the wild: editor atomic-save creating + removing a
     temp file inside the debounce window, ``brain note new`` immediately
     followed by ``brain rm``, or any tool that creates + removes within the
     same debounce interval and races the worker.
+
+    Drives the worker synchronously, for the reason
+    ``test_stale_delete_event_preserves_existing_file`` gives: every claim
+    here is an ABSENCE (no error, no row, no count), and a 0.5s sleep after
+    the enqueue hook could not tell "skipped" from "not reached yet".
     """
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -670,40 +744,14 @@ def test_stale_upsert_event_for_vanished_file(
     ghost = vault / "phantom.md"
     assert not ghost.exists(), "test setup invariant: file must not exist"
 
-    events: list[Any] = []
-    config = WatchConfig(
-        vault_path=vault,
-        debounce_ms=10,
-        on_event=lambda a, p: events.append((a, p)),
-    )
+    # Non-vacuity: the event really becomes an upsert job. A classifier that
+    # dropped it would leave the worker nothing to skip.
+    event = FileCreatedEvent(str(ghost))
+    assert _classify_event(event, vault) == [("upsert", ghost, None)]
 
-    thread, result_q = _start_watcher(
-        conn_factory=_conn_factory(test_db),
-        embedder=fake_embedder,
-        config=config,
-    )
-    observer = _wait_for_observer(result_q=result_q)
-
-    # Snapshot processed counter BEFORE we inject — startup sync may have
-    # incremented it for the (empty) initial scan, and we want a delta.
-    state = observer.handler._state
-    processed_before = state.processed
-
-    # Inject a "created" event for a path that doesn't exist. The previous
-    # behavior here was: enqueue → worker calls sync_one_file → FileNotFoundError
-    # → except → state.errors += 1. The fix: re-stat before sync, treat
-    # nonexistence as a no-op.
-    observer.inject(FileCreatedEvent(str(ghost)))
-
-    # Wait for the worker to dequeue the job. The on_event hook fires when a
-    # job is enqueued (post-debounce); we poll for that, then bound-wait for
-    # the worker to finish acting on it. We can't sync on a DB row appearing
-    # (it shouldn't) or on processed advancing (it shouldn't either, per the
-    # impl decision to ``continue``), so the bounded wait is the right shape.
-    _wait_for(lambda: ("upsert", ghost) in events)
-    deadline = time.monotonic() + 0.5
-    while time.monotonic() < deadline:
-        time.sleep(0.02)
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    state = _run_events_through_worker(test_db, fake_embedder, config, event)
+    assert state.jobs.empty(), "the drain must consume every job it enqueued"
 
     # The fix: stale upsert for a vanished file must NOT raise + be caught.
     assert state.errors == 0, (
@@ -721,14 +769,10 @@ def test_stale_upsert_event_for_vanished_file(
     # And per impl decision: state.processed must NOT advance for a stale
     # event. A vanished file isn't meaningful work, neither processed nor
     # errored — it's a phantom event that should leave the counters alone.
-    assert state.processed == processed_before, (
-        f"state.processed advanced for a stale upsert "
-        f"({processed_before} → {state.processed}); the worker should "
-        f"``continue`` without counting a vanished file as work"
+    assert state.processed == 0, (
+        f"state.processed advanced for a stale upsert (0 → {state.processed}); "
+        f"the worker should ``continue`` without counting a vanished file as work"
     )
-
-    state.stop_event.set()
-    thread.join(timeout=5.0)
 
 
 def test_graceful_shutdown_drains_pending(
@@ -1881,6 +1925,11 @@ def test_vanished_file_with_cached_body_is_noop(
     and the resulting ``FileNotFoundError`` would surface through the
     error path. That was the symptom of the bug fixed in this change;
     the test has been inverted to lock in the fix.
+
+    Drives the worker synchronously, with the primed cache passed in as
+    ``state``. Until 2026-10-22 this slept 0.5s after the enqueue hook and
+    then asserted four absences, which a worker that synced the vanished
+    file passes whenever it is slower than the sleep.
     """
     spy_calls = _make_sync_spy(mocker)
     vault = tmp_path / "vault"
@@ -1889,30 +1938,18 @@ def test_vanished_file_with_cached_body_is_noop(
     note_id = str(uuid.uuid4())
     _write(note, {"id": note_id, "title": "Vanished"}, "x\n")
 
-    events: list[Any] = []
-    config = WatchConfig(
-        vault_path=vault,
-        debounce_ms=10,
-        on_event=lambda a, p: events.append((a, p)),
-    )
-    thread, result_q = _start_watcher(
-        conn_factory=_conn_factory(test_db),
-        embedder=fake_embedder,
-        config=config,
-    )
-    observer = _wait_for_observer(result_q=result_q)
-    state = observer.handler._state
+    state = _WatcherState()
     state.body_cache[note] = strip_fence(note.read_text())
-    processed_before = state.processed
 
     # Make the file vanish AFTER cache seeding but BEFORE the worker acts.
     note.unlink()
-    observer.inject(FileModifiedEvent(str(note)))
+    event = FileModifiedEvent(str(note))
+    assert _classify_event(event, vault) == [("upsert", note, None)]
 
-    _wait_for(lambda: ("upsert", note) in events)
-    deadline = time.monotonic() + 0.5
-    while time.monotonic() < deadline:
-        time.sleep(0.02)
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    drained = _run_events_through_worker(test_db, fake_embedder, config, event, state=state)
+    assert drained is state, "the drain must run against the primed cache"
+    assert state.jobs.empty(), "the drain must consume every job it enqueued"
 
     # Existence-guard short-circuits before _is_fence_only_write or sync.
     assert spy_calls == [], (
@@ -1921,10 +1958,7 @@ def test_vanished_file_with_cached_body_is_noop(
     )
     assert state.skipped_fence_only == 0
     assert state.errors == 0
-    assert state.processed == processed_before
-
-    state.stop_event.set()
-    thread.join(timeout=5.0)
+    assert state.processed == 0
 
 
 @pytest.mark.fresh_schema
