@@ -49,7 +49,7 @@ wiki-as-fallback option, RA-8, was declined).
   you: `<vault>/.quartz/` (the Quartz workspace and its builds),
   `$BRAIN_HOME/Caddyfile` and any `caddy` you started to serve it, and
   `$BRAIN_HOME/build/`. The vault watcher keeps skipping `.quartz/` until it is
-  gone.
+  gone, and `brain backup` leaves it out (see Fixed).
 
 ### Changed — the brain sizes its own Ollama context window
 
@@ -223,6 +223,16 @@ wiki-as-fallback option, RA-8, was declined).
 
 ### Fixed
 
+- **`brain backup` archived the leftover Quartz workspace.** Every full backup
+  carried `<vault>/.quartz/`, the deleted wiki's `node_modules`, builds and
+  cache, which on an upgraded vault is about 11 GB that nothing reads.
+  `brain restore` paid that cost twice, because it takes a pre-restore backup
+  first. The backup now leaves out `<vault>/.quartz/` without walking into it,
+  and says so in its report. It skips only that top-level directory: other
+  dotted directories, such as `.obsidian/` and a vault `.git/`, are user data
+  and are still backed up. `vault_file_count` counts what the archive holds.
+  A restore still renames the existing vault aside whole, so a `.quartz/` on
+  disk moves with it and is never deleted.
 - **`brain-up` repointed the background daemons at `~/brain-vault`.**
   `brain-install-launchd`, which every `brain-up` runs, wrote the launchd
   plists with `~/brain-vault` no matter what vault was configured. It ignored

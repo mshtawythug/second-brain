@@ -313,6 +313,37 @@ def test_vault_moved_aside_not_deleted(
     assert (cfg.vault_path / "keep-me.md").exists()
 
 
+def test_restore_moves_an_existing_quartz_workspace_aside_intact(
+    test_db: psycopg.Connection,
+    cfg: Config,
+    runner: StubAndRestoreRunner,
+) -> None:
+    """A backup without `.quartz/` never deletes the one on disk (ruling B8).
+
+    The backup leaves the leftover Quartz workspace out, and the restore renames
+    the whole existing vault aside, so the workspace survives byte-for-byte in
+    `<vault>.replaced-<ts>` and the restored vault holds only backed-up data.
+    """
+    leftover = cfg.vault_path / ".quartz" / "node_modules" / "synthetic-pkg" / "index.js"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("synthetic build output\n", encoding="utf-8")
+    archive = create_backup(
+        cfg,
+        runner=StubDumpRunner(responses={"--version": CONTAINER_VERSION}),
+        clock=lambda: NOW,
+        embedder=FakeEmbedder(dim=EMBEDDING_DIM),
+    ).archive_path
+
+    report = _restore(archive, cfg, runner)
+
+    assert report.replaced_vault_path is not None
+    aside = report.replaced_vault_path / leftover.relative_to(cfg.vault_path)
+    assert aside.is_file()
+    assert aside.read_text(encoding="utf-8") == "synthetic build output\n"
+    assert (cfg.vault_path / "keep-me.md").exists()
+    assert not (cfg.vault_path / ".quartz").exists()
+
+
 def test_db_only_leaves_the_vault_alone(
     test_db: psycopg.Connection,
     archive: Path,

@@ -139,9 +139,13 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
 
 ### Follow-ups still open (as of 2026-10-21)
 
-- `brain backup`'s `tar_vault` (`src/brain/backup/create.py`) archives the whole vault with no skip
+- ~~`brain backup`'s `tar_vault` (`src/brain/backup/create.py`) archives the whole vault with no skip
   list, unlike vault sync and watch, which skip `.quartz/` (R9-8). Until `<vault>/.quartz` is deleted, a
-  full backup carries about 11 GB of dead build output (measured 2026-10-21).
+  full backup carries about 11 GB of dead build output (measured 2026-10-21).~~ **Fixed 2026-10-22**
+  by PR #47 (`fix/backup-skip-quartz`). `tar_vault` now prunes the top-level
+  `<vault>/.quartz/` and nothing else, and reports the skip. Rulings B1–B10 are in
+  `docs/plans/2026-10-22-backup-skip-quartz.md`. `<vault>/.quartz` itself is still on disk until the
+  user deletes it.
 - `graph_runner` has no `degraded` tolerance. This is deliberate, and the reason is in its module
   docstring (PR #37 left it out on purpose).
 - ~~Watcher burst/stale-event tests that `sleep` and then assert ABSENCE can false-PASS under load.~~

@@ -705,6 +705,14 @@ the production Postgres is 16.x while a typical host Homebrew `pg_dump` is
 14.x, and the version mismatch makes a host-side dump abort outright. A host
 binary is used only after an explicit major-version check.
 
+The vault is archived whole except for `<vault>/.quartz/`, the leftover
+workspace of the retired rendered wiki (see [docs/vault.md](vault.md)). Nothing
+reads it, it can run to many GB, and the backup does not walk into it; the
+report says when it was left out. Every other dotted directory (`.obsidian/`, a
+vault `.git/`) is user data and is backed up. A restore renames the existing
+vault aside whole, so a `.quartz/` on disk moves with it to
+`<vault>.replaced-<timestamp>` and is never deleted.
+
 `--yes` skips the y/N prompt but **never** skips the pre-flight compatibility
 checks — those are what stop a restore from half-applying.
 
