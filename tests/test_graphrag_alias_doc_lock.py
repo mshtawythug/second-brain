@@ -50,6 +50,15 @@ def _entity(conn: psycopg.Connection[Any], key: str) -> str:
     return str(row[0])
 
 
+def _id_of(conn: psycopg.Connection[Any], key: str) -> str:
+    row = conn.execute(
+        "SELECT id::text FROM graph_entities WHERE tenant_id = %s AND canonical_key = %s",
+        (TENANT, key),
+    ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
 def _mention(conn: psycopg.Connection[Any], entity_id: str, document_id: str) -> None:
     conn.execute(
         "INSERT INTO graph_entity_mentions "
@@ -74,14 +83,21 @@ def test_an_alias_merge_and_a_concurrent_document_delete_do_not_deadlock(
     consistent: X and its mentions are gone, and Y is mentioned only by the
     target.
     """
-    source = _entity(test_db, "source-key")
-    target = _entity(test_db, "target-key")
-    doc_y = seed_note_doc(test_db, "doc-y")
-    doc_x = seed_note_doc(test_db, "doc-x")
+    # Ids are random, and both statements may walk an index rather than the
+    # heap. So the roles go by id: Y's document id sorts below X's, and the
+    # source's entity id below the target's. Heap order and every index order
+    # then agree. Otherwise the merge's DELETE could reach (source, X) before
+    # the gate, and the test would pass without exercising the cycle.
+    first, second = sorted([_entity(test_db, "key-one"), _entity(test_db, "key-two")])
+    source_key, target_key = (
+        ("key-one", "key-two") if first == _id_of(test_db, "key-one") else ("key-two", "key-one")
+    )
+    source, target = first, second
+    doc_y, doc_x = sorted([seed_note_doc(test_db, "doc-a"), seed_note_doc(test_db, "doc-b")])
     _mention(test_db, source, doc_y)
     _mention(test_db, source, doc_x)
     _mention(test_db, target, doc_x)
-    rules = [AliasRule("topic", "source-key", "topic", "target-key")]
+    rules = [AliasRule("topic", source_key, "topic", target_key)]
     config = ReconcileConfig(tenant_id=TENANT, generic_df_ratio=1.0)
     gate, merge_conn, delete_conn, observer = (connect_worker() for _ in range(4))
     try:

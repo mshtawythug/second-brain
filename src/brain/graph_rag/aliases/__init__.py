@@ -216,14 +216,6 @@ def apply_aliases(
 # ---------------------------------------------------------------------------
 
 
-def _existing_source_ids(
-    conn: psycopg.Connection[Any], tenant_id: str, rules: list[AliasRule]
-) -> list[str]:
-    """The entity ids of every rule source that exists (absent ones are no-ops)."""
-    ids = (_entity_id_by_key(conn, tenant_id, r.from_type, r.from_key) for r in rules)
-    return [entity_id for entity_id in ids if entity_id is not None]
-
-
 #: Every document a merge of the given source entities will touch (their
 #: mentions, and contributions with them at either end), locked in id order.
 _LOCK_ALIAS_DOCUMENTS = (
@@ -243,17 +235,21 @@ def _lock_alias_documents(
 ) -> None:
     """Lock ``FOR KEY SHARE``, in id order, every document the merge will touch.
 
-    Call it right after the graph write lock, before any graph row is written.
-    ``_repoint_mentions`` DO-UPDATEs a target row, which runs no FK check and so
-    takes no lock on the document, and then DELETEs the source rows. A
-    concurrent ``DELETE FROM documents`` landing between those two statements
-    deadlocked with its cascade: the cascade waited on the updated target row,
-    and the merge's DELETE waited on the cascade's deleted source row. Holding
-    the documents first makes such a DELETE wait for the merge. A delete that
-    committed first leaves no row to lock, and its cascade has already removed
-    the rows the merge would have moved. The only competitors are single-row
-    autocommit DELETEs, which hold one document and wait for nothing graph-side,
-    so the id order is belt-and-braces. See
+    Call it in each rule's transaction, right after the graph write lock and
+    before the rule writes. ``_repoint_mentions`` DO-UPDATEs a target row, which
+    runs no FK check and so takes no lock on the document, and then DELETEs the
+    source rows. A concurrent ``DELETE FROM documents`` landing between those
+    two statements deadlocked with its cascade: the cascade waited on the
+    updated target row, and the merge's DELETE waited on the cascade's deleted
+    source row. Holding the documents first makes such a DELETE wait for the
+    merge. A delete that committed first leaves no row to lock, and its cascade
+    has already removed the rows the merge would have moved.
+
+    Per rule is enough. The locks last to the end of the outer transaction, so
+    every document whose rows an earlier rule touched is already held. A later
+    rule can therefore wait only on a document whose delete needs none of the
+    merge's rows. The only competitors are single-row autocommit DELETEs, which
+    hold one document, so the id order is belt-and-braces. See
     ``docs/plans/2026-10-22-graph-entities-deadlock.md``.
     """
     if source_ids:
@@ -546,9 +542,6 @@ def merge_aliases(
     try:
         with conn.transaction():
             acquire_graph_write_lock(conn, tenant_id)
-            # Every rule's documents, up front: a per-rule lock alone would let
-            # rule 2 wait on a doc whose rows rule 1 already holds.
-            _lock_alias_documents(conn, tenant_id, _existing_source_ids(conn, tenant_id, rules))
             res = apply_aliases(conn, tenant_id, rules, dry_run=False)
             if dry_run:
                 # Record the counters BEFORE unwinding so the dry-run summary
