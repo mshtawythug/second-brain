@@ -240,6 +240,7 @@ def test_a_failed_connect_disables_the_lane(caplog: pytest.LogCaptureFixture) ->
         raise psycopg.OperationalError("synthetic connect failure")
 
     lane = GraphLane(_Syncer(), _refuse)  # type: ignore[arg-type]
+    lane.remove(None, "queued")  # type: ignore[arg-type]  # pending when the connect fails
     with caplog.at_level(logging.ERROR, logger="brain.vault.graph_lane"):
         lane.start()
         # The lane marks itself closed BEFORE it logs, so the record proves it.
@@ -251,6 +252,10 @@ def test_a_failed_connect_disables_the_lane(caplog: pytest.LogCaptureFixture) ->
     exited = lane.close(WAIT_FOR_BACKSTOP_S)
 
     assert logged, "the failed connect was not logged"
+    errors = " ".join(r.getMessage() for r in caplog.records)
+    assert "1 graph remove(s) not applied (queued)" in errors, (
+        f"the failed connect did not name the removes it dropped: {errors!r}"
+    )
     assert queued == [], "a submit after a failed connect was queued"
     assert exited, "the lane thread did not exit after a failed connect"
 

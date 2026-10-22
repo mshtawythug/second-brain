@@ -348,10 +348,6 @@ def run_watcher(
         "vault watcher: scoped polling on top-level dirs: %s",
         ", ".join(scheduled_names) or "(none)",
     )
-    # Start the lane only now, after the setup that can raise, so a failed
-    # start never leaks its thread and connection.
-    if lane is not None:
-        lane.start()
     observer.start()
 
     # 4. Signal handlers. SIGINT for Ctrl-C, SIGTERM for systemd /
@@ -368,6 +364,10 @@ def run_watcher(
         for sig in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[sig] = signal.signal(sig, _signal_handler)
 
+    # Start the lane LAST, right before the stop-wait whose finally closes it,
+    # so no setup failure can leak its thread; requests just queue until now.
+    if lane is not None:
+        lane.start()
     try:
         # Block until a signal (or test) flips the stop_event.
         state.stop_event.wait()
@@ -412,7 +412,10 @@ def run_watcher(
             undrained = lane.undrained_removes()
             logger.warning(
                 "vault watcher: graph lane still finishing a reconcile; %d graph "
-                "remove(s) not applied (%s); repair with `brain graphrag build`",
+                "remove(s) not applied (%s): their AGE Document vertices stay until "
+                "`brain graphrag build --force` (re-extracts concepts for every document "
+                "when concepts are on); aggregates and orphan entities heal at the next "
+                "graph reconcile or with `brain graphrag refresh`",
                 len(undrained),
                 ", ".join(undrained) or "none",
             )

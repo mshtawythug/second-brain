@@ -352,6 +352,40 @@ def test_undrained_removes_at_shutdown_are_logged(
         syncer.release.set()
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any(doomed_id in m and "brain graphrag build" in m for m in warnings), (
+    assert any(doomed_id in m and "brain graphrag build --force" in m for m in warnings), (
         f"an undrained graph remove was not logged with its id and the repair: {warnings!r}"
     )
+
+
+class _ObserverThatCannotStart(_Observer):
+    def start(self) -> None:
+        raise RuntimeError("synthetic observer start failure")
+
+
+def test_an_observer_that_cannot_start_leaks_no_lane_thread(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """W3b: the lane starts LAST, so even ``observer.start()`` failing leaks no lane."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write(vault / "n.md", {"id": str(uuid.uuid4()), "title": "N"}, "n\n")
+    lanes_before = _lane_threads()
+    syncer = _SlowGraphSyncer()
+
+    raised: Exception | None = None
+    try:
+        run_watcher(
+            _conn_factory(),
+            embedder=fake_embedder,
+            config=WatchConfig(vault_path=vault, debounce_ms=10),
+            observer_factory=_ObserverThatCannotStart,
+            install_signal_handlers=False,
+            graph_syncer=syncer,  # type: ignore[arg-type]
+        )
+    except RuntimeError as exc:
+        raised = exc
+    leaked = _lane_threads() - lanes_before
+    syncer.release.set()
+
+    assert raised is not None, "fixture: observer.start() must fail"
+    assert not leaked, "observer.start() failed and run_watcher leaked a graph lane thread"

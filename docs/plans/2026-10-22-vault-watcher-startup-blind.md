@@ -89,8 +89,17 @@ The constraints come from the code:
     NOT redo them: it only removes graph rows for pruned documents. So when
     `close` times out, the removes still queued are not applied.
     `GraphLane.undrained_removes()` names them, and `run_watcher` logs a
-    WARNING with their count, their document ids and the repair command
-    (`brain graphrag build`). In exactly this PR's scenario (an 8-10 minute
+    WARNING with their count, their document ids and the real repair options.
+    These were verified against `cli.graphrag_build`, `cli.graphrag_refresh`
+    and `build.build_graph`:
+    - **The ghost AGE `Document` vertex** (and its `MENTIONED_IN` edges) stays
+      until `brain graphrag build --force`. That clears the tenant's AGE mirror
+      and rebuilds it, and with concepts on it re-extracts every document.
+    - **Aggregates and orphan entities** heal at the next non-skipped graph
+      reconcile, for that reconcile's aspects, or with `brain graphrag
+      refresh`.
+    - **Neither of these works:** a bare `brain graphrag build` only prints
+      usage, and `--backfill` skips the deleted document. In exactly this PR's scenario (an 8-10 minute
     extraction in flight), a routine launchd restart or reinstall hits this
     case. That made it the review's LOW-MEDIUM finding.
   - requests after `close` are ignored.
@@ -117,18 +126,27 @@ option, evaluated and declined).
 - **Applying the removes at shutdown** on a second connection would put two
   graph writers in one process (the deadlock class PR #53 addresses), or wait
   out the in-flight reconcile.
-- **So** the lost removes are named in a WARNING with the repair command, and
-  `remove_document` is idempotent, so the repair is safe to run at any time.
+- **So** the lost removes are named in a WARNING with the real repair options
+  (above).
+- **Deferred follow-up** (in the handoff): a cheap, targeted
+  `brain graphrag remove <id>` that calls `remove_document` for one id.
+  `remove_document` is robust whether or not the `documents` row still exists.
 
 **Lane robustness (review items 2-4):**
 
 - **A failed connect** is logged (`describe_failure`, class only), and the lane
-  marks itself closed and clears its queue, so later submits are no-ops (L9).
+  marks itself closed and clears its queue, so later submits are no-ops. The
+  ERROR line says graph sync is off until a restart, and names the count and
+  ids of the removes it dropped (audit G2), since a later startup does not
+  redo them (L9).
 - **A failing request** is logged by class only: an exception message can
   quote row values (L7).
-- **`lane.start()` runs just before `observer.start()`**, after the setup that
-  can raise, so a failed setup never leaks the lane's thread and connection
-  (W3).
+- **`lane.start()` runs LAST**, after `observer.start()` and the signal
+  handlers, right before the stop-wait whose `finally` closes it. So no setup
+  failure can leak the lane's thread and connection (W3: a failing observer
+  factory; W3b: a failing `observer.start()`). Requests just queue until then
+  (audit G3; round 2 had started it before `observer.start()`, outside the
+  `try`).
 - **The `except` around the lane's `conn.close()` is gone** (audit F2). psycopg's
   `close` is idempotent and does not raise, so the branch was dead.
 
@@ -172,6 +190,7 @@ injected slow syncer (a `GraphSyncTarget` whose `reconcile` blocks on an
 | L9 | lane: a `conn_factory` that raises leads to a logged error, an exited thread, and no-op submits | a failed connect cannot wedge the lane |
 | L10 | lane: an idle lane closes at once (`close(1.0) is True`) | `close` wakes the thread (audit F1) |
 | W3 | `run_watcher` whose observer factory raises leaks no lane thread | the lane starts only after setup |
+| W3b | `run_watcher` whose `observer.start()` raises leaks no lane thread | the lane starts last |
 | W4 | a delete's remove queued behind a blocked reconcile at shutdown is logged with its document id and `brain graphrag build` | undrained removes are named |
 
 ## Ceiling
@@ -334,7 +353,39 @@ they are now predicted:
 
 `graph_lane.py` is at 100% branch coverage over the lane and startup tests.
 
-**Ceiling:** `watch.py` is now 1,195 lines (1,184 after round 1). The extra
+**Ceiling:** `watch.py` is now 1,198 lines: 1,184 after round 1, 1,195 after round 2, then +3 in round 3 for the reworded repair line. The extra
 lines are the `_LANE_CLOSE_TIMEOUT_S` constant, the undrained-removes warning,
 and starting the lane just before the observer. `graph_lane.py` is 147 lines.
 The CLAUDE.md growth record covers both.
+
+### Round 3: the PR #54 review and re-audit of `f0ed695`
+
+- **The repair line was wrong.** It named `brain graphrag build`, which
+  repairs nothing: bare, it prints usage, and `--backfill` skips the deleted
+  document. The warning now names the real options, verified against
+  `cli.graphrag_build`, `cli.graphrag_refresh`, `build.build_graph`,
+  `aggregates.refresh_aggregates` and `reconcile.reconcile_document`:
+  - `build --force` for the ghost AGE `Document` vertices, re-extracting
+    concepts for every document when concepts are on;
+  - `refresh`, or the next non-skipped reconcile, for aggregates and orphan
+    entities.
+
+  W4 asserts `brain graphrag build --force`.
+- **Audit G1:** the CLAUDE.md trail now carries 1,184 (`5e3c0f2`) and 1,195
+  (`f0ed695`), both verified with `git show "${sha}:src/brain/vault/watch.py"
+  | wc -l`, and a descriptive hop for this commit.
+- **Audit G2:** a failed connect's ERROR names the count and ids of the queued
+  removes it drops (L9).
+- **Audit G3:** the lane starts LAST, after `observer.start()` and the signal
+  handlers. W3b (a failing `observer.start()`) pins it.
+
+**The matrix of record:** strict judge, snapshot `9c31e98`, `git archive` copy
+only. All 53 mutants are OK.
+
+| Mutant | Edit | Failing tests (exactly) |
+|---|---|---|
+| H2 (re-anchored) | a failed connect keeps accepting work | L9 "a submit after a failed connect was queued" |
+| H4 | the lane starts before `observer.start()` (round 2's position) | W3b "observer.start() failed and run_watcher leaked a graph lane thread" |
+| H4b | the lane starts right after the startup sync (round 1's position) | W3, W3b |
+| R1 | the warning names a plain `brain graphrag build` | W4 |
+| R2 | a failed connect's ERROR hides the dropped removes | L9 "the failed connect did not name the removes it dropped" |

@@ -120,11 +120,19 @@ class GraphLane:
             conn = self._conn_factory()
         except psycopg.Error as exc:
             # Without a connection the lane can do nothing: close it (before
-            # logging, so the log line proves it) so later submits are no-ops.
+            # logging, so the log line proves it) so later submits are no-ops,
+            # and name the removes dropped with it: a later startup won't redo them.
             with self._cond:
                 self._closing = True
+                dropped = [d for o, d in self._pending if o == "remove"]
                 self._pending.clear()
-            logger.error("vault watcher: graph lane could not connect: %s", describe_failure(exc))
+            logger.error(
+                "vault watcher: graph lane could not connect: %s; graph sync is off until "
+                "the watcher restarts; %d graph remove(s) not applied (%s)",
+                describe_failure(exc),
+                len(dropped),
+                ", ".join(dropped) or "none",
+            )
             return
         try:
             conn.autocommit = True

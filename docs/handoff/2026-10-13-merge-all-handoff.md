@@ -232,6 +232,17 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
      - **Plan:** `docs/plans/2026-10-22-vault-watcher-startup-blind.md`.
      - **Side effect:** the graph now lags while a large startup backlog drains. It is
        best-effort and recomputable with `brain graphrag build`.
+  6. **Deferred: a targeted repair for lost graph removes.** When the watcher's shutdown times
+     out behind a long reconcile (PR #54), the removes queued behind it are not applied. A
+     startup self-heal was declined, because every per-doc relational graph table cascades on
+     documents delete, so nothing relational records a lost remove.
+     - **What happens today:** the shutdown WARNING names the document ids. Their ghost AGE
+       `Document` vertices stay until `brain graphrag build --force`, which, with concepts on,
+       re-extracts every document. Aggregates and orphan entities heal at the next graph
+       reconcile or with `brain graphrag refresh`.
+     - **The cheap repair:** a `brain graphrag remove <id>` command that calls
+       `graph_rag.reconcile.remove_document` for the logged ids. It is robust to an
+       already-deleted `documents` row, and it is not built yet.
 
 ## Status on 2026-10-16: DONE except items that need the user
 
