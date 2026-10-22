@@ -202,6 +202,14 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
      DIFFERENT job is now enqueued first, under the lock. Every other action pair still coalesces,
      the atomic-save delete+create collapse included. The pair table is in
      `docs/plans/2026-10-22-vault-watcher-shutdown-mixed-actions.md`.
+  4. **Still open: a coalesced move can carry the wrong document's row.** A pending `upsert` or
+     `delete` of P is coalesced into a later `move` P → Q. If P had been re-populated by a
+     DIFFERENT document (another frontmatter id, B) before the rename, `_handle_move` renames the
+     previous document's row (A) to Q. Syncing Q then either hits `documents_vault_path_idx` (Q
+     carries id B) or adopts A's id (Q is id-less). Coalescing stays the default, because it keeps
+     A's backlinks in the common same-id atomic save. The case predates PR #51 (via upsert →
+     move), and PR #51 neither introduced nor widened it (PR #51 audit, F1). A fix would have
+     `_handle_move` compare the destination's frontmatter id with the row's id before renaming.
 
 ## Status on 2026-10-16: DONE except items that need the user
 
