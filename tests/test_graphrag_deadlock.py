@@ -661,3 +661,76 @@ def test_an_indexed_document_is_planned_without_reading_its_body(
     assert len(first_reads) == 1, f"expected one body read to extract: {first_reads}"
     assert second.skipped is True
     assert second_reads == [], f"an up-to-date document's body was read: {second_reads}"
+
+
+# --------------------------------------------------------------------------- #
+# A reconcile's rewrite vs a concurrent DELETE of the same document
+# --------------------------------------------------------------------------- #
+def test_a_rewrite_and_a_concurrent_document_delete_do_not_deadlock(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """The PR #54 reviewer's cycle, and the plan's same-document residual.
+
+    At ``8711ff0``:
+
+    1. The reconcile (A) rewrites X: it DELETEs X's old mention rows. A gate
+       row lock on X's contribution row parks A right after that, inside
+       ``rewrite_doc_relational``.
+    2. The worker (B) runs ``DELETE FROM documents WHERE id = X``. It takes X's
+       tuple lock, and its ON DELETE CASCADE waits on A's deleted mention rows.
+    3. The gate opens. A's INSERT of X's new mentions runs its FK check
+       (``FOR KEY SHARE`` on X) and waits on B. ``DeadlockDetected`` follows;
+       the reproduction aborted B, the worker.
+
+    Now A takes ``FOR KEY SHARE`` on X as the first statement after the graph
+    write lock (``ReconcilePlan.is_current``), before it touches a graph row.
+    B's DELETE waits on A while holding nothing A needs. A commits, then B
+    deletes X and its cascade. Neither side may raise, and the end state must
+    be consistent: X is gone, and so is every graph row of X.
+    """
+    doc = seed_note_doc(test_db, "deleted-while-rewritten")
+    persons = static_resolver([ResolvedPerson("alpha", "Alpha"), ResolvedPerson("bravo", "Bravo")])
+    reconcile_document(test_db, doc, backend=NullBackend(), config=_cfg(), person_resolver=persons)
+    gate, lane_conn, worker_conn, observer = _connect(), _connect(), _connect(), _connect()
+    try:
+        gate.autocommit = False
+        locked = gate.execute(
+            "SELECT 1 FROM graph_edge_contributions WHERE document_id = %s FOR UPDATE",
+            (doc,),
+        ).fetchall()
+        assert len(locked) == 1, "the setup must leave X exactly one contribution row"
+
+        lane = _Worker(
+            lambda: reconcile_document(
+                lane_conn,
+                doc,
+                backend=NullBackend(),
+                config=_cfg(),
+                person_resolver=persons,
+                force=True,
+            )
+        )
+        lane.start()
+        # The rewrite deleted X's mentions and is parked on the gate.
+        wait_for(lambda: _is_waiting_on_lock(observer, lane_conn.info.backend_pid))
+        worker = _Worker(
+            lambda: worker_conn.execute("DELETE FROM documents WHERE id = %s", (doc,))
+        )
+        worker.start()
+        wait_for(lambda: _is_waiting_on_lock(observer, worker_conn.info.backend_pid))
+        gate.rollback()
+        _join(lane, worker)
+
+        assert worker.error is None, f"the document DELETE failed: {worker.error!r}"
+        assert lane.error is None, f"the reconcile failed: {lane.error!r}"
+        remaining = test_db.execute(
+            "SELECT (SELECT count(*) FROM documents WHERE id = %(d)s),"
+            " (SELECT count(*) FROM graph_entity_mentions WHERE document_id = %(d)s),"
+            " (SELECT count(*) FROM graph_edge_contributions WHERE document_id = %(d)s),"
+            " (SELECT count(*) FROM graph_index_state WHERE document_id = %(d)s)",
+            {"d": doc},
+        ).fetchone()
+        assert remaining == (0, 0, 0, 0), f"graph rows of the deleted doc remain: {remaining}"
+    finally:
+        for conn in (gate, lane_conn, worker_conn, observer):
+            conn.close()

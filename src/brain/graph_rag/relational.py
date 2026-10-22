@@ -23,6 +23,7 @@ __all__ = [
     "fetch_doc_meta",
     "graph_stats",
     "index_state",
+    "key_share_doc_meta",
     "list_entities",
     "read_doc_mentions",
     "rewrite_doc_relational",
@@ -40,6 +41,32 @@ def fetch_doc_meta(
     """Return ``(content_hash, content_type)`` for a document, or ``None``."""
     row = conn.execute(
         "SELECT content_hash, content_type FROM documents WHERE id = %s",
+        (document_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return (str(row[0]), str(row[1]))
+
+
+def key_share_doc_meta(
+    conn: psycopg.Connection[Any], document_id: str
+) -> tuple[str, str] | None:
+    """``fetch_doc_meta`` that also takes ``FOR KEY SHARE`` on the row.
+
+    For the reconcile write transaction, as its first statement after the graph
+    write lock and BEFORE any graph row is touched. Every graph row this
+    document's reconcile then inserts (mentions, contributions, watermarks)
+    runs an FK check that needs this same lock. Taking it last, inside those
+    inserts, deadlocked against a concurrent ``DELETE FROM documents``: the
+    delete held the tuple and its cascade waited on the rewrite's deleted rows.
+    Taken first, the delete simply waits for this short transaction. ``None``
+    means the row is gone, including a delete that committed while this
+    waited. ``KEY SHARE`` does not conflict with a plain ``UPDATE`` of the
+    document: every unique index on ``documents`` but the primary key is
+    partial, so such an update takes ``FOR NO KEY UPDATE``.
+    """
+    row = conn.execute(
+        "SELECT content_hash, content_type FROM documents WHERE id = %s FOR KEY SHARE",
         (document_id,),
     ).fetchone()
     if row is None:
