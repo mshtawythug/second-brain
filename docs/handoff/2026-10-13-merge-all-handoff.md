@@ -145,8 +145,8 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
 - `graph_runner` has no `degraded` tolerance. This is deliberate, and the reason is in its module
   docstring (PR #37 left it out on purpose).
 - ~~Watcher burst/stale-event tests that `sleep` and then assert ABSENCE can false-PASS under load.~~
-  *[FIXED 2026-10-22, on branch `test/vault-watcher-absence-sync`, in the commit that wrote this
-  note.]* The vault-watcher half had seven such tests in `tests/test_vault_watcher.py`. Each now
+  *[Tests FIXED 2026-10-22, on branch `test/vault-watcher-absence-sync`, in the commit that wrote
+  this note. The status covers the tests only; the production follow-up is the next bullet.]* The vault-watcher half had seven such tests in `tests/test_vault_watcher.py`. Each now
   asserts absence only on proof the watcher got past the point in question. The four
   debounce/filter tests use a one-hour debounce, so `pending_timers` is exact right after
   `inject()`, and the burst tests join every superseded timer. The three stale-event tests drain
@@ -154,6 +154,15 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
   proofs and the old tests' demonstrated false passes are in
   `docs/plans/2026-10-22-vault-watcher-absence-tests.md`. The build-watcher half is moot, because
   `tests/wiki/test_build_watcher.py` was deleted with the wiki at R3 (`885b5a6`).
+- Two production items in `src/brain/vault/watch.py`, found while reviewing those tests. Both are
+  for the follow-up watcher PR:
+  1. **A race in `_fire`** (lines 636-638 at `58e27c6`). It pops `state.pending_timers[path]` by
+     path, with no identity check. A superseded timer whose `_fire` has already started can pop its
+     successor's entry. That yields two jobs, and the orphaned successor can enqueue after the
+     shutdown sentinel. The fixed tests use a one-hour debounce, so they never reach that window.
+  2. **A known-false comment** at lines 800-803. It says an unguarded `sync_one_file` raises
+     `FileNotFoundError` and bumps `state.errors`. In fact it reports "file does not exist" and
+     returns, so `processed` is what advances. It was left unchanged so the test PR stays test-only.
 
 ## Status on 2026-10-16: DONE except items that need the user
 

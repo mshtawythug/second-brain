@@ -99,6 +99,13 @@ grows an over-ceiling file to get a determinism that the one-hour debounce plus
   burst test waits `WAIT_FOR_BACKSTOP_S` (10s) on the first live superseded
   timer before going red. That is the backstop, not a latency budget, and a
   passing run never pays it.
+- **A production race these tests rule out by design (found in review; tracked as a follow-up fix).**
+  `_fire` (`watch.py:636-638` at `58e27c6`) pops `state.pending_timers[path]` by
+  path with no identity check. So a superseded timer whose `_fire` has already
+  started can pop its successor's entry. That yields two jobs, and the orphaned
+  successor can enqueue after the shutdown sentinel. The one-hour debounce here
+  never lets a superseded timer reach `_fire`, so the tests neither hit nor
+  detect that window.
 - **Coverage of the threaded path.** The stale-event claims now run without
   `run_watcher`'s timer and worker threads. The event → debounce → job →
   worker path keeps its threaded coverage in `test_delete_event_removes_row`,
@@ -138,6 +145,11 @@ docstring said the unguarded worker's `sync_one_file` raises
 records `"file does not exist"` in its report and returns, so with the guard
 deleted, `processed` goes 0 → 1 and `errors` stays 0. The docstring is
 corrected. The `errors` claim gets its own mutation (`e6b`).
+`src/brain/vault/watch.py:800-803` (at `58e27c6`) states the same false
+claim in the guard's own comment. This PR is test-only, so the production
+copy was deliberately left unchanged. Correcting it is tracked for the
+follow-up watcher PR, which also edits `watch.py` (handoff, "Follow-ups
+still open").
 
 ### Mutations
 

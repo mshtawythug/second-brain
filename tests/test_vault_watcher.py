@@ -726,7 +726,10 @@ def test_stale_upsert_event_for_vanished_file(
     in its report and returns, so the unguarded worker counts the phantom
     as PROCESSED work instead. Measured 2026-10-22 by deleting the guard:
     ``processed`` 0 → 1, ``errors`` unchanged. The ``errors`` assertion
-    stays as the second half of "neither processed nor errored".
+    stays as the second half of "neither processed nor errored". The guard's
+    own comment in ``src/brain/vault/watch.py`` (lines 800-803 at
+    ``58e27c6``) makes the same false claim. This test-only change leaves it
+    alone on purpose; the follow-up watcher PR corrects it.
 
     Trigger scenarios in the wild: editor atomic-save creating + removing a
     temp file inside the debounce window, ``brain note new`` immediately
@@ -753,7 +756,9 @@ def test_stale_upsert_event_for_vanished_file(
     state = _run_events_through_worker(test_db, fake_embedder, config, event)
     assert state.jobs.empty(), "the drain must consume every job it enqueued"
 
-    # The fix: stale upsert for a vanished file must NOT raise + be caught.
+    # Second half of "neither processed nor errored": today's unguarded path
+    # does not raise (see docstring); this pins ``errors`` against one that
+    # does (mutation e6b).
     assert state.errors == 0, (
         f"stale upsert event inflated state.errors (={state.errors}); "
         f"watcher should re-stat the path before sync_one_file"
