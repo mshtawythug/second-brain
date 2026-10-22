@@ -118,13 +118,24 @@ still a correct local command. The historical specs are not edited.
 3. **The tag is mutable.** A digest pin would make it immutable, but the build
    fallback cannot produce a digest ref. The trade-off is accepted, the same as
    in `ci.yml`.
-4. **`brain setup --profile full` re-renders `$BRAIN_HOME/docker-compose.yml`
-   on every run.** With the template tag corrected, an existing full-profile
-   install that re-runs setup moves from pgvector 0.8.2 to 0.8.6 at its next
-   `pull`/`up` (the same minor). Fresh installs are unaffected. Before this
-   change their pull got the old 0.8.2 image, while the build fallback built
-   0.8.6 content under the 0.8.2 tag, which mislabelled it. The maintainer's
-   own prod container is not rendered from this template.
+4. **Re-running `brain setup --profile full` moves an existing install to
+   0.8.6.** `run_setup` re-renders `$BRAIN_HOME/docker-compose.yml` on every
+   run that passes preflight (`_write_compose_yml`, an unconditional
+   `atomic_write_text`). It then runs `docker compose pull` and `up -d` itself
+   (`_compose_up`). So the re-run pulls `pgv0.8.6` and `up -d` recreates the
+   Postgres container, in the same run. Preflight refuses an occupied Postgres
+   port, so in practice this happens on a re-run with the stack stopped.
+   Checked: binding a port Docker publishes fails with `EADDRINUSE` on macOS.
+   With the stack up, setup aborts before it writes anything. The major stays
+   PostgreSQL 16, so the data directory is unchanged. The `vector` extension
+   stays at 0.8.2 until `ALTER EXTENSION vector UPDATE;`, because migration
+   001's `CREATE EXTENSION IF NOT EXISTS` never updates it (pgvector README,
+   "Upgrading"). Fresh installs were getting the old image before this change.
+   Their pull got the 0.8.2 image, and the build fallback built 0.8.6 content
+   under the 0.8.2 tag, which mislabelled it. The maintainer's own prod
+   container is not rendered from this template. This is recorded in
+   `CHANGELOG.md` under `[Unreleased]`, and supersedes the 0.3.0 note "keep
+   running their current image until you rebuild deliberately".
 
 ## Verification
 

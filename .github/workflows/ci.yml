@@ -64,8 +64,9 @@
 #     block can't `build:` an image inline, so compose is used instead of a
 #     service container. All three AGE workflows PULL first: an explicit
 #     `pull --quiet || true` step, then a plain `up -d` (no `--build`). With no
-#     `pull_policy` set, `up` reuses any local copy of the tag; with none, it
-#     tries the registry and builds from `build:` only when that pull fails.
+#     `pull_policy` set, `up` reuses any local copy of the tag; when there is
+#     no local copy, it tries the registry and builds from `build:` only when
+#     that pull fails.
 #     The explicit step does not rely on that `up`-time behaviour, refreshes a
 #     cached copy of the mutable tag, and shows the pull as its own step.
 #     `|| true` preserves the local-build fallback the compose file promises if

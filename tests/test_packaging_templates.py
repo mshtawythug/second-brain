@@ -317,6 +317,23 @@ def test_age_image_version_pins_agree_everywhere() -> None:
 _AGE_PIN_HISTORY_PREFIXES = ("docs/", "CHANGELOG.md", "src/brain/migrations/")
 _AGE_TAG_RE = re.compile(r"second-brain-age:(?P<tag>pg16-[\w.\-]+)")
 _AGE_PROSE_RE = re.compile(r"pgvector (?P<version>\d+\.\d+\.\d+) \+")
+# Live files known to carry each pattern. The scan must SEE every one of them, or
+# a regex (or a file-listing) that stopped matching would pass with nothing to check.
+_AGE_TAG_SITES = frozenset(
+    {
+        "docker-compose.age-test.yml",
+        "src/brain/templates/docker-compose.yml.j2",
+        "bin/brain-graphrag-gif",
+        ".github/workflows/publish-age-image.yml",
+    }
+)
+_AGE_PROSE_SITES = frozenset(
+    {
+        "src/brain/templates/docker-compose.yml.j2",
+        "src/brain/templates/env.example",
+        ".env.example",
+    }
+)
 
 
 def _tracked_live_text_files() -> list[Path]:
@@ -348,12 +365,18 @@ def test_every_tracked_age_image_tag_matches_the_dockerfile_pins() -> None:
     expected_tag = f"pg16-v{age_version}-pgv{pgvector_version}"
 
     stale: list[str] = []
+    tag_seen: set[str] = set()
+    prose_seen: set[str] = set()
     for path in _tracked_live_text_files():
         try:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
             continue
         rel = path.relative_to(REPO_ROOT)
+        if _AGE_TAG_RE.search(text):
+            tag_seen.add(rel.as_posix())
+        if _AGE_PROSE_RE.search(text):
+            prose_seen.add(rel.as_posix())
         stale += [
             f"{rel}: tag {m.group('tag')}"
             for m in _AGE_TAG_RE.finditer(text)
@@ -367,6 +390,15 @@ def test_every_tracked_age_image_tag_matches_the_dockerfile_pins() -> None:
     assert not stale, (
         f"the Dockerfile pins {expected_tag} (pgvector {pgvector_version}), but these "
         f"tracked files disagree: {stale}"
+    )
+    # Not vacuous: every known live site was actually scanned and matched.
+    assert not _AGE_TAG_SITES - tag_seen, (
+        f"the tag scan never matched {sorted(_AGE_TAG_SITES - tag_seen)}; the regex or "
+        "the file listing no longer reaches them, so a stale tag there would pass"
+    )
+    assert not _AGE_PROSE_SITES - prose_seen, (
+        f"the prose scan never matched {sorted(_AGE_PROSE_SITES - prose_seen)}; the regex "
+        "or the file listing no longer reaches them"
     )
 
 
