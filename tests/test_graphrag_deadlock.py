@@ -12,8 +12,9 @@ production DI seams: the ``person_resolver`` and the ``extractor`` are injected
 fakes, and a third "gate" connection holds a row lock where the interleaving
 needs a writer parked. The tests never sleep for a fixed time and assume it is
 long enough: they poll ``pg_stat_activity`` until a backend is waiting on a
-lock, with a deadline. Every worker connection has a ``statement_timeout`` so a
-regression fails within seconds instead of hanging the suite.
+lock, through the shared backstop ``tests.thread_wait.wait_for``. Every worker
+connection has a ``statement_timeout``, so a regression fails within seconds
+instead of hanging the suite.
 
 * :func:`test_backfill_concept_upsert_vs_watcher_recompute_does_not_deadlock`
   is the reported crash: a deferred backfill reconcile vs a non-deferred
@@ -33,7 +34,6 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
-import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -47,6 +47,7 @@ from brain.graph_rag.reconcile import (
     reconcile_document,
 )
 from brain.graph_rag.schema import EntityMention, GraphEntity
+from tests.thread_wait import wait_for
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -226,14 +227,6 @@ def _is_waiting_on_lock(observer: psycopg.Connection[Any], pid: int) -> bool:
     return row is not None and row[0] == "Lock"
 
 
-def _wait_for(predicate: Callable[[], bool], what: str) -> None:
-    deadline = time.monotonic() + _WAIT_S
-    while not predicate():
-        if time.monotonic() > deadline:
-            raise AssertionError(f"timed out waiting for {what}")
-        time.sleep(0.01)
-
-
 def _join(*workers: _Worker) -> None:
     for worker in workers:
         worker.join(_WAIT_S * 2)
@@ -293,12 +286,12 @@ def test_backfill_concept_upsert_vs_watcher_recompute_does_not_deadlock(
 
         def park_until_watcher_waits_or_ends() -> None:
             in_extract.set()
-            _wait_for(lambda: watcher is not None, "the watcher to start")
+            wait_for(lambda: watcher is not None)  # the watcher has started
             assert watcher is not None
-            _wait_for(
+            # The watcher is parked on a lock, or has already committed.
+            wait_for(
                 lambda: watcher.finished.is_set()
-                or _is_waiting_on_lock(observer, watcher_pid),
-                "the watcher to block or finish",
+                or _is_waiting_on_lock(observer, watcher_pid)
             )
 
         backfill = _Worker(
@@ -378,16 +371,12 @@ def test_two_full_reconciles_do_not_deadlock_in_the_tenant_recompute(
 
         first = reconcile(conn_one, doc_one, "p-alpha")
         first.start()
-        _wait_for(
-            lambda: _is_waiting_on_lock(observer, conn_one.info.backend_pid),
-            "the first reconcile to park on the gate",
-        )
+        # The first reconcile is parked on the gate.
+        wait_for(lambda: _is_waiting_on_lock(observer, conn_one.info.backend_pid))
         second = reconcile(conn_two, doc_two, "p-bravo")
         second.start()
-        _wait_for(
-            lambda: _is_waiting_on_lock(observer, conn_two.info.backend_pid),
-            "the second reconcile to park",
-        )
+        # The second reconcile is parked (on the gate at 94dd1cb, on the lock now).
+        wait_for(lambda: _is_waiting_on_lock(observer, conn_two.info.backend_pid))
         gate.rollback()
         _join(first, second)
 
