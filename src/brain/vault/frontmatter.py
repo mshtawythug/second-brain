@@ -76,6 +76,21 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return {}, text
 
 
+def read_frontmatter_id(path: Path) -> str | None:
+    """Return the file's frontmatter ``id``, or None if absent, invalid or unreadable.
+
+    Uses :func:`parse_frontmatter` and the same validity test ``sync`` applies
+    to ``id`` (a non-empty string). Malformed frontmatter reads as None; the
+    sync that follows reports that error itself.
+    """
+    try:
+        fields, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+    raw_id = fields.get("id")
+    return raw_id if isinstance(raw_id, str) and raw_id else None
+
+
 def body_hash(text: str) -> str:
     """Return SHA-256 of the body of a vault file (frontmatter + fence stripped).
 
