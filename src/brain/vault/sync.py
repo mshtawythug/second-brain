@@ -68,7 +68,7 @@ from .links import ParsedLink, parse_wiki_links
 from .resolver import resolve_link, title_collisions
 
 if TYPE_CHECKING:
-    from ..graph_rag.sync import GraphSyncer
+    from .graph_lane import GraphSyncTarget
 
 # Top-level vault directories (or anything starting with ``_``) that the sync
 # engine never treats as authored notes. ``_templates`` is editor scaffolding,
@@ -177,7 +177,7 @@ def sync_vault(
     dry_run: bool = False,
     link_rewrite: bool = True,
     owner_participants: frozenset[str] = frozenset(),
-    graph_syncer: GraphSyncer | None = None,
+    graph_syncer: GraphSyncTarget | None = None,
     secret_guard: str = _GUARD_OFF,
 ) -> SyncReport:
     """Reconcile every ``.md`` file under ``vault_path`` into the DB.
@@ -309,7 +309,7 @@ def sync_one_file(
     file_path: Path,
     link_rewrite: bool = True,
     owner_participants: frozenset[str] = frozenset(),
-    graph_syncer: GraphSyncer | None = None,
+    graph_syncer: GraphSyncTarget | None = None,
     secret_guard: str = _GUARD_OFF,
 ) -> SyncReport:
     """Sync exactly one ``.md`` file under ``vault_path``.
