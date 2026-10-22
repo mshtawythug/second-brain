@@ -387,7 +387,7 @@ def reconcile_document(
     # doc concept-indexed-empty until `build --concepts --force` (spec §17b #7).
     extracted: list[ExtractedEntity] = []
     if plan.concept_stale:
-        assert extractor is not None  # narrowed by concepts_active
+        assert extractor is not None and plan.content is not None  # see nothing_to_do
         extracted = extractor.extract(plan.content)
     # 3. Write: take the graph write lock, then drop a plan whose doc was edited
     # (or deleted) since step 1 -- the newer edit's own reconcile indexes it.

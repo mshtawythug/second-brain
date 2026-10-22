@@ -6,10 +6,10 @@ so that module stays under the 800-line ceiling. ``reconcile_document`` now
 runs in three steps:
 
 1. **Plan** (:func:`plan_reconcile`, inside a short read transaction): fetch
-   the doc's ``content_hash`` / ``content_type`` (and, when the concept aspect
-   is active, its body in the same SELECT), resolve its persons, and compare
-   both aspects' ``graph_index_state`` watermarks. The transaction commits before step 2, so every
-   ``AccessShareLock`` it took on ``documents`` / ``graph_*`` is released.
+   the doc's ``content_hash`` / ``content_type``, resolve its persons, compare
+   both aspects' ``graph_index_state`` watermarks, and, only when the concept
+   aspect is stale, read the body pinned to that hash. The transaction commits
+   before step 2, so every ``AccessShareLock`` it took on ``documents`` / ``graph_*`` is released.
 2. **Extract**, with NO transaction open: the concept extractor's model call.
    A transaction open across that call would hold its relation locks for
    seconds to minutes and stall DDL behind it (migration 028's ``lock_timeout``
@@ -43,7 +43,7 @@ from ..errors import GraphReconcileError
 from .concepts import CONCEPTS_ASPECT, concept_inputs_hash
 from .extract import EntityExtractor
 from .person_resolver import ResolvedPerson
-from .relational import fetch_doc_meta, fetch_doc_snapshot, index_state
+from .relational import fetch_doc_content_at, fetch_doc_meta, index_state
 from .weighting import suppress_ver
 
 if TYPE_CHECKING:
@@ -85,21 +85,25 @@ class ReconcilePlan:
     concept_stale: bool
     concept_extractor_ver: str
     concept_inputs_hash: str
-    #: The body to extract from, read in the SAME select as ``content_hash``;
-    #: empty unless ``concept_stale``.
-    content: str
+    #: The body to extract from, read only when ``concept_stale`` and only if
+    #: the document still has ``content_hash`` (else ``None``: superseded).
+    content: str | None
 
     @property
     def nothing_to_do(self) -> bool:
-        """Both aspects' watermarks match: the document is already indexed."""
-        return not self.person_stale and not self.concept_stale
+        """Write nothing: both watermarks match, or the plan is already superseded.
+
+        Superseded: the body changed between the hash read and the body read.
+        The newer edit's own reconcile indexes it.
+        """
+        return self.content is None or (not self.person_stale and not self.concept_stale)
 
     def is_current(self, conn: psycopg.Connection[Any]) -> bool:
         """True iff the document still exists with the ``content_hash`` the plan read.
 
-        That hash came from the same row version as ``content``, so a match
-        means the body the plan extracted is still the document's body (or a
-        byte-identical revert of it). Call it AFTER taking the graph write
+        ``content`` was read only if the document still had that hash, so a
+        match means the body the plan extracted is still the document's body
+        (or a byte-identical revert of it). Call it AFTER taking the graph write
         lock: from then on no other graph writer can index this document, so a
         plan that is current here stays current until this transaction commits.
         """
@@ -122,16 +126,10 @@ def plan_reconcile(
     marks every active aspect stale (spec §7 authoritative rebuild). Raises
     :class:`~brain.errors.GraphReconcileError` when the document does not exist.
     """
-    # When the concept aspect is active, read the hash and the body in ONE select
-    # (fetch_doc_snapshot): two reads could pair one edit's hash with another's body.
-    if extractor is not None:
-        snapshot = fetch_doc_snapshot(conn, document_id)
-    else:
-        meta = fetch_doc_meta(conn, document_id)
-        snapshot = None if meta is None else (meta[0], meta[1], "")
-    if snapshot is None:
+    doc_meta = fetch_doc_meta(conn, document_id)
+    if doc_meta is None:
         raise GraphReconcileError(f"cannot reconcile document {document_id!r}: not found")
-    content_hash, content_type, body = snapshot
+    content_hash, content_type = doc_meta
     tenant_id = cfg.tenant_id
     sver = suppress_ver(cfg.generic_df_ratio)
 
@@ -175,7 +173,9 @@ def plan_reconcile(
         concept_stale=concept_stale,
         concept_extractor_ver=extractor_ver,
         concept_inputs_hash=c_inputs_hash,
-        content=body if concept_stale else "",
+        # Pinned to the hash read above (fetch_doc_content_at); ``None`` means the
+        # doc changed in between, and the plan is superseded.
+        content=fetch_doc_content_at(conn, document_id, content_hash) if concept_stale else "",
     )
 
 

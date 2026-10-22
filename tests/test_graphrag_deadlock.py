@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import threading
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -547,7 +548,7 @@ class _BodyExtractor:
         return [_GAMMA] if text == self._v1_body else [_DELTA]
 
 
-def test_the_plan_reads_hash_and_body_from_one_row_version(
+def test_the_plan_never_pairs_one_edits_hash_with_another_edits_body(
     test_db: psycopg.Connection[Any],
 ) -> None:
     """An edit between the plan's hash read and body read, then a revert.
@@ -558,7 +559,11 @@ def test_the_plan_reads_hash_and_body_from_one_row_version(
     At ``0012a66`` the plan paired v1's hash with v2's body. The re-check under
     the lock passed, because the hash matched, and v2's concepts were committed
     under v1's watermark. Nothing re-indexes that: the watermark matches the
-    document. The plan must index the body that goes with the hash it read.
+    document. Now the body read is pinned to the hash read, so the plan sees
+    that v1's body is gone and writes nothing. The edit's own reconcile
+    indexes v2. Pairing v1's hash with v1's body would also be correct, so the
+    test asserts only the claim: v2's concepts are never indexed under v1's
+    hash.
     """
     doc = seed_note_doc(test_db, "torn-doc")
     v1 = test_db.execute("SELECT content FROM documents WHERE id = %s", (doc,)).fetchone()
@@ -589,11 +594,70 @@ def test_the_plan_reads_hash_and_body_from_one_row_version(
             extractor=_BodyExtractor(v1_body, revert_to_v1),
         )
 
-        current = test_db.execute("SELECT content FROM documents WHERE id = %s", (doc,))
-        assert current.fetchone() == (v1_body,)
-        assert _mentioned_keys(test_db, doc) == {"gamma"}, (
+        assert "delta" not in _mentioned_keys(test_db, doc), (
             "v2's concepts were indexed under v1's hash"
         )
     finally:
         for conn in (edit_conn, reconcile_conn):
             conn.close()
+
+
+class _RecordingConnection(psycopg.Connection[Any]):
+    """A psycopg connection that records every statement passed to ``execute``.
+
+    A test double by subclassing; production code is untouched.
+    """
+
+    statements: list[str]
+
+    def execute(self, query: Any, params: Any = None, **kwargs: Any) -> Any:
+        self.statements.append(str(query))
+        return super().execute(query, params, **kwargs)
+
+
+#: Any SELECT of the ``content`` column from ``documents``, whatever else it
+#: selects (``\b`` keeps ``content_hash`` / ``content_type`` out).
+_BODY_READ = re.compile(r"^\s*SELECT\b(?:(?!\bFROM\b).)*\bcontent\b.*\bFROM\s+documents\b", re.S)
+
+
+def _body_reads(statements: list[str]) -> list[str]:
+    return [query for query in statements if _BODY_READ.search(query)]
+
+
+def test_an_indexed_document_is_planned_without_reading_its_body(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """A re-run over an indexed corpus must not load every body for nothing.
+
+    The first reconcile reads the body once, to extract. The second finds both
+    watermarks current, so it must not read the body at all. Reading it eagerly
+    on every plan would make ``build --backfill --concepts`` over an indexed
+    corpus read every document's body for no work (PR #53 audit advisory).
+    """
+    doc = seed_note_doc(test_db, "indexed-doc")
+    conn = _RecordingConnection.connect(TEST_DATABASE_URL, autocommit=True, connect_timeout=5)
+    conn.statements = []
+    try:
+
+        def reconcile() -> Any:
+            return reconcile_document(
+                conn,
+                doc,
+                backend=NullBackend(),
+                config=_cfg(concepts=True),
+                person_resolver=static_resolver([]),
+                extractor=_HookExtractor([_GAMMA]),
+            )
+
+        first = reconcile()
+        first_reads = _body_reads(conn.statements)
+        conn.statements.clear()
+        second = reconcile()
+        second_reads = _body_reads(conn.statements)
+    finally:
+        conn.close()
+
+    assert first.skipped is False
+    assert len(first_reads) == 1, f"expected one body read to extract: {first_reads}"
+    assert second.skipped is True
+    assert second_reads == [], f"an up-to-date document's body was read: {second_reads}"
