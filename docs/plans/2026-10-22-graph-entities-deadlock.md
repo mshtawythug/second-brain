@@ -133,7 +133,18 @@ now runs in three steps. The read phase moved into the new module
 ceiling (797 -> 716 lines).
 
 1. **Plan,** in a short read transaction that commits before step 2 (watermarks,
-   persons, the body when the concept aspect is stale).
+   persons, and the body when the concept aspect is stale). The body read is
+   pinned to the hash the plan read: `WHERE id = %s AND content_hash = %s`
+   (`relational.fetch_doc_content_at`). If no row comes back, the document
+   changed between the two reads, and the plan is superseded and returns
+   `skipped`. Review round 2: two unpinned READ COMMITTED reads could pair one
+   edit's hash with another edit's body. An edit and a byte-identical revert
+   around them then passed the re-check, and the edit's concepts were committed
+   under the original hash, a watermark nothing ever flags stale. An interim
+   fix (`c1ebc63`) read hash and body in one SELECT, but it loaded every body
+   whenever the extractor was active, even with current watermarks (audit
+   advisory). The pinned lazy read does neither: it never pairs one edit's hash
+   with another's body, and it reads no body at all for an indexed document.
 2. **Extract,** with NO transaction open. The first version of this PR
    (`b998798`) ran the extraction before the lock but inside the open
    transaction. Its comment said the model call "never holds a lock", which was
@@ -256,6 +267,8 @@ seconds instead of hanging CI.
 | D4 the extraction holds no lock at all, and no transaction is open | `test_extraction_runs_with_no_transaction_or_lock_open` |
 | D5 a stale plan never overwrites a newer edit (audit F1) | `test_a_stale_reconcile_never_overwrites_a_newer_edit` |
 | D6 a plan whose document was deleted writes nothing | `test_a_reconcile_whose_document_was_deleted_writes_nothing` |
+| D7 one edit's concepts are never indexed under another edit's hash | `test_the_plan_never_pairs_one_edits_hash_with_another_edits_body` |
+| D8 an indexed document is planned without reading its body | `test_an_indexed_document_is_planned_without_reading_its_body` |
 
 `tests/test_graphrag_write_lock.py` holds the lock contract. Unit tests cover
 the guard and per-tenant scope. One test per writer W1-W10 holds the tenant's
@@ -276,6 +289,10 @@ Mutations are applied only in a `git archive` copy, never in this worktree.
 | M15 move the extraction into the read transaction | D4 |
 | M14 drop the `is_current` re-check | D5, D6 |
 | M16 make `is_current` treat a deleted document as current | D6 |
+| `0012a66` (round two: body read in a second, unpinned SELECT) | D7 |
+| `c1ebc63` (interim: hash and body in one SELECT, read eagerly) | D8 |
+| M17 drop the hash pin from the body read | D7 |
+| M18 read the body even when nothing is stale | D8 |
 | M3-M11 drop the call in each of W2-W10, one at a time | that writer's lock test only |
 | M12 key `acquire_graph_write_lock` on a constant instead of the tenant | the per-tenant test |
 | M13 remove the not-in-a-transaction guard | the guard test |
@@ -286,6 +303,25 @@ during extraction, and without the reorder the watcher parks on the lock before
 writing. Its red is the base code.
 
 ## Results
+
+### Review round 2 (PR #53, at `32c4a4e`)
+
+**RED first.**
+- `src/` at `0012a66` with the new tests: D7 fails with "v2's concepts were
+  indexed under v1's hash", and the other 20 pass.
+- `src/` at `c1ebc63`: D8 fails with "an up-to-date document's body was read:
+  ['SELECT content_hash, content_type, content FROM documents ...']".
+
+**GREEN.** The two files (21 tests) pass 5 runs of 5. The graph and docs-guard files (1,248 tests) pass; `ruff check` and `mypy src/` are clean.
+
+**Mutations.** Each ran in a fresh archive copy of `32c4a4e`; unmutated, all
+21 pass. M17 turns D7 red and M18 turns D8 red; nothing else changes. M1,
+M14, M16 and M3-M13 give the same reds as round one.
+- M2 turns D3, D4, D5 and D6 red. D7 stays green: the superseded check now
+  runs before the extraction.
+- M15 turns D4 red, and also D7. D7 here is a mutation artifact: the moved
+  extraction runs before the superseded check, so its `plan.content is not
+  None` assert fires.
 
 ### Review round (PR #53, at `a97eb86`)
 
