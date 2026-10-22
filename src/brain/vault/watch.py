@@ -31,6 +31,10 @@ Concurrency invariants worth restating:
 - ``_pending_timers`` and ``_jobs`` are only touched while holding
   ``_state_lock`` — a short, fine-grained mutex that doesn't block the
   worker (the worker holds the queue's lock instead).
+- A debounce timer's ``_fire`` acts only on its OWN ``pending_timers`` entry
+  and enqueues under that lock. This is the 2026-10-22 race fix, reasoned at
+  ``_schedule_debounced``'s ``_fire``. It is the growth CLAUDE.md's ceiling
+  table records for this over-800 file.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
   spamming events can't OOM the process; on overflow we trigger an
   immediate full sync and clear the buffer.
@@ -86,6 +90,7 @@ from watchdog.observers.polling import PollingObserver as Observer
 # (negligible for ~1100 docs); latency is the polling interval.
 from ..ingest import Embedder
 from ..log_rotation import default_log_dir, start_background_rotator
+from .debounce_timer import DebounceTimer, TimerFactory, daemon_timer
 from .derived_links.fence import strip_fence
 from .sync import SyncReport, sync_one_file, sync_vault
 
@@ -169,7 +174,10 @@ class _Job:
 class _WatcherState:
     """Mutable state shared across threads — guarded by ``lock``."""
 
-    pending_timers: dict[Path, threading.Timer] = field(default_factory=dict)
+    pending_timers: dict[Path, DebounceTimer] = field(default_factory=dict)
+    # Builds each per-path debounce timer. Tests inject a manual timer (see
+    # ``brain.vault.debounce_timer``) so timer races replay without sleeps.
+    timer_factory: TimerFactory = daemon_timer
     lock: threading.Lock = field(default_factory=threading.Lock)
     stop_event: threading.Event = field(default_factory=threading.Event)
     jobs: queue.Queue[_Job | None] = field(default_factory=queue.Queue)
@@ -344,17 +352,7 @@ def run_watcher(
         observer.stop()
         observer.join(timeout=5.0)
 
-        # Drain any in-flight debounce timers: cancel them, then enqueue
-        # an immediate job for each path that had a pending timer so the
-        # worker still picks up the user's last edit before exiting.
-        with state.lock:
-            pending_paths = list(state.pending_timers.keys())
-            for timer in state.pending_timers.values():
-                timer.cancel()
-            state.pending_timers.clear()
-        for path in pending_paths:
-            _enqueue(state, _Job(action="upsert", abs_path=path), config=config)
-
+        _drain_pending_timers(state, config)
         # Sentinel tells the worker its queue is now closed.
         state.jobs.put(None)
         worker_thread.join(timeout=10.0)
@@ -634,13 +632,20 @@ def _schedule_debounced(
     delay = max(config.debounce_ms, 0) / 1000.0
 
     def _fire() -> None:
+        # brain (2026-10-22, _fire race): ``cancel()`` cannot stop a callback
+        # that has already started, so this may run after ``timer`` was
+        # superseded, flushed by overflow, or drained at shutdown. Act only if
+        # the entry is still OUR timer: popping by path stole a successor's
+        # entry, producing two jobs and an orphan the drain never saw. Whoever
+        # removed our entry owns the path's event, so returning loses nothing.
+        # Check, pop and enqueue under one lock so a shutdown drain can never
+        # slip between the pop and the put, which leaves the job behind the
+        # sentinel. ``jobs`` is unbounded, so ``put`` never blocks.
         with state.lock:
-            state.pending_timers.pop(path, None)
-        _enqueue(
-            state,
-            _Job(action=action, abs_path=path, dest_path=dest),
-            config=config,
-        )
+            if state.pending_timers.get(path) is not timer:
+                return
+            del state.pending_timers[path]
+            _enqueue(state, _Job(action=action, abs_path=path, dest_path=dest), config=config)
 
     with state.lock:
         existing = state.pending_timers.pop(path, None)
@@ -662,10 +667,26 @@ def _schedule_debounced(
                 config=config,
             )
             return
-        timer = threading.Timer(delay, _fire)
-        timer.daemon = True
+        timer = state.timer_factory(delay, _fire)
         state.pending_timers[path] = timer
         timer.start()
+
+
+def _drain_pending_timers(state: _WatcherState, config: WatchConfig) -> None:
+    """Cancel every pending debounce timer and enqueue an upsert for its path.
+
+    Runs at shutdown, before the sentinel, so the worker still picks up the
+    user's last edit instead of dropping it. It was extracted from
+    ``run_watcher``'s ``finally`` on 2026-10-22, so that the ``_fire`` race
+    tests can drive the real drain.
+    """
+    with state.lock:
+        pending_paths = list(state.pending_timers.keys())
+        for timer in state.pending_timers.values():
+            timer.cancel()
+        state.pending_timers.clear()
+    for path in pending_paths:
+        _enqueue(state, _Job(action="upsert", abs_path=path), config=config)
 
 
 def _enqueue(
@@ -674,7 +695,11 @@ def _enqueue(
     *,
     config: WatchConfig,
 ) -> None:
-    """Push a job onto the worker queue, after the optional test hook."""
+    """Push a job onto the worker queue, after the optional test hook.
+
+    Called under ``state.lock`` by ``_fire`` and the overflow flush, so the
+    hook must never take that lock.
+    """
     if config.on_event is not None:
         try:
             config.on_event(job.action, job.abs_path)
@@ -797,10 +822,10 @@ def _worker_loop(
                     # file, a ``brain note new`` followed immediately
                     # by ``brain rm``, or any tool that creates +
                     # removes within the debounce window. Without this
-                    # guard ``sync_one_file`` would raise
-                    # ``FileNotFoundError``, the outer ``except`` would
-                    # bump ``state.errors``, and the shutdown report
-                    # would falsely flag a phantom failure. Skip the
+                    # guard ``sync_one_file`` would record "file does not
+                    # exist" in its report and return (it does not raise),
+                    # and the worker would count the phantom as processed
+                    # work (measured 2026-10-22, PR #48). Skip the
                     # job entirely (``continue``) so neither
                     # ``processed`` nor ``errors`` advances — there
                     # was no real work to count.

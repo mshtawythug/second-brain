@@ -154,8 +154,11 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
   proofs and the old tests' demonstrated false passes are in
   `docs/plans/2026-10-22-vault-watcher-absence-tests.md`. The build-watcher half is moot, because
   `tests/wiki/test_build_watcher.py` was deleted with the wiki at R3 (`885b5a6`).
-- Two production items in `src/brain/vault/watch.py`, found while reviewing those tests. Both are
-  for the follow-up watcher PR:
+- *[Both FIXED 2026-10-22 on `fix/vault-watcher-fire-race` (PR number below). `_fire` now acts only
+  on its own entry and enqueues under the lock, and the comment is corrected. Plan and mutation
+  proofs: `docs/plans/2026-10-22-vault-watcher-fire-race.md`.]* Two production items in
+  `src/brain/vault/watch.py`, found while reviewing those tests. Both were for the follow-up watcher
+  PR:
   1. **A race in `_fire`** (lines 636-638 at `58e27c6`). It pops `state.pending_timers[path]` by
      path, with no identity check. A superseded timer whose `_fire` has already started can pop its
      successor's entry. That yields two jobs, and the orphaned successor can enqueue after the
@@ -163,6 +166,14 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
   2. **A known-false comment** at lines 800-803. It says an unguarded `sync_one_file` raises
      `FileNotFoundError` and bumps `state.errors`. In fact it reports "file does not exist" and
      returns, so `processed` is what advances. It was left unchanged so the test PR stays test-only.
+- Still open, found while fixing the `_fire` race (both predate it):
+  1. **The shutdown drain enqueues every pending path as an `upsert`.** `pending_timers` keeps the
+     timer, not the job. So a `delete` still pending at shutdown becomes a stale upsert, which is
+     skipped, and the row survives until a pruning sync. A pending `move` upserts its vanished
+     source, and the destination is never synced.
+  2. **A job can still land after the sentinel through the observer.** `run_watcher` gives
+     `observer.join` 5s. If the observer thread outlives that, an event it delivers after the drain
+     arms a timer that nobody drains.
 
 ## Status on 2026-10-16: DONE except items that need the user
 

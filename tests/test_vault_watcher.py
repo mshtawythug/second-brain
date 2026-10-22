@@ -728,8 +728,8 @@ def test_stale_upsert_event_for_vanished_file(
     ``processed`` 0 → 1, ``errors`` unchanged. The ``errors`` assertion
     stays as the second half of "neither processed nor errored". The guard's
     own comment in ``src/brain/vault/watch.py`` (lines 800-803 at
-    ``58e27c6``) makes the same false claim. This test-only change leaves it
-    alone on purpose; the follow-up watcher PR corrects it.
+    ``58e27c6``) made the same false claim until the 2026-10-22 ``_fire``
+    race fix corrected it.
 
     Trigger scenarios in the wild: editor atomic-save creating + removing a
     temp file inside the debounce window, ``brain note new`` immediately
