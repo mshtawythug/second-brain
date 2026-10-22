@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -51,6 +52,16 @@ TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
 #: Backups hold the whole corpus in plaintext (§7), so the directory is
 #: owner-only — matching the 0600 the archive itself gets.
 _BACKUP_DIR_MODE = 0o700
+
+#: Top-level vault entries ``vault.tar`` leaves out. Only ``.quartz``: the
+#: Quartz wiki's workspace (``node_modules``, builds, ``.cache``), which nothing
+#: reads since the wiki was deleted (R3) and which an upgraded vault keeps until
+#: the user deletes it by hand — about 11 GB on one vault. Every other dotted
+#: entry is user data a restore must bring back (``.obsidian/`` config, a vault
+#: ``.git/``), which is why this is not sync's "skip every hidden dir" rule nor
+#: ``bin/monitor.py``'s ``{".quartz", ".git"}``. Rulings B1-B5 in
+#: ``docs/plans/2026-10-22-backup-skip-quartz.md``.
+VAULT_BACKUP_SKIP_DIRS: frozenset[str] = frozenset({".quartz"})
 
 
 @dataclass(frozen=True)
@@ -184,21 +195,60 @@ def _dump_database(
             )
 
 
-def tar_vault(vault_path: Path, destination: Path) -> int:
-    """Write an uncompressed ``vault.tar`` and return the file count.
+@dataclass(frozen=True)
+class VaultTar:
+    """What :func:`tar_vault` wrote: the regular-file count and what it left out."""
+
+    file_count: int
+    skipped: tuple[str, ...]
+
+
+def _vault_entries(vault_path: Path) -> tuple[list[Path], tuple[str, ...]]:
+    """Every vault entry to archive, sorted, plus the top-level names left out.
+
+    ``os.walk`` with in-place pruning, not ``rglob`` plus a filter: a filter
+    still lists and stats every entry under ``.quartz/node_modules`` on each
+    backup, while pruning ``dirnames`` never enters the tree. Apart from the
+    skip, the entry set is the one ``rglob("*")`` yields: every name in
+    ``dirnames`` and ``filenames`` at every level, with symlinked directories
+    listed but not followed (``followlinks=False``).
+    """
+    entries: list[Path] = []
+    skipped: list[str] = []
+    for root, dirnames, filenames in os.walk(vault_path):
+        here = Path(root)
+        if here == vault_path:
+            # Top level only (ruling B2): a nested `.quartz` was not written by
+            # this project, so it is the user's and stays in the backup.
+            skipped = sorted(
+                name for name in (*dirnames, *filenames) if name in VAULT_BACKUP_SKIP_DIRS
+            )
+            dirnames[:] = [name for name in dirnames if name not in VAULT_BACKUP_SKIP_DIRS]
+            filenames = [name for name in filenames if name not in VAULT_BACKUP_SKIP_DIRS]
+        entries.extend(here / name for name in (*dirnames, *filenames))
+    return sorted(entries), tuple(skipped)
+
+
+def tar_vault(vault_path: Path, destination: Path) -> VaultTar:
+    """Write an uncompressed ``vault.tar``; return its file count and the skips.
 
     Uncompressed on purpose: exactly two members then need checksums, and the
     outer gzip compresses it anyway. Per-file checksums over 1,200 vault files
     would bloat the manifest for no gain.
+
+    ``VAULT_BACKUP_SKIP_DIRS`` entries at the top of the vault are left out,
+    and ``file_count`` counts only what the tar holds, so the manifest's
+    ``vault_file_count`` and the restore report stay true to the archive.
     """
+    entries, skipped = _vault_entries(vault_path)
     file_count = 0
     with tarfile.open(destination, "w") as tar:
-        for path in sorted(vault_path.rglob("*")):
+        for path in entries:
             name = path.relative_to(vault_path).as_posix()
             tar.add(path, arcname=name, recursive=False)
             if path.is_file():
                 file_count += 1
-    return file_count
+    return VaultTar(file_count=file_count, skipped=skipped)
 
 
 def create_backup(
@@ -254,8 +304,11 @@ def create_backup(
 
             vault_present = include_vault and cfg.vault_path.is_dir()
             vault_file_count: int | None = None
+            vault_skipped: tuple[str, ...] = ()
             if vault_present:
-                vault_file_count = tar_vault(cfg.vault_path, staging / VAULT_MEMBER)
+                vault_tar_result = tar_vault(cfg.vault_path, staging / VAULT_MEMBER)
+                vault_file_count = vault_tar_result.file_count
+                vault_skipped = vault_tar_result.skipped
 
             active_embedder = embedder if embedder is not None else make_embedder(cfg)
             manifest = collect_manifest(
@@ -279,6 +332,13 @@ def create_backup(
             if vault_present
             else "vault skipped (not present in this backup)"
         )
+        for name in vault_skipped:
+            # Said out loud (ruling B7): a user comparing the archive with the
+            # vault on disk should not have to guess why ~11 GB are missing.
+            report(
+                f"left out {name}/ (leftover Quartz wiki output, not backed up; "
+                "safe to delete by hand)"
+            )
 
         files = {
             DUMP_MEMBER: FileEntry(
