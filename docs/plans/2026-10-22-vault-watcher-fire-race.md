@@ -253,7 +253,8 @@ New tests, in `tests/test_vault_watch_fire_race.py` (A-N, with M split into Ma/M
 | H | `test_overflow_flush_enqueues_a_pending_delete_before_the_full_sync` | A pending `delete` plus an overflow gives `[delete job, full-vault upsert]` |
 | I | `test_delete_fire_that_loses_to_the_overflow_flush_is_not_lost` | The reviewer's replay: the delete precedes the full sync, and the losing fire adds nothing |
 | J | `test_overflow_flush_enqueues_a_pending_move_with_its_destination` | A pending `move` plus an overflow gives `[move job with dest, full-vault upsert]` |
-| K | `test_overflowing_call_that_is_a_delete_is_enqueued` | The call that trips the overflow is a `delete`: it is enqueued before the full sync, and the flushed upsert is covered by it |
+| K | `test_overflowing_call_that_is_a_delete_is_enqueued` | The call that trips the overflow is a `delete`: it is enqueued before the full sync, the flushed upsert is covered by it, and the overflowing call builds NO timer (`len(rig.timers)` is unchanged) |
+| K2 | `test_overflowing_call_whose_timer_cannot_start_still_flushes` | With `start()` failing, an overflowing call still flushes: `[flushed delete, full sync]`, and nothing is left pending |
 | L | `test_raising_timer_factory_leaves_the_existing_entry_pending` | A factory raising on its 2nd call: P's original delete timer stays pending, and shutdown gives `[delete P, None]` |
 | Ma | `test_start_failure_delivers_a_delete_that_supersedes_a_pending_upsert` | The fake `start()` raises "can't start new thread" for a delete superseding a pending upsert. Nothing raises; the queue is `[delete P]` exactly once; nothing is pending; the upsert's timer is cancelled |
 | Mb | `test_start_failure_on_a_fresh_path_delivers_the_event_now` | The same failure with nothing pending: the queue is `[delete P]` exactly once, and nothing is pending |
@@ -394,6 +395,7 @@ Every cell not marked red passed:
 | MN | no `start()` fallback (the `except` never matches) | Ma, Mb `raised is None` ("a failing start() raised instead of delivering the event") |
 | MO | the fallback leaves the existing entry pending | Ma `rig.pending() == {}` |
 | MP | the fallback drops the new job | Ma, Mb `rig.queued() == [_Job("delete", note)]` |
+| OVFSTART | the overflowing call builds and starts a timer (`if not overflowing:` changed to `if True:`) | K `len(rig.timers) == timers_before`; K2 `rig.queued() == [delete, full sync]` |
 | MJ | no scheduling guard in `_Handler.on_any_event` | N `escaped is None` ("a scheduling failure escaped into the observer thread") |
 | ME | `daemon_timer` without `timer.daemon = True` | T `timer.daemon is True` |
 | neg | MA, with the wrong claimed assertion (`rig.events == []`) for A | **MISMATCH**: the checker can fail |
@@ -418,12 +420,34 @@ Each claim has its own killing mutant (clause e):
 - "nothing stays pending after a `start()` failure": MO → Ma;
 - "the new event is delivered exactly once": MP → Ma, Mb;
 - "a scheduling error never escapes into the observer thread": MJ → N;
+- "the overflowing call builds and starts no timer": OVFSTART → K, K2;
 - "the default timer is a daemon": ME → T.
+
+**The OVFSTART gap (PR #49 review of `76c9c2c`).**
+
+- **The hole.** The Fix section's claim that "the overflow path builds and
+  starts no timer at all" was stated but pinned by no test. The reviewer's
+  mutant OVFSTART survived 15/15. Under thread exhaustion it would make row
+  2b's fallback return BEFORE the flush, so no full sync is queued, and the
+  flushed deletes and moves stay pending.
+- **The fix.** K now asserts that the overflowing call builds no timer. K2
+  covers the start-failure variant.
+- **Evidence** (a `git archive` copy of `76c9c2c` with the new test file):
+  - unmutated, all 17 pass;
+  - OVFSTART applies 1/1 and reds K at `len(rig.timers) == timers_before` and
+    K2 at "the overflow flush was skipped when a timer could not start";
+  - the other 15 pass;
+  - the file was restored byte-identical.
+- **No correction needed.** The matrix had no OVFSTART-equivalent recorded as
+  killed. The 241-run matrix above predates K2 and the K assertion; this row
+  was run separately.
+- **No CLAUDE.md hop.** `watch.py` is unchanged by this commit, so the ceiling
+  row's trail stays correct as is.
 
 ### Stability
 
 - `test_vault_watch_fire_race.py` plus `test_debounce_timer.py` passed 5 times in
-  a row (16 passed each run in round 4). There are no threads and no sleeps, so nothing is
+  a row (16 passed each run in round 4; 17 after K2). There are no threads and no sleeps, so nothing is
   timing-dependent.
 - Run once, serially: the watcher and docs-guard files
   (`test_vault_watch_fire_race.py`, `test_debounce_timer.py`,

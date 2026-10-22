@@ -355,12 +355,37 @@ def test_overflowing_call_that_is_a_delete_is_enqueued(tmp_path: Path, mocker: A
     gone = tmp_path / "gone.md"
     rig = _Rig(tmp_path)
     rig.schedule(tmp_path / "a.md")  # an upsert: the full sync covers it
+    timers_before = len(rig.timers)
 
     _schedule_debounced(rig.config, rig.state, "delete", gone)  # overflows
 
     assert rig.queued() == [_Job(action="delete", abs_path=gone), _full_sync(tmp_path)], (
         "the overflowing call's own delete was dropped"
     )
+    assert len(rig.timers) == timers_before, "the overflowing call built a debounce timer"
+
+
+def test_overflowing_call_whose_timer_cannot_start_still_flushes(
+    tmp_path: Path, mocker: Any
+) -> None:
+    """The overflow path must not depend on a timer: it builds and starts none.
+
+    Were it to build one, a ``start()`` failure under thread exhaustion would
+    take the direct-delivery fallback and return BEFORE the flush: no full
+    sync would be queued, and the flushed delete would stay pending.
+    """
+    mocker.patch("brain.vault.watch._MAX_PENDING", 1)
+    gone = tmp_path / "gone.md"
+    rig = _Rig(tmp_path)
+    rig.schedule(gone, "delete")
+    rig.start_error = RuntimeError("can't start new thread")
+
+    rig.schedule(tmp_path / "other.md")  # overflows
+
+    assert rig.queued() == [_Job(action="delete", abs_path=gone), _full_sync(tmp_path)], (
+        "the overflow flush was skipped when a timer could not start"
+    )
+    assert rig.pending() == {}, "a flushed entry was left pending"
 
 
 # ---------------------------------------------------------------------------
