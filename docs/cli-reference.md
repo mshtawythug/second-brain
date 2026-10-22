@@ -706,7 +706,8 @@ the production Postgres is 16.x while a typical host Homebrew `pg_dump` is
 binary is used only after an explicit major-version check.
 
 The vault is archived whole except for `<vault>/.quartz/`, the leftover
-workspace of the deleted Quartz wiki. Nothing reads it, it can run to many GB,
+workspace of the retired rendered wiki (see [docs/vault.md](vault.md)). Nothing
+reads it, it can run to many GB,
 and the backup does not walk into it; the report says when it was left out.
 Every other dotted directory (`.obsidian/`, a vault `.git/`) is user data and is
 backed up. A restore renames the existing vault aside whole, so a `.quartz/` on
