@@ -403,8 +403,8 @@ def test_a_stale_reconcile_never_overwrites_a_newer_edit(
     call when the document is edited to v2 and the watcher's reconcile
     (``newer``) indexes v2 and commits. At ``d8baa50`` the older reconcile then
     committed v1's entities over v2's, with a watermark naming a body the
-    document no longer has, and nothing would re-index it. It must notice the
-    edit once it holds the lock, and write nothing.
+    document no longer has, and it stayed stale until the next build. It must
+    notice the edit once it holds the lock, and write nothing.
     """
     doc = seed_note_doc(test_db, "edited-doc")
     older_conn, newer_conn, edit_conn = _connect(), _connect(), _connect()
@@ -530,4 +530,70 @@ def test_extraction_runs_with_no_transaction_or_lock_open(
         )
     finally:
         for conn in (reconcile_conn, observer):
+            conn.close()
+
+
+class _BodyExtractor:
+    """Fake extractor that names ``gamma`` for the v1 body and ``delta`` otherwise."""
+
+    version = "fake-model@deadlock-v1"
+
+    def __init__(self, v1_body: str, hook: Callable[[], None]) -> None:
+        self._v1_body = v1_body
+        self._hook = hook
+
+    def extract(self, text: str) -> list[ExtractedEntity]:
+        self._hook()
+        return [_GAMMA] if text == self._v1_body else [_DELTA]
+
+
+def test_the_plan_reads_hash_and_body_from_one_row_version(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """An edit between the plan's hash read and body read, then a revert.
+
+    The person resolver runs between the plan's two reads at ``0012a66``: the
+    hash (v1) first, the body after it. Here the resolver edits the body to v2,
+    and the extractor reverts it to v1 (byte-identical, so the same hash).
+    At ``0012a66`` the plan paired v1's hash with v2's body. The re-check under
+    the lock passed, because the hash matched, and v2's concepts were committed
+    under v1's watermark. Nothing re-indexes that: the watermark matches the
+    document. The plan must index the body that goes with the hash it read.
+    """
+    doc = seed_note_doc(test_db, "torn-doc")
+    v1 = test_db.execute("SELECT content FROM documents WHERE id = %s", (doc,)).fetchone()
+    assert v1 is not None
+    v1_body = str(v1[0])
+    edit_conn, reconcile_conn = _connect(), _connect()
+    try:
+
+        def edit_to_v2(
+            conn: Any,
+            document_id: str,
+            *,
+            owner_keys: frozenset[str],
+            sender_denylist: frozenset[str] = frozenset(),
+        ) -> list[ResolvedPerson]:
+            _edit_body(edit_conn, doc, v1_body + "\nedited to v2")
+            return []
+
+        def revert_to_v1() -> None:
+            _edit_body(edit_conn, doc, v1_body)
+
+        reconcile_document(
+            reconcile_conn,
+            doc,
+            backend=NullBackend(),
+            config=_cfg(concepts=True),
+            person_resolver=edit_to_v2,
+            extractor=_BodyExtractor(v1_body, revert_to_v1),
+        )
+
+        current = test_db.execute("SELECT content FROM documents WHERE id = %s", (doc,))
+        assert current.fetchone() == (v1_body,)
+        assert _mentioned_keys(test_db, doc) == {"gamma"}, (
+            "v2's concepts were indexed under v1's hash"
+        )
+    finally:
+        for conn in (edit_conn, reconcile_conn):
             conn.close()

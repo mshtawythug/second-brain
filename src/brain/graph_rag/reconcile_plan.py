@@ -6,9 +6,9 @@ so that module stays under the 800-line ceiling. ``reconcile_document`` now
 runs in three steps:
 
 1. **Plan** (:func:`plan_reconcile`, inside a short read transaction): fetch
-   the doc's ``content_hash`` / ``content_type``, resolve its persons, compare
-   both aspects' ``graph_index_state`` watermarks, and read the body when the
-   concept aspect is stale. The transaction commits before step 2, so every
+   the doc's ``content_hash`` / ``content_type`` (and, when the concept aspect
+   is active, its body in the same SELECT), resolve its persons, and compare
+   both aspects' ``graph_index_state`` watermarks. The transaction commits before step 2, so every
    ``AccessShareLock`` it took on ``documents`` / ``graph_*`` is released.
 2. **Extract**, with NO transaction open: the concept extractor's model call.
    A transaction open across that call would hold its relation locks for
@@ -43,7 +43,7 @@ from ..errors import GraphReconcileError
 from .concepts import CONCEPTS_ASPECT, concept_inputs_hash
 from .extract import EntityExtractor
 from .person_resolver import ResolvedPerson
-from .relational import fetch_doc_content, fetch_doc_meta, index_state
+from .relational import fetch_doc_meta, fetch_doc_snapshot, index_state
 from .weighting import suppress_ver
 
 if TYPE_CHECKING:
@@ -85,7 +85,8 @@ class ReconcilePlan:
     concept_stale: bool
     concept_extractor_ver: str
     concept_inputs_hash: str
-    #: The body to extract from; read only when ``concept_stale``.
+    #: The body to extract from, read in the SAME select as ``content_hash``;
+    #: empty unless ``concept_stale``.
     content: str
 
     @property
@@ -94,11 +95,13 @@ class ReconcilePlan:
         return not self.person_stale and not self.concept_stale
 
     def is_current(self, conn: psycopg.Connection[Any]) -> bool:
-        """True iff the document still exists with the body this plan read.
+        """True iff the document still exists with the ``content_hash`` the plan read.
 
-        Call it AFTER taking the graph write lock: from then on no other graph
-        writer can index this document, so a plan that is current here stays
-        current until this transaction commits.
+        That hash came from the same row version as ``content``, so a match
+        means the body the plan extracted is still the document's body (or a
+        byte-identical revert of it). Call it AFTER taking the graph write
+        lock: from then on no other graph writer can index this document, so a
+        plan that is current here stays current until this transaction commits.
         """
         meta = fetch_doc_meta(conn, self.document_id)
         return meta is not None and meta[0] == self.content_hash
@@ -119,10 +122,16 @@ def plan_reconcile(
     marks every active aspect stale (spec §7 authoritative rebuild). Raises
     :class:`~brain.errors.GraphReconcileError` when the document does not exist.
     """
-    doc_meta = fetch_doc_meta(conn, document_id)
-    if doc_meta is None:
+    # When the concept aspect is active, read the hash and the body in ONE select
+    # (fetch_doc_snapshot): two reads could pair one edit's hash with another's body.
+    if extractor is not None:
+        snapshot = fetch_doc_snapshot(conn, document_id)
+    else:
+        meta = fetch_doc_meta(conn, document_id)
+        snapshot = None if meta is None else (meta[0], meta[1], "")
+    if snapshot is None:
         raise GraphReconcileError(f"cannot reconcile document {document_id!r}: not found")
-    content_hash, content_type = doc_meta
+    content_hash, content_type, body = snapshot
     tenant_id = cfg.tenant_id
     sver = suppress_ver(cfg.generic_df_ratio)
 
@@ -166,7 +175,7 @@ def plan_reconcile(
         concept_stale=concept_stale,
         concept_extractor_ver=extractor_ver,
         concept_inputs_hash=c_inputs_hash,
-        content=fetch_doc_content(conn, document_id) if concept_stale else "",
+        content=body if concept_stale else "",
     )
 
 

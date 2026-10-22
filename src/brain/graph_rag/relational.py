@@ -19,7 +19,7 @@ from .schema import EdgeContribution, EntityMention, EntitySummary, GraphStats
 
 __all__ = [
     "delete_doc_relational",
-    "fetch_doc_content",
+    "fetch_doc_snapshot",
     "fetch_doc_meta",
     "graph_stats",
     "index_state",
@@ -47,17 +47,25 @@ def fetch_doc_meta(
     return (str(row[0]), str(row[1]))
 
 
-def fetch_doc_content(conn: psycopg.Connection[Any], document_id: str) -> str:
-    """Return a document's body text (for concept extraction; spec §4 D4).
+def fetch_doc_snapshot(
+    conn: psycopg.Connection[Any], document_id: str
+) -> tuple[str, str, str] | None:
+    """Return ``(content_hash, content_type, content)`` from ONE row version.
 
-    Fetched lazily — only when the concept aspect is stale and about to extract —
-    so the person-only path never pays to load a (potentially large) body.
+    For concept extraction (spec §4 D4). Hash and body come from a single
+    SELECT, so they always describe the same edit. Two READ COMMITTED reads
+    could pair one edit's hash with another edit's body: an edit and a revert
+    between them would index the edit's body under the reverted hash, and the
+    watermark would then never flag it stale. Only the concept path calls
+    this, so the person-only path never loads a (potentially large) body.
     """
     row = conn.execute(
-        "SELECT content FROM documents WHERE id = %s",
+        "SELECT content_hash, content_type, content FROM documents WHERE id = %s",
         (document_id,),
     ).fetchone()
-    return str(row[0]) if row is not None and row[0] is not None else ""
+    if row is None:
+        return None
+    return (str(row[0]), str(row[1]), str(row[2]) if row[2] is not None else "")
 
 
 def read_doc_mentions(

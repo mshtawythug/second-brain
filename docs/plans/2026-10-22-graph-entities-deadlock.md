@@ -153,7 +153,8 @@ ceiling (797 -> 716 lines).
 
 **No retry (candidate 4).** Graph writers can no longer deadlock with each
 other, so a retry would only hide a regression of that invariant. It would also
-redo the model call. The one residual (below) is a same-document race.
+redo the model call. The only remaining deadlock (Residuals, below) is a
+same-document race.
 
 ## Closed list of writers
 
