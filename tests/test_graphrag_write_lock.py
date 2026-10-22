@@ -17,10 +17,8 @@ All entities are synthetic; no PII.
 """
 from __future__ import annotations
 
-import hashlib
 import os
-import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -44,11 +42,11 @@ from brain.graph_rag.reconcile import (
     reconcile_document,
     remove_document,
 )
-from brain.graph_rag.schema import EntityMention, GraphEntity
 from brain.graph_rag.write_lock import (
     GRAPH_WRITE_LOCK_CLASS,
     acquire_graph_write_lock,
 )
+from tests.graph_fakes import NullBackend, seed_note_doc, static_resolver
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -61,54 +59,6 @@ TENANT = "default"
 # --------------------------------------------------------------------------- #
 # Test doubles
 # --------------------------------------------------------------------------- #
-class _NullBackend:
-    """A GraphBackend that writes nothing; these tests are about the lock."""
-
-    def bootstrap(self, conn: Any) -> None:  # pragma: no cover - unused
-        return None
-
-    def upsert_entities(
-        self, conn: Any, tenant_id: str, entities: Sequence[GraphEntity]
-    ) -> int:
-        return len(entities)
-
-    def upsert_mention_edges(
-        self,
-        conn: Any,
-        tenant_id: str,
-        document_id: str,
-        mentions: Sequence[EntityMention],
-        *,
-        document_props: Mapping[str, Any] | None = None,
-    ) -> int:
-        return len(mentions)
-
-    def refresh_cooccur_edges(self, conn: Any, tenant_id: str) -> int:
-        return 0
-
-    def detach_delete_entities(
-        self, conn: Any, tenant_id: str, entity_uuids: Sequence[str]
-    ) -> int:
-        return len(entity_uuids)
-
-    def detach_delete_documents(
-        self, conn: Any, tenant_id: str, document_uuids: Sequence[str]
-    ) -> int:
-        return len(document_uuids)
-
-    def clear_tenant(self, conn: Any, tenant_id: str) -> int:
-        return 0
-
-    def drop_graph(self, conn: Any, tenant_id: str) -> int:  # pragma: no cover
-        return 0
-
-    def traverse(self, *args: Any, **kwargs: Any) -> list[Any]:  # pragma: no cover
-        return []
-
-    def scope_person(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover
-        return None
-
-
 class _Summarizer:
     model = "fake-model:1b"
 
@@ -131,41 +81,11 @@ class _Embedder:
         return max(1, len(text) // 4)
 
 
-def _resolver(persons: list[ResolvedPerson]) -> Any:
-    def _resolve(
-        conn: Any,
-        document_id: str,
-        *,
-        owner_keys: frozenset[str],
-        sender_denylist: frozenset[str] = frozenset(),
-    ) -> list[ResolvedPerson]:
-        return persons
-
-    return _resolve
-
-
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
 def _cfg(tenant: str = TENANT) -> ReconcileConfig:
     return ReconcileConfig(tenant_id=tenant, generic_df_ratio=1.0)
-
-
-def _seed_doc(conn: psycopg.Connection[Any], name: str) -> str:
-    src = conn.execute(
-        "INSERT INTO sources (kind, external_id, metadata) "
-        "VALUES ('manual', %s, '{}'::jsonb) RETURNING id",
-        (name,),
-    ).fetchone()
-    assert src is not None
-    body = f"{name}\n<!-- {uuid.uuid4()} -->"
-    row = conn.execute(
-        "INSERT INTO documents (source_id, title, content, content_hash, content_type) "
-        "VALUES (%s, %s, %s, %s, 'note') RETURNING id::text",
-        (src[0], name, body, hashlib.sha256(body.encode()).hexdigest()),
-    ).fetchone()
-    assert row is not None
-    return str(row[0])
 
 
 def _seed_entity(
@@ -250,15 +170,15 @@ def test_lock_is_keyed_by_tenant(test_db: psycopg.Connection[Any]) -> None:
 
 
 def test_other_tenants_are_not_blocked(test_db: psycopg.Connection[Any]) -> None:
-    doc = _seed_doc(test_db, "doc")
+    doc = seed_note_doc(test_db, "doc")
     test_db.execute("SET lock_timeout = '200ms'")
     with _lock_held_elsewhere("some-other-tenant"):
         result = reconcile_document(
             test_db,
             doc,
-            backend=_NullBackend(),
+            backend=NullBackend(),
             config=_cfg(),
-            person_resolver=_resolver([ResolvedPerson("alpha", "Alpha")]),
+            person_resolver=static_resolver([ResolvedPerson("alpha", "Alpha")]),
         )
     assert result.skipped is False
 
@@ -267,31 +187,31 @@ def test_other_tenants_are_not_blocked(test_db: psycopg.Connection[Any]) -> None
 # W1-W10: every graph write transaction takes the lock
 # --------------------------------------------------------------------------- #
 def test_w1_reconcile_document_takes_the_lock(test_db: psycopg.Connection[Any]) -> None:
-    doc = _seed_doc(test_db, "doc")
+    doc = seed_note_doc(test_db, "doc")
     _assert_takes_graph_lock(
         test_db,
         lambda: reconcile_document(
             test_db,
             doc,
-            backend=_NullBackend(),
+            backend=NullBackend(),
             config=_cfg(),
-            person_resolver=_resolver([ResolvedPerson("alpha", "Alpha")]),
+            person_resolver=static_resolver([ResolvedPerson("alpha", "Alpha")]),
         ),
     )
 
 
 def test_w2_remove_document_takes_the_lock(test_db: psycopg.Connection[Any]) -> None:
-    doc = _seed_doc(test_db, "doc")
+    doc = seed_note_doc(test_db, "doc")
     _assert_takes_graph_lock(
         test_db,
-        lambda: remove_document(test_db, doc, backend=_NullBackend(), config=_cfg()),
+        lambda: remove_document(test_db, doc, backend=NullBackend(), config=_cfg()),
     )
 
 
 def test_w3_refresh_aggregates_takes_the_lock(test_db: psycopg.Connection[Any]) -> None:
     _assert_takes_graph_lock(
         test_db,
-        lambda: refresh_aggregates(test_db, backend=_NullBackend(), config=_cfg()),
+        lambda: refresh_aggregates(test_db, backend=NullBackend(), config=_cfg()),
     )
 
 
@@ -301,7 +221,7 @@ def test_w4_build_graph_force_prepass_takes_the_lock(
     _assert_takes_graph_lock(
         test_db,
         lambda: build_graph(
-            test_db, iter([]), backend=_NullBackend(), config=_cfg(), force=True
+            test_db, iter([]), backend=NullBackend(), config=_cfg(), force=True
         ),
     )
 
@@ -317,7 +237,7 @@ def test_w6_merge_aliases_takes_the_lock(test_db: psycopg.Connection[Any]) -> No
     rules = [AliasRule("topic", "absent-key", "topic", "target-key")]
     _assert_takes_graph_lock(
         test_db,
-        lambda: merge_aliases(test_db, TENANT, rules, _NullBackend(), config=_cfg()),
+        lambda: merge_aliases(test_db, TENANT, rules, NullBackend(), config=_cfg()),
     )
 
 
@@ -328,7 +248,7 @@ def test_w7_restore_winner_display_names_takes_the_lock(
     _assert_takes_graph_lock(
         test_db,
         lambda: _restore_winner_display_names(
-            test_db, TENANT, _NullBackend(), {("topic", "winner-key"): "WinnerKey"}
+            test_db, TENANT, NullBackend(), {("topic", "winner-key"): "WinnerKey"}
         ),
     )
 

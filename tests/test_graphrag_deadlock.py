@@ -34,8 +34,7 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
-import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import psycopg
@@ -46,7 +45,7 @@ from brain.graph_rag.reconcile import (
     ResolvedPerson,
     reconcile_document,
 )
-from brain.graph_rag.schema import EntityMention, GraphEntity
+from tests.graph_fakes import NullBackend, seed_note_doc, static_resolver
 from tests.thread_wait import wait_for
 
 TEST_DATABASE_URL = os.environ.get(
@@ -67,54 +66,6 @@ _WAIT_S = 15.0
 # --------------------------------------------------------------------------- #
 # Test doubles
 # --------------------------------------------------------------------------- #
-class _NullBackend:
-    """A GraphBackend that writes nothing (the relational layer deadlocked)."""
-
-    def bootstrap(self, conn: Any) -> None:  # pragma: no cover - unused
-        return None
-
-    def upsert_entities(
-        self, conn: Any, tenant_id: str, entities: Sequence[GraphEntity]
-    ) -> int:
-        return len(entities)
-
-    def upsert_mention_edges(
-        self,
-        conn: Any,
-        tenant_id: str,
-        document_id: str,
-        mentions: Sequence[EntityMention],
-        *,
-        document_props: Mapping[str, Any] | None = None,
-    ) -> int:
-        return len(mentions)
-
-    def refresh_cooccur_edges(self, conn: Any, tenant_id: str) -> int:
-        return 0
-
-    def detach_delete_entities(
-        self, conn: Any, tenant_id: str, entity_uuids: Sequence[str]
-    ) -> int:
-        return len(entity_uuids)
-
-    def detach_delete_documents(
-        self, conn: Any, tenant_id: str, document_uuids: Sequence[str]
-    ) -> int:
-        return len(document_uuids)
-
-    def clear_tenant(self, conn: Any, tenant_id: str) -> int:  # pragma: no cover
-        return 0
-
-    def drop_graph(self, conn: Any, tenant_id: str) -> int:  # pragma: no cover
-        return 0
-
-    def traverse(self, *args: Any, **kwargs: Any) -> list[Any]:  # pragma: no cover
-        return []
-
-    def scope_person(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover
-        return None
-
-
 class _HookExtractor:
     """Fake concept extractor that runs ``hook`` before returning ``entities``."""
 
@@ -132,19 +83,6 @@ class _HookExtractor:
         if self._hook is not None:
             self._hook()
         return list(self._entities)
-
-
-def _resolver(persons: list[ResolvedPerson]) -> Any:
-    def _resolve(
-        conn: Any,
-        document_id: str,
-        *,
-        owner_keys: frozenset[str],
-        sender_denylist: frozenset[str] = frozenset(),
-    ) -> list[ResolvedPerson]:
-        return persons
-
-    return _resolve
 
 
 class _Worker(threading.Thread):
@@ -181,30 +119,13 @@ def _connect() -> psycopg.Connection[Any]:
     return conn
 
 
-def _seed_doc(conn: psycopg.Connection[Any], name: str) -> str:
-    src = conn.execute(
-        "INSERT INTO sources (kind, external_id, metadata) "
-        "VALUES ('manual', %s, '{}'::jsonb) RETURNING id",
-        (name,),
-    ).fetchone()
-    assert src is not None
-    body = f"{name}\n<!-- {uuid.uuid4()} -->"
-    row = conn.execute(
-        "INSERT INTO documents (source_id, title, content, content_hash, content_type) "
-        "VALUES (%s, %s, %s, %s, 'note') RETURNING id::text",
-        (src[0], name, body, hashlib.sha256(body.encode()).hexdigest()),
-    ).fetchone()
-    assert row is not None
-    return str(row[0])
-
-
 def _seed_persons(conn: psycopg.Connection[Any], keys: Sequence[str]) -> None:
     """Commit person entities IN THIS ORDER (heap order), each with a mention.
 
     The mention (on an anchor document) keeps them from being GC'd as orphans
     by whichever reconcile commits first.
     """
-    anchor = _seed_doc(conn, "anchor")
+    anchor = seed_note_doc(conn, "anchor")
     for key in keys:
         row = conn.execute(
             "INSERT INTO graph_entities (tenant_id, entity_type, name, canonical_key) "
@@ -275,8 +196,8 @@ def test_backfill_concept_upsert_vs_watcher_recompute_does_not_deadlock(
     reported context (``while inserting index tuple``).
     """
     _seed_persons(test_db, ["alpha"])
-    backfill_doc = _seed_doc(test_db, "backfill-doc")
-    watcher_doc = _seed_doc(test_db, "watcher-doc")
+    backfill_doc = seed_note_doc(test_db, "backfill-doc")
+    watcher_doc = seed_note_doc(test_db, "watcher-doc")
     backfill_conn, watcher_conn, observer = _connect(), _connect(), _connect()
     try:
         watcher_conn.execute("SET deadlock_timeout = '10s'")
@@ -298,9 +219,9 @@ def test_backfill_concept_upsert_vs_watcher_recompute_does_not_deadlock(
             lambda: reconcile_document(
                 backfill_conn,
                 backfill_doc,
-                backend=_NullBackend(),
+                backend=NullBackend(),
                 config=_cfg(concepts=True),
-                person_resolver=_resolver([ResolvedPerson("alpha", "Alpha")]),
+                person_resolver=static_resolver([ResolvedPerson("alpha", "Alpha")]),
                 extractor=_HookExtractor([_GAMMA], park_until_watcher_waits_or_ends),
                 defer_tenant_refresh=True,
             )
@@ -311,9 +232,9 @@ def test_backfill_concept_upsert_vs_watcher_recompute_does_not_deadlock(
             lambda: reconcile_document(
                 watcher_conn,
                 watcher_doc,
-                backend=_NullBackend(),
+                backend=NullBackend(),
                 config=_cfg(concepts=True),
-                person_resolver=_resolver([]),
+                person_resolver=static_resolver([]),
                 extractor=_HookExtractor([_GAMMA]),
             )
         )
@@ -347,8 +268,8 @@ def test_two_full_reconciles_do_not_deadlock_in_the_tenant_recompute(
     (step 2 never row-locks ``bravo``), so the two simply serialize.
     """
     _seed_persons(test_db, ["aaa-gate", "p-alpha", "p-bravo"])
-    doc_one = _seed_doc(test_db, "doc-one")
-    doc_two = _seed_doc(test_db, "doc-two")
+    doc_one = seed_note_doc(test_db, "doc-one")
+    doc_two = seed_note_doc(test_db, "doc-two")
     gate, conn_one, conn_two, observer = _connect(), _connect(), _connect(), _connect()
     try:
         gate.autocommit = False
@@ -363,9 +284,9 @@ def test_two_full_reconciles_do_not_deadlock_in_the_tenant_recompute(
                 lambda: reconcile_document(
                     conn,
                     doc,
-                    backend=_NullBackend(),
+                    backend=NullBackend(),
                     config=_cfg(),
-                    person_resolver=_resolver([ResolvedPerson(key, key.title())]),
+                    person_resolver=static_resolver([ResolvedPerson(key, key.title())]),
                 )
             )
 
@@ -402,8 +323,8 @@ def test_concept_extraction_holds_no_graph_lock(
     lock it needs, it fails with ``LockNotAvailable`` instead of finishing.
     """
     _seed_persons(test_db, ["alpha"])
-    extracting_doc = _seed_doc(test_db, "extracting-doc")
-    writer_doc = _seed_doc(test_db, "writer-doc")
+    extracting_doc = seed_note_doc(test_db, "extracting-doc")
+    writer_doc = seed_note_doc(test_db, "writer-doc")
     extracting_conn, writer_conn = _connect(), _connect()
     try:
         writer_conn.execute("SET lock_timeout = '3s'")
@@ -411,9 +332,9 @@ def test_concept_extraction_holds_no_graph_lock(
             lambda: reconcile_document(
                 writer_conn,
                 writer_doc,
-                backend=_NullBackend(),
+                backend=NullBackend(),
                 config=_cfg(),
-                person_resolver=_resolver([ResolvedPerson("alpha", "Alpha")]),
+                person_resolver=static_resolver([ResolvedPerson("alpha", "Alpha")]),
             )
         )
 
@@ -425,9 +346,9 @@ def test_concept_extraction_holds_no_graph_lock(
             lambda: reconcile_document(
                 extracting_conn,
                 extracting_doc,
-                backend=_NullBackend(),
+                backend=NullBackend(),
                 config=_cfg(concepts=True),
-                person_resolver=_resolver([ResolvedPerson("alpha", "Alpha")]),
+                person_resolver=static_resolver([ResolvedPerson("alpha", "Alpha")]),
                 extractor=_HookExtractor([_GAMMA], run_the_writer_to_completion),
                 defer_tenant_refresh=True,
             )
@@ -445,3 +366,168 @@ def test_concept_extraction_holds_no_graph_lock(
         for conn in (extracting_conn, writer_conn):
             conn.close()
 
+
+
+# --------------------------------------------------------------------------- #
+# The plan read before the lock must still be current when the writes happen
+# --------------------------------------------------------------------------- #
+_DELTA = ExtractedEntity(
+    entity_type="topic", canonical_key="delta", display_name="Delta", positions=(0,)
+)
+
+
+def _edit_body(conn: psycopg.Connection[Any], document_id: str, body: str) -> str:
+    content_hash = hashlib.sha256(body.encode()).hexdigest()
+    conn.execute(
+        "UPDATE documents SET content = %s, content_hash = %s WHERE id = %s",
+        (body, content_hash, document_id),
+    )
+    return content_hash
+
+
+def _watermark_hashes(conn: psycopg.Connection[Any], document_id: str) -> set[str]:
+    rows = conn.execute(
+        "SELECT content_hash FROM graph_index_state "
+        "WHERE tenant_id = %s AND document_id = %s",
+        (TENANT, document_id),
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def test_a_stale_reconcile_never_overwrites_a_newer_edit(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Adopted from the PR #53 audit's probe (finding F1).
+
+    The backfill (``older``) plans against body v1 and is still in its model
+    call when the document is edited to v2 and the watcher's reconcile
+    (``newer``) indexes v2 and commits. At ``d8baa50`` the older reconcile then
+    committed v1's entities over v2's, with a watermark naming a body the
+    document no longer has, and nothing would re-index it. It must notice the
+    edit once it holds the lock, and write nothing.
+    """
+    doc = seed_note_doc(test_db, "edited-doc")
+    older_conn, newer_conn, edit_conn = _connect(), _connect(), _connect()
+    try:
+        newer = _Worker(
+            lambda: reconcile_document(
+                newer_conn,
+                doc,
+                backend=NullBackend(),
+                config=_cfg(concepts=True),
+                person_resolver=static_resolver([ResolvedPerson("beta", "Beta")]),
+                extractor=_HookExtractor([_DELTA]),
+            )
+        )
+
+        def edit_then_run_the_newer_reconcile() -> None:
+            _edit_body(edit_conn, doc, "edited body v2")
+            newer.start()
+            assert newer.finished.wait(_WAIT_S), "the newer reconcile hung"
+
+        older = _Worker(
+            lambda: reconcile_document(
+                older_conn,
+                doc,
+                backend=NullBackend(),
+                config=_cfg(concepts=True),
+                person_resolver=static_resolver([ResolvedPerson("alpha", "Alpha")]),
+                extractor=_HookExtractor([_GAMMA], edit_then_run_the_newer_reconcile),
+                defer_tenant_refresh=True,
+            )
+        )
+        older.start()
+        _join(older)
+
+        assert newer.error is None, f"newer reconcile failed: {newer.error!r}"
+        assert older.error is None, f"older reconcile failed: {older.error!r}"
+        doc_hash = test_db.execute(
+            "SELECT content_hash FROM documents WHERE id = %s", (doc,)
+        ).fetchone()
+        assert doc_hash is not None
+        assert _mentioned_keys(test_db, doc) == {"beta", "delta"}, (
+            "the stale reconcile overwrote the newer edit's graph"
+        )
+        assert _watermark_hashes(test_db, doc) == {doc_hash[0]}
+    finally:
+        for conn in (older_conn, newer_conn, edit_conn):
+            conn.close()
+
+
+def test_a_reconcile_whose_document_was_deleted_writes_nothing(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """The document is deleted while its reconcile is in the model call.
+
+    The reconcile must return ``skipped`` and write nothing. At ``d8baa50`` it
+    went on to insert mentions of a document that no longer existed and failed
+    on the foreign key.
+    """
+    doc = seed_note_doc(test_db, "deleted-doc")
+    reconcile_conn, delete_conn = _connect(), _connect()
+    try:
+
+        def delete_the_document() -> None:
+            delete_conn.execute("DELETE FROM documents WHERE id = %s", (doc,))
+
+        result = reconcile_document(
+            reconcile_conn,
+            doc,
+            backend=NullBackend(),
+            config=_cfg(concepts=True),
+            person_resolver=static_resolver([ResolvedPerson("alpha", "Alpha")]),
+            extractor=_HookExtractor([_GAMMA], delete_the_document),
+            defer_tenant_refresh=True,
+        )
+
+        assert result.skipped is True
+        written = test_db.execute(
+            "SELECT count(*) FROM graph_entities WHERE tenant_id = %s", (TENANT,)
+        ).fetchone()
+        assert written == (0,), "a reconcile of a deleted document wrote entities"
+    finally:
+        for conn in (reconcile_conn, delete_conn):
+            conn.close()
+
+
+def test_extraction_runs_with_no_transaction_or_lock_open(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """During the model call the reconciling backend holds no lock of any kind.
+
+    Not even an ``AccessShareLock`` from the pre-lock reads: one held for a
+    model call stalls DDL behind it (migration 028's ``lock_timeout`` is 3s).
+    The hook inspects the reconciling backend from an observer connection.
+    """
+    doc = seed_note_doc(test_db, "doc")
+    reconcile_conn, observer = _connect(), _connect()
+    seen: dict[str, Any] = {}
+    try:
+        pid = reconcile_conn.info.backend_pid
+
+        def inspect_the_reconciling_backend() -> None:
+            seen["locks"] = observer.execute(
+                "SELECT locktype, mode FROM pg_locks WHERE pid = %s ORDER BY 1, 2",
+                (pid,),
+            ).fetchall()
+            state = observer.execute(
+                "SELECT state FROM pg_stat_activity WHERE pid = %s", (pid,)
+            ).fetchone()
+            seen["state"] = state[0] if state is not None else None
+
+        reconcile_document(
+            reconcile_conn,
+            doc,
+            backend=NullBackend(),
+            config=_cfg(concepts=True),
+            person_resolver=static_resolver([ResolvedPerson("alpha", "Alpha")]),
+            extractor=_HookExtractor([_GAMMA], inspect_the_reconciling_backend),
+        )
+
+        assert seen["locks"] == [], f"locks held during the model call: {seen['locks']}"
+        assert seen["state"] == "idle", (
+            f"a transaction was open during the model call: {seen['state']}"
+        )
+    finally:
+        for conn in (reconcile_conn, observer):
+            conn.close()

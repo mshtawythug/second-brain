@@ -20,8 +20,14 @@ list of writers and the mutation proofs:
 ``graph_community_members`` or the tenant's AGE graph calls
 :func:`acquire_graph_write_lock` BEFORE its first such write. Graph writes in a
 tenant then serialize on one lock that is taken while the transaction holds no
-graph row, so waiting can never become a deadlock. It changes no outcome: the
-recompute already made concurrent writers wait on each other's rows.
+graph row, so waiting can never become a deadlock. Writers already waited on
+each other's rows through the recompute; they now wait on the lock instead,
+before they hold anything.
+
+The lock does not by itself make a reconcile's PLAN current: a reconcile reads
+the document before it takes the lock. ``ReconcilePlan.is_current``
+(:mod:`brain.graph_rag.reconcile_plan`) re-checks the plan under the lock, so
+a reconcile of a body that was edited or deleted meanwhile writes nothing.
 
 **Properties.**
 
@@ -35,6 +41,12 @@ recompute already made concurrent writers wait on each other's rows.
   apart. A ``hashtext`` collision between two tenants only over-serializes.
 * Take it AFTER any slow work (the concept extractor's model call), never
   before: the lock is held to the end of the transaction.
+* **Long holders.** Only the per-document writers (``reconcile_document``,
+  ``remove_document``) hold it briefly. ``refresh_aggregates``, the
+  ``build_graph --force`` pre-pass, ``merge_aliases`` and
+  ``build_communities`` hold it for their whole tenant-wide transaction. Every
+  other graph write in the tenant, the watcher's and ``brain-mcp``'s graph sync
+  included, waits behind them with no timeout. A wait, never a deadlock.
 """
 from __future__ import annotations
 

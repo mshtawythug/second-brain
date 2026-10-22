@@ -36,15 +36,25 @@ you don't have an LLM available locally. No raw Cypher is ever accepted or
 shown; every command takes structured params and the backend injects the
 tenant + traversal caps.
 
-**Concurrent writers.** Graph writes in a tenant take turns on one lock. Those
-writers are the vault watcher, `brain-mcp`, ingest, `brain vault
-relink-derived`, `brain graphrag build` / `refresh` / `aliases apply` and
-`communities build`. So a `build --backfill` can run while the watcher is
-live. Each document's graph write waits for the other writer's current
-document, and neither one deadlocks. Concept extraction (the model call) runs
-before a document takes the lock, so nothing waits on another document's LLM
-call. Details: `src/brain/graph_rag/write_lock.py` and
-`docs/plans/2026-10-22-graph-entities-deadlock.md`.
+**Concurrent writers.** Graph writes in a tenant take turns on one lock, so
+two graph writers can no longer deadlock on each other's rows. The writers are:
+
+- the vault watcher, `brain-mcp`, ingest and `brain vault relink-derived`. These
+  sync one document at a time and hold the lock only for that document's
+  writes.
+- `brain graphrag refresh`, `build --force`, `aliases apply` and `communities
+  build`. These hold it for a whole tenant-wide pass. While one runs, every
+  other graph write in the tenant waits, the watcher's included, with no
+  timeout.
+
+So a `build --backfill` can run while the watcher is live. The concept
+extraction (the model call) runs with no transaction open, so nothing waits on
+another document's LLM call. If a document is edited or deleted while its
+reconcile is in that call, the reconcile writes nothing, and the newer edit's
+own reconcile indexes it. One deadlock remains possible: a document deleted at
+the very moment it is being reconciled. Postgres detects it, and a re-run
+resumes. Details: `src/brain/graph_rag/write_lock.py` and
+`docs/plans/2026-10-22-graph-entities-deadlock.md` ("Residuals").
 
 ## Enabling GraphRAG
 

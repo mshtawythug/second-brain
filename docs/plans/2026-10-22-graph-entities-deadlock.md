@@ -103,9 +103,13 @@ rolls back. It is defined in the new module `brain/graph_rag/write_lock.py`
 - It is the only fix that orders step 4 against everything else. Graph writes
   in one tenant serialize, so no cycle can form among them. Every graph
   writer's first graph lock is the same lock.
-- It changes no outcome. Step 4 already made concurrent graph writers wait on
-  each other's rows. They now wait on one lock, before they hold anything, so
-  waiting cannot become a deadlock.
+- Writers already waited on each other's rows through step 4. They now wait
+  on one lock, before they hold anything, so waiting cannot become a deadlock.
+  *(Corrected in the PR #53 review round: this line used to say "It changes no
+  outcome". That was false. At `94dd1cb` a second reconcile of the same
+  document waited on the first one's row locks. Under the lock alone, with the
+  extraction outside it, an older plan could commit over a newer edit: audit
+  finding F1. The plan re-check below closes that.)*
 - It is per tenant, so tenants do not serialize against each other.
 - It is re-entrant within a transaction, so nested writers are fine:
   `merge_aliases` -> `refresh_aggregates`, and `collapse_cross_type_concepts` ->
@@ -116,12 +120,36 @@ rolls back. It is defined in the new module `brain/graph_rag/write_lock.py`
 - `acquire_graph_write_lock` refuses to run outside a transaction. On an
   autocommit connection outside one, the lock would be released at the end of
   its own statement, which would be a silent no-op.
+- **Long holders.** Only W1 and W2 are per-document. W3, W4, W6 and W8 hold the
+  lock for their whole tenant-wide transaction. Every other graph write in the
+  tenant waits behind them, the watcher's and `brain-mcp`'s graph sync
+  included, and the wait has no timeout. It is a wait, never a deadlock. A
+  `brain graphrag refresh` on a large tenant stalls the watcher's graph sync
+  for its duration.
 
-**Companion change: extract before locking.** In `reconcile_document` the
-concept extraction (a pure read of `documents.content` plus the model call)
-moves ahead of the first graph write. The lock is then never held across a
-model call: a concurrent graph write waits for one document's writes, not for
-its LLM round-trip. `test_concept_extraction_holds_no_graph_lock` pins this.
+**Companion change: plan, then extract, then write.** `reconcile_document`
+now runs in three steps. The read phase moved into the new module
+`brain/graph_rag/reconcile_plan.py`, which also keeps `reconcile.py` under the
+ceiling (797 -> 716 lines).
+
+1. **Plan,** in a short read transaction that commits before step 2 (watermarks,
+   persons, the body when the concept aspect is stale).
+2. **Extract,** with NO transaction open. The first version of this PR
+   (`b998798`) ran the extraction before the lock but inside the open
+   transaction. Its comment said the model call "never holds a lock", which was
+   false: the reads before it held `AccessShareLock` on `documents` and the
+   `graph_*` tables through the model call. That blocks DDL, and migration
+   028's 3s `lock_timeout` would fail behind a backfill (PR #53 review, item
+   1). It is pinned by `test_extraction_runs_with_no_transaction_or_lock_open`
+   (no `pg_locks` row and `state = idle` during the call) and by
+   `test_concept_extraction_holds_no_graph_lock`.
+3. **Write:** take the lock, then `ReconcilePlan.is_current` re-reads the
+   `content_hash`. If the document was edited or deleted since step 1, the
+   reconcile returns `skipped` and writes nothing. The newer edit's own
+   reconcile, which runs after every write, or the next build indexes it. This
+   is audit finding F1, pinned by
+   `test_a_stale_reconcile_never_overwrites_a_newer_edit` (adopted from the
+   audit's probe) and `test_a_reconcile_whose_document_was_deleted_writes_nothing`.
 
 **No retry (candidate 4).** Graph writers can no longer deadlock with each
 other, so a retry would only hide a regression of that invariant. It would also
@@ -141,7 +169,7 @@ place that takes the lock:
 
 | # | Writer (top-level transaction) | Graph writes | Lock taken |
 |---|---|---|---|
-| W1 | `reconcile.reconcile_document` | entities, mentions, contributions, index_state, relationships, GC, AGE | after extraction, before the first write |
+| W1 | `reconcile.reconcile_document` | entities, mentions, contributions, index_state, relationships, GC, AGE | first statement of the write transaction (after the read transaction and the extraction) |
 | W2 | `reconcile.remove_document` | mentions, contributions, index_state, relationships, GC, AGE | first statement in the transaction |
 | W3 | `aggregates.refresh_aggregates` | entities (`doc_count`), relationships, GC, AGE | first statement |
 | W4 | `build.build_graph` `force` pre-pass | relationships, GC, AGE `clear_tenant` + restore | first statement |
@@ -178,7 +206,24 @@ uniform: every graph write transaction takes the lock.
   `graph_communities.summary_embedding`. These are idempotent catalog changes at
   `brain init` / `reembed` / summary time, not row writers.
 
-## Residual (recorded, not fixed)
+## Residuals (recorded, not fixed)
+
+**Metadata-only edits are not re-checked.** `is_current` compares the
+`content_hash` only. An edit that changes a document's participants without
+touching its body can still be overtaken. An older reconcile's persons, read
+before the lock, then commit after the newer edit's. The watermark records the
+older person set, so the next build re-indexes it. A full re-plan under the
+lock would close this, at the cost of a second resolver pass per document.
+
+**The cross-type collapse window (pre-existing, cosmetic).**
+`collapse_cross_type_concepts` runs `merge_aliases` (W6), then
+`_restore_winner_display_names` (W7), in two transactions. Another graph
+writer can run between them. It sees the winning concept's humanized key as
+its `name` for that moment (e.g. `Acmeplatform` for `AcmePlatform`), and an
+upsert by that writer can refresh the name, which W7 then restores. Only a
+display name is affected, and only until W7 commits. This predates this PR.
+
+**Same-document delete vs. reconcile.**
 
 A document that is **deleted at the same moment it is reconciled** can still
 deadlock against the cascade. The reconcile deletes the document's mention rows
@@ -207,6 +252,9 @@ seconds instead of hanging CI.
 | D1 the reported crash is gone | `test_backfill_concept_upsert_vs_watcher_recompute_does_not_deadlock` |
 | D2 two full reconciles serialize instead of deadlocking in step 4 | `test_two_full_reconciles_do_not_deadlock_in_the_tenant_recompute` |
 | D3 the extraction holds no graph lock | `test_concept_extraction_holds_no_graph_lock` |
+| D4 the extraction holds no lock at all, and no transaction is open | `test_extraction_runs_with_no_transaction_or_lock_open` |
+| D5 a stale plan never overwrites a newer edit (audit F1) | `test_a_stale_reconcile_never_overwrites_a_newer_edit` |
+| D6 a plan whose document was deleted writes nothing | `test_a_reconcile_whose_document_was_deleted_writes_nothing` |
 
 `tests/test_graphrag_write_lock.py` holds the lock contract. Unit tests cover
 the guard and per-tenant scope. One test per writer W1-W10 holds the tenant's
