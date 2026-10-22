@@ -1,6 +1,7 @@
 """`create_backup` against the test DB with a faked pg_dump (F3 §5.4)."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -406,6 +407,75 @@ def test_top_level_quartz_is_skipped_whatever_its_type(
         names = tar.getnames()
     assert [name for name in names if name.split("/")[0] == ".quartz"] == []
     assert result.skipped == (".quartz",)
+
+
+@pytest.fixture
+def deep_vault(tmp_path: Path) -> Path:
+    """`a.md` plus a two-level subtree, `notes/deep/b.md` (the review's repro)."""
+    root = tmp_path / "deep-vault"
+    (root / "notes" / "deep").mkdir(parents=True)
+    (root / "a.md").write_text("Synthetic top note.\n", encoding="utf-8")
+    (root / "notes" / "deep" / "b.md").write_text("Synthetic deep note.\n", encoding="utf-8")
+    return root
+
+
+def _scandir_failing_at(monkeypatch: pytest.MonkeyPatch, target: Path, error: OSError) -> None:
+    """Make ``os.scandir`` raise ``error`` for ``target`` only.
+
+    `monkeypatch` is a standard test double with automatic cleanup (rule 13).
+    """
+    real_scandir = os.scandir
+
+    def _scandir(path: Any = ".") -> Any:
+        if Path(path) == target:
+            raise error
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", _scandir)
+
+
+def test_unlistable_directory_other_than_permission_fails_the_backup(
+    deep_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An EIO while listing a subtree raises; it never silently drops it (B10).
+
+    Python 3.11's `rglob`, which `tar_vault` used to walk with, let every
+    listing error but `PermissionError` propagate. `os.walk`'s default
+    `onerror=None` swallows them all, which would back up a vault minus
+    `notes/` and still exit 0.
+    """
+    _scandir_failing_at(
+        monkeypatch,
+        deep_vault / "notes",
+        OSError(errno.EIO, "Input/output error", str(deep_vault / "notes")),
+    )
+
+    with pytest.raises(OSError) as raised:
+        tar_vault(deep_vault, tmp_path / "eio.tar")
+
+    assert raised.value.errno == errno.EIO
+
+
+def test_permission_denied_directory_is_still_passed_over(
+    deep_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory the user cannot list is passed over, as `rglob` did (B10)."""
+    _scandir_failing_at(
+        monkeypatch,
+        deep_vault / "notes",
+        PermissionError(errno.EACCES, "Permission denied", str(deep_vault / "notes")),
+    )
+    destination = tmp_path / "eacces.tar"
+
+    try:
+        result = tar_vault(deep_vault, destination)
+    except PermissionError as exc:
+        pytest.fail(f"a PermissionError subtree must be passed over, not raised: {exc}")
+
+    with tarfile.open(destination, "r:") as tar:
+        names = tar.getnames()
+    assert names == ["a.md", "notes"]
+    assert result.file_count == 1
 
 
 def test_quartz_workspace_is_not_walked(

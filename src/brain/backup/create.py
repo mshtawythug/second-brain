@@ -61,7 +61,7 @@ _BACKUP_DIR_MODE = 0o700
 #: ``.git/``), which is why this is not sync's "skip every hidden dir" rule nor
 #: ``bin/monitor.py``'s ``{".quartz", ".git"}``. Rulings B1-B5 in
 #: ``docs/plans/2026-10-22-backup-skip-quartz.md``.
-VAULT_BACKUP_SKIP_DIRS: frozenset[str] = frozenset({".quartz"})
+VAULT_BACKUP_SKIP_NAMES: frozenset[str] = frozenset({".quartz"})
 
 
 @dataclass(frozen=True)
@@ -203,6 +203,19 @@ class VaultTar:
     skipped: tuple[str, ...]
 
 
+def _raise_unless_permission(error: OSError) -> None:
+    """``os.walk``'s ``onerror``: pass over ``PermissionError``, raise the rest.
+
+    The walk used to be Python 3.11's ``rglob``, which catches only
+    ``PermissionError`` around ``scandir``. ``os.walk``'s default
+    (``onerror=None``) swallows EVERY listing error, so an EIO or a vanished
+    directory would silently drop a whole subtree from a backup that still
+    exits 0 and verifies. Ruling B10.
+    """
+    if not isinstance(error, PermissionError):
+        raise error
+
+
 def _vault_entries(vault_path: Path) -> tuple[list[Path], tuple[str, ...]]:
     """Every vault entry to archive, sorted, plus the top-level names left out.
 
@@ -211,20 +224,21 @@ def _vault_entries(vault_path: Path) -> tuple[list[Path], tuple[str, ...]]:
     backup, while pruning ``dirnames`` never enters the tree. Apart from the
     skip, the entry set is the one ``rglob("*")`` yields: every name in
     ``dirnames`` and ``filenames`` at every level, with symlinked directories
-    listed but not followed (``followlinks=False``).
+    listed but not followed (``followlinks=False``). Listing errors match
+    ``rglob`` too: see :func:`_raise_unless_permission`.
     """
     entries: list[Path] = []
     skipped: list[str] = []
-    for root, dirnames, filenames in os.walk(vault_path):
+    for root, dirnames, filenames in os.walk(vault_path, onerror=_raise_unless_permission):
         here = Path(root)
         if here == vault_path:
             # Top level only (ruling B2): a nested `.quartz` was not written by
             # this project, so it is the user's and stays in the backup.
             skipped = sorted(
-                name for name in (*dirnames, *filenames) if name in VAULT_BACKUP_SKIP_DIRS
+                name for name in (*dirnames, *filenames) if name in VAULT_BACKUP_SKIP_NAMES
             )
-            dirnames[:] = [name for name in dirnames if name not in VAULT_BACKUP_SKIP_DIRS]
-            filenames = [name for name in filenames if name not in VAULT_BACKUP_SKIP_DIRS]
+            dirnames[:] = [name for name in dirnames if name not in VAULT_BACKUP_SKIP_NAMES]
+            filenames = [name for name in filenames if name not in VAULT_BACKUP_SKIP_NAMES]
         entries.extend(here / name for name in (*dirnames, *filenames))
     return sorted(entries), tuple(skipped)
 
@@ -236,7 +250,7 @@ def tar_vault(vault_path: Path, destination: Path) -> VaultTar:
     outer gzip compresses it anyway. Per-file checksums over 1,200 vault files
     would bloat the manifest for no gain.
 
-    ``VAULT_BACKUP_SKIP_DIRS`` entries at the top of the vault are left out,
+    ``VAULT_BACKUP_SKIP_NAMES`` entries at the top of the vault are left out,
     and ``file_count`` counts only what the tar holds, so the manifest's
     ``vault_file_count`` and the restore report stay true to the archive.
     """
