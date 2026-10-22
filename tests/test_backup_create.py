@@ -467,10 +467,12 @@ def test_permission_denied_directory_is_still_passed_over(
     )
     destination = tmp_path / "eacces.tar"
 
+    error: PermissionError | None = None
     try:
         result = tar_vault(deep_vault, destination)
     except PermissionError as exc:
-        pytest.fail(f"a PermissionError subtree must be passed over, not raised: {exc}")
+        error = exc
+    assert error is None, "a PermissionError subtree must be passed over, not raised"
 
     with tarfile.open(destination, "r:") as tar:
         names = tar.getnames()
