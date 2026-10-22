@@ -82,10 +82,15 @@ never recompute the full-tenant aggregate with a *different* ``generic_df_ratio`
 path.
 
 **Connection contract (atomicity).** Each entry point opens ``with
-conn.transaction()`` as its FIRST database action and performs *all* reads and
-writes inside it. That guarantees a true top-level transaction even on a
-caller's ``autocommit=False`` connection (a pre-transaction read would otherwise
-open an implicit transaction and demote the block to a SAVEPOINT), so the
+conn.transaction()`` as its FIRST database action and performs *all* writes
+inside one. :func:`reconcile_document` runs two (2026-10-22): a short read
+transaction that plans the work (:mod:`.reconcile_plan`), then, after the
+concept extraction ran with NO transaction open, the write transaction, which
+takes the graph write lock (:mod:`.write_lock`) and re-checks the plan before
+writing. :func:`remove_document` runs one, lock first. That guarantees a true
+top-level transaction even on a caller's ``autocommit=False`` connection (a
+pre-transaction read would otherwise open an implicit transaction and demote
+the block to a SAVEPOINT), so the
 relational rewrite and the AGE sync commit or roll back **together** — a failure
 mid-sync never leaves a half-written graph or a dangling transaction. When the
 caller is already inside a transaction the block nests as a SAVEPOINT and the
@@ -93,8 +98,6 @@ caller still owns the outer transaction (G1-c wiring relies on this).
 """
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -113,7 +116,6 @@ from .concepts import (
     CONCEPT_ENTITY_TYPES,
     CONCEPTS_ASPECT,
     build_concept_rows,
-    concept_inputs_hash,
     concept_mention_source,
     upsert_concept_entities,
 )
@@ -124,19 +126,18 @@ from .cooccur import (
     cooccurrence_counts,
     to_contributions,
 )
-from .extract import EntityExtractor
+from .extract import EntityExtractor, ExtractedEntity
 from .person_resolver import ResolvedPerson, default_person_resolver
+from .reconcile_plan import PEOPLE_ASPECT, PEOPLE_ASPECT_VERSION, plan_reconcile
 from .relational import (
     delete_doc_relational,
-    fetch_doc_content,
-    fetch_doc_meta,
-    index_state,
     read_doc_mentions,
     rewrite_doc_relational,
     upsert_index_state,
 )
 from .schema import EdgeContribution, EntityMention, GraphEntity
-from .weighting import DEFAULT_GENERIC_DF, suppress_ver
+from .weighting import DEFAULT_GENERIC_DF
+from .write_lock import acquire_graph_write_lock
 
 __all__ = [
     "CONCEPTS_ASPECT",
@@ -158,24 +159,8 @@ __all__ = [
 # relational rewrite + GC. Concepts own :data:`CONCEPT_ENTITY_TYPES`.
 _PERSON_ENTITY_TYPES: tuple[str, ...] = ("person",)
 
-# The migration-012 ``graph_index_state.aspect`` value this module owns. People
-# and concepts (G2) re-index independently under their own watermark rows.
-PEOPLE_ASPECT = "people"
-
-# Versions the people-aspect derivation. Stored in
-# ``graph_index_state.extractor_ver`` (spec §7 step 1) — bumping it forces every
-# document's people aspect to re-reconcile (e.g. if the participant-derivation
-# logic changes). There is no LLM extractor for the people aspect (people are
-# derived from participants), so this is the derivation-logic version.
-#
-# people-v2 (2026-05-23, Phase 1 data-quality remediation): the shared
-# person-name normalizer (:mod:`brain.person_name`) now drives canonical
-# keys — mailing-list "via X" decoration stripped, ``Last, First`` flipped,
-# separators collapsed (so ``Jane.Doe`` / ``Jane Doe`` merge), email-as-name
-# humanized from the local part, automated / org senders dropped, and owner
-# first-name / local-part variants excluded. A re-`build --backfill` re-extracts
-# every document's people aspect cleanly under the new keys.
-PEOPLE_ASPECT_VERSION = "people-v2"
+# ``PEOPLE_ASPECT`` / ``PEOPLE_ASPECT_VERSION`` live in :mod:`.reconcile_plan`
+# (the read phase) and are re-exported here.
 
 # ``graph_entity_mentions.source`` provenance for person mentions (spec §5a:
 # ``'people'`` for the people pipeline vs ``'extractor:<model>@<ver>'`` for the
@@ -294,9 +279,11 @@ def reconcile_document(
 ) -> ReconcileResult:
     """(Re)index one document's people (+ optionally concept) aspect (spec §7).
 
-    All work runs inside ``with conn.transaction()`` (opened as the first DB
-    action — see the module "Connection contract"), so the relational rewrites
-    and the AGE sync are one atomic unit. The **people** aspect always runs; the
+    All writes run inside one ``with conn.transaction()`` (after a short read
+    transaction and the extraction — see the module "Connection contract"), so
+    the relational rewrites and the AGE sync are one atomic unit. A document
+    edited or deleted between the two transactions is returned ``skipped``
+    unwritten; its newer edit's own reconcile indexes it. The **people** aspect always runs; the
     **concepts** aspect (wave G2-c) runs additionally when
     ``config.concepts_enabled`` is True AND an ``extractor`` is injected (DI
     seam, like ``person_resolver``). Each aspect has its OWN per-aspect
@@ -376,77 +363,45 @@ def reconcile_document(
         )
     tenant_id = cfg.tenant_id
 
-    # Open the transaction FIRST so no implicit transaction is pre-opened by a
-    # read (which would demote this block to a SAVEPOINT on an autocommit=False
-    # connection); see the module "Connection contract". The return commits on
-    # the way out of the ``with`` block.
+    # Three steps (module "Connection contract"; reconcile_plan.py). 1. Plan in a
+    # short read transaction, so no lock outlives it into the model call.
     with conn.transaction():
-        doc_meta = fetch_doc_meta(conn, document_id)
-        if doc_meta is None:
-            raise GraphReconcileError(
-                f"cannot reconcile document {document_id!r}: not found"
-            )
-        content_hash, content_type = doc_meta
-        sver = suppress_ver(cfg.generic_df_ratio)
-
-        # --- People aspect: resolve + watermark (always active). ---
-        persons = person_resolver(
+        plan = plan_reconcile(
             conn,
             document_id,
-            owner_keys=cfg.owner_keys,
-            sender_denylist=cfg.sender_denylist,
+            cfg,
+            person_resolver=person_resolver,
+            extractor=extractor if concepts_active else None,
+            force=force,
         )
-        person_inputs_hash = _inputs_hash(
-            persons, cfg.cooccur_window, cfg.max_entities_per_doc
-        )
-        person_watermark = (
-            content_hash,
-            person_inputs_hash,
-            PEOPLE_ASPECT_VERSION,
-            sver,
-        )
-        person_stale = force or (
-            index_state(conn, tenant_id, document_id, PEOPLE_ASPECT)
-            != person_watermark
-        )
-
-        # --- Concept aspect: PRE-extraction watermark check (no LLM on skip). ---
-        concept_stale = False
-        concept_extractor_ver = ""
-        c_inputs_hash = ""
-        if concepts_active:
-            assert extractor is not None  # narrowed by concepts_active
-            concept_extractor_ver = extractor.version
-            c_inputs_hash = concept_inputs_hash(
-                cfg.cooccur_window,
-                cfg.max_entities_per_doc,
-                stopwords=cfg.graph_extract_stopwords,
-            )
-            concept_watermark = (
-                content_hash,
-                c_inputs_hash,
-                concept_extractor_ver,
-                sver,
-            )
-            concept_stale = force or (
-                index_state(conn, tenant_id, document_id, CONCEPTS_ASPECT)
-                != concept_watermark
-            )
-
-        if not person_stale and not concept_stale:
-            return ReconcileResult(
-                document_id=document_id,
-                tenant_id=tenant_id,
-                skipped=True,
-                person_count=len(persons),
-            )
+    skipped = ReconcileResult(
+        document_id=document_id,
+        tenant_id=tenant_id,
+        skipped=True,
+        person_count=len(plan.persons),
+    )
+    if plan.nothing_to_do:
+        return skipped
+    # 2. Extract with NO transaction open (the model call takes seconds). It is
+    # never-raise: an Ollama outage yields [] (WARN) and the watermark marks the
+    # doc concept-indexed-empty until `build --concepts --force` (spec §17b #7).
+    extracted: list[ExtractedEntity] = []
+    if plan.concept_stale:
+        assert extractor is not None and plan.content is not None  # see nothing_to_do
+        extracted = extractor.extract(plan.content)
+    # 3. Write: take the graph write lock, then drop a plan whose doc was edited
+    # (or deleted) since step 1 -- the newer edit's own reconcile indexes it.
+    with conn.transaction():
+        acquire_graph_write_lock(conn, tenant_id)
+        if not plan.is_current(conn):
+            return skipped
 
         # --- People relational rewrite (only when its watermark is stale). ---
         person_entities: list[GraphEntity] = []
         person_mentions: list[EntityMention] = []
         person_contributions: list[EdgeContribution] = []
-        if person_stale:
-            capped = _apply_person_cap(persons, cfg.max_entities_per_doc)
+        if plan.person_stale:
+            capped = _apply_person_cap(plan.persons, cfg.max_entities_per_doc)
             person_entities = _upsert_person_entities(conn, tenant_id, capped)
             person_mentions = [
                 EntityMention(
@@ -484,14 +439,7 @@ def reconcile_document(
         concept_entities: list[GraphEntity] = []
         concept_mentions: list[EntityMention] = []
         concept_contributions: list[EdgeContribution] = []
-        if concept_stale:
-            assert extractor is not None  # narrowed by concepts_active
-            content = fetch_doc_content(conn, document_id)
-            # OllamaExtractor.extract is never-raise: an Ollama outage yields []
-            # (logged WARN). The watermark is still written, marking the doc
-            # concept-indexed-empty; `brain graphrag build --concepts --force`
-            # re-extracts it once Ollama is back (spec §7 / §17b decision 7).
-            extracted = extractor.extract(content)
+        if plan.concept_stale:
             concept_entities = upsert_concept_entities(conn, tenant_id, extracted)
             concept_mentions, concept_contributions = build_concept_rows(
                 extracted,
@@ -499,7 +447,7 @@ def reconcile_document(
                 document_id=document_id,
                 tenant_id=tenant_id,
                 window=cfg.cooccur_window,
-                source=concept_mention_source(concept_extractor_ver),
+                source=concept_mention_source(plan.concept_extractor_ver),
             )
             rewrite_doc_relational(
                 conn,
@@ -532,9 +480,9 @@ def reconcile_document(
             relationship_count = _recompute_aggregates(
                 conn, tenant_id, cfg.generic_df_ratio
             )
-            if person_stale:
+            if plan.person_stale:
                 orphan_ids += _gc_orphan_persons(conn, tenant_id)
-            if concept_stale:
+            if plan.concept_stale:
                 orphan_ids += _gc_orphan_concepts(conn, tenant_id)
 
         # --- AGE sync. Re-read the doc's COMBINED current mentions from the
@@ -552,40 +500,40 @@ def reconcile_document(
             document_id,
             entities=entities_ran,
             mentions=combined_mentions,
-            content_type=content_type,
+            content_type=plan.content_type,
             orphan_ids=orphan_ids,
             skip_cooccur=defer_tenant_refresh,
         )
 
         # --- Per-aspect watermarks (only for the aspects that ran). ---
-        if person_stale:
+        if plan.person_stale:
             upsert_index_state(
                 conn,
                 tenant_id,
                 document_id,
                 aspect=PEOPLE_ASPECT,
-                content_hash=content_hash,
-                inputs_hash=person_inputs_hash,
+                content_hash=plan.content_hash,
+                inputs_hash=plan.person_inputs_hash,
                 extractor_ver=PEOPLE_ASPECT_VERSION,
-                sver=sver,
+                sver=plan.sver,
             )
-        if concept_stale:
+        if plan.concept_stale:
             upsert_index_state(
                 conn,
                 tenant_id,
                 document_id,
                 aspect=CONCEPTS_ASPECT,
-                content_hash=content_hash,
-                inputs_hash=c_inputs_hash,
-                extractor_ver=concept_extractor_ver,
-                sver=sver,
+                content_hash=plan.content_hash,
+                inputs_hash=plan.concept_inputs_hash,
+                extractor_ver=plan.concept_extractor_ver,
+                sver=plan.sver,
             )
 
         return ReconcileResult(
             document_id=document_id,
             tenant_id=tenant_id,
             skipped=False,
-            person_count=len(person_entities) if person_stale else len(persons),
+            person_count=len(person_entities) if plan.person_stale else len(plan.persons),
             mention_count=len(person_mentions),
             contribution_count=len(person_contributions),
             relationship_count=relationship_count,
@@ -625,6 +573,7 @@ def remove_document(
     cfg = config if config is not None else ReconcileConfig()
     tenant_id = cfg.tenant_id
     with conn.transaction():
+        acquire_graph_write_lock(conn, tenant_id)
         delete_doc_relational(conn, tenant_id, document_id)
         relationship_count = _recompute_aggregates(
             conn, tenant_id, cfg.generic_df_ratio
@@ -765,28 +714,3 @@ def _apply_person_cap(
         return list(persons)
     return sorted(persons, key=lambda person: person.canonical_key)[:max_entities]
 
-
-def _inputs_hash(
-    persons: list[ResolvedPerson], window: int, max_entities: int | None
-) -> str:
-    """Stable fingerprint of the people-aspect inputs for the watermark.
-
-    Captures everything that determines this document's people-aspect output:
-    the resolved person *tuples* — ``(canonical_key, display_name)`` — plus the
-    co-occurrence config. Hashing the display name (not just the canonical key)
-    means a resolver that changes a person's presentation name (without changing
-    their canonical identity) still flips the hash and re-indexes, so the AGE
-    vertex / catalog ``name`` cannot go stale. A change in participants,
-    directory resolution, owner filtering, or config flips the hash and forces a
-    re-reconcile (spec §7 step 1). The suppression/weighting config is tracked
-    separately via ``suppress_ver``.
-    """
-    payload = {
-        "persons": sorted(
-            [person.canonical_key, person.display_name] for person in persons
-        ),
-        "window": window,
-        "max_entities": max_entities,
-    }
-    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

@@ -230,6 +230,9 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
      - **Unchanged:** there is still one graph writer per process, and `sync_vault` and the
        `brain vault sync` CLI are still synchronous.
      - **Plan:** `docs/plans/2026-10-22-vault-watcher-startup-blind.md`.
+     - **With PR #53's per-tenant write lock:** the lane's reconciles take the tenant lock like
+       every graph writer, so they wait behind a tenant-wide writer (`graphrag refresh`, `build
+       --force`, ...). That wait happens on the lane thread; the event worker never waits.
      - **Side effect:** the graph now lags while a large startup backlog drains. It is
        best-effort and recomputable with `brain graphrag build`.
   6. **Deferred: a targeted repair for lost graph removes.** When the watcher's shutdown times
@@ -243,6 +246,34 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
      - **The cheap repair:** a `brain graphrag remove <id>` command that calls
        `graph_rag.reconcile.remove_document` for the logged ids. It is robust to an
        already-deleted `documents` row, and it is not built yet.
+- *[FIXED 2026-10-22 on branch `fix/graph-entities-deadlock`.]* **`graph_entities` deadlocks
+  between graph writers.** On prod, `brain graphrag build --backfill --concepts` died with
+  `DeadlockDetected` in `upsert_concept_entities` against the vault watcher. This is the same class
+  as the memory note on `relink-derived` hanging against the watcher and `brain-mcp`.
+  - Cause: every non-deferred reconcile runs a tenant-wide `UPDATE graph_entities SET doc_count`.
+    That row-locks every entity in the tenant while the transaction still holds its own upserted
+    rows. The concept extractor (a model call) also ran inside that transaction.
+  - Fix: every graph write transaction now takes a per-tenant advisory lock before its first graph
+    write (`src/brain/graph_rag/write_lock.py`; closed writer list W1-W10). After the PR #53 review,
+    `reconcile_document` plans in a short read transaction (`graph_rag/reconcile_plan.py`) and runs
+    the extraction with no transaction open. It then re-checks the plan under the lock, so a
+    document edited or deleted meanwhile is skipped rather than overwritten (audit F1).
+  - Tenant-wide writers (`graphrag refresh`, `build --force`, `aliases apply`,
+    `communities build`) hold the lock for their whole pass. The watcher's graph sync waits behind
+    them with no timeout.
+  - Plan, root cause and mutation proofs: `docs/plans/2026-10-22-graph-entities-deadlock.md`.
+  - The prod backfill can be re-run once this is merged and the daemon install is updated. The
+    per-document watermarks resume it.
+  - **Still open (recorded in the plan, "Residuals"):**
+    1. A document deleted at the same moment it is reconciled can still deadlock against the
+       `documents` cascade. This is a same-document, two-statement window.
+    2. `build_graph` raises `GraphReconcileError` if a document is deleted between id enumeration
+       and its reconcile's read phase. This predates the fix. A deletion after the read phase is
+       now skipped.
+    3. The plan re-check compares `content_hash` only, so a metadata-only edit (participants) can
+       still be overtaken. The next build re-indexes it.
+    4. The cross-type collapse window between W6 and W7 is pre-existing and cosmetic (a display
+       name only).
 
 ## Status on 2026-10-16: DONE except items that need the user
 

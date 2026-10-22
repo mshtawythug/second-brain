@@ -37,6 +37,7 @@ import psycopg
 
 from .backends.base import GraphBackend
 from .weighting import generic_df_cap
+from .write_lock import acquire_graph_write_lock
 
 if TYPE_CHECKING:
     from .reconcile import ReconcileConfig
@@ -112,6 +113,7 @@ def refresh_aggregates(
         config = ReconcileConfig()
     tenant_id = config.tenant_id
     with conn.transaction():
+        acquire_graph_write_lock(conn, tenant_id)
         relationship_count = _recompute_aggregates(
             conn, tenant_id, config.generic_df_ratio
         )

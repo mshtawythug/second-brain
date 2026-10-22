@@ -62,6 +62,7 @@ from ..errors import GraphTenantError
 from ..sensitivity import not_confidential_sql
 from ..set_similarity import jaccard
 from .schema import CommunityMember, CommunityRecord
+from .write_lock import acquire_graph_write_lock
 
 __all__ = [
     "BUILD_VERSION",
@@ -320,6 +321,7 @@ def build_communities(
         )
 
     with conn.transaction():
+        acquire_graph_write_lock(conn, tenant)
         edges = _read_edges(conn, tenant)
         source_graph_hash = compute_source_graph_hash(edges)
         matches = _fingerprint_matches(conn, tenant, source_graph_hash)
