@@ -219,9 +219,13 @@ _UNFIRED_DEBOUNCE_MS = 3_600_000
 
 
 def _pending(state: _WatcherState) -> dict[Path, threading.Timer]:
-    """Snapshot ``state.pending_timers`` under the lock the watcher uses."""
+    """Snapshot path -> armed timer under the lock the watcher uses.
+
+    Each ``state.pending_timers`` entry is ``(timer, pending job)``; these
+    tests reason about the timers.
+    """
     with state.lock:
-        return dict(state.pending_timers)
+        return {path: timer for path, (timer, _job) in state.pending_timers.items()}
 
 
 def _assert_superseded_never_fire(superseded: list[threading.Timer], events: list[Any]) -> None:
@@ -728,8 +732,8 @@ def test_stale_upsert_event_for_vanished_file(
     ``processed`` 0 → 1, ``errors`` unchanged. The ``errors`` assertion
     stays as the second half of "neither processed nor errored". The guard's
     own comment in ``src/brain/vault/watch.py`` (lines 800-803 at
-    ``58e27c6``) makes the same false claim. This test-only change leaves it
-    alone on purpose; the follow-up watcher PR corrects it.
+    ``58e27c6``) made the same false claim until the 2026-10-22 ``_fire``
+    race fix corrected it.
 
     Trigger scenarios in the wild: editor atomic-save creating + removing a
     temp file inside the debounce window, ``brain note new`` immediately

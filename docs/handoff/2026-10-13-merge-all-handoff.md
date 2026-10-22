@@ -158,8 +158,11 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
   proofs and the old tests' demonstrated false passes are in
   `docs/plans/2026-10-22-vault-watcher-absence-tests.md`. The build-watcher half is moot, because
   `tests/wiki/test_build_watcher.py` was deleted with the wiki at R3 (`885b5a6`).
-- Two production items in `src/brain/vault/watch.py`, found while reviewing those tests. Both are
-  for the follow-up watcher PR:
+- *[Both FIXED 2026-10-22 by PR #49 (`fix/vault-watcher-fire-race`). `_fire` now acts only
+  on its own entry and enqueues under the lock, and the comment is corrected. Plan and mutation
+  proofs: `docs/plans/2026-10-22-vault-watcher-fire-race.md`.]* Two production items in
+  `src/brain/vault/watch.py`, found while reviewing those tests. Both were for the follow-up watcher
+  PR:
   1. **A race in `_fire`** (lines 636-638 at `58e27c6`). It pops `state.pending_timers[path]` by
      path, with no identity check. A superseded timer whose `_fire` has already started can pop its
      successor's entry. That yields two jobs, and the orphaned successor can enqueue after the
@@ -167,6 +170,32 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
   2. **A known-false comment** at lines 800-803. It says an unguarded `sync_one_file` raises
      `FileNotFoundError` and bumps `state.errors`. In fact it reports "file does not exist" and
      returns, so `processed` is what advances. It was left unchanged so the test PR stays test-only.
+- Found while fixing the `_fire` race:
+  1. ~~**The shutdown drain enqueued every pending path as an `upsert`.**~~ *[FIXED by PR #49, in its
+     review-fix commit: each `pending_timers` entry is now `(timer, job)`, and the drain enqueues
+     the real job.]* `pending_timers` used to keep the timer, not the job.
+     - A `delete` still pending at shutdown became a stale upsert. That was skipped, so the row
+       survived until a pruning sync.
+     - A pending `move` upserted its vanished source, so the destination was not synced by that run.
+       The next startup sync treated the destination as a new file. The in-place move was lost (the
+       document id and its incoming backlinks), and the source row survived until a pruning sync.
+     - The PR #49 audit found that the identity check would have made the `delete` case a
+       regression for a delete whose `_fire` lost the lock to the drain.
+     - **The overflow flush had the same defect, also FIXED by PR #49** (its overflow-flush commit,
+       from the review of `a2b8af7`). The flush enqueued only a full-vault upsert, and that runs
+       with `prune=False`, so flushed deletes and moves were dropped. A delete whose `_fire` lost
+       to the flush regressed the same way. The flush now enqueues every flushed delete/move job,
+       plus the overflowing call's own, BEFORE the full sync.
+     - The plan (`docs/plans/2026-10-22-vault-watcher-fire-race.md`) now lists all four removers
+       of `pending_timers` entries as a closed list, each with its proof. The one known gap is
+       item 3.
+  2. **Still open: a job can land after the sentinel through the observer.** `run_watcher` gives
+     `observer.join` 5s. If the observer thread outlives that, an event it delivers after the drain
+     arms a timer that nobody drains. This predates PR #49.
+  3. **Still open: debouncing is keyed by path, and the last event wins across actions.** Example: a
+     `move` is keyed on its src, and within `debounce_ms` the src is recreated. The move becomes an
+     upsert of src, and the destination is not synced, with the same consequences as item 1's move
+     case. This predates PR #49 and was found in its review.
 
 ## Status on 2026-10-16: DONE except items that need the user
 

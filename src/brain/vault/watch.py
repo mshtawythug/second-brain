@@ -7,19 +7,19 @@ having to run ``brain vault sync`` after every save. The lifecycle is:
    watcher was off get caught up.
 2. Start a watchdog ``Observer`` that emits filesystem events from the OS
    (FSEvents on macOS, inotify on Linux). The Observer runs on its own
-   thread and pushes raw events through ``_handle_event``.
-3. ``_handle_event`` filters out non-``.md`` paths, hidden directories,
-   templates, and attachments, then debounces per absolute path with a
-   ``threading.Timer``. When a path's debounce fires it enqueues a
-   ``_Job`` onto the worker queue.
+   thread and pushes raw events through ``_Handler.on_any_event``.
+3. ``_Handler.on_any_event`` filters out non-``.md`` paths, hidden
+   directories, templates, and attachments, then debounces per absolute
+   path with a timer from ``state.timer_factory``. When a path's debounce
+   fires it enqueues a ``_Job`` onto the worker queue.
 4. A single worker thread consumes the queue serially. It owns the only
    DB connection used by the watcher (we never share a psycopg connection
    across threads). Each job runs ``sync_one_file`` (created/modified) or
    removes the row + relinks (deleted) for the affected path. Errors from
    one job never kill the worker — they're logged and the loop continues.
 5. SIGINT / SIGTERM flip a ``threading.Event``; the main thread stops the
-   Observer, waits for any in-flight debounce timers to fire (so pending
-   edits drain instead of getting dropped), then joins the worker.
+   Observer, cancels pending debounce timers and enqueues each one's job
+   (``_drain_pending_timers``), then joins the worker.
 
 Concurrency invariants worth restating:
 
@@ -28,9 +28,14 @@ Concurrency invariants worth restating:
   after the startup sync returns. (Sharing connections across threads
   triggers psycopg ``InterfaceError: another command is already in
   progress`` under load.)
-- ``_pending_timers`` and ``_jobs`` are only touched while holding
-  ``_state_lock`` — a short, fine-grained mutex that doesn't block the
-  worker (the worker holds the queue's lock instead).
+- ``state.pending_timers`` is only touched while holding ``state.lock``, a
+  short mutex. ``state.jobs`` is a thread-safe ``Queue`` the worker reads
+  without that lock; the worker never takes ``state.lock``.
+- A debounce timer's ``_fire`` acts only on its OWN ``pending_timers`` entry
+  and enqueues under ``state.lock``; the drain and the overflow flush keep each
+  entry's delete/move job; a timer that cannot start delivers its job directly,
+  and a scheduling error never escapes into the observer thread. This is the
+  2026-10-22 race fix, reasoned at ``_fire``; CLAUDE.md's ceiling table records it.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
   spamming events can't OOM the process; on overflow we trigger an
   immediate full sync and clear the buffer.
@@ -86,6 +91,7 @@ from watchdog.observers.polling import PollingObserver as Observer
 # (negligible for ~1100 docs); latency is the polling interval.
 from ..ingest import Embedder
 from ..log_rotation import default_log_dir, start_background_rotator
+from .debounce_timer import DebounceTimer, TimerFactory, daemon_timer
 from .derived_links.fence import strip_fence
 from .sync import SyncReport, sync_one_file, sync_vault
 
@@ -169,7 +175,12 @@ class _Job:
 class _WatcherState:
     """Mutable state shared across threads — guarded by ``lock``."""
 
-    pending_timers: dict[Path, threading.Timer] = field(default_factory=dict)
+    # Path -> (its armed debounce timer, the job it will enqueue). Keeping the
+    # job lets the shutdown drain enqueue it as-is instead of an ``upsert``.
+    pending_timers: dict[Path, tuple[DebounceTimer, _Job]] = field(default_factory=dict)
+    # Builds each per-path debounce timer. Tests inject a manual timer (see
+    # ``brain.vault.debounce_timer``) so timer races replay without sleeps.
+    timer_factory: TimerFactory = daemon_timer
     lock: threading.Lock = field(default_factory=threading.Lock)
     stop_event: threading.Event = field(default_factory=threading.Event)
     jobs: queue.Queue[_Job | None] = field(default_factory=queue.Queue)
@@ -344,17 +355,7 @@ def run_watcher(
         observer.stop()
         observer.join(timeout=5.0)
 
-        # Drain any in-flight debounce timers: cancel them, then enqueue
-        # an immediate job for each path that had a pending timer so the
-        # worker still picks up the user's last edit before exiting.
-        with state.lock:
-            pending_paths = list(state.pending_timers.keys())
-            for timer in state.pending_timers.values():
-                timer.cancel()
-            state.pending_timers.clear()
-        for path in pending_paths:
-            _enqueue(state, _Job(action="upsert", abs_path=path), config=config)
-
+        _drain_pending_timers(state, config)
         # Sentinel tells the worker its queue is now closed.
         state.jobs.put(None)
         worker_thread.join(timeout=10.0)
@@ -441,7 +442,12 @@ class _Handler(FileSystemEventHandler):
         if classified is None:
             return
         for action, path, dest in classified:
-            _schedule_debounced(self._config, self._state, action, path, dest)
+            try:
+                _schedule_debounced(self._config, self._state, action, path, dest)
+            except Exception:
+                # Same guard as classify (2026-10-22): e.g. "can't start new
+                # thread" must not kill the observer thread and all later events.
+                logger.exception("vault watcher: schedule failed for %s %s", action, path)
 
     def _maybe_watch_new_directory(self, event: FileSystemEvent) -> None:
         """Schedule a recursive watch for a NEW top-level directory.
@@ -634,38 +640,90 @@ def _schedule_debounced(
     delay = max(config.debounce_ms, 0) / 1000.0
 
     def _fire() -> None:
+        # brain (2026-10-22, _fire race): ``cancel()`` cannot stop a callback
+        # that has already started, so this may run after ``timer`` was
+        # superseded, flushed by overflow, or drained at shutdown. Act only if
+        # the entry is still OUR timer: popping by path stole a successor's
+        # entry, producing two jobs and an orphan the drain never saw. Whoever
+        # removed our entry covers it: a successor, the drain (this very job),
+        # or the overflow flush (the full sync covers upserts; the flush
+        # enqueues each delete/move job itself). So returning loses nothing.
+        # Check, pop and enqueue under one lock so a shutdown drain can never
+        # slip between the pop and the put, which leaves the job behind the
+        # sentinel. ``jobs`` is unbounded, so ``put`` never blocks.
         with state.lock:
-            state.pending_timers.pop(path, None)
-        _enqueue(
-            state,
-            _Job(action=action, abs_path=path, dest_path=dest),
-            config=config,
-        )
+            entry = state.pending_timers.get(path)
+            if entry is None or entry[0] is not timer:
+                return
+            del state.pending_timers[path]
+            _enqueue(state, job, config=config)
 
+    job = _Job(action=action, abs_path=path, dest_path=dest)
     with state.lock:
+        overflowing = len(state.pending_timers) - (path in state.pending_timers) >= _MAX_PENDING
+        if not overflowing:
+            # Build AND start the timer BEFORE touching the existing entry, so a
+            # raising factory leaves that entry, and its job, pending and armed.
+            # Starting before the store is safe: _fire blocks on this lock, then
+            # finds its own entry.
+            timer = state.timer_factory(delay, _fire)
+            try:
+                timer.start()
+            except RuntimeError:
+                # "can't start new thread": no timer, so no debounce. The newest
+                # event wins at once, as debounce would have let it: supersede
+                # the pending entry and deliver this job now (2026-10-22, PR #49).
+                existing = state.pending_timers.pop(path, None)
+                if existing is not None:
+                    existing[0].cancel()
+                logger.exception("vault watcher: debounce timer failed to start; enqueued directly")
+                _enqueue(state, job, config=config)
+                return
         existing = state.pending_timers.pop(path, None)
         if existing is not None:
-            existing.cancel()
-        if len(state.pending_timers) >= _MAX_PENDING:
+            existing[0].cancel()
+        if overflowing:
             # Buffer overflow → drop everything, queue a full-vault sync.
-            for timer in state.pending_timers.values():
-                timer.cancel()
+            # That sync (prune=False) covers upserts only: it cannot remove a
+            # deleted row or move one in place. So enqueue every flushed
+            # delete/move job, and this call's, BEFORE it (2026-10-22, PR #49).
+            flushed = [entry_job for _t, entry_job in state.pending_timers.values()] + [job]
+            for pending, _pending_job in state.pending_timers.values():
+                pending.cancel()
             state.pending_timers.clear()
             logger.warning(
                 "vault watcher: debounce buffer overflow (%d pending) — "
                 "scheduling full sync",
                 _MAX_PENDING,
             )
+            for kept in flushed:
+                if kept.action != "upsert":
+                    _enqueue(state, kept, config=config)
             _enqueue(
                 state,
                 _Job(action="upsert", abs_path=config.vault_path),
                 config=config,
             )
             return
-        timer = threading.Timer(delay, _fire)
-        timer.daemon = True
-        state.pending_timers[path] = timer
-        timer.start()
+        state.pending_timers[path] = (timer, job)
+
+
+def _drain_pending_timers(state: _WatcherState, config: WatchConfig) -> None:
+    """Cancel every pending debounce timer and enqueue its pending job.
+
+    Runs at shutdown, before the sentinel, so the worker still picks up the
+    user's last edit instead of dropping it: the REAL job, so a pending
+    ``delete`` stays a delete and a ``move`` keeps its destination (until
+    2026-10-22 every path was drained as an ``upsert``). Extracted from
+    ``run_watcher``'s ``finally`` that day so the race tests drive it.
+    """
+    with state.lock:
+        entries = list(state.pending_timers.values())
+        for pending, _job in entries:
+            pending.cancel()
+        state.pending_timers.clear()
+    for _timer, job in entries:
+        _enqueue(state, job, config=config)
 
 
 def _enqueue(
@@ -674,7 +732,11 @@ def _enqueue(
     *,
     config: WatchConfig,
 ) -> None:
-    """Push a job onto the worker queue, after the optional test hook."""
+    """Push a job onto the worker queue, after the optional test hook.
+
+    Called under ``state.lock`` by ``_fire`` and the overflow flush, so the
+    hook must never take that lock.
+    """
     if config.on_event is not None:
         try:
             config.on_event(job.action, job.abs_path)
@@ -797,10 +859,10 @@ def _worker_loop(
                     # file, a ``brain note new`` followed immediately
                     # by ``brain rm``, or any tool that creates +
                     # removes within the debounce window. Without this
-                    # guard ``sync_one_file`` would raise
-                    # ``FileNotFoundError``, the outer ``except`` would
-                    # bump ``state.errors``, and the shutdown report
-                    # would falsely flag a phantom failure. Skip the
+                    # guard ``sync_one_file`` would record "file does not
+                    # exist" in its report and return (it does not raise),
+                    # and the worker would count the phantom as processed
+                    # work (measured 2026-10-22, PR #48). Skip the
                     # job entirely (``continue``) so neither
                     # ``processed`` nor ``errors`` advances — there
                     # was no real work to count.
