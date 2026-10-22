@@ -26,9 +26,10 @@ drift (2) alone.* Ingests added 608 documents to the document set (Krisp on
 well; the means fell from 0.4834 / 0.5835 / 0.7267 to 0.2589 / 0.3697 / 0.5852
 (nDCG@5 / MRR / Recall@20). Those are no longer the committed file's means: a
 second re-record the same day followed a ranking change, so for the current
-means see "Vector-leg candidate pool" under "Known retrieval issues" below. The golden judgments predated ~30% of the document set, so the
-absolute scores understated quality until `golden_corpus.yaml` was re-judged
-against the new documents. The two `recency` rows were re-judged on 2026-10-21
+means see "Vector-leg candidate pool" under "Known retrieval issues" below.
+The golden judgments predated ~30% of the document set, so the absolute
+scores understated quality until `golden_corpus.yaml` was re-judged against
+the new documents. The two `recency` rows were re-judged on 2026-10-21
 (see "Re-judged 2026-10-21" in (2)), and the other 29 on 2026-10-22 (see
 "Re-judged 2026-10-22" below).
 
@@ -43,10 +44,13 @@ all read-only:
 - an exact vector leg, with no index
 - the row's own judgments
 
-A row with a `source_filter` was pooled inside that source only. Some rows'
-judged sets had been built by listing every document of a kind: rows 14, 15,
-16, 29 and 30. Those were listed again by title over the new transcripts. Each row's own rule was applied
-unchanged: its `notes`, and the corpus header's "primarily about the topic".
+A row with a `source_filter` was pooled inside that source only. Rows 14, 15,
+16 and 30 had judged sets built by listing every document of a kind, and
+those were listed again by title over the new transcripts. Row 29 is
+judged by topic, not enumerated; besides its five channels, the new
+transcripts were searched for it by body keyword, not by title. Each row's
+own rule was applied unchanged: its `notes`, and the corpus header's
+"primarily about the topic".
 
 A Krisp ingest ran during the work: 2,029 documents at the start, **2,068** at
 the re-record. The ingest's 55 transcripts were judged too: 16 were already
