@@ -189,13 +189,18 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
      - The plan (`docs/plans/2026-10-22-vault-watcher-fire-race.md`) now lists all four removers
        of `pending_timers` entries as a closed list, each with its proof. The one known gap is
        item 3.
-  2. **Still open: a job can land after the sentinel through the observer.** `run_watcher` gives
-     `observer.join` 5s. If the observer thread outlives that, an event it delivers after the drain
-     arms a timer that nobody drains. This predates PR #49.
-  3. **Still open: debouncing is keyed by path, and the last event wins across actions.** Example: a
-     `move` is keyed on its src, and within `debounce_ms` the src is recreated. The move becomes an
-     upsert of src, and the destination is not synced, with the same consequences as item 1's move
-     case. This predates PR #49 and was found in its review.
+  2. ~~**A job can land after the sentinel through the observer.**~~ *[FIXED by PR #51
+     (`fix/vault-watcher-shutdown-and-mixed-actions`).]* `run_watcher` gives `observer.join` 5s. If
+     the observer thread outlived that, an event it delivered after the drain armed a timer that
+     nobody drained. The drain now sets `_WatcherState.closed` under the lock. A closed watcher arms
+     no timer and enqueues nothing, and logs the drop once. The next startup `sync_vault`
+     reconciles the path, though a delete is pruned only with prune on.
+  3. ~~**Debouncing is keyed by path, and the last event wins across actions.**~~ *[FIXED by PR
+     #51.]* Example: a `move` keyed on its src, then the src recreated within `debounce_ms`,
+     became an upsert of src, and the destination was not synced. A pending `move` superseded by a
+     DIFFERENT job is now enqueued first, under the lock. Every other action pair still coalesces,
+     the atomic-save delete+create collapse included. The pair table is in
+     `docs/plans/2026-10-22-vault-watcher-shutdown-mixed-actions.md`.
 
 ## Status on 2026-10-16: DONE except items that need the user
 
