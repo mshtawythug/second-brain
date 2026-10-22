@@ -177,6 +177,14 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        document id and its incoming backlinks), and the source row survived until a pruning sync.
      - The PR #49 audit found that the identity check would have made the `delete` case a
        regression for a delete whose `_fire` lost the lock to the drain.
+     - **The overflow flush had the same defect, also FIXED by PR #49** (its overflow-flush commit,
+       from the review of `a2b8af7`). The flush enqueued only a full-vault upsert, and that runs
+       with `prune=False`, so flushed deletes and moves were dropped. A delete whose `_fire` lost
+       to the flush regressed the same way. The flush now enqueues every flushed delete/move job,
+       plus the overflowing call's own, BEFORE the full sync.
+     - The plan (`docs/plans/2026-10-22-vault-watcher-fire-race.md`) now lists all four removers
+       of `pending_timers` entries as a closed list, each with its proof. The one known gap is
+       item 3.
   2. **Still open: a job can land after the sentinel through the observer.** `run_watcher` gives
      `observer.join` 5s. If the observer thread outlives that, an event it delivers after the drain
      arms a timer that nobody drains. This predates PR #49.

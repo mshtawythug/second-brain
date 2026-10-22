@@ -32,9 +32,9 @@ Concurrency invariants worth restating:
   short mutex. ``state.jobs`` is a thread-safe ``Queue`` the worker reads
   without that lock; the worker never takes ``state.lock``.
 - A debounce timer's ``_fire`` acts only on its OWN ``pending_timers`` entry
-  and enqueues under ``state.lock``; the drain enqueues each entry's real job.
-  This is the 2026-10-22 race fix, reasoned at ``_fire`` and the drain, and
-  the growth CLAUDE.md's ceiling table records for this over-800 file.
+  and enqueues under ``state.lock``; the drain and the overflow flush keep each
+  entry's delete/move job. This is the 2026-10-22 race fix, reasoned at
+  ``_fire``, and the growth CLAUDE.md's ceiling table records for this file.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
   spamming events can't OOM the process; on overflow we trigger an
   immediate full sync and clear the buffer.
@@ -639,8 +639,9 @@ def _schedule_debounced(
         # superseded, flushed by overflow, or drained at shutdown. Act only if
         # the entry is still OUR timer: popping by path stole a successor's
         # entry, producing two jobs and an orphan the drain never saw. Whoever
-        # removed our entry enqueued its own job (successor, full sync, or the
-        # drain, which enqueues this very job), so returning loses nothing.
+        # removed our entry covers it: a successor, the drain (this very job),
+        # or the overflow flush (the full sync covers upserts; the flush
+        # enqueues each delete/move job itself). So returning loses nothing.
         # Check, pop and enqueue under one lock so a shutdown drain can never
         # slip between the pop and the put, which leaves the job behind the
         # sentinel. ``jobs`` is unbounded, so ``put`` never blocks.
@@ -658,6 +659,10 @@ def _schedule_debounced(
             existing[0].cancel()
         if len(state.pending_timers) >= _MAX_PENDING:
             # Buffer overflow → drop everything, queue a full-vault sync.
+            # That sync (prune=False) covers upserts only: it cannot remove a
+            # deleted row or move one in place. So enqueue every flushed
+            # delete/move job, and this call's, BEFORE it (2026-10-22, PR #49).
+            flushed = [entry_job for _t, entry_job in state.pending_timers.values()] + [job]
             for pending, _pending_job in state.pending_timers.values():
                 pending.cancel()
             state.pending_timers.clear()
@@ -666,6 +671,9 @@ def _schedule_debounced(
                 "scheduling full sync",
                 _MAX_PENDING,
             )
+            for kept in flushed:
+                if kept.action != "upsert":
+                    _enqueue(state, kept, config=config)
             _enqueue(
                 state,
                 _Job(action="upsert", abs_path=config.vault_path),

@@ -179,12 +179,13 @@ def test_fire_enqueues_before_a_racing_drain_closes_queue(tmp_path: Path) -> Non
 
 
 def test_fire_that_lost_to_overflow_adds_nothing(tmp_path: Path, mocker: Any) -> None:
-    """A ``_fire`` that lost to the overflow flush is covered by the full sync.
+    """An UPSERT ``_fire`` that lost to the overflow flush is covered by the full sync.
 
-    Overflow cancels and clears every pending timer and enqueues one
-    full-vault upsert under the same lock. A timer already inside ``_fire``
-    finds its entry gone and must add nothing: the full sync re-reads the
-    whole vault, so no event is lost.
+    Overflow cancels and clears every pending timer under the same lock. It
+    enqueues each flushed delete/move job itself (tests below), then one
+    full-vault upsert. A timer already inside ``_fire`` finds its entry gone
+    and must add nothing. For an upsert, the full sync re-reads the whole
+    vault, so no event is lost.
     """
     mocker.patch("brain.vault.watch._MAX_PENDING", 1)
     rig = _Rig(tmp_path)
@@ -257,4 +258,89 @@ def test_delete_fire_that_loses_to_the_drain_is_not_lost(tmp_path: Path) -> None
     assert jobs[-1] is None, f"a job landed behind the shutdown sentinel: {jobs!r}"
     assert jobs == [_Job(action="delete", abs_path=gone), None], (
         f"the delete that lost to the drain was not delivered as a delete: {jobs!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The overflow flush keeps deletes and moves (PR #49 review, 2026-10-22).
+#
+# The full-vault job the flush enqueues covers UPSERTS: the worker runs
+# ``sync_vault(prune=False)``, which re-reads every file. That sync can neither
+# remove a deleted file's row nor apply a move in place: it would walk the
+# destination as a new file. So the flush enqueues every flushed entry's
+# non-upsert job itself, and the current call's job too, BEFORE the full sync,
+# so a move updates ``vault_path`` before the sync walks the destination.
+# ---------------------------------------------------------------------------
+
+
+def _full_sync(vault: Path) -> _Job:
+    return _Job(action="upsert", abs_path=vault)
+
+
+def test_overflow_flush_enqueues_a_pending_delete_before_the_full_sync(
+    tmp_path: Path, mocker: Any
+) -> None:
+    """A pending ``delete`` flushed by overflow is enqueued, ahead of the full sync."""
+    mocker.patch("brain.vault.watch._MAX_PENDING", 1)
+    gone = tmp_path / "gone.md"
+    rig = _Rig(tmp_path)
+    rig.schedule(gone, "delete")
+
+    rig.schedule(tmp_path / "other.md")  # overflow: flush gone.md's entry
+
+    assert rig.queued() == [_Job(action="delete", abs_path=gone), _full_sync(tmp_path)], (
+        "the overflow flush dropped a pending delete, or queued it after the full sync"
+    )
+
+
+def test_delete_fire_that_loses_to_the_overflow_flush_is_not_lost(
+    tmp_path: Path, mocker: Any
+) -> None:
+    """The reviewer's replay: a ``delete`` whose ``_fire`` lost the lock to the flush.
+
+    At ``a6a76fe`` the late fire still enqueued its delete. With the identity
+    check it returns, so the flush must already have enqueued the delete, once.
+    """
+    mocker.patch("brain.vault.watch._MAX_PENDING", 1)
+    gone = tmp_path / "gone.md"
+    rig = _Rig(tmp_path)
+    timer = rig.schedule(gone, "delete")
+    rig.schedule(tmp_path / "other.md")  # overflow wins the lock
+
+    timer.fire()  # the delete's already-running _fire
+
+    assert rig.queued() == [_Job(action="delete", abs_path=gone), _full_sync(tmp_path)], (
+        "the delete that lost to the overflow flush was dropped or delivered twice"
+    )
+
+
+def test_overflow_flush_enqueues_a_pending_move_with_its_destination(
+    tmp_path: Path, mocker: Any
+) -> None:
+    """A pending ``move`` flushed by overflow keeps its dest, ahead of the full sync."""
+    mocker.patch("brain.vault.watch._MAX_PENDING", 1)
+    src = tmp_path / "old.md"
+    dst = tmp_path / "new.md"
+    rig = _Rig(tmp_path)
+    rig.schedule(src, "move", dst)
+
+    rig.schedule(tmp_path / "other.md")  # overflow
+
+    assert rig.queued() == [
+        _Job(action="move", abs_path=src, dest_path=dst),
+        _full_sync(tmp_path),
+    ], "the overflow flush dropped a pending move, or queued it after the full sync"
+
+
+def test_overflowing_call_that_is_a_delete_is_enqueued(tmp_path: Path, mocker: Any) -> None:
+    """The call that trips the overflow is never armed, so its own delete must be queued."""
+    mocker.patch("brain.vault.watch._MAX_PENDING", 1)
+    gone = tmp_path / "gone.md"
+    rig = _Rig(tmp_path)
+    rig.schedule(tmp_path / "a.md")  # an upsert: the full sync covers it
+
+    _schedule_debounced(rig.config, rig.state, "delete", gone)  # overflows
+
+    assert rig.queued() == [_Job(action="delete", abs_path=gone), _full_sync(tmp_path)], (
+        "the overflowing call's own delete was dropped"
     )

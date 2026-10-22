@@ -72,9 +72,32 @@ The auditor replayed it deterministically: schedule a `delete` for a missing
 file, run the real drain, put the sentinel, then fire. The queue ended as
 `[_Job(action='upsert', ...deleted.md), None]`.
 
+### 5. The overflow flush dropped deletes and moves; found in the PR #49 review
+
+The same bug class as item 4, on the overflow path. The flush cancelled and
+cleared every entry, then enqueued only a full-vault `upsert`. The worker runs
+that as `sync_vault(prune=False)`, which can neither remove a deleted file's row
+nor move a row in place: it walks a move's destination as a new file.
+
+- **A regression from the identity check.** A `delete` whose `_fire` lost the
+  lock to the flush now returned. The reviewer's replay, with `_MAX_PENDING=1`:
+  schedule a delete for `gone.md`, schedule an upsert for `other.md` (which
+  overflows), then fire the delete's timer.
+  - `a6a76fe` gives `[upsert(vault), delete(gone.md)]`.
+  - `a2b8af7` gives `[upsert(vault)]`.
+- **Pre-existing.** The flushed entries' delete/move jobs were always dropped.
+  The overflowing call's own job was never armed and never enqueued either.
+
+**Fix:** under the lock, the flush first enqueues the real job of every flushed
+entry whose action is not `upsert`, plus the current call's job if it is not
+`upsert`. Only then does it enqueue the full-vault upsert. The order matters: a
+move updates `vault_path` before the full sync walks its destination as a new
+file. Upserts stay covered by the full sync.
+
 ## Fix
 
-All in `_schedule_debounced`, its `_fire`, and `_drain_pending_timers`:
+All in `_schedule_debounced` (including its overflow branch), its `_fire`, and
+`_drain_pending_timers`:
 
 ```python
 job = _Job(action=action, abs_path=path, dest_path=dest)
@@ -104,22 +127,35 @@ state.pending_timers[path] = (timer, job)
   REAL pending job: a `delete` stays a delete, and a `move` keeps its
   destination.
 
-### No lost event: a `_fire` returns without enqueueing only when its entry is gone or replaced
+### No lost event: the closed list of `pending_timers` removers
 
-A `pending_timers[path]` entry leaves the dict in exactly four ways. Each one
-holds `state.lock`, and each one hands the path's work to something that will
-run before the sentinel:
+Items 4 and 5 were the same defect found twice: a remover that did not hand off
+the entry's job. So this section is a **closed list**, not a sample. It was
+derived from every reference in `src/`, via
+`grep -rn "pending_timers" src/`, at the review-fix commit:
 
-| Removed by | Who covers the event |
-|---|---|
-| its own `_fire` (identity holds) | that `_fire` enqueues its job, inside the same critical section |
-| supersession (`_schedule_debounced` for the same path) | the successor, which is now the entry and is itself resolved by one of these four rows. This is the last-wins semantics a cancel that arrives in time always had. |
-| overflow (`len >= _MAX_PENDING`) | the full-vault `upsert` job, enqueued under the same lock |
-| shutdown drain | the entry's OWN job (same action, same `dest`), enqueued before the sentinel |
+- **One writer:** `state.pending_timers[path] = (timer, job)` in `_schedule_debounced`.
+- **Exactly four removers**, nothing else:
+  - `del` in `_fire`;
+  - `pop(path, None)` in `_schedule_debounced`;
+  - `.clear()` in the overflow branch;
+  - `.clear()` in `_drain_pending_timers`.
 
-A superseded or drained `_fire` that lost the race therefore drops nothing that
-another row does not cover. For a drained one, the drain enqueued the very job
-the fire would have. Since a `_fire` enqueues under the lock, any job it puts
+There are no other `pop`, `del` or `clear` calls, no reassignment of the dict,
+and no reader outside `watch.py` except the two test helpers. Every remover
+holds `state.lock`.
+
+| # | Remover | Its proof that the entry's job is not lost | Pinned by |
+|---|---|---|---|
+| 1 | `_fire`: `del`, identity holds | It enqueues its own job in the same critical section, so the drain sees it either pending or already queued | A (T2's fire), C |
+| 2 | supersession: `pop(path)` in `_schedule_debounced` | The current call's job replaces it, and that job is resolved by one of these four rows. This is **last-wins**, the semantics a cancel that arrives in time always had. **Known gap, recorded and not fixed here:** last-wins across ACTIONS, e.g. a `move` keyed on src superseded by a recreated src (handoff item 3) | A, B |
+| 3 | overflow `.clear()` | Every flushed entry's non-upsert job, plus the current call's non-upsert job, is enqueued before the full-vault upsert, under the lock. Upserts are covered by that full sync (`sync_vault` re-reads every file) | D, H, I, J, K |
+| 4 | drain `.clear()` | It enqueues each entry's own job (same action, same `dest`) before the sentinel, on the thread that then puts the sentinel | B, E, F, G |
+
+A `_fire` that finds its entry gone or replaced returns. Rows 2-4 are the only
+ways that happens, and each one has already enqueued that fire's work, or
+handed it to the successor. For rows 3 and 4 the job enqueued is the very job
+the fire would have queued, or an upsert covered by the full sync. Since a `_fire` enqueues under the lock, any job it puts
 precedes the drain's critical section, and therefore the sentinel. The drain's
 own enqueues and the sentinel run on one thread, in order.
 
@@ -151,7 +187,7 @@ The race is then three synchronous steps, with no threads and no sleeps:
 The drain moves out of `run_watcher`'s `finally` into
 `_drain_pending_timers(state, config)`, so a test can run the real drain.
 
-New tests, in `tests/test_vault_watch_fire_race.py` (A-G) and
+New tests, in `tests/test_vault_watch_fire_race.py` (A-K) and
 `tests/test_debounce_timer.py` (T):
 
 | Id | Test | Claim |
@@ -159,10 +195,14 @@ New tests, in `tests/test_vault_watch_fire_race.py` (A-G) and
 | A | `test_superseded_fire_leaves_successor_pending` | After the race, T2 is still `pending_timers[path]`, T1 enqueued nothing, and T2's fire enqueues exactly one job |
 | B | `test_raced_successor_is_drained_before_sentinel` | After the race, the real drain plus the sentinel: T2's path is queued before the `None`, and a late T2 fire adds nothing after it |
 | C | `test_fire_enqueues_before_a_racing_drain_closes_queue` | A drain cannot run between `_fire`'s pop and its put. The `on_event` hook (called just before the put) runs the drain only if `state.lock` is free, and the job must still precede the sentinel |
-| D | `test_fire_that_lost_to_overflow_adds_nothing` | A `_fire` that lost to the overflow flush adds nothing: the queue holds only the full-vault upsert |
+| D | `test_fire_that_lost_to_overflow_adds_nothing` | An UPSERT `_fire` that lost to the overflow flush adds nothing: the queue holds only the full-vault upsert, which covers it |
 | E | `test_drain_enqueues_a_pending_delete_as_delete` | A `delete` pending at shutdown drains as `[_Job("delete", p), None]` |
 | F | `test_drain_enqueues_a_pending_move_with_its_destination` | A `move` pending at shutdown drains as that move, with its `dest` |
 | G | `test_delete_fire_that_loses_to_the_drain_is_not_lost` | The auditor's replay: schedule a delete, drain, sentinel, then the losing fire. The queue is `[_Job("delete", p), None]`, with nothing after the sentinel |
+| H | `test_overflow_flush_enqueues_a_pending_delete_before_the_full_sync` | A pending `delete` plus an overflow gives `[delete job, full-vault upsert]` |
+| I | `test_delete_fire_that_loses_to_the_overflow_flush_is_not_lost` | The reviewer's replay: the delete precedes the full sync, and the losing fire adds nothing |
+| J | `test_overflow_flush_enqueues_a_pending_move_with_its_destination` | A pending `move` plus an overflow gives `[move job with dest, full-vault upsert]` |
+| K | `test_overflowing_call_that_is_a_delete_is_enqueued` | The call that trips the overflow is a `delete`: it is enqueued before the full sync, and the flushed upsert is covered by it |
 | T | `test_daemon_timer_builds_an_unstarted_daemon_threading_timer` | `daemon_timer(60, cb)` is a `threading.Timer` with `daemon is True`, and not alive |
 
 ## Ceiling
@@ -173,10 +213,10 @@ through `a6a76fe`. This change:
 - extracts the timer seam to a new module;
 - records the remaining growth inline at `_fire` and the drain, AND as a
   module-docstring bullet;
-- extends the row's trail. The trail now has SHA-bound hops for 1,070 through
-  `a6a76fe` and for 1,095 at `bd7c8d8`, the first fix commit. The descriptive
-  hop it carried was promoted when this review-fix commit touched the file, and
-  a new descriptive hop was added for the review-fix commit.
+- extends the row's trail with SHA-bound hops: 1,070 through `a6a76fe`, 1,095
+  at `bd7c8d8` (the first fix) and 1,101 at `a2b8af7` (the drain fix). Each
+  descriptive hop was promoted by the next commit to touch the file. A new
+  descriptive hop covers the overflow-flush commit.
 
 The row stops saying "no commit through", so the anchored-grep set shrinks by
 one. The parenthetical that already records `setup.py` leaving that set gets
@@ -229,6 +269,17 @@ and went RED at their targeted assertions:
 With `(timer, job)` entries, all pass. T passes against `daemon_timer` as written.
 It goes red only under its mutant (ME, below).
 
+**Round 3 (`a2b8af7` review, the overflow flush).** H-K were written first,
+against `a2b8af7`'s code, and went RED at their targeted assertions:
+
+- H: "the overflow flush dropped a pending delete, or queued it after the full sync"
+- I: "the delete that lost to the overflow flush was dropped or delivered twice"
+- J: "...dropped a pending move, or queued it after the full sync"
+- K: "the overflowing call's own delete was dropped"
+
+With the flush enqueuing non-upsert jobs before the full sync, all 12 race and
+timer tests pass.
+
 ### Mutations (five clauses)
 
 The harness is a throwaway script, not committed, using the same design as
@@ -236,8 +287,14 @@ PR #48's:
 
 - Each mutant is a `str.replace` on `watch.py` (or `debounce_timer.py` for
   ME), and its `str.count` is asserted equal to the declared count (1).
-- Each (mutant, test) pair runs as its own pytest node: 8 + 6×8 + 1 = 57 runs.
-- Both files' bytes are restored in a `finally`.
+- Each (mutant, test) pair runs as its own pytest node: 12 unmutated + 9
+  mutants × 12 tests + 1 negative control = 121 runs, in the round-3 run of
+  record.
+- Both files' bytes are restored in a `finally`. **Process note:** these runs
+  mutated the live worktree. A concurrent auditor read `watch.py` mid-run and
+  saw the M0 mutant. After every round, `git diff` against the previous commit
+  was verified to show only the intended source. Harnesses for any later round
+  run only in `git archive` copies.
 - Clause (d) matches the expected text only in the failing block: the `>`
   statement plus its `E` lines.
 
@@ -245,12 +302,15 @@ Every cell not marked red passed:
 
 | Mutant | Edit | Red at (targeted statement) |
 |---|---|---|
-| none | n/a | none: all 8 pass |
-| M0 | `a6a76fe`'s `_fire` (pop by path, enqueue after the lock) | A `rig.pending() == {note: t2}`; B `jobs[-1] is None`; C `jobs[-1] is None` (drain between pop and put); D overflow loser enqueued; G `jobs[-1] is None` |
-| MA | identity check removed, enqueue still under the lock | A `rig.pending() == {note: t2}`; B `jobs[-1] is None`; D overflow loser enqueued; G `jobs[-1] is None` |
+| none | n/a | none: all 12 pass |
+| M0 | `a6a76fe`'s `_fire` (pop by path, enqueue after the lock) | A `rig.pending() == {note: t2}`; B `jobs[-1] is None`; C `jobs[-1] is None` (drain between pop and put); D overflow loser enqueued; G `jobs[-1] is None`; I delete delivered twice |
+| MA | identity check removed, enqueue still under the lock | A `rig.pending() == {note: t2}`; B `jobs[-1] is None`; D overflow loser enqueued; G `jobs[-1] is None`; I delete delivered twice |
 | MB | identity kept, enqueue moved outside the lock | C `jobs[-1] is None` (drain between pop and put) |
-| MC | identity kept, but the loser still enqueues its job | A `rig.events == []`; B `jobs[-1] is None`; D overflow loser enqueued; G `jobs[-1] is None` |
+| MC | identity kept, but the loser still enqueues its job | A `rig.events == []`; B `jobs[-1] is None`; D overflow loser enqueued; G `jobs[-1] is None`; I delete delivered twice |
 | MD | the drain enqueues `_Job("upsert", path)` again | E `== [_Job("delete", ...), None]`; F `== [_Job("move", ..., dest_path=dst), None]`; G `jobs == [_Job("delete", ...), None]` |
+| MF | overflow flush reverted (the non-upsert jobs are not enqueued) | H, I, J, K: each `rig.queued() == [..., full sync]` |
+| MG | the flush enqueues its jobs AFTER the full sync | H, I, J, K: same statements (order) |
+| MH | the flush omits the overflowing call's own job | K `rig.queued() == [_Job("delete", gone), full sync]` |
 | ME | `daemon_timer` without `timer.daemon = True` | T `timer.daemon is True` |
 | neg | MA, with the wrong claimed assertion (`rig.events == []`) for A | **MISMATCH**: the checker can fail |
 
@@ -264,18 +324,24 @@ Each claim has its own killing mutant (clause e):
 - "the drain keeps the action": MD → E;
 - "the drain keeps a move's destination": MD → F;
 - "a delete that lost to the drain is delivered as a delete": MD → G;
+- "the overflow flush keeps flushed deletes/moves": MF → H, J;
+- "a delete that lost to the flush is delivered exactly once": MF → I
+  (dropped); M0 / MA / MC → I (delivered twice);
+- "the flushed jobs precede the full sync": MG → H, I, J, K;
+- "the overflowing call's own non-upsert job is kept": MH → K;
 - "the default timer is a daemon": ME → T.
 
 ### Stability
 
 - `test_vault_watch_fire_race.py` plus `test_debounce_timer.py` passed 5 times in
-  a row (8 passed each run). There are no threads and no sleeps, so nothing is
+  a row (12 passed each run in round 3). There are no threads and no sleeps, so nothing is
   timing-dependent.
 - Run once, serially: the watcher and docs-guard files
   (`test_vault_watch_fire_race.py`, `test_debounce_timer.py`,
   `test_vault_watcher.py`, `test_cli_vault_watch.py`, `test_thread_wait.py`,
   `test_graphrag_sync_wiring.py`, `test_reading_surface_pointers.py`,
-  `test_repo_hygiene_files.py`, `test_eval_workflow_contract.py`). 292 passed.
+  `test_repo_hygiene_files.py`, `test_eval_workflow_contract.py`). 296 passed
+  in round 3.
 - The full suite was not run locally; CI is the full-suite evidence.
 
 ### Lint and ceiling
@@ -283,9 +349,15 @@ Each claim has its own killing mutant (clause e):
 - `ruff check` and `mypy src/` are clean.
 - The new files are `ruff format`-clean. In `watch.py` (unformatted at base,
   like most of the repo), no format hunk overlaps a line this change added.
-- `watch.py`: 1,070 at `a6a76fe`, then 1,095 at `bd7c8d8`; the review fixes add
-  a few more lines (take the present count from `wc -l`). What grew is the
-  wiring, `_drain_pending_timers`, the `(timer, job)` entry and the `_fire`
-  reasoning. It is recorded inline at `_fire` and at the drain, in a
+- `watch.py`: 1,070 at `a6a76fe`, 1,095 at `bd7c8d8`, 1,101 at `a2b8af7`. The
+  overflow-flush commit adds a few more lines; take the present count from
+  `wc -l`. What grew is:
+  - the wiring;
+  - `_drain_pending_timers`;
+  - the `(timer, job)` entry;
+  - the overflow flush;
+  - the `_fire` reasoning.
+
+  It is recorded inline at `_fire`, the drain and the flush, in a
   module-docstring bullet, and in the CLAUDE.md row.
 - `debounce_timer.py` is a new leaf, well under 800.
