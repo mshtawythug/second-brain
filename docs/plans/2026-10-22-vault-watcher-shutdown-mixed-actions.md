@@ -117,6 +117,8 @@ All in `tests/test_vault_watch_fire_race.py`.
   the drain fires after it and adds nothing behind the sentinel.
 - **B1** move → upsert, **B2** move → delete, **B3** move → move with a different
   dest: the pending move is enqueued at once, and the new job stays pending.
+  Each then fires its successor and asserts that the NEW job is the one
+  delivered: `[upsert src]`, `[delete src]`, and `[move src→second]`.
 - **B4** move → move, same dest: coalesced to a single move.
 - **B5** the coalescing pairs, parametrized: upsert → upsert / delete / move, and
   delete → delete / upsert / move. Nothing is enqueued at supersession, and only
@@ -139,6 +141,17 @@ and records the growth inline, in the module docstring, and in the row.
 - **Changed semantics for move → * pairs.** Only flushes are added. A flushed
   move is a job the worker already handles (`_handle_move`, including a
   vanished destination). No coalescing pair changes.
+- **A flushed move is delivered ahead of other paths' still-pending jobs.** It
+  is enqueued at the supersession, while other paths' timers are still waiting
+  out their debounce. That is acceptable, for three reasons:
+  - The watcher never promised cross-path ordering. Every path debounces
+    independently, so jobs for different paths already land in the order their
+    timers happen to fire.
+  - The move is a fact that has already happened on disk. Delivering it early
+    only shortens its debounce: it is not coalesced with anything, because the
+    next job on that path is a different one.
+  - `_handle_move` reads the destination's current state when it runs, so an
+    earlier start cannot observe a stale file.
 - **`closed` read under the lock only,** by `_schedule_debounced`. Its sole
   writer is the drain, inside the same lock.
 - **Out of scope, recorded.** If the observer outlives the join, `observer.schedule`
@@ -214,6 +227,7 @@ and the whole matrix was re-run.
 | MP | the fallback drops the job | fire-race Ma, Mb, plus B7 |
 | MJ | no scheduling guard | fire-race N |
 | OVFSTART | the overflowing call builds a timer | fire-race K, K2 |
+| MX | the move is flushed, but the OLD move is stored (and fired) as the successor's job | B1, B2, B3 (the NEW job not delivered) |
 | ME | no daemon flag | timer T |
 
 **Each new claim has its own killing mutant (clause e):**
@@ -224,7 +238,16 @@ and the whole matrix was re-run.
 - "a superseded move is delivered first": MT → B1, B2, B3;
 - "even through the start() fallback": MT / MW → B7;
 - "deletes still coalesce, the atomic save included": MU → B5, B6;
-- "identical moves still coalesce": MV → B4.
+- "identical moves still coalesce": MV → B4;
+- "the successor delivers the NEW job": MX → B1, B2, B3.
+
+**MX was added in review (of `c00bba0`).** B2 and B3 originally asserted only
+the flush. Run against an archive of `c00bba0`, with its own tests, MX was
+killed only by B1, and B2 and B3 survived it. With the successor assertions
+added, MX reds all three. The run of record is now 22 mutants, all OK. It was
+re-run on a `git stash create` snapshot (`eefb528`) of this round's tree, with a
+clean control, both negative controls rejected, and the archive restored
+byte-identical.
 
 **Every earlier claim still holds against the new code:** M0 to ME re-ran with
 their earlier kills intact. The A3 additions under M0, MA and MC are expected:

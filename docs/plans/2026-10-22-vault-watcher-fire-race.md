@@ -197,10 +197,15 @@ holds `state.lock`.
 | # | Remover | Its proof that the entry's job is not lost | Pinned by |
 |---|---|---|---|
 | 1 | `_fire`: `del`, identity holds | It enqueues its own job in the same critical section, so the drain sees it either pending or already queued | A (T2's fire), C |
-| 2 | supersession: `pop(path)` in `_schedule_debounced` | The current call's job replaces it, and that job is resolved by one of these rows. This is **last-wins**, the semantics a cancel that arrives in time always had. **Known gap, recorded and not fixed here:** last-wins across ACTIONS, e.g. a `move` keyed on src superseded by a recreated src (handoff item 3). **Exceptions:** the new timer is built AND started BEFORE the pop. A raising factory leaves the old entry pending and armed (nothing popped or stored), and the exception reaches `_Handler.on_any_event`, which logs it and keeps the observer thread alive | A, B, L, N |
+| 2 | supersession: `pop(path)` in `_schedule_debounced` (superseded by PR #51: see the pointer below the table) | The current call's job replaces it, and that job is resolved by one of these rows. This is **last-wins**, the semantics a cancel that arrives in time always had. **Known gap, recorded and not fixed here:** last-wins across ACTIONS, e.g. a `move` keyed on src superseded by a recreated src (handoff item 3). **Exceptions:** the new timer is built AND started BEFORE the pop. A raising factory leaves the old entry pending and armed (nothing popped or stored), and the exception reaches `_Handler.on_any_event`, which logs it and keeps the observer thread alive | A, B, L, N |
 | 2b | supersession on a failed `start()`: `pop(path)` in the `RuntimeError` fallback of `_schedule_debounced` | The NEW call's job is enqueued directly, under the lock, in the same critical section as the pop. The newest event wins exactly as row 2's last-wins, without the debounce delay. With nothing pending, the pop is a no-op and the event is still delivered | Ma, Mb |
 | 3 | overflow `.clear()` | Every flushed entry's non-upsert job, plus the current call's non-upsert job, is enqueued before the full-vault upsert, under the lock. Upserts are covered by that full sync (`sync_vault` re-reads every file) | D, H, I, J, K |
 | 4 | drain `.clear()` | It enqueues each entry's own job (same action, same `dest`) before the sentinel, on the thread that then puts the sentinel | B, E, F, G |
+
+> **Closed by PR #51.** Row 2's known gap (last-wins across actions) and the
+> observer-after-drain window were fixed in
+> `docs/plans/2026-10-22-vault-watcher-shutdown-mixed-actions.md`, which supersedes
+> row 2 and carries the current remover list. This table is kept as history.
 
 A `_fire` that finds its entry gone or replaced returns. Rows 2, 2b, 3 and 4
 are the only ways that happens. Each one has already enqueued that fire's work,
@@ -292,7 +297,8 @@ the same note, with no digit.
   (`tests/test_vault_watcher.py::_pending`, the rig's `pending()`). Both test
   helpers map entries back to timers.
   `test_graceful_shutdown_drains_pending` reads only `len(...)`.
-- **Still open, out of scope, and recorded in the handoff.** Debouncing is keyed
+- **Closed by PR #51** (`docs/plans/2026-10-22-vault-watcher-shutdown-mixed-actions.md`);
+  kept as history. **Still open, out of scope, and recorded in the handoff.** Debouncing is keyed
   by path, and the last event wins across actions. So a `move` keyed on its src,
   followed within `debounce_ms` by a recreated src, becomes an upsert of src,
   and the destination is not synced. Also, an observer that outlives

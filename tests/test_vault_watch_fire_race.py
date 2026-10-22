@@ -589,12 +589,16 @@ def test_move_superseded_by_delete_is_delivered_first(tmp_path: Path) -> None:
     rig = _Rig(tmp_path)
     rig.schedule(src, "move", dst)
 
-    rig.schedule(src, "delete")
+    newest = rig.schedule(src, "delete")
 
     assert rig.queued() == [_Job(action="move", abs_path=src, dest_path=dst)], (
         "the pending move was dropped when a delete of its src superseded it"
     )
-    assert set(rig.pending()) == {src}
+    assert rig.pending() == {src: newest}
+    newest.fire()
+    assert rig.queued() == [_Job(action="delete", abs_path=src)], (
+        "the successor did not deliver the NEW job (the delete)"
+    )
 
 
 def test_move_superseded_by_a_move_elsewhere_is_delivered_first(tmp_path: Path) -> None:
@@ -602,10 +606,14 @@ def test_move_superseded_by_a_move_elsewhere_is_delivered_first(tmp_path: Path) 
     rig = _Rig(tmp_path)
     rig.schedule(src, "move", first)
 
-    rig.schedule(src, "move", second)
+    newest = rig.schedule(src, "move", second)
 
     assert rig.queued() == [_Job(action="move", abs_path=src, dest_path=first)], (
         "the first move was dropped when a move of the same src to another dest superseded it"
+    )
+    newest.fire()
+    assert rig.queued() == [_Job(action="move", abs_path=src, dest_path=second)], (
+        "the successor did not deliver the NEW job (the move to the second dest)"
     )
 
 

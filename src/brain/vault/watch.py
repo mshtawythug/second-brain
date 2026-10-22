@@ -633,10 +633,10 @@ def _schedule_debounced(
     Each new event for the same path resets the debounce timer to
     ``config.debounce_ms`` from now. Once the path goes ``debounce_ms``
     without a new event, the timer fires and enqueues a job. ``dest`` is the
-    rename destination for a ``move`` action (``None`` otherwise); the
-    debounce is keyed on ``path`` (the source), so repeated moves of the same
-    source coalesce and the last one's destination wins — the desired
-    outcome for a burst of rename events.
+    rename destination for a ``move`` action (``None`` otherwise), keyed on
+    ``path`` (the source). Repeated reports of the same move coalesce; a
+    pending move superseded by a different job is delivered first
+    (``_supersede_pending``); a closed watcher schedules nothing.
 
     If the pending-timer dict overflows (a misbehaving editor or a
     bulk-replace operation), we fall back to "trigger an immediate full
@@ -760,8 +760,9 @@ def _enqueue(
 ) -> None:
     """Push a job onto the worker queue, after the optional test hook.
 
-    Called under ``state.lock`` by ``_fire`` and the overflow flush, so the
-    hook must never take that lock.
+    Called under ``state.lock`` by ``_fire``, the overflow flush,
+    ``_supersede_pending`` and the start() fallback, so the hook must never
+    take that lock. The drain calls it after releasing the lock.
     """
     if config.on_event is not None:
         try:

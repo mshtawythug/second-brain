@@ -187,8 +187,9 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        to the flush regressed the same way. The flush now enqueues every flushed delete/move job,
        plus the overflowing call's own, BEFORE the full sync.
      - The plan (`docs/plans/2026-10-22-vault-watcher-fire-race.md`) now lists all four removers
-       of `pending_timers` entries as a closed list, each with its proof. The one known gap is
-       item 3.
+       of `pending_timers` entries as a closed list, each with its proof. The one known gap was
+       item 3, now closed by PR #51; `docs/plans/2026-10-22-vault-watcher-shutdown-mixed-actions.md`
+       carries the current list.
   2. ~~**A job can land after the sentinel through the observer.**~~ *[FIXED by PR #51
      (`fix/vault-watcher-shutdown-and-mixed-actions`).]* `run_watcher` gives `observer.join` 5s. If
      the observer thread outlived that, an event it delivered after the drain armed a timer that
