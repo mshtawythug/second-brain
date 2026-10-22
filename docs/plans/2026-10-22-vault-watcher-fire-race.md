@@ -94,6 +94,53 @@ entry whose action is not `upsert`, plus the current call's job if it is not
 move updates `vault_path` before the full sync walks its destination as a new
 file. Upserts stay covered by the full sync.
 
+### 6. A scheduling exception lost a job and could kill the observer; found in the PR #49 review of `8341ea1`
+
+- **A failing timer lost a job.** `_schedule_debounced` popped and cancelled
+  the existing entry, and stored the new one, BEFORE it started the new timer.
+  - Constructing a `threading.Timer` creates no OS thread. `start()` does, and
+    raises `RuntimeError: can't start new thread` under thread exhaustion.
+  - So a failing `start()` left a never-started timer as the entry, while the
+    old entry's armed timer had already been cancelled. A raising factory
+    likewise lost the old entry's job, and a racing `_fire` returned on the
+    identity check.
+- **The exception escaped into the observer thread.** `_Handler.on_any_event`
+  wrapped only classification in its try/except, so the exception reached
+  watchdog's observer thread. That can kill the thread and silently stop every
+  later event.
+
+**Fix:**
+- Build AND `start()` the timer first, inside the lock, before the pop, the
+  cancel and the store.
+  - **A raising factory** leaves nothing popped or stored, so the old entry
+    stays pending and ARMED. The exception propagates to the handler guard.
+  - **A raising `start()`** (`RuntimeError`, which is what `threading` raises)
+    falls back to delivery WITHOUT debounce: there is no timer, so the newest
+    event wins at once, as debounce would have let it. Under the lock it pops
+    and cancels the existing entry (if any), enqueues the NEW job directly, and
+    logs once, with no path or content. Nothing is lost. A delete that
+    supersedes a pending upsert is delivered as a delete, and an event for a
+    path with nothing pending is delivered immediately. This replaced a
+    recorded residual (the new event was dropped) at the coordinator's request,
+    in 11 lines including comments.
+  - Starting before the store is safe: a firing `_fire` blocks on `state.lock`,
+    which is held until after the store, and its identity check then finds its
+    own entry.
+  - The overflow path builds and starts no timer at all. The overflow decision
+    is computed first, discounting the path's own entry, which is popped either
+    way.
+  - My first attempt only moved the factory call above the pop (`fb20bde`,
+    local, never pushed). The auditor showed it does not cover the realistic
+    `start()` failure, and the `fb20bde` archive run below confirms it.
+- Wrap each scheduling call in the same log-and-continue guard as
+  classification.
+  - It logs the action and path, never content.
+  - It does not bump `state.errors`, because that counter is the worker's alone
+    (its own comment: "Only the worker thread touches them").
+  - A `_schedule_debounced` call from `_maybe_watch_new_directory` already runs
+    inside the classification guard. A failure there aborts only the rest of
+    that one directory event.
+
 ## Fix
 
 All in `_schedule_debounced` (including its overflow branch), its `_fire`, and
@@ -135,26 +182,30 @@ derived from every reference in `src/`, via
 `grep -rn "pending_timers" src/`, at the review-fix commit:
 
 - **One writer:** `state.pending_timers[path] = (timer, job)` in `_schedule_debounced`.
-- **Exactly four removers**, nothing else:
+- **Exactly five removers**, nothing else:
   - `del` in `_fire`;
-  - `pop(path, None)` in `_schedule_debounced`;
+  - `pop(path, None)` in `_schedule_debounced` (row 2);
+  - `pop(path, None)` in its `start()`-failure fallback (row 2b);
   - `.clear()` in the overflow branch;
   - `.clear()` in `_drain_pending_timers`.
 
 There are no other `pop`, `del` or `clear` calls, no reassignment of the dict,
-and no reader outside `watch.py` except the two test helpers. Every remover
+and no reader outside `watch.py` except test code (two helpers and one inline
+`len` check at `tests/test_vault_watcher.py:822`). Every remover
 holds `state.lock`.
 
 | # | Remover | Its proof that the entry's job is not lost | Pinned by |
 |---|---|---|---|
 | 1 | `_fire`: `del`, identity holds | It enqueues its own job in the same critical section, so the drain sees it either pending or already queued | A (T2's fire), C |
-| 2 | supersession: `pop(path)` in `_schedule_debounced` | The current call's job replaces it, and that job is resolved by one of these four rows. This is **last-wins**, the semantics a cancel that arrives in time always had. **Known gap, recorded and not fixed here:** last-wins across ACTIONS, e.g. a `move` keyed on src superseded by a recreated src (handoff item 3) | A, B |
+| 2 | supersession: `pop(path)` in `_schedule_debounced` | The current call's job replaces it, and that job is resolved by one of these rows. This is **last-wins**, the semantics a cancel that arrives in time always had. **Known gap, recorded and not fixed here:** last-wins across ACTIONS, e.g. a `move` keyed on src superseded by a recreated src (handoff item 3). **Exceptions:** the new timer is built AND started BEFORE the pop. A raising factory leaves the old entry pending and armed (nothing popped or stored), and the exception reaches `_Handler.on_any_event`, which logs it and keeps the observer thread alive | A, B, L, N |
+| 2b | supersession on a failed `start()`: `pop(path)` in the `RuntimeError` fallback of `_schedule_debounced` | The NEW call's job is enqueued directly, under the lock, in the same critical section as the pop. The newest event wins exactly as row 2's last-wins, without the debounce delay. With nothing pending, the pop is a no-op and the event is still delivered | Ma, Mb |
 | 3 | overflow `.clear()` | Every flushed entry's non-upsert job, plus the current call's non-upsert job, is enqueued before the full-vault upsert, under the lock. Upserts are covered by that full sync (`sync_vault` re-reads every file) | D, H, I, J, K |
 | 4 | drain `.clear()` | It enqueues each entry's own job (same action, same `dest`) before the sentinel, on the thread that then puts the sentinel | B, E, F, G |
 
-A `_fire` that finds its entry gone or replaced returns. Rows 2-4 are the only
-ways that happens, and each one has already enqueued that fire's work, or
-handed it to the successor. For rows 3 and 4 the job enqueued is the very job
+A `_fire` that finds its entry gone or replaced returns. Rows 2, 2b, 3 and 4
+are the only ways that happens. Each one has already enqueued that fire's work,
+or handed it to the newer job, which is itself enqueued (2b) or resolved by
+these rows (2). For rows 3 and 4 the job enqueued is the very job
 the fire would have queued, or an upsert covered by the full sync. Since a `_fire` enqueues under the lock, any job it puts
 precedes the drain's critical section, and therefore the sentinel. The drain's
 own enqueues and the sentinel run on one thread, in order.
@@ -187,7 +238,7 @@ The race is then three synchronous steps, with no threads and no sleeps:
 The drain moves out of `run_watcher`'s `finally` into
 `_drain_pending_timers(state, config)`, so a test can run the real drain.
 
-New tests, in `tests/test_vault_watch_fire_race.py` (A-K) and
+New tests, in `tests/test_vault_watch_fire_race.py` (A-N, with M split into Ma/Mb) and
 `tests/test_debounce_timer.py` (T):
 
 | Id | Test | Claim |
@@ -203,6 +254,10 @@ New tests, in `tests/test_vault_watch_fire_race.py` (A-K) and
 | I | `test_delete_fire_that_loses_to_the_overflow_flush_is_not_lost` | The reviewer's replay: the delete precedes the full sync, and the losing fire adds nothing |
 | J | `test_overflow_flush_enqueues_a_pending_move_with_its_destination` | A pending `move` plus an overflow gives `[move job with dest, full-vault upsert]` |
 | K | `test_overflowing_call_that_is_a_delete_is_enqueued` | The call that trips the overflow is a `delete`: it is enqueued before the full sync, and the flushed upsert is covered by it |
+| L | `test_raising_timer_factory_leaves_the_existing_entry_pending` | A factory raising on its 2nd call: P's original delete timer stays pending, and shutdown gives `[delete P, None]` |
+| Ma | `test_start_failure_delivers_a_delete_that_supersedes_a_pending_upsert` | The fake `start()` raises "can't start new thread" for a delete superseding a pending upsert. Nothing raises; the queue is `[delete P]` exactly once; nothing is pending; the upsert's timer is cancelled |
+| Mb | `test_start_failure_on_a_fresh_path_delivers_the_event_now` | The same failure with nothing pending: the queue is `[delete P]` exactly once, and nothing is pending |
+| N | `test_handler_survives_a_scheduling_failure` | A schedule whose timer factory raises is logged ("schedule failed") and does not escape `on_any_event`; a later event for another path is the only entry scheduled |
 | T | `test_daemon_timer_builds_an_unstarted_daemon_threading_timer` | `daemon_timer(60, cb)` is a `threading.Timer` with `daemon is True`, and not alive |
 
 ## Ceiling
@@ -280,6 +335,25 @@ against `a2b8af7`'s code, and went RED at their targeted assertions:
 With the flush enqueuing non-upsert jobs before the full sync, all 12 race and
 timer tests pass.
 
+**Round 4 (`8341ea1` review, exception safety).** Every RED check ran in a `git
+archive` copy with the new test file dropped in.
+
+- **Against `8341ea1`:** L ("a raising timer factory dropped the existing
+  pending entry") and N ("a scheduling failure escaped into the observer
+  thread") went RED. So did the first start-failure test, M: "a timer whose
+  start() raised replaced the existing pending entry".
+- **Against `fb20bde`** (the superseded factory-first attempt, local and never
+  pushed): M and N were still RED. The realistic `start()` failure was not
+  covered.
+- **Residual closed.** M asserted the old entry stayed pending. That design
+  dropped the NEW event, so a delete superseding an upsert was lost, and so was
+  any event on a path with nothing pending. At the coordinator's request this
+  was closed instead of recorded. M was replaced by Ma and Mb, which went RED
+  against the staged build-and-start code ("a failing start() raised instead of
+  delivering the event") before the fallback landed.
+
+With the fallback, all 16 race and timer tests pass.
+
 ### Mutations (five clauses)
 
 The harness is a throwaway script, not committed, using the same design as
@@ -287,14 +361,19 @@ PR #48's:
 
 - Each mutant is a `str.replace` on `watch.py` (or `debounce_timer.py` for
   ME), and its `str.count` is asserted equal to the declared count (1).
-- Each (mutant, test) pair runs as its own pytest node: 12 unmutated + 9
-  mutants × 12 tests + 1 negative control = 121 runs, in the round-3 run of
-  record.
+- Each (mutant, test) pair runs as its own pytest node. The run of record is
+  round 4's: 16 unmutated + 14 mutants × 16 tests + 1 negative control = 241
+  runs. It ran in a `git archive` copy of the final tree (`git stash create`
+  snapshot `da5ee13`), and each run's raw output was kept.
 - Both files' bytes are restored in a `finally`. **Process note:** these runs
   mutated the live worktree. A concurrent auditor read `watch.py` mid-run and
   saw the M0 mutant. After every round, `git diff` against the previous commit
-  was verified to show only the intended source. Harnesses for any later round
-  run only in `git archive` copies.
+  was verified to show only the intended source. **From round 4 on, every
+  harness ran only in `git archive` copies,** and the live worktree was never
+  mutated. A first round-4 run kept no per-run logs. It showed every test red
+  under MO and MP, even `test_debounce_timer.py`. Re-running those cells in the
+  same archive gave exactly the predicted results, and the file was
+  byte-identical afterwards. The run of record above keeps every log.
 - Clause (d) matches the expected text only in the failing block: the `>`
   statement plus its `E` lines.
 
@@ -302,15 +381,20 @@ Every cell not marked red passed:
 
 | Mutant | Edit | Red at (targeted statement) |
 |---|---|---|
-| none | n/a | none: all 12 pass |
+| none | n/a | none: all 16 pass |
 | M0 | `a6a76fe`'s `_fire` (pop by path, enqueue after the lock) | A `rig.pending() == {note: t2}`; B `jobs[-1] is None`; C `jobs[-1] is None` (drain between pop and put); D overflow loser enqueued; G `jobs[-1] is None`; I delete delivered twice |
 | MA | identity check removed, enqueue still under the lock | A `rig.pending() == {note: t2}`; B `jobs[-1] is None`; D overflow loser enqueued; G `jobs[-1] is None`; I delete delivered twice |
 | MB | identity kept, enqueue moved outside the lock | C `jobs[-1] is None` (drain between pop and put) |
 | MC | identity kept, but the loser still enqueues its job | A `rig.events == []`; B `jobs[-1] is None`; D overflow loser enqueued; G `jobs[-1] is None`; I delete delivered twice |
-| MD | the drain enqueues `_Job("upsert", path)` again | E `== [_Job("delete", ...), None]`; F `== [_Job("move", ..., dest_path=dst), None]`; G `jobs == [_Job("delete", ...), None]` |
+| MD | the drain enqueues `_Job("upsert", path)` again | E `== [_Job("delete", ...), None]`; F `== [_Job("move", ..., dest_path=dst), None]`; G `jobs == [_Job("delete", ...), None]`; L `rig.queued() == [_Job("delete", note), None]` |
 | MF | overflow flush reverted (the non-upsert jobs are not enqueued) | H, I, J, K: each `rig.queued() == [..., full sync]` |
 | MG | the flush enqueues its jobs AFTER the full sync | H, I, J, K: same statements (order) |
 | MH | the flush omits the overflowing call's own job | K `rig.queued() == [_Job("delete", gone), full sync]` |
+| MI | a factory failure pops the existing entry (the `8341ea1` order) | L `rig.pending() == {note: original}` |
+| MN | no `start()` fallback (the `except` never matches) | Ma, Mb `raised is None` ("a failing start() raised instead of delivering the event") |
+| MO | the fallback leaves the existing entry pending | Ma `rig.pending() == {}` |
+| MP | the fallback drops the new job | Ma, Mb `rig.queued() == [_Job("delete", note)]` |
+| MJ | no scheduling guard in `_Handler.on_any_event` | N `escaped is None` ("a scheduling failure escaped into the observer thread") |
 | ME | `daemon_timer` without `timer.daemon = True` | T `timer.daemon is True` |
 | neg | MA, with the wrong claimed assertion (`rig.events == []`) for A | **MISMATCH**: the checker can fail |
 
@@ -329,19 +413,24 @@ Each claim has its own killing mutant (clause e):
   (dropped); M0 / MA / MC → I (delivered twice);
 - "the flushed jobs precede the full sync": MG → H, I, J, K;
 - "the overflowing call's own non-upsert job is kept": MH → K;
+- "a raising factory leaves the old entry pending": MI → L;
+- "a failing `start()` delivers the new event instead of raising": MN → Ma, Mb;
+- "nothing stays pending after a `start()` failure": MO → Ma;
+- "the new event is delivered exactly once": MP → Ma, Mb;
+- "a scheduling error never escapes into the observer thread": MJ → N;
 - "the default timer is a daemon": ME → T.
 
 ### Stability
 
 - `test_vault_watch_fire_race.py` plus `test_debounce_timer.py` passed 5 times in
-  a row (12 passed each run in round 3). There are no threads and no sleeps, so nothing is
+  a row (16 passed each run in round 4). There are no threads and no sleeps, so nothing is
   timing-dependent.
 - Run once, serially: the watcher and docs-guard files
   (`test_vault_watch_fire_race.py`, `test_debounce_timer.py`,
   `test_vault_watcher.py`, `test_cli_vault_watch.py`, `test_thread_wait.py`,
   `test_graphrag_sync_wiring.py`, `test_reading_surface_pointers.py`,
   `test_repo_hygiene_files.py`, `test_eval_workflow_contract.py`). 296 passed
-  in round 3.
+  in round 3, and 300 in round 4.
 - The full suite was not run locally; CI is the full-suite evidence.
 
 ### Lint and ceiling

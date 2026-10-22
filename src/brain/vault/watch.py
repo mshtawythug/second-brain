@@ -33,8 +33,9 @@ Concurrency invariants worth restating:
   without that lock; the worker never takes ``state.lock``.
 - A debounce timer's ``_fire`` acts only on its OWN ``pending_timers`` entry
   and enqueues under ``state.lock``; the drain and the overflow flush keep each
-  entry's delete/move job. This is the 2026-10-22 race fix, reasoned at
-  ``_fire``, and the growth CLAUDE.md's ceiling table records for this file.
+  entry's delete/move job; a timer that cannot start delivers its job directly,
+  and a scheduling error never escapes into the observer thread. This is the
+  2026-10-22 race fix, reasoned at ``_fire``; CLAUDE.md's ceiling table records it.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
   spamming events can't OOM the process; on overflow we trigger an
   immediate full sync and clear the buffer.
@@ -441,7 +442,12 @@ class _Handler(FileSystemEventHandler):
         if classified is None:
             return
         for action, path, dest in classified:
-            _schedule_debounced(self._config, self._state, action, path, dest)
+            try:
+                _schedule_debounced(self._config, self._state, action, path, dest)
+            except Exception:
+                # Same guard as classify (2026-10-22): e.g. "can't start new
+                # thread" must not kill the observer thread and all later events.
+                logger.exception("vault watcher: schedule failed for %s %s", action, path)
 
     def _maybe_watch_new_directory(self, event: FileSystemEvent) -> None:
         """Schedule a recursive watch for a NEW top-level directory.
@@ -654,10 +660,29 @@ def _schedule_debounced(
 
     job = _Job(action=action, abs_path=path, dest_path=dest)
     with state.lock:
+        overflowing = len(state.pending_timers) - (path in state.pending_timers) >= _MAX_PENDING
+        if not overflowing:
+            # Build AND start the timer BEFORE touching the existing entry, so a
+            # raising factory leaves that entry, and its job, pending and armed.
+            # Starting before the store is safe: _fire blocks on this lock, then
+            # finds its own entry.
+            timer = state.timer_factory(delay, _fire)
+            try:
+                timer.start()
+            except RuntimeError:
+                # "can't start new thread": no timer, so no debounce. The newest
+                # event wins at once, as debounce would have let it: supersede
+                # the pending entry and deliver this job now (2026-10-22, PR #49).
+                existing = state.pending_timers.pop(path, None)
+                if existing is not None:
+                    existing[0].cancel()
+                logger.exception("vault watcher: debounce timer failed to start; enqueued directly")
+                _enqueue(state, job, config=config)
+                return
         existing = state.pending_timers.pop(path, None)
         if existing is not None:
             existing[0].cancel()
-        if len(state.pending_timers) >= _MAX_PENDING:
+        if overflowing:
             # Buffer overflow → drop everything, queue a full-vault sync.
             # That sync (prune=False) covers upserts only: it cannot remove a
             # deleted row or move one in place. So enqueue every flushed
@@ -680,9 +705,7 @@ def _schedule_debounced(
                 config=config,
             )
             return
-        timer = state.timer_factory(delay, _fire)
         state.pending_timers[path] = (timer, job)
-        timer.start()
 
 
 def _drain_pending_timers(state: _WatcherState, config: WatchConfig) -> None:

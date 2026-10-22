@@ -16,14 +16,19 @@ cancel check, so each race is replayed as a fixed sequence of calls.
 
 from __future__ import annotations
 
+import logging
 import queue
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pytest
+from watchdog.events import FileModifiedEvent
+
 from brain.vault.watch import (
     WatchConfig,
     _drain_pending_timers,
+    _Handler,
     _Job,
     _schedule_debounced,
     _WatcherState,
@@ -33,12 +38,15 @@ from brain.vault.watch import (
 class _ManualTimer:
     """A debounce timer the test fires by hand."""
 
-    def __init__(self, callback: Callable[[], None]) -> None:
+    def __init__(self, callback: Callable[[], None], start_error: Exception | None = None) -> None:
         self._callback = callback
+        self._start_error = start_error
         self.started = False
         self.cancelled = False
 
     def start(self) -> None:
+        if self._start_error is not None:
+            raise self._start_error
         self.started = True
 
     def cancel(self) -> None:
@@ -56,6 +64,12 @@ class _Rig:
     def __init__(self, vault: Path, on_event: Callable[[str, Path], None] | None = None) -> None:
         self.timers: list[_ManualTimer] = []
         self.events: list[tuple[str, Path]] = []
+        #: 1-based factory call that raises ``factory_error`` (thread exhaustion).
+        self.factory_fails_on: int | None = None
+        self.factory_error = RuntimeError("can't start new thread")
+        #: When set, every timer built raises this from ``start()``.
+        self.start_error: Exception | None = None
+        self._factory_calls = 0
         self.state = _WatcherState(timer_factory=self._make_timer)
 
         def _record(action: str, path: Path) -> None:
@@ -66,7 +80,10 @@ class _Rig:
         self.config = WatchConfig(vault_path=vault, debounce_ms=10, on_event=_record)
 
     def _make_timer(self, _delay: float, callback: Callable[[], None]) -> _ManualTimer:
-        timer = _ManualTimer(callback)
+        self._factory_calls += 1
+        if self._factory_calls == self.factory_fails_on:
+            raise self.factory_error
+        timer = _ManualTimer(callback, self.start_error)
         self.timers.append(timer)
         return timer
 
@@ -343,4 +360,114 @@ def test_overflowing_call_that_is_a_delete_is_enqueued(tmp_path: Path, mocker: A
 
     assert rig.queued() == [_Job(action="delete", abs_path=gone), _full_sync(tmp_path)], (
         "the overflowing call's own delete was dropped"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A scheduling failure loses nothing and kills nothing (PR #49 review of 8341ea1).
+#
+# ``_schedule_debounced`` used to pop and cancel the existing entry BEFORE it
+# built the new timer. A raising factory (``RuntimeError: can't start new
+# thread`` under thread exhaustion) therefore dropped the existing entry's job,
+# and a racing ``_fire`` returned on the identity check. The exception also
+# escaped ``_Handler.on_any_event`` into watchdog's observer thread, which
+# wrapped only classification in its try/except.
+# ---------------------------------------------------------------------------
+
+
+def test_raising_timer_factory_leaves_the_existing_entry_pending(tmp_path: Path) -> None:
+    """A factory that raises on the 2nd call must not cost P its pending delete."""
+    note = tmp_path / "p.md"
+    rig = _Rig(tmp_path)
+    rig.factory_fails_on = 2
+    original = rig.schedule(note, "delete")
+
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        rig.schedule(note)  # the factory raises
+
+    assert rig.pending() == {note: original}, (
+        "a raising timer factory dropped the existing pending entry"
+    )
+    rig.shut_down()
+    assert rig.queued() == [_Job(action="delete", abs_path=note), None]
+
+
+def _schedule_expecting_no_raise(rig: _Rig, path: Path, action: Any) -> None:
+    # The assertion sits outside the ``except`` so a failure reports it, not a
+    # chained traceback of the original exception.
+    raised: RuntimeError | None = None
+    try:
+        rig.schedule(path, action)
+    except RuntimeError as exc:
+        raised = exc
+    assert raised is None, "a failing start() raised instead of delivering the event"
+
+
+def test_start_failure_delivers_a_delete_that_supersedes_a_pending_upsert(
+    tmp_path: Path,
+) -> None:
+    """``start()`` raising "can't start new thread" delivers the NEW event now.
+
+    Constructing a ``threading.Timer`` creates no OS thread; ``start()`` does.
+    Without a timer there is no debounce, so the newest event wins at once,
+    exactly as debounce would have let it: the pending upsert is cancelled and
+    the delete is enqueued directly, once, with nothing left pending.
+    """
+    note = tmp_path / "p.md"
+    rig = _Rig(tmp_path)
+    pending_upsert = rig.schedule(note)
+    rig.start_error = RuntimeError("can't start new thread")
+
+    _schedule_expecting_no_raise(rig, note, "delete")
+
+    assert rig.queued() == [_Job(action="delete", abs_path=note)], (
+        "the delete was not delivered exactly once when its timer could not start"
+    )
+    assert rig.pending() == {}, "an entry was left pending after a start failure"
+    assert pending_upsert.cancelled, "the superseded upsert's timer was left armed"
+
+
+def test_start_failure_on_a_fresh_path_delivers_the_event_now(tmp_path: Path) -> None:
+    """With nothing pending, a ``start()`` failure still delivers the event, once."""
+    note = tmp_path / "p.md"
+    rig = _Rig(tmp_path)
+    rig.start_error = RuntimeError("can't start new thread")
+
+    _schedule_expecting_no_raise(rig, note, "delete")
+
+    assert rig.queued() == [_Job(action="delete", abs_path=note)], (
+        "the event was not delivered exactly once when its timer could not start"
+    )
+    assert rig.pending() == {}, "an entry was left pending after a start failure"
+
+
+def test_handler_survives_a_scheduling_failure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A scheduling exception must not escape into watchdog's observer thread.
+
+    An escape can kill that thread, which silently stops every later event.
+    The handler logs and keeps going, like its classification guard does. The
+    trigger is a raising timer factory, which ``_schedule_debounced`` lets
+    propagate (only a failing ``start()`` falls back to direct delivery).
+    """
+    rig = _Rig(tmp_path)
+    rig.factory_fails_on = 1
+    handler = _Handler(config=rig.config, state=rig.state)
+    first = tmp_path / "a.md"
+    later = tmp_path / "b.md"
+
+    with caplog.at_level(logging.ERROR, logger="brain.vault.watch"):
+        escaped: RuntimeError | None = None
+        try:
+            handler.on_any_event(FileModifiedEvent(str(first)))
+        except RuntimeError as exc:
+            escaped = exc
+        handler.on_any_event(FileModifiedEvent(str(later)))
+
+    assert escaped is None, "a scheduling failure escaped into the observer thread"
+
+    assert set(rig.pending()) == {later}, "a later event was not scheduled"
+    assert any("schedule failed" in r.getMessage() for r in caplog.records), (
+        "the scheduling failure was not logged"
     )
