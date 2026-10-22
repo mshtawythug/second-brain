@@ -335,8 +335,10 @@ def create_backup(
         for name in vault_skipped:
             # Said out loud (ruling B7): a user comparing the archive with the
             # vault on disk should not have to guess why ~11 GB are missing.
+            # No trailing "/": the entry is skipped whatever its type (B3), so
+            # the name is printed as it is on disk.
             report(
-                f"left out {name}/ (leftover Quartz wiki output, not backed up; "
+                f"left out {name} (leftover Quartz wiki output, not backed up; "
                 "safe to delete by hand)"
             )
 

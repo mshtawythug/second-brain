@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import tarfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -307,7 +308,7 @@ _FILES_KEPT = {
 
 #: The exact report line for a skipped workspace (ruling B7).
 _QUARTZ_SKIP_STEP = (
-    "left out .quartz/ (leftover Quartz wiki output, not backed up; safe to delete by hand)"
+    "left out .quartz (leftover Quartz wiki output, not backed up; safe to delete by hand)"
 )
 
 
@@ -370,6 +371,41 @@ def test_vault_tar_keeps_a_nested_quartz_directory(quartz_vault: Path, tmp_path:
     names = _tar_names(quartz_vault, tmp_path)
 
     assert "notes/.quartz/keep.md" in names
+
+
+def _make_quartz_file(vault_path: Path, tmp_path: Path) -> None:
+    (vault_path / ".quartz").write_text("synthetic stray file\n", encoding="utf-8")
+
+
+def _make_quartz_symlink(vault_path: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside-quartz-workspace"
+    outside.mkdir()
+    (outside / "index.js").write_text("synthetic build output\n", encoding="utf-8")
+    (vault_path / ".quartz").symlink_to(outside, target_is_directory=True)
+
+
+@pytest.mark.parametrize(
+    "make_quartz",
+    [_make_quartz_file, _make_quartz_symlink],
+    ids=["regular-file", "symlink-to-outside-dir"],
+)
+def test_top_level_quartz_is_skipped_whatever_its_type(
+    vault: Path, tmp_path: Path, make_quartz: Callable[[Path, Path], None]
+) -> None:
+    """A top-level `.quartz` that is a file or a symlink is skipped too (B3).
+
+    `os.walk` lists a regular file under `filenames` and a symlink to a
+    directory under `dirnames`, so each case reaches a different filter.
+    """
+    make_quartz(vault, tmp_path)
+    destination = tmp_path / "typed-vault.tar"
+
+    result = tar_vault(vault, destination)
+
+    with tarfile.open(destination, "r:") as tar:
+        names = tar.getnames()
+    assert [name for name in names if name.split("/")[0] == ".quartz"] == []
+    assert result.skipped == (".quartz",)
 
 
 def test_quartz_workspace_is_not_walked(
