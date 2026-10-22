@@ -496,3 +496,188 @@ def test_handler_survives_a_scheduling_failure(
     assert any("schedule failed" in r.getMessage() for r in caplog.records), (
         "the scheduling failure was not logged"
     )
+
+
+# ---------------------------------------------------------------------------
+# (A) No event after shutdown. Plan:
+# docs/plans/2026-10-22-vault-watcher-shutdown-mixed-actions.md.
+#
+# An observer thread that outlives ``observer.join(5.0)`` could arm a timer
+# after the drain, and its job landed behind the sentinel, where no worker
+# reads it. The drain now closes the watcher. A closed watcher arms nothing
+# and enqueues nothing; the next startup ``sync_vault`` reconciles the path.
+# ---------------------------------------------------------------------------
+
+
+def test_event_after_shutdown_arms_no_timer_and_enqueues_nothing(tmp_path: Path) -> None:
+    """After the drain, a new event builds no timer and lands nothing behind ``None``."""
+    rig = _Rig(tmp_path)
+    rig.shut_down()
+    timers_before = len(rig.timers)
+
+    _schedule_debounced(rig.config, rig.state, "delete", tmp_path / "late.md")
+
+    assert len(rig.timers) == timers_before, "a closed watcher armed a debounce timer"
+    assert rig.pending() == {}, "a closed watcher registered a pending entry"
+    assert rig.queued() == [None], "a closed watcher enqueued behind the sentinel"
+
+
+def test_events_after_shutdown_are_logged_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Dropped post-shutdown events are logged once, not once per event."""
+    rig = _Rig(tmp_path)
+    rig.shut_down()
+
+    with caplog.at_level(logging.WARNING, logger="brain.vault.watch"):
+        _schedule_debounced(rig.config, rig.state, "upsert", tmp_path / "a.md")
+        _schedule_debounced(rig.config, rig.state, "upsert", tmp_path / "b.md")
+
+    drops = [r for r in caplog.records if "after shutdown" in r.getMessage()]
+    assert len(drops) == 1, f"expected one drop log, got {len(drops)}"
+
+
+def test_timer_fired_after_shutdown_enqueues_nothing(tmp_path: Path) -> None:
+    """A timer armed before the drain that fires after it adds nothing.
+
+    The drain clears ``pending_timers`` and a closed watcher never refills
+    it, so every surviving ``_fire`` fails its identity check.
+    """
+    note = tmp_path / "p.md"
+    rig = _Rig(tmp_path)
+    timer = rig.schedule(note)
+    rig.shut_down()
+
+    timer.fire()
+    _schedule_debounced(rig.config, rig.state, "upsert", note)  # refused: closed
+    for survivor in rig.timers:  # every timer ever built fires late
+        survivor.fire()
+
+    assert rig.queued() == [_Job(action="upsert", abs_path=note), None], (
+        "a timer fired after shutdown enqueued behind the sentinel"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (B) A pending MOVE is never silently replaced by a different job.
+#
+# Debounce is keyed by path and the last event wins. For a move (keyed on its
+# src) that lost the in-place rename: a move from P, then P recreated within
+# debounce_ms, became an upsert of P. A pending move superseded by a DIFFERENT
+# job is now enqueued first, under the lock. Every other pair still coalesces;
+# see the action-pair table in the plan.
+# ---------------------------------------------------------------------------
+
+
+def test_move_superseded_by_upsert_is_delivered_first(tmp_path: Path) -> None:
+    src, dst = tmp_path / "p.md", tmp_path / "d.md"
+    rig = _Rig(tmp_path)
+    rig.schedule(src, "move", dst)
+
+    upsert = rig.schedule(src)  # P recreated within the debounce window
+
+    assert rig.queued() == [_Job(action="move", abs_path=src, dest_path=dst)], (
+        "the pending move was dropped when an upsert of its src superseded it"
+    )
+    assert rig.pending() == {src: upsert}
+    upsert.fire()
+    assert rig.queued() == [_Job(action="upsert", abs_path=src)]
+
+
+def test_move_superseded_by_delete_is_delivered_first(tmp_path: Path) -> None:
+    src, dst = tmp_path / "p.md", tmp_path / "d.md"
+    rig = _Rig(tmp_path)
+    rig.schedule(src, "move", dst)
+
+    rig.schedule(src, "delete")
+
+    assert rig.queued() == [_Job(action="move", abs_path=src, dest_path=dst)], (
+        "the pending move was dropped when a delete of its src superseded it"
+    )
+    assert set(rig.pending()) == {src}
+
+
+def test_move_superseded_by_a_move_elsewhere_is_delivered_first(tmp_path: Path) -> None:
+    src, first, second = tmp_path / "p.md", tmp_path / "d1.md", tmp_path / "d2.md"
+    rig = _Rig(tmp_path)
+    rig.schedule(src, "move", first)
+
+    rig.schedule(src, "move", second)
+
+    assert rig.queued() == [_Job(action="move", abs_path=src, dest_path=first)], (
+        "the first move was dropped when a move of the same src to another dest superseded it"
+    )
+
+
+def test_duplicate_move_still_coalesces(tmp_path: Path) -> None:
+    """Two reports of the same rename stay ONE job: same-action bursts coalesce."""
+    src, dst = tmp_path / "p.md", tmp_path / "d.md"
+    rig = _Rig(tmp_path)
+    rig.schedule(src, "move", dst)
+
+    again = rig.schedule(src, "move", dst)
+
+    assert rig.queued() == [], "a duplicate move report was delivered twice"
+    again.fire()
+    assert rig.queued() == [_Job(action="move", abs_path=src, dest_path=dst)]
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("upsert", "upsert"),
+        ("upsert", "delete"),
+        ("upsert", "move"),
+        ("delete", "delete"),
+        ("delete", "upsert"),
+        ("delete", "move"),
+    ],
+)
+def test_non_move_pending_jobs_still_coalesce(tmp_path: Path, first: str, second: str) -> None:
+    """A pending upsert or delete is superseded silently: only the newest job is delivered."""
+    path, dst = tmp_path / "p.md", tmp_path / "d.md"
+    rig = _Rig(tmp_path)
+    rig.schedule(path, first, dst if first == "move" else None)
+
+    newest = rig.schedule(path, second, dst if second == "move" else None)
+
+    assert rig.queued() == [], f"a pending {first} was delivered when a {second} superseded it"
+    newest.fire()
+    assert rig.queued() == [
+        _Job(action=second, abs_path=path, dest_path=dst if second == "move" else None)
+    ]
+
+
+def test_atomic_save_delete_then_create_collapses_to_one_upsert(tmp_path: Path) -> None:
+    """An editor's atomic save (delete + create of P) must stay ONE upsert.
+
+    Delivering the delete first would DELETE the row, cascading away its
+    incoming backlinks, before re-inserting it.
+    """
+    note = tmp_path / "p.md"
+    rig = _Rig(tmp_path)
+    rig.schedule(note, "delete")
+
+    created = rig.schedule(note)
+
+    assert rig.queued() == [], "the atomic save's delete was delivered"
+    created.fire()
+    assert rig.queued() == [_Job(action="upsert", abs_path=note)]
+
+
+def test_move_superseded_when_the_timer_cannot_start_is_delivered_first(
+    tmp_path: Path,
+) -> None:
+    """The start() fallback delivers the pending move, THEN the new job."""
+    src, dst = tmp_path / "p.md", tmp_path / "d.md"
+    rig = _Rig(tmp_path)
+    rig.schedule(src, "move", dst)
+    rig.start_error = RuntimeError("can't start new thread")
+
+    _schedule_expecting_no_raise(rig, src, "upsert")
+
+    assert rig.queued() == [
+        _Job(action="move", abs_path=src, dest_path=dst),
+        _Job(action="upsert", abs_path=src),
+    ], "the fallback dropped the pending move, or delivered it out of order"
+    assert rig.pending() == {}
