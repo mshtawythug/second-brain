@@ -146,10 +146,9 @@ The record below is from after that fix. M8 also runs the existing
 | M7 | no report without a workspace (B7) | `for name in vault_skipped:` → `for name in (".quartz",):` | 1 | `assert _QUARTZ_SKIP_STEP not in steps` |
 | M8 | restore never deletes an existing `.quartz` (B8) | `_move_vault_aside`: `vault_path.rename(aside)` → `shutil.rmtree(vault_path)` | 2 (new restore test, plus the existing `test_vault_moved_aside_not_deleted`) | `assert aside.is_file()` |
 | M9 | a top-level `.quartz` **file** is skipped (B3) | `filenames = [name for name in filenames if name not in VAULT_BACKUP_SKIP_NAMES]` → `filenames = list(filenames)` | 1 (test 9 `[regular-file]` only: `skipped` is computed before the filter, so the report would still claim the skip) | `assert [name for name in names if name.split("/")[0] == ".quartz"] == []` |
-
-| M12 | a top-level `.quartz` in `dirnames` (a directory, or a symlink to one) is pruned (B3) | `dirnames[:] = [name for name in dirnames if name not in VAULT_BACKUP_SKIP_NAMES]` → `dirnames[:] = list(dirnames)` | 5 (test 9 `[symlink-to-outside-dir]`, leaves_out, not_walked, file_count, restore) | `assert [name for name in names if name.split("/")[0] == ".quartz"] == []` |
 | M10 | a listing error other than `PermissionError` fails the backup (B10) | `os.walk(vault_path, onerror=_raise_unless_permission)` → `os.walk(vault_path)` | 1 (test 10) | `with pytest.raises(OSError) as raised:` (pytest reports `DID NOT RAISE` at this line) |
 | M11 | a `PermissionError` subtree is passed over (B10) | `if not isinstance(error, PermissionError):` → `if True:` | 1 (test 11) | `assert error is None, "a PermissionError subtree must be passed over, not raised"` |
+| M12 | a top-level `.quartz` in `dirnames` (a directory, or a symlink to one) is pruned (B3) | `dirnames[:] = [name for name in dirnames if name not in VAULT_BACKUP_SKIP_NAMES]` → `dirnames[:] = list(dirnames)` | 5 (test 9 `[symlink-to-outside-dir]`, leaves_out, not_walked, file_count, restore) | `assert [name for name in names if name.split("/")[0] == ".quartz"] == []` |
 
 *(Numbering: M10 and M11 are the review's two B10 rows. M12 is the auditor's
 `dirnames` mutation. Until `ae70e5d` this section said that test 9's symlink case
