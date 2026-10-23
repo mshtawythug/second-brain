@@ -128,7 +128,8 @@ def test_brain_ask_ollama_unavailable_internal_error(
 
     with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_ask(question="synthetic doc", no_loop=True)
-    assert "Ollama is not running" in str(exc_info.value)
+    # RM-02: the CLI and MCP share ``brain.ask_errors``'s fixed sentence.
+    assert "Ollama is not available" in str(exc_info.value)
 
 
 def test_brain_ask_rejects_non_positive_max_iterations(
@@ -185,7 +186,7 @@ def test_brain_ask_limit_defaults_to_config(
     real_retrieve = ask_mod._retrieve_hybrid
 
     def _spy_retrieve(  # type: ignore[no-untyped-def]
-        conn, cfg, *, embedder, query, limit, exclude_confidential=False
+        conn, cfg, *, embedder, query, limit, exclude_confidential=False, fallback=True
     ):
         captured["limit"] = limit
         # FORWARDS ``exclude_confidential`` rather than merely accepting it.
@@ -199,6 +200,7 @@ def test_brain_ask_limit_defaults_to_config(
             query=query,
             limit=limit,
             exclude_confidential=exclude_confidential,
+            fallback=fallback,
         )
 
     monkeypatch.setattr(ask_mod, "_retrieve_hybrid", _spy_retrieve)

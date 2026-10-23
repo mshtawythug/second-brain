@@ -279,13 +279,14 @@ def test_retrieve_graph_requires_backend() -> None:
 def test_retrieve_graph_merges_docs(monkeypatch: pytest.MonkeyPatch) -> None:
     from brain.ask import _retrieve
     from brain.graph_rag.schema import GraphContext
+    from brain.search_fallback import FallbackSearch
 
     # Hybrid leg returns doc-1; graph leg returns doc-1 (dup) + doc-2 (new).
     monkeypatch.setattr(
         "brain.ask._retrieve_hybrid",
-        lambda conn, cfg, *, embedder, query, limit, exclude_confidential=False: [
-            _doc("doc-1")
-        ],
+        lambda conn, cfg, *, embedder, query, limit, exclude_confidential=False, fallback=True: (
+            FallbackSearch(results=[_doc("doc-1")], fallback=None)
+        ),
     )
     graph_ctx = GraphContext(
         session_id="s",
@@ -298,7 +299,7 @@ def test_retrieve_graph_merges_docs(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *a, **k: graph_ctx,
     )
 
-    docs, summary = _retrieve(
+    docs, summary, fallback = _retrieve(
         None,
         _cfg(),
         embedder=FakeEmbedder(),
@@ -308,6 +309,7 @@ def test_retrieve_graph_merges_docs(monkeypatch: pytest.MonkeyPatch) -> None:
         backend=object(),  # sentinel; graph_rag_search is patched
     )
     assert [d.document_id for d in docs] == ["doc-1", "doc-2"]
+    assert fallback is None
 
 
 def test_ask_no_loop_graph_requires_backend() -> None:
@@ -353,10 +355,11 @@ def _patch_retrieve(
         mode: str,
         backend: Any,
         exclude_confidential: bool = False,
-    ) -> tuple[list[SearchResult], str]:
+        fallback: bool = True,
+    ) -> tuple[list[SearchResult], str, None]:
         seen_queries.append(query)
         batch = queue.pop(0) if queue else batches[-1]
-        return batch, ""
+        return batch, "", None
 
     monkeypatch.setattr("brain.ask._retrieve", _fake_retrieve)
     return seen_queries

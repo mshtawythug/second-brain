@@ -54,9 +54,11 @@ Both are bounded; they differ in *where the reading happens*.
   would have already thrown that away.
 
 Rule of thumb: if you would have followed `ask` with "now show me the source",
-you wanted `recall`. If Ollama is down, `ask` exits non-zero. `brain search`
-and `brain recall` fall back to text-only matching and say so (recall's header
-ends `, text-only`). They are the fallback, not a `brain show` loop.
+you wanted `recall`. If the chat model (Ollama) is down, `ask` exits non-zero.
+If only the embedder is down, `ask`, `brain search` and `brain recall` all fall
+back to text-only matching and say so (`ask` prints `Retrieval: text-only` under
+the answer and `"fallback": "fts_only"` in `--json`; recall's header ends
+`, text-only`). They are the fallback, not a `brain show` loop.
 `brain recall` shares every filter with `brain search`; the full cost-ordered
 table lives in `consult-brain`, which is the one place it is maintained.
 
@@ -133,6 +135,7 @@ TTS backend still leaves the script behind.
 | Symptom | Cause | What to do |
 |---|---|---|
 | `ask` exits non-zero citing Ollama | Ollama is down | Say so, offer `brain search` via `consult-brain` (it falls back to text-only matching when the embedder is down, and says so). **Do not retry in a loop.** |
+| `ask` answers, with `Retrieval: text-only` / `"fallback": "fts_only"` | Only the embedder is down | Relay the answer **and** say it came from text-only matching, so it may miss documents a semantic search would find. |
 | `ask --mode auto/fuse/local` errors | No AGE image / no built graph | Fall back to `--mode hybrid`. |
 | `audio --topic` finds no communities | `graphrag communities build` never ran | Route to `brain-graph` / `brain-maintenance`. |
 | `audio --person` finds no such person | Name is not in the graph | Report it plainly; do not guess spellings. |

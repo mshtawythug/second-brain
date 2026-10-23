@@ -567,8 +567,11 @@ ranks 1a, 2 and 3, in that order.
 - **Test plan:** unit tests for `describe_ask_failure` (one per class, subclass ordering, sentinel
   absent); `ask` tests with a fake `ChatJson` and the failing embedder (both modes); `CliRunner`
   tests for criteria 1–6, with the pre-fix traceback reproduced RED first; MCP tests.
-- **Eval:** none. `answer_eval` uses `ask` but scores answers only on a live machine; it inherits the
-  fallback, which is the user-facing behaviour, and the answer-eval docs say so.
+- **Eval:** none. `brain eval --answer` does **not** fall back: `ask()` and `ask_no_loop()` take
+  `fallback: bool = True`, and `_run_answer_eval_cli` passes `fallback=False`, so an embed failure
+  still aborts the run with exit 1 (§2.7; spec 2026-10-16 §3.4). *(Corrected during RM-02, by
+  team-lead ruling; this line first said the answer eval "inherits the fallback", which
+  contradicted §2.7 and would have left the answer eval's `except EmbedError` unreachable.)*
 - **Depends on:** nothing. It may be developed beside RM-01, but the two merge one after the other
   (both touch `mcp_server.py`).
 - **Size:** S.

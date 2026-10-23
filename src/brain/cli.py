@@ -98,6 +98,11 @@ refresh`` so ``brain graphrag --help`` lists it with the admin commands.
 **Eighth growth (class-only logging, PR #58): one import line.** Two WARNINGs
 log ``describe_failure(exc)``; plan ``docs/plans/2026-10-22-watcher-repair-hint-and-yaml-log.md``.
 
+**Ninth growth (RM-02, ``brain ask`` text-only fallback): one argument.** ``ask``
+now falls back on a failed query embed, so ``eval --answer`` passes
+``fallback=False`` to keep aborting (spec section 2.7; reason inline). The
+``ask`` handler itself shrank: one ``except ASK_FAILURES``, class-only.
+
 The long-deferred split into per-domain command modules is unchanged by any of
 this; ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
@@ -3911,6 +3916,9 @@ def _run_answer_eval_cli(
                 chat=chat,
                 question=question,
                 limit=cfg.ask_docs_per_iter,
+                # Over-ceiling growth (module docstring, ninth): eval never falls
+                # back (spec 2.7), so the EmbedError handler below stays reachable.
+                fallback=False,
             )
 
         try:
@@ -5056,6 +5064,8 @@ def _print_ask_result(result: AskResult, *, explain: bool) -> None:
 
     console.print("[bold]● Answer[/bold]\n")
     console.print(result.answer or "[dim](no answer)[/dim]")
+    if result.retrieval_fallback is not None:
+        console.print("[dim]Retrieval: text-only (semantic ranking unavailable)[/dim]")
 
     if result.citations:
         console.print("\n[bold]━ Sources[/bold]\n")
@@ -5107,10 +5117,12 @@ def ask(
     composes a single answer with inline [N] citations into your documents.
     Requires a local Ollama for the plan/reflect/synthesize steps; if Ollama is
     unavailable the command exits non-zero with a clear message (no partial
-    answer). Document snippets only are sent to the LLM — never full bodies.
+    answer). If only the embedder is down, retrieval is text-only and stderr
+    says so. Document snippets only are sent to the LLM — never full bodies.
     """
     from .ask import ASK_MODES, HYBRID_MODE
     from .ask import ask as run_ask
+    from .ask_errors import ASK_FAILURES, describe_ask_failure
 
     if mode not in ASK_MODES:
         raise typer.BadParameter(
@@ -5160,21 +5172,13 @@ def ask(
                     backend=backend,
                 )
                 _log_ask_interactions(conn, result, source="cli")
-    except OllamaUnavailable as exc:
-        typer.secho(
-            f"ask: Ollama is not available — start it (e.g. `brew services "
-            f"start ollama`) and retry. ({exc})",
-            fg="red",
-            err=True,
-        )
-        raise typer.Exit(code=1) from exc
-    except EnrichmentError as exc:
-        typer.secho(f"ask: synthesis failed — {exc}", fg="red", err=True)
-        raise typer.Exit(code=1) from exc
-    except (GraphTenantError, GraphBackendError) as exc:
-        typer.secho(f"ask: graph retrieval failed — {exc}", fg="red", err=True)
+    except ASK_FAILURES as exc:
+        # One fixed, class-only sentence per family (RM-02): never ``{exc}``.
+        typer.secho(f"ask: {describe_ask_failure(exc)}", fg="red", err=True)
         raise typer.Exit(code=1) from exc
 
+    if result.retrieval_fallback is not None:
+        typer.secho(result.retrieval_fallback.note, fg=typer.colors.YELLOW, err=True)
     if json_output:
         emit_json(result.to_dict())
         return

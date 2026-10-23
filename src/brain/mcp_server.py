@@ -264,7 +264,6 @@ from .errors import (
     BrainError,
     ConnectError,
     EmbedError,
-    EnrichmentError,
     GraphBackendError,
     GraphReconcileError,
     GraphTenantError,
@@ -273,7 +272,6 @@ from .errors import (
     IdPrefixNotHex,
     IdPrefixTooShort,
     InteractionError,
-    OllamaUnavailable,
     PersonAmbiguous,
     PersonNotFound,
     ReviewError,
@@ -3103,9 +3101,13 @@ def brain_ask(
     defaults to ``cfg.ask_max_iterations``.
 
     Returns ``{answer, citations[], iterations_used, sub_queries[],
-    fallback_used, session_id}``. Requires a local Ollama for the LLM steps; an
-    unavailable Ollama surfaces as ``INTERNAL_ERROR`` (start it and retry). A
-    bad ``mode`` is ``INVALID_PARAMS``.
+    fallback_used, session_id}`` plus the four ``fallback*`` keys
+    ``brain_search`` emits. ``fallback_used`` means the planning loop was
+    skipped; ``fallback == "fts_only"`` means the embedder was down and
+    retrieval was text-only: relay ``fallback_note`` to the user when it is set.
+    Requires a local Ollama for the LLM steps; an unavailable Ollama (or any
+    other ``ask`` failure) is ``INTERNAL_ERROR`` with one fixed sentence. A bad
+    ``mode`` is ``INVALID_PARAMS``.
 
     F6 confidentiality: documents marked ``sensitivity='confidential'`` are
     **excluded from retrieval** — from BOTH the hybrid leg and (for the graph
@@ -3122,6 +3124,7 @@ def brain_ask(
     """
     from .ask import ASK_MODES, HYBRID_MODE
     from .ask import ask as run_ask
+    from .ask_errors import ASK_FAILURES, describe_ask_failure
     from .chat import chat_json
 
     state = _get_state()
@@ -3182,20 +3185,11 @@ def brain_ask(
                     exclude_confidential=not include_confidential,
                 )
                 _log_ask_interactions_mcp(conn, result)
-    except OllamaUnavailable as exc:
-        raise _mcp_error(
-            INTERNAL_ERROR,
-            "Ollama is not running — start it (e.g. `brew services start "
-            f"ollama`) and retry. ({type(exc).__name__})",
-        ) from exc
-    except EnrichmentError as exc:
-        raise _mcp_error(
-            INTERNAL_ERROR, f"answer synthesis failed: {type(exc).__name__}"
-        ) from exc
-    except (GraphTenantError, GraphBackendError) as exc:
-        raise _mcp_error(
-            INTERNAL_ERROR, f"graph retrieval failed: {type(exc).__name__}"
-        ) from exc
+    except ASK_FAILURES as exc:
+        # RM-02: one fixed, class-only sentence per family, shared with the CLI
+        # (``brain.ask_errors``). It also maps a graph mode's own embed failure,
+        # which used to escape unmapped; the hybrid leg falls back instead.
+        raise _mcp_error(INTERNAL_ERROR, describe_ask_failure(exc)) from exc
     except ValueError as exc:
         raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
     except psycopg.Error as exc:

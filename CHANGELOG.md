@@ -22,6 +22,26 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Changed — `brain ask` answers from text-only retrieval when the embedder is down
+
+`brain ask` and MCP `brain_ask` no longer fail when the query embedding cannot
+be computed: they retrieve through the same text-only fallback `brain search`
+uses, and still answer (roadmap ticket RM-02). The answer text is never edited.
+The CLI prints `Retrieval: text-only (semantic ranking unavailable)` under it
+and the one-line notice on stderr (exit code 0). `--json` and `brain_ask` carry
+the four always-present `fallback*` keys (`null` on a normal run), separate
+from `fallback_used`, which still means the planning loop was skipped.
+`brain eval --answer` does not fall back: an embed failure still stops it with
+exit 1, as in every `brain eval` mode.
+
+Fixed in the same change: every other `ask` failure is now one fixed
+`ask: <sentence>` line and exit 1 (MCP: `INTERNAL_ERROR` with the same
+sentence). Ollama down, a prompt over the chat model's context window, an answer
+cut off at its output budget, a synthesis error and a graph-leg failure each get
+their own sentence. None of them prints the exception's message any more (the
+old CLI text did), and a graph mode's own embed failure, which used to escape
+as a traceback, is mapped too.
+
 ### Changed — `brain recall` falls back to text-only when the embedder is down
 
 `brain recall` and MCP `brain_recall` no longer fail when the query embedding
@@ -53,10 +73,10 @@ failure falls back too; its notice says a retry will not fix it and points at
 (`OllamaEmbedContextOverflow`), whose notice says to shorten the query.
 Non-embedding errors (a database failure) still fail as before. The bare
 `brain search --json` list keeps its shape. `brain eval` does **not** fall
-back, so its degraded-run semantics are unchanged. `brain ask` and `brain ui`
-are unchanged too (rulings and follow-ups in
-`docs/plans/2026-10-23-search-fts-fallback.md`); `brain recall` now falls back
-as well (entry above).
+back, so its degraded-run semantics are unchanged. `brain ui` is unchanged
+too (rulings and follow-ups in
+`docs/plans/2026-10-23-search-fts-fallback.md`); `brain recall` and `brain ask`
+now fall back as well (entries above).
 
 ### Removed — the Quartz wiki (wiki-to-ui phase 9, R3)
 

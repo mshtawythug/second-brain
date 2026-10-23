@@ -1051,6 +1051,18 @@ for the plan/reflect/synthesize steps; if Ollama is down the command exits
 non-zero with a clear message (no partial answer). Only document **snippets**
 are sent to the LLM — never full bodies.
 
+If only the embedding model is unavailable, `ask` still answers, from text-only
+(FTS) retrieval, as `brain search` does. The answer text is not changed: a line
+`Retrieval: text-only (semantic ranking unavailable)` follows it, the one-line
+notice goes to stderr (exit code 0), and `--json` carries `fallback`
+(`"fts_only"` or `null`), `fallback_reason` (the failure's class, never its
+message), `fallback_transient` and `fallback_note`. These are separate from
+`fallback_used`, which still means the planning loop was skipped. Every other
+failure is one `ask: <sentence>` line on stderr and exit 1: Ollama down, a
+prompt over the chat model's context window, an answer cut off at its output
+budget, a graph-leg failure. The sentence names the class at most, never the
+exception's message.
+
 ![brain ask plans sub-queries over the corpus, then synthesizes one answer with inline citations back to the source documents](assets/ask.gif)
 
 _Recorded against a throwaway synthetic corpus; regenerate with `bin/brain-ask-gif`._
@@ -1069,7 +1081,9 @@ Retrieval `--mode` is `hybrid` (vector/FTS only, default) `| auto | fuse |
 local`; the three graph modes require the Apache AGE image. An answer-quality
 eval harness ships alongside it: `brain eval --answer` loads
 `tests/eval/answer_corpus.yaml`, runs `brain ask --no-loop` per case, and
-reports citation-grounding metrics (live-model gated, no baselines).
+reports citation-grounding metrics (live-model gated, no baselines). Unlike
+`brain ask`, the harness does **not** fall back to text-only retrieval: an
+embedder failure stops the run with exit 1, as every `brain eval` mode does.
 
 ### brain audio
 
