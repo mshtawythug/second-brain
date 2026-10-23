@@ -26,6 +26,7 @@ from brain.config import Config
 from brain.embeddings import OllamaEmbedContextOverflow
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.search import hybrid_search
+from brain.sensitivity import CONFIDENTIAL
 from brain.ui.app import create_app
 from brain.ui.context import UiContext
 from brain.vault import init_vault
@@ -119,6 +120,7 @@ def _client(
     search: RecordingSearch,
     *,
     logging_enabled: bool = False,
+    serve_confidential: bool = True,
 ) -> TestClient:
     @contextlib.contextmanager
     def conn_factory() -> Any:
@@ -131,6 +133,7 @@ def _client(
         search_fn=search,
         allowed_origin=ORIGIN,
         logging_enabled=logging_enabled,
+        serve_confidential_bodies=serve_confidential,
     )
     return TestClient(create_app(context), base_url=ORIGIN)
 
@@ -260,6 +263,60 @@ def test_a_non_embed_error_is_not_swallowed(
     with pytest.raises(RuntimeError, match="synthetic programming error"):
         client.get("/api/search", params={"q": TERM})
     assert len(search.calls) == 1
+
+
+# ----------------------------------------------------- confidential lens --
+
+
+@pytest.mark.usefixtures("seeded")
+def test_a_fallen_back_search_still_excludes_a_confidential_match(
+    test_db: psycopg.Connection[Any], fake_embedder: Any, ui_cfg: Config
+) -> None:
+    """The text-only retry keeps the default lens: a confidential match is absent.
+
+    The route's ``sensitivity`` kwarg reaches the retry through the helper's
+    pass-through, and that is the only thing keeping the row out — the
+    membership oracle ``routes_search`` documents. The permissive control below
+    proves the document DOES match the text-only query, so the absence is the
+    lens and not a miss.
+    """
+    doc_id = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Glacier budget memo",
+            content=f"The {TERM} budget memo is restricted.",
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+        source_external_id="manual:ui-glacier-confidential",
+        tags=["field"],
+    ).document_id
+    test_db.execute(
+        "UPDATE documents SET sensitivity=%s WHERE id=%s", (CONFIDENTIAL, doc_id)
+    )
+    params = {"q": TERM, "limit": "50"}
+
+    withholding = _client(
+        test_db, ui_cfg, _down(fake_embedder), RecordingSearch(),
+        serve_confidential=False,
+    ).get("/api/search", params=params).json()
+    permissive = _client(
+        test_db, ui_cfg, _down(fake_embedder), RecordingSearch(),
+        serve_confidential=True,
+    ).get("/api/search", params=params).json()
+
+    assert withholding["fallback"] == permissive["fallback"] == "fts_only"
+    assert str(doc_id) in {r["id"] for r in permissive["results"]}, (
+        "control: the confidential note must match the text-only query"
+    )
+    assert str(doc_id) not in {r["id"] for r in withholding["results"]}, (
+        "a fallen-back search returned a confidential document under the "
+        "default lens"
+    )
+    assert len(withholding["results"]) == SEEDED
 
 
 # ----------------------------------------------------------------- paging --

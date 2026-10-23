@@ -90,7 +90,7 @@ class UiUnsupportedMedia(UiError):
 
 
 class UiUnavailable(UiError):
-    """503 — a dependency the request needed is down (Postgres, Ollama)."""
+    """503 — a dependency the request needed is down (Postgres)."""
 
     status = 503
     default_code = "unavailable"
