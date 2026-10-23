@@ -122,6 +122,13 @@ L9).
     the in-flight remove first.
   - **Ownership:** a `close` that times out hands the report to its caller. `_abandon`, which runs
     if the lane later gives up, then logs nothing instead of naming the same ids again.
+  - **The hand-off is a SNAPSHOT (PR #56 audit F1).** `close` takes it under the same `_cond`
+    acquisition that sets `_caller_reports`, and `undrained_removes()` returns it from then on.
+    - **Why:** at `155e61d`, `undrained_removes()` read the LIVE queue. If the lane gave up and
+      cleared the queue before the caller asked, the removes were logged at DEBUG only and the
+      caller warned "0 graph remove(s)". They vanished (L15b, RED at `155e61d` with `[]`).
+    - **Trade-off:** the snapshot can over-report a remove the lane finished later. The caller's
+      warning says "may not be applied" for exactly that reason.
   - **The warnings:**
     - `run_watcher`'s lane warning now says "still finishing a request or reconnecting ... may
       not be applied".
@@ -199,6 +206,7 @@ L9).
 | L14 | `close` wakes a lane in a 600s reconnect backoff (default `sleep`) and itself returns within the backstop | R3 (condition wake) |
 | T1 | `tests.thread_wait.blocked_in_wait(thread, caller)` is True only while `thread` is blocked in a `threading` wait reached through `caller` | the barrier WR4 and L14 use (round 1) |
 | L15 | a remove in flight while the lane's connect blocks past `close(0.05)` is named by `undrained_removes()`, and the lane does not log it again when it gives up | R4a (review round) |
+| L15b | the same, but the lane gives up and EXITS before the caller asks: still `["doomed"]`, and still logged once | R4a snapshot (audit F1) |
 | B1 | `connect_raw(url, connect_timeout=2)` opens with `connect_timeout` 2; the default stays 10 | R3 bound (review round) |
 | B2 | the CLI's watch factory calls `connect_raw` with `connect_timeout=WATCHER_CONNECT_TIMEOUT_S` | R3 bound, wiring (review round) |
 | B3 | two addresses' worth of `WATCHER_CONNECT_TIMEOUT_S` fits inside both `_LANE_CLOSE_TIMEOUT_S` and `_WORKER_JOIN_TIMEOUT_S` | R3 nesting (review round) |
@@ -431,5 +439,63 @@ MESSAGE at WARNING in two places, and a psycopg DETAIL can quote row values. Bot
 exception object, the `OSError` on read and the YAML error on malformed frontmatter. PyYAML's
 error text can quote a snippet of the file.
 
-**Mutation rows for this round** are in round 6, below.
+**Mutation rows for this round** are in round 7, below.
+
+### The PR #56 audit F1 (MEDIUM, a regression from `155e61d`)
+
+**The race:** a timed-out `close` handed the report to its caller. If the lane then reached
+`_abandon` before the caller called `undrained_removes()`, `_abandon` cleared the queue and logged
+only at DEBUG. The caller got `[]` and warned "0 graph remove(s)", so the removes vanished.
+
+**The fix:** the hand-off is a snapshot (R4a).
+
+**The regression test is L15b.** The lane gives up and exits BEFORE the caller asks. RED at
+`155e61d`'s `graph_lane.py`, which this change had left untouched until then, with `[]`.
+
+### Round 6: stopped, superseded by round 7
+
+Round 6 ran on the merge commit `0247184`, with the re-run and link-rewrite fixes but not F1. Its
+first run aborted at clause (b), and that was the check working.
+
+- R11's anchor (8-space indent) is also a substring of R12's 12-space line, so the edit would have
+  applied twice. Both anchors now start at the preceding newline.
+- The re-run was stopped when F1 arrived, and the archive was rebuilt from scratch. A stopped
+  harness cannot be trusted to have restored its files.
+
+### Round 7 (final tree, `15342ad` = the merge plus F1): 40 of 40 OK
+
+The full matrix ran, 40 mutants in all. Every edit applied exactly once, the control passed, the
+negative controls were rejected, and the archive was restored byte-identical. 37 were OK as
+predicted; three needed attention:
+
+- **G2 (the in-flight remove left out) and R2 (`_abandon` ignores the hand-off)** were also killed
+  by L15b, which was written after their predictions. Both are correct kills, and L15b was added to
+  their predictions.
+- **R3 (`close` never hands off) had a stale anchor.** It removed the `if not exited:` block but
+  left the new snapshot line under it, and the resulting IndentationError failed collection. So
+  the judge marked it NOT OK. Re-anchored to remove the whole hand-off block, it is killed by L15
+  ("logged removes its caller had already reported") and L15b ("vanished").
+
+The three re-ran OK on the same archive.
+
+| Mutant | Edit | Killed by |
+|---|---|---|
+| R11 | the upsert path's re-run takes the fence-only shortcut | WR5, WR6[upsert] |
+| R12 | the stale-delete path's re-run takes it | WR6[delete] |
+| R10 (re-predicted) | `_job_runner` never flags a re-run | WR5, WR6[upsert], WR6[delete] |
+| P1 | the resolver WARNING logs the exception message | P1 (resolver) |
+| P2 | the escaped-DB-error WARNING logs the message | P1 (escaped) |
+| F1a | `undrained_removes()` reads the live queue that `_abandon` cleared (the audit's race) | L15b |
+| F1b | `close` takes no snapshot | L15b, L15, L8, `test_undrained_removes_at_shutdown_are_logged` |
+
+D3 and D4 now also predict WR6 (both variants), since WR6 runs the return path they break.
+
+**Suites (final tree, run serially on a sibling test DB): 483 passed.** That is the round-5 set,
+plus:
+
+- `test_vault_link_rewrite`;
+- `test_vault_sync_link_rewrite`;
+- PR #55's `test_graphrag_deadlock`, `test_graphrag_write_lock` and `test_graphrag_alias_doc_lock`.
+
+`ruff check` and `mypy src/` (224 files) are clean.
 
