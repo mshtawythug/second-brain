@@ -86,6 +86,12 @@ class GraphLane:
         self._pending: deque[tuple[_Op, str]] = deque()
         self._cond = threading.Condition()
         self._closing = False
+        # The request popped and not yet finished, so a timed-out close can name
+        # a remove that is neither queued nor applied (PR #56 review).
+        self._inflight: tuple[_Op, str] | None = None
+        # Set when ``close`` times out: its caller reports the leftovers through
+        # ``undrained_removes``, so ``_abandon`` must not log them again.
+        self._caller_reports = False
         self._thread = threading.Thread(
             target=self._run, name="brain-vault-watcher-graph", daemon=True
         )
@@ -114,10 +120,12 @@ class GraphLane:
         """Stop accepting work, drop pending reconciles, then join (draining removes).
 
         Returns True if the lane thread exited within ``timeout``. An in-flight
-        reconcile is allowed to finish; if it outlives ``timeout`` the daemon
-        thread is left to finish (or to die with the process, which rolls its
-        transaction back), and the removes still queued behind it are NOT
-        applied: :meth:`undrained_removes` names them.
+        request (or a reconnect) is allowed to finish; if it outlives ``timeout``
+        the daemon thread is left to finish (or to die with the process, which
+        rolls its transaction back). The remove in flight, if any, and the
+        removes still queued behind it may then never be applied:
+        :meth:`undrained_removes` names them, and the caller that got False owns
+        that report, so the lane does not log them again if it later gives up.
         """
         with self._cond:
             self._closing = True
@@ -125,18 +133,28 @@ class GraphLane:
             self._cond.notify()
         if self._thread.is_alive():
             self._thread.join(timeout)
-        return not self._thread.is_alive()
+        with self._cond:
+            exited = not self._thread.is_alive()
+            if not exited:
+                self._caller_reports = True
+        return exited
 
     def undrained_removes(self) -> list[str]:
-        """Document ids of removes still queued (not applied), in queue order."""
+        """Document ids of removes not yet applied: the one in flight, then the queue."""
         with self._cond:
-            return [d for o, d in self._pending if o == "remove"]
+            return self._unapplied_removes()
+
+    def _unapplied_removes(self) -> list[str]:
+        """Caller holds ``_cond``."""
+        inflight = [self._inflight[1]] if self._inflight and self._inflight[0] == "remove" else []
+        return inflight + [d for o, d in self._pending if o == "remove"]
 
     def _next(self) -> tuple[_Op, str] | None:
         with self._cond:
             while not self._pending and not self._closing:
                 self._cond.wait()
-            return self._pending.popleft() if self._pending else None
+            self._inflight = self._pending.popleft() if self._pending else None
+            return self._inflight
 
     def _run(self) -> None:
         try:
@@ -145,7 +163,7 @@ class GraphLane:
                 try:
                     self._link.call(functools.partial(self._apply, op, document_id))
                 except ReconnectAbandoned as exc:
-                    self._abandon(item, exc)
+                    self._abandon(exc)
                     return
                 except Exception as exc:  # one bad request must not stop the lane
                     # Class only: a message can quote row values (CLAUDE.md logging rule).
@@ -155,6 +173,8 @@ class GraphLane:
                         document_id,
                         describe_failure(exc),
                     )
+                with self._cond:
+                    self._inflight = None
         finally:
             self._link.close()
 
@@ -164,18 +184,22 @@ class GraphLane:
         else:
             self._syncer.remove(conn, document_id)
 
-    def _abandon(self, item: tuple[_Op, str], exc: ReconnectAbandoned) -> None:
+    def _abandon(self, exc: ReconnectAbandoned) -> None:
         """Shutdown came while the DB was unreachable: name every remove not applied.
 
         ``close`` already dropped the pending reconciles (the next startup redoes
         them). The removes, the one in flight included, are not redone by a
-        startup, so they are logged here: the thread exits, ``close`` returns
-        True, and the caller only reports a lane that is still running.
+        startup, so they are logged here, unless a ``close`` that timed out
+        already handed them to its caller (:meth:`undrained_removes`).
         """
         with self._cond:
-            dropped = [item[1]] if item[0] == "remove" else []
-            dropped += [d for o, d in self._pending if o == "remove"]
+            dropped = self._unapplied_removes()
             self._pending.clear()
+            self._inflight = None
+            reported = self._caller_reports
+        if reported:
+            logger.debug("vault watcher: graph lane gave up; its caller reported the removes")
+            return
         logger.error(
             "vault watcher: graph lane has no DB connection at shutdown (%s); "
             "%d graph remove(s) not applied (%s): %s",

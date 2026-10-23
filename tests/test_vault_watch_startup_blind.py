@@ -355,6 +355,9 @@ def test_undrained_removes_at_shutdown_are_logged(
     assert any(doomed_id in m and "brain graphrag build --force" in m for m in warnings), (
         f"an undrained graph remove was not logged with its id and the repair: {warnings!r}"
     )
+    assert any("still finishing a request or reconnecting" in m for m in warnings), (
+        f"the lane warning does not cover a lane that is reconnecting: {warnings!r}"
+    )
 
 
 class _ObserverThatCannotStart(_Observer):

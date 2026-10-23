@@ -522,3 +522,22 @@ def test_migration_017_creates_elicitation_gaps_table(
         "WHERE table_schema = 'public' AND table_name = 'elicitation_gaps'"
     ).fetchone()
     assert row is not None, "elicitation_gaps table not found after migrations"
+
+
+def test_connect_raw_takes_a_connect_timeout() -> None:
+    """The vault watcher bounds its (re)connects (PR #56 review); the default stays 10s."""
+    from brain.db import connect_raw
+    from tests.conftest import TEST_DATABASE_URL
+
+    bounded = connect_raw(TEST_DATABASE_URL, connect_timeout=2)
+    default = connect_raw(TEST_DATABASE_URL)
+    try:
+        params = (
+            bounded.info.get_parameters().get("connect_timeout"),
+            default.info.get_parameters().get("connect_timeout"),
+        )
+    finally:
+        bounded.close()
+        default.close()
+
+    assert params == ("2", "10"), f"connect_timeout (bounded, default) was {params}"

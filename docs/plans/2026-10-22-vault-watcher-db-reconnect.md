@@ -62,6 +62,14 @@ L9).
   - **A second failure is an ordinary job error.** It is counted and logged.
     If that failure also lost the connection, the next job reconnects again.
     So a job runs at most twice, and the lane is never wedged.
+  - **A re-run is told it is one (PR #56 audit).** If the connection dies after a
+    worker job's last statement, the job RETURNS and is re-run (R1). The re-run then
+    finds the body cache that the completed sync primed, and takes the fence-only
+    branch. That is right for the data: the sync is done, and the cache is primed only
+    after `sync_one_file` returns, which a lost connection's `OperationalError` never
+    lets it do. It was wrong for the stats, which counted one sync as processed AND
+    skipped. `_job_runner` passes `rerun=True` on the second run, and a re-run's
+    fence-only hit counts nothing (WR5).
   - **Residual:** suppose a delete's `DELETE` commits and the connection dies
     before its `RETURNING` arrives. The retry then finds no row, so no graph
     remove is queued, and the AGE `Document` vertex stays. That is the same
@@ -75,8 +83,22 @@ L9).
     wakes on shutdown:
     - **worker:** `state.stop_event.wait`;
     - **lane:** a condition wait that `close` notifies.
-  - So at most one connect attempt runs after shutdown starts, bounded by
-    `connect_raw`'s `connect_timeout=10`.
+  - So at most one connect attempt runs after shutdown starts.
+    - **Its handshake fits inside both shutdown windows** (the lane's 10s close and the worker's
+      10s join). Every watcher connection is opened with `connect_timeout=WATCHER_CONNECT_TIMEOUT_S`
+      (2s), passed by the CLI's factory through `connect_raw(..., connect_timeout=)`. libpq
+      applies it to each address a host resolves to, so `localhost` (`::1`, then `127.0.0.1`)
+      costs at most 4s.
+    - **Not bounded:** the two probe queries `connect_raw` runs after the handshake (the
+      `pg_type` lookup, then `register_vector`). A server that accepts a connection and then
+      stalls can still outlast the windows.
+    - **When the windows ARE exceeded, the report is still right (R4a):**
+      - a lane `close` that times out names the remove in flight as well as the queued ones;
+      - the lane then does not log them a second time;
+      - the warnings say "still finishing a request or reconnecting".
+    - *(Corrected in the PR #56 review round. This said "bounded by `connect_raw`'s
+      `connect_timeout=10`". A 10s handshake bound equals the 10s windows rather than fitting
+      inside them, and the probe queries come on top of it.)*
 - **R4. Giving up at shutdown is reported, never silent.**
   - **Worker:** it does not process the rest of its queue. It reads it up to
     the sentinel and logs a WARNING with the number of jobs not applied and how
@@ -85,6 +107,17 @@ L9).
   - **Lane:** it logs an ERROR naming the graph removes not applied, as PR #54
     did for a failed connect. Pending reconciles are redone by the next
     startup.
+- **R4a. A timed-out lane close names the remove in flight, once (PR #56 review).**
+  - **The gap:** `undrained_removes()` named only QUEUED removes. A remove the lane had already
+    popped, still waiting on a slow connect, was in neither list when `close` timed out.
+  - **The fix:** the lane tracks `_inflight` under its condition, and `undrained_removes()` lists
+    the in-flight remove first.
+  - **Ownership:** a `close` that times out hands the report to its caller. `_abandon`, which runs
+    if the lane later gives up, then logs nothing instead of naming the same ids again.
+  - **The warnings:**
+    - `run_watcher`'s lane warning now says "still finishing a request or reconnecting ... may
+      not be applied".
+    - The worker's leak warning now says "still running a job, or reconnecting to the DB".
 - **R5. The lane's first connect uses the same reconnect.** PR #54 turned the
   lane off for good when its first connect failed (L9). It now retries like
   any other lost connection, and requests queue until it connects. L9 is
@@ -157,6 +190,12 @@ L9).
 | L13 | real DB: the lane's backend is terminated, and the next reconcile still writes its watermark | the bug, lane, real |
 | L14 | `close` wakes a lane in a 600s reconnect backoff (default `sleep`) and itself returns within the backstop | R3 (condition wake) |
 | T1 | `tests.thread_wait.blocked_in_wait(thread, caller)` is True only while `thread` is blocked in a `threading` wait reached through `caller` | the barrier WR4 and L14 use (round 1) |
+| L15 | a remove in flight while the lane's connect blocks past `close(0.05)` is named by `undrained_removes()`, and the lane does not log it again when it gives up | R4a (review round) |
+| B1 | `connect_raw(url, connect_timeout=2)` opens with `connect_timeout` 2; the default stays 10 | R3 bound (review round) |
+| B2 | the CLI's watch factory calls `connect_raw` with `connect_timeout=WATCHER_CONNECT_TIMEOUT_S` | R3 bound, wiring (review round) |
+| B3 | two addresses' worth of `WATCHER_CONNECT_TIMEOUT_S` fits inside both `_LANE_CLOSE_TIMEOUT_S` and `_WORKER_JOIN_TIMEOUT_S` | R3 nesting (review round) |
+| WR5 | a worker job whose connection dies AFTER its sync completed is re-run, and counts processed 1, `skipped_fence_only` 0 | R2 re-run flag (audit round) |
+| M1 | the worker's leak warning names the reconnecting case (`test_worker_join_timeout_skips_close_when_alive`), and so does `run_watcher`'s lane warning (`test_undrained_removes_at_shutdown_are_logged`) | R4a wording (review round) |
 
 ## Ceiling
 
@@ -182,6 +221,9 @@ These tests were written and run before any production change:
   - **L12** (lane, fake): "the lane did not re-run on a fresh connection: [('reconcile', 'a', 'c1')]".
 - **API RED:** the rest failed on the missing `brain.vault.db_reconnect` module, or on the `sleep=`
   keyword `GraphLane` did not yet take. That is C1-C9, WR1, WR2, WR4, L9 and L14.
+- **So the worker's behavioral RED is WR3 alone.** WR1 reproduces the same bug on the
+  worker, but it was RED only on the missing module (API-RED), because it drives the new
+  `_worker_loop(link, ...)` signature directly. *(Added in the PR #56 audit round.)*
 
 ### Round 1 of the mutation matrix (five clauses, in an archive copy only)
 
@@ -228,7 +270,7 @@ D7, D9, G4 and W2 were now OK. Three were still not OK:
   - **Backoff patch:** L14 and WR4 now patch both `BACKOFF_INITIAL_S` and `BACKOFF_MAX_S` to 600s.
     The earlier 60s initial value had been capped to 30s by `BACKOFF_MAX_S`.
 
-### Round 3 (final tree): 25 of 25 OK
+### Round 3 (the tree pushed as `c3161a7`): 25 of 25 OK
 
 The control passed, the negative controls (a wrong text, a wrong set) were both rejected, and the
 archive was restored byte-identical. The judge reads only each JUnit failure's `message`, and the
@@ -269,7 +311,7 @@ The harness (`mutate_rc.py`) and its JUnit output lived in the session scratchpa
 checked in. Each mutant's anchor text is in the table above, and each one was applied exactly once
 (clause b).
 
-### Suites and checks (final tree)
+### Suites and checks (at `c3161a7`)
 
 - **Targeted suites, run serially on a sibling test DB:** 317 passed. These are `test_thread_wait`,
   `test_vault_db_reconnect`, `test_vault_watch_db_reconnect`, `test_vault_graph_lane`,
@@ -283,11 +325,74 @@ checked in. Each mutant's anchor text is in the table above, and each one was ap
 
 ### Ceiling
 
-`watch.py` grew from 1,198 to 1,265 lines. Its CLAUDE.md row is updated:
+`watch.py` was 1,198 lines at `0c461f7` and 1,265 at `c3161a7`. Both counts are frozen; check
+them with `git show "${sha}:src/brain/vault/watch.py" | wc -l`. The review round grows it again,
+so take the present count from `wc -l`. Its CLAUDE.md row is updated:
 
-- the previous descriptive hop is PROMOTED to `0c461f7` (1,198);
+- the hops for `0c461f7` and `c3161a7` are PROMOTED;
 - a new descriptive hop and a growth record are added;
 - the module docstring carries the pointer.
 
-`graph_lane.py` is 195 lines and the new `db_reconnect.py` is under 200. Re-derive both with
-`wc -l`.
+`graph_lane.py` and the new `db_reconnect.py` stay well under 800; re-derive both with `wc -l`.
+`db.py` (under 800) and `cli.py` (one line shorter) changed only for the connect bound.
+
+### The PR #56 review and audit round
+
+**The reviewer's MINOR, at `c3161a7`.** R3's bound was a 10s connect, which equals the 10s
+shutdown windows rather than fitting inside them. On top of that, a remove in flight during a slow
+reconnect was not named. Both are fixed, under R3 and R4a:
+
+- **The lane:**
+  - it tracks `_inflight`;
+  - a `close` that times out hands the report to its caller;
+  - `_abandon` then logs nothing.
+- **`connect_raw(..., connect_timeout=)`:** the CLI's watch factory passes
+  `WATCHER_CONNECT_TIMEOUT_S` (2s).
+- **The warnings** now say "still finishing a request or reconnecting" and "or reconnecting to the
+  DB".
+
+**Why `src/brain/cli.py` and `src/brain/db.py` changed.**
+
+- `connect_raw` had a hard-coded `connect_timeout=10`. It gains a keyword parameter, whose default
+  of 10 every other caller keeps.
+- The CLI's `vault sync --watch` connection factory is the one place the watcher's connections are
+  opened, so it passes the 2s bound there. That is a net-negative change to `cli.py`.
+
+**The auditor's LOW notes:**
+
+- the re-run stat (R2, WR5), whose RED in a pre-fix archive copy was `processed/skipped_fence_only
+  (1, 1), expected (1, 0)`;
+- the TDD note above.
+
+**Mutation rows added (round 4: 33 of 33 OK, on the tree before the audit fix):**
+
+| Mutant | Edit | Killed by |
+|---|---|---|
+| G2 (re-anchored) | the in-flight remove is left out of `_unapplied_removes` | L9, L15 |
+| R2 | `_abandon` ignores the hand-off | L15 "the lane logged removes its caller had already reported" |
+| R3 | `close` never hands off | L15 (same assertion) |
+| R4 | `_inflight` not cleared after a request | L16 "an applied remove was still reported as undrained" |
+| R5 | `connect_raw` ignores `connect_timeout` | B1 |
+| R6 | the CLI's watch factory is unbounded | B2 |
+| R7 | `WATCHER_CONNECT_TIMEOUT_S` raised to 5 | B3 |
+| R8 | the leak warning goes back to "mid-statement" | M1 (`test_worker_join_timeout_skips_close_when_alive`) |
+| R9 | the lane warning goes back to "a reconcile" | M1 (`test_undrained_removes_at_shutdown_are_logged`) |
+| R10 | `_job_runner` never flags a re-run | WR5 (added with the audit fix; first run in round 5) |
+
+### Round 5 (final tree): 34 of 34 OK
+
+The whole matrix (34 mutants: rounds 1-3's 25 with G2 re-anchored, R2-R10, and nothing
+dropped) ran on the final tree. Every edit applied exactly once. The control passed, the
+negative controls were rejected, and the archive was restored byte-identical.
+
+- 32 were OK as predicted.
+- D3 (no state check after a RETURN) and D4 (no re-run) also killed WR5, which was written
+  after their predictions:
+  - D3: "fixture: the job was not re-run on a fresh connection";
+  - D4: "processed/skipped_fence_only (0, 0)".
+- Both were OK once WR5 was added to their predictions.
+
+**Suites (final tree, run serially on a sibling test DB):** 416 passed. That is the round-3 set
+plus `test_db`, `test_repo_hygiene_files` and `test_reading_surface_pointers`. `ruff check` and
+`mypy src/` (224 files) are clean.
+

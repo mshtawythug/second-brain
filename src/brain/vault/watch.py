@@ -40,7 +40,9 @@ Concurrency invariants worth restating:
   Graph syncs run on one background lane (``graph_lane``), so a slow startup
   reconcile never delays observing the vault. The worker and the lane reconnect
   after a Postgres restart (``db_reconnect``), which split the worker's job body
-  out into ``_run_job``.
+  out into ``_run_job`` (bound per job by ``_job_runner``, so a re-run counts no
+  fence-only skip); ``WATCHER_CONNECT_TIMEOUT_S`` keeps a shutdown-time connect
+  inside the shutdown windows.
   These are the 2026-10-22 race fixes, reasoned at ``_fire``,
   ``_supersede_pending`` and the drain; CLAUDE.md's ceiling table records them.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
@@ -69,7 +71,6 @@ path, so we never silently drop a real edit.
 from __future__ import annotations
 
 import contextlib
-import functools
 import logging
 import os
 import queue
@@ -126,8 +127,14 @@ _Action = Literal["upsert", "delete", "move"]
 # conceptually an admission-control valve, not a normal code path.
 _MAX_PENDING = 1000
 
-# How long shutdown waits for the graph lane's in-flight reconcile to finish.
+# How long shutdown waits for the graph lane's in-flight request to finish.
 _LANE_CLOSE_TIMEOUT_S = 10.0
+# How long shutdown waits for the worker thread.
+_WORKER_JOIN_TIMEOUT_S = 10.0
+# libpq connect_timeout for every watcher connection (the CLI's factory passes
+# it). A connect attempt that starts after shutdown must fit inside both
+# windows above, and libpq applies it per resolved address (localhost: two).
+WATCHER_CONNECT_TIMEOUT_S = 2
 
 
 @dataclass
@@ -399,18 +406,19 @@ def run_watcher(
         _drain_pending_timers(state, config)
         # Sentinel tells the worker its queue is now closed.
         state.jobs.put(None)
-        worker_thread.join(timeout=10.0)
+        worker_thread.join(timeout=_WORKER_JOIN_TIMEOUT_S)
         if worker_thread.is_alive():
             # The worker is mid-statement (a sync_vault call, an embed
-            # request, etc.) past our 10s patience. Closing the
-            # connection from the main thread now would race against
-            # the in-flight statement and raise from the worker thread
-            # while we're trying to return cleanly. The thread is a
-            # daemon — it carries the orphaned connection on its back,
-            # and Postgres reaps the backend after its idle timeout.
+            # request, etc.) or reconnecting, past our patience. Closing the
+            # connection from the main thread now would race against the
+            # worker and raise from its thread while we're trying to return
+            # cleanly. The thread is a daemon — it carries the orphaned
+            # connection on its back, and Postgres reaps the backend after
+            # its idle timeout.
             logger.warning(
-                "vault watcher: worker thread did not exit within 10s — "
-                "leaking its connection to avoid a mid-statement close race"
+                "vault watcher: worker thread did not exit within %ss (still running a job, "
+                "or reconnecting to the DB); leaving its connection to it, not racing a close",
+                _WORKER_JOIN_TIMEOUT_S,
             )
         else:
             try:
@@ -427,8 +435,8 @@ def run_watcher(
         if lane is not None and not lane.close(timeout=_LANE_CLOSE_TIMEOUT_S):
             undrained = lane.undrained_removes()
             logger.warning(
-                "vault watcher: graph lane still finishing a reconcile; %d graph "
-                "remove(s) not applied (%s): %s",
+                "vault watcher: graph lane still finishing a request or reconnecting; %d "
+                "graph remove(s) may not be applied (%s): %s",
                 len(undrained),
                 ", ".join(undrained) or "none",
                 LOST_REMOVES_REPAIR,
@@ -855,16 +863,8 @@ def _worker_loop(
         job = state.jobs.get()
         if job is None:
             return
-        run = functools.partial(
-            _run_job,
-            job=job,
-            embedder=embedder,
-            config=config,
-            state=state,
-            graph_syncer=graph_syncer,
-        )
         try:
-            counted = link.call(run)
+            counted = link.call(_job_runner(job, embedder, config, state, graph_syncer))
         except ReconnectAbandoned as exc:
             _report_unapplied(state, job, exc)
             return
@@ -900,6 +900,37 @@ def _report_unapplied(state: _WatcherState, job: _Job, exc: ReconnectAbandoned) 
     )
 
 
+def _job_runner(
+    job: _Job,
+    embedder: Embedder,
+    config: WatchConfig,
+    state: _WatcherState,
+    graph_syncer: GraphSyncTarget | None,
+) -> Callable[[psycopg.Connection[Any]], bool]:
+    """``_run_job`` bound to one job, and told whether ``link.call`` is re-running it.
+
+    A re-run after the connection died at the END of a completed sync finds the
+    body cache that sync primed, so its fence-only branch is not a skip and must
+    not be counted as one (PR #56 audit).
+    """
+    runs = 0
+
+    def run(conn: psycopg.Connection[Any]) -> bool:
+        nonlocal runs
+        runs += 1
+        return _run_job(
+            conn,
+            job=job,
+            embedder=embedder,
+            config=config,
+            state=state,
+            graph_syncer=graph_syncer,
+            rerun=runs > 1,
+        )
+
+    return run
+
+
 def _run_job(
     conn: psycopg.Connection[Any],
     *,
@@ -908,6 +939,7 @@ def _run_job(
     config: WatchConfig,
     state: _WatcherState,
     graph_syncer: GraphSyncTarget | None,
+    rerun: bool,
 ) -> bool:
     """Run one job on ``conn``; False when it was a no-op that must not be counted."""
     if job.abs_path == config.vault_path and job.action == "upsert":
@@ -962,7 +994,7 @@ def _run_job(
                 job.abs_path,
             )
             if _is_fence_only_write(state, job.abs_path):
-                state.skipped_fence_only += 1
+                state.skipped_fence_only += 0 if rerun else 1  # see _job_runner
             else:
                 report = sync_one_file(
                     conn,
@@ -1008,7 +1040,7 @@ def _run_job(
             )
             return False  # no real work: neither processed nor errors advances
         if _is_fence_only_write(state, job.abs_path):
-            state.skipped_fence_only += 1
+            state.skipped_fence_only += 0 if rerun else 1  # see _job_runner
             logger.debug(
                 "vault watcher: skipping fence-only write for %s",
                 job.abs_path,

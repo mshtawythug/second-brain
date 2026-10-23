@@ -264,10 +264,18 @@ def test_a_lane_that_cannot_connect_backs_off_and_close_still_ends_it(
         lane.start()
         assert parked.wait(WAIT_FOR_BACKSTOP_S), "the lane did not keep retrying its connect"
         lane.remove(None, "late")  # type: ignore[arg-type]  # queues during the outage
-        queued = lane.undrained_removes()
-        lane.close(0)
+        queued = [d for d in lane.undrained_removes() if d != "queued"]  # "queued" is in flight
+        # Close WITHOUT a timed-out close() first: a close that times out hands
+        # the reporting to its caller (L15), and this test is about the lane's own.
+        closed: list[bool] = []
+        closer = threading.Thread(
+            target=lambda: closed.append(lane.close(WAIT_FOR_BACKSTOP_S)), daemon=True
+        )
+        closer.start()
+        wait_for(lane._is_closing)
         gate.set()
-        exited = lane.close(WAIT_FOR_BACKSTOP_S)
+        closer.join(WAIT_FOR_BACKSTOP_S)
+        exited = closed == [True]
 
     assert sleeps == [1, 2, 4], f"the connect retries did not back off: {sleeps}"
     assert queued == ["late"], f"a request did not queue during the outage: {queued}"
@@ -490,3 +498,52 @@ def test_close_wakes_a_lane_in_reconnect_backoff(monkeypatch: pytest.MonkeyPatch
     closer.join(WAIT_FOR_BACKSTOP_S)
 
     assert closed == [True], "close did not wake a lane sleeping out its reconnect backoff"
+
+
+def test_a_remove_in_flight_during_a_slow_reconnect_is_named_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """L15: a close that times out names the remove the lane has already popped.
+
+    PR #56 review: ``undrained_removes`` named only QUEUED removes, so a remove
+    in flight while the lane was still reconnecting was in neither list. The
+    timed-out close hands the report to its caller; when the lane later gives
+    up, it must not log the same remove again.
+    """
+    entered, release = threading.Event(), threading.Event()
+
+    def _slow_refuse() -> Any:
+        entered.set()
+        release.wait(WAIT_FOR_BACKSTOP_S)
+        raise psycopg.OperationalError("synthetic connect failure")
+
+    lane = GraphLane(_Syncer(), _slow_refuse)  # type: ignore[arg-type]
+    lane.remove(None, "doomed")  # type: ignore[arg-type]
+    with caplog.at_level(logging.ERROR, logger="brain.vault.graph_lane"):
+        lane.start()
+        assert entered.wait(WAIT_FOR_BACKSTOP_S), "fixture: the lane never tried to connect"
+        timed_out = lane.close(0.05) is False
+        undrained = lane.undrained_removes()
+        release.set()
+        exited = lane.close(WAIT_FOR_BACKSTOP_S)
+
+    assert timed_out, "fixture: close must time out while the lane is connecting"
+    assert undrained == ["doomed"], (
+        f"a remove in flight during a slow reconnect was not named: {undrained!r}"
+    )
+    assert exited, "the lane did not exit once its connect gave up"
+    again = [r.getMessage() for r in caplog.records if "not applied" in r.getMessage()]
+    assert again == [], f"the lane logged removes its caller had already reported: {again!r}"
+
+
+def test_an_applied_remove_is_not_reported_as_undrained() -> None:
+    """L16: a finished request is no longer in flight, even while the lane idles."""
+    syncer = _Syncer()
+    syncer.release.set()
+    with _lane(syncer) as (lane, _conn):
+        token = f"barrier-{uuid.uuid4()}"
+        lane.remove(None, token)  # type: ignore[arg-type]
+        wait_for(lambda: ("remove", token) in syncer.calls)
+        cleared = _settled(lambda: lane.undrained_removes() == [])
+
+    assert cleared, "an applied remove was still reported as undrained"

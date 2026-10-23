@@ -20,6 +20,7 @@ Conventions:
 - Each test starts the watcher in a background thread and asserts on
   observations from a thread-safe collector.
 """
+import logging
 import os
 import queue
 import threading
@@ -1338,7 +1339,11 @@ def test_enqueue_signature_has_no_bypass_filter(
 
 
 def test_worker_join_timeout_skips_close_when_alive(
-    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path, mocker: Any
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    tmp_path: Path,
+    mocker: Any,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Phase 5 carryover: don't close the worker connection when the
     worker thread is still alive past the join timeout.
@@ -1404,9 +1409,14 @@ def test_worker_join_timeout_skips_close_when_alive(
     state = observer.handler._state
     assert len(fake_workers) == 1, "expected one fake worker thread to be created"
 
-    state.stop_event.set()
-    thread.join(timeout=5.0)
+    with caplog.at_level(logging.WARNING, logger="brain.vault.watch"):
+        state.stop_event.set()
+        thread.join(timeout=5.0)
     assert not thread.is_alive()
+    # PR #56 review: since the reconnect, a worker past its join may be
+    # reconnecting rather than mid-statement; the warning must say both.
+    leak = " ".join(r.getMessage() for r in caplog.records)
+    assert "or reconnecting to the DB" in leak, f"the leak warning is stale: {leak!r}"
 
     # The connection's close() must NOT have been invoked — that's the
     # point of the fix. The fake worker reports ``is_alive()`` True so

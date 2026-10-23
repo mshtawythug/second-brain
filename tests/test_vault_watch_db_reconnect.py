@@ -306,3 +306,98 @@ def test_shutdown_wakes_a_worker_in_reconnect_backoff(
     assert "1 job(s) not applied" in logged, (
         f"the job the worker could not apply was not reported: {logged!r}"
     )
+
+
+def test_a_post_shutdown_connect_nests_inside_the_shutdown_windows() -> None:
+    """R3: one connect attempt after shutdown starts fits inside both 10s windows.
+
+    libpq applies ``connect_timeout`` to EACH address a host resolves to, and
+    ``localhost`` can resolve to two (``::1`` and ``127.0.0.1``).
+    """
+    from brain.vault import watch
+
+    worst = 2 * watch.WATCHER_CONNECT_TIMEOUT_S
+    windows = (watch._LANE_CLOSE_TIMEOUT_S, watch._WORKER_JOIN_TIMEOUT_S)
+
+    assert all(worst < w for w in windows), (
+        f"a {worst}s connect does not nest inside the shutdown windows {windows}"
+    )
+
+
+class _DiesAtTheGraphCall:
+    """A real connection that reads as closed once the job's last step has run.
+
+    ``sync_one_file`` calls its graph syncer after every DB write has committed,
+    so marking the connection dead there is a loss AFTER the work: the C9 path,
+    where the job returns and is re-run on a fresh connection.
+    """
+
+    def __init__(self, inner: psycopg.Connection[Any]) -> None:
+        self._inner = inner
+        self.dead = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    @property
+    def closed(self) -> bool:
+        return self.dead or self._inner.closed
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class _KillOnReconcile:
+    def __init__(self, conn: _DiesAtTheGraphCall) -> None:
+        self._conn = conn
+
+    def reconcile(self, conn: Any, document_id: str) -> None:
+        self._conn.dead = True
+
+    def remove(self, conn: Any, document_id: str) -> None:
+        return None
+
+
+def test_a_rerun_after_a_completed_sync_counts_no_fence_only_skip(
+    test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path
+) -> None:
+    """WR5: the re-run finds the cache the first run primed; that is not a skip.
+
+    PR #56 audit: the re-run took the fence-only branch, so the watcher counted
+    one sync as processed AND skipped. The data was right; the stat was not.
+    """
+    from brain.vault.db_reconnect import ReconnectingConnection
+
+    vault = tmp_path / "vault"
+    _write(vault / "done.md", "Synced once")
+    factory = _Factory()
+    first = _DiesAtTheGraphCall(factory())
+    first.autocommit = True
+    state = _WatcherState()
+    link = ReconnectingConnection(
+        factory,
+        label="worker",
+        sleep=lambda _d: None,
+        stopping=lambda: False,
+        conn=first,  # type: ignore[arg-type]
+    )
+    try:
+        state.jobs.put(_Job("upsert", vault / "done.md"))
+        state.jobs.put(None)
+        _worker_loop(
+            link,
+            fake_embedder,
+            WatchConfig(vault_path=vault, debounce_ms=10),
+            state,
+            graph_syncer=_KillOnReconcile(first),  # type: ignore[arg-type]
+        )
+    finally:
+        link.close()
+        factory.close_all()
+
+    assert len(factory.made) == 2, "fixture: the job was not re-run on a fresh connection"
+    assert "Synced once" in _titles(test_db), "the file was not synced"
+    assert (state.processed, state.skipped_fence_only) == (1, 0), (
+        f"processed/skipped_fence_only {(state.processed, state.skipped_fence_only)}, "
+        "expected (1, 0): the re-run counted a fence-only skip"
+    )

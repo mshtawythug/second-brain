@@ -297,6 +297,11 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
     - **Shutdown:** shutdown wakes the backoff, and a failed attempt at shutdown gives up and logs
       what was not applied. The worker logs a job count and how many were deletes. The lane logs the
       graph-remove ids.
+    - **Bounded connects (PR #56 review):** every watcher connection uses a 2s `connect_timeout`, so a
+      connect attempt that starts after shutdown fits inside the 10s lane-close and worker-join windows.
+      `connect_raw`'s probe queries after the handshake stay unbounded. If a timed-out lane close
+      happens anyway, it now names the remove in flight as well as the queued ones, and the lane does
+      not log them again.
   - **Still open:**
     1. A delete whose `DELETE` committed just before the connection died re-runs as a no-op. So no
        graph remove is queued, and the document's AGE `Document` vertex stays. That is the same ghost,

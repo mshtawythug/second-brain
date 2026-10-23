@@ -183,3 +183,36 @@ def test_watch_prints_initial_sync_summary(
     assert result.exit_code == 0, result.stdout
     assert "created 1" in result.stdout
     assert "links_resolved 0" in result.stdout
+
+
+def test_watch_connects_with_the_watcher_connect_timeout(
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    tmp_path: Path,
+    patch_embedder: Any,
+    mocker: Any,
+) -> None:
+    """Every watcher connection, and so every reconnect, uses WATCHER_CONNECT_TIMEOUT_S."""
+    from brain.vault.sync import SyncReport
+    from brain.vault.watch import WATCHER_CONNECT_TIMEOUT_S
+
+    patch_embedder(fake_embedder)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    factories: list[Any] = []
+
+    def _capture(conn_factory: Any, **_kwargs: Any) -> SyncReport:
+        factories.append(conn_factory)
+        return SyncReport()
+
+    mocker.patch("brain.cli.run_watcher", _capture)
+    connect = mocker.patch("brain.cli.connect_raw")
+    result = CliRunner().invoke(
+        app, ["vault", "sync", "--vault", str(vault), "--watch"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.stdout
+    factories[0]()
+
+    assert connect.call_args.kwargs.get("connect_timeout") == WATCHER_CONNECT_TIMEOUT_S, (
+        f"the watcher's connections are not bounded: {connect.call_args!r}"
+    )
