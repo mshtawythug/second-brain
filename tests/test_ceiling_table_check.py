@@ -253,6 +253,27 @@ def test_first_cell_without_backticks_is_mismatched(ceiling: ModuleType) -> None
     assert "backticked" in report.mismatched_rows[0].reason
 
 
+def test_row_without_lines_cell_is_mismatched(ceiling: ModuleType) -> None:
+    """A table line with fewer than two cell separators has no Lines cell."""
+    rows = ceiling.table_rows(_claude_md("| `big.py`"))
+
+    report = ceiling.compare({"big.py": 900}, rows)
+
+    assert [row.path for row in rows] == ["big.py"]
+    assert [(m.path, m.reason) for m in report.mismatched_rows] == [
+        ("big.py", "its row has no Lines cell")
+    ]
+    assert not report.missing_rows and not report.stale_rows
+
+
+def test_row_without_lines_cell_or_path_is_mismatched(ceiling: ModuleType) -> None:
+    rows = ceiling.table_rows(_claude_md("| not a path"))
+
+    report = ceiling.compare({}, rows)
+
+    assert [m.reason for m in report.mismatched_rows] == ["its row has no Lines cell"]
+
+
 def test_duplicate_row_is_mismatched(ceiling: ModuleType) -> None:
     rows = ceiling.table_rows(_claude_md(_row("big.py"), _row("big.py")))
 
@@ -383,6 +404,13 @@ def test_parser_ignores_pipes_inside_the_why_cell(ceiling: ModuleType) -> None:
     assert "wc -l src/brain/big.py" in rows[0].lines_cell
 
 
+def test_table_at_end_of_file_is_read(ceiling: ModuleType) -> None:
+    """No line after the table: the row loop ends without its break."""
+    text = "\n".join(["# CLAUDE.md", "", HEADER, SEPARATOR, _row("a.py"), _row("b/c.py")])
+
+    assert [row.path for row in ceiling.table_rows(text)] == ["a.py", "b/c.py"]
+
+
 def test_header_with_trailing_whitespace_still_anchors(ceiling: ModuleType) -> None:
     text = _claude_md(_row("big.py")).replace(HEADER, HEADER + "  ")
 
@@ -415,10 +443,12 @@ def test_over_ceiling_walks_nested_dirs_and_only_py(ceiling: ModuleType, tmp_pat
     _write_py(src_root, "top.py", 1000)
     _write_py(src_root, "small.py", 10)
     (src_root / "data.txt").write_text("x\n" * 2000, encoding="utf-8")
+    (src_root / "pkg.py").mkdir()  # a directory rglob("*.py") yields; not a file
+    _write_py(src_root, "pkg.py/inner.py", 900)
 
     over = ceiling.over_ceiling(src_root)
 
-    assert over == {"top.py": 1000, "vault/graph.py": 801}
+    assert over == {"pkg.py/inner.py": 900, "top.py": 1000, "vault/graph.py": 801}
 
 
 def test_success_summary_reports_the_count(

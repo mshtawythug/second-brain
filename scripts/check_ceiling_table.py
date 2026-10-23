@@ -66,6 +66,7 @@ class TableRow:
     path: str
     lines_cell: str
     path_cell_ok: bool = True
+    has_lines_cell: bool = True
 
 
 @dataclass(frozen=True)
@@ -129,7 +130,16 @@ def table_rows(claude_md: str) -> list[TableRow]:
             continue
         match = ROW_RE.match(line)
         if match is None:
-            rows.append(TableRow(path=line.strip(), lines_cell="", path_cell_ok=False))
+            # Fewer than two cell separators: there is no Lines cell to read.
+            lone = PATH_CELL_RE.match(line[1:].rstrip().removesuffix("|"))
+            rows.append(
+                TableRow(
+                    path=lone.group("path") if lone else line.strip(),
+                    lines_cell="",
+                    path_cell_ok=lone is not None,
+                    has_lines_cell=False,
+                )
+            )
             continue
         first = match.group("first")
         path_match = PATH_CELL_RE.match(first)
@@ -143,6 +153,8 @@ def table_rows(claude_md: str) -> list[TableRow]:
 
 
 def _row_mismatch(row: TableRow) -> str | None:
+    if not row.has_lines_cell:
+        return "its row has no Lines cell"
     if not row.path_cell_ok:
         return "its first cell must be one backticked path relative to src/brain/"
     measured = WC_RE.findall(row.lines_cell)
