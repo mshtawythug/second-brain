@@ -62,14 +62,21 @@ L9).
   - **A second failure is an ordinary job error.** It is counted and logged.
     If that failure also lost the connection, the next job reconnects again.
     So a job runs at most twice, and the lane is never wedged.
-  - **A re-run is told it is one (PR #56 audit).** If the connection dies after a
-    worker job's last statement, the job RETURNS and is re-run (R1). The re-run then
-    finds the body cache that the completed sync primed, and takes the fence-only
-    branch. That is right for the data: the sync is done, and the cache is primed only
-    after `sync_one_file` returns, which a lost connection's `OperationalError` never
-    lets it do. It was wrong for the stats, which counted one sync as processed AND
-    skipped. `_job_runner` passes `rerun=True` on the second run, and a re-run's
-    fence-only hit counts nothing (WR5).
+  - **A worker re-run always syncs; it never takes the fence-only shortcut (PR #56 review of
+    `155e61d`).** `_job_runner` passes `rerun=True` on the second run, and `_run_job` then skips
+    `_is_fence_only_write` at both of its sites.
+    - **Why:** a job can RETURN on a lost connection (R1) and still have left work undone. It
+      does that when the loss lands inside a step that swallows `psycopg.Error`:
+      `rewrite_vault_links` is a best-effort polish step, and the last thing `sync_one_file` does.
+      The first run then primed the body cache anyway, so on a re-run the cache proves nothing,
+      and the shortcut would skip the very step that failed. `sync_one_file` is idempotent by
+      content hash, so re-syncing is safe (WR6, both the upsert and the stale-delete path).
+    - **This also keeps the stats right:** processed 1, no fence-only skip (WR5).
+    - *(This bullet read differently at `155e61d`.* It said that cache-priming implied a completed
+      sync, because a lost connection's `OperationalError` never lets `sync_one_file` return, and
+      so a re-run's fence-only hit only needed not to be COUNTED. That was true of the exception
+      path. It was false of `rewrite_vault_links`, which catches the error and returns normally.
+      The audit's stat finding was a symptom of this; the reviewer found the cause.)
   - **Residual:** suppose a delete's `DELETE` commits and the connection dies
     before its `RETURNING` arrives. The retry then finds no row, so no graph
     remove is queued, and the AGE `Document` vertex stays. That is the same
@@ -195,6 +202,8 @@ L9).
 | B2 | the CLI's watch factory calls `connect_raw` with `connect_timeout=WATCHER_CONNECT_TIMEOUT_S` | R3 bound, wiring (review round) |
 | B3 | two addresses' worth of `WATCHER_CONNECT_TIMEOUT_S` fits inside both `_LANE_CLOSE_TIMEOUT_S` and `_WORKER_JOIN_TIMEOUT_S` | R3 nesting (review round) |
 | WR5 | a worker job whose connection dies AFTER its sync completed is re-run, and counts processed 1, `skipped_fence_only` 0 | R2 re-run flag (audit round) |
+| WR6 | a worker job whose connection dies INSIDE `rewrite_vault_links` (which swallows the error) is re-run and the link IS rewritten, on both the upsert and the stale-delete path | R2: a re-run always syncs (review of `155e61d`) |
+| P1 | `rewrite_wiki_links`'s resolver-failure WARNING and `rewrite_vault_links`'s escaped-DB-error WARNING name the exception class only, never a psycopg DETAIL's row values | logging rule (review of `155e61d`, pre-existing) |
 | M1 | the worker's leak warning names the reconnecting case (`test_worker_join_timeout_skips_close_when_alive`), and so does `run_watcher`'s lane warning (`test_undrained_removes_at_shutdown_are_logged`) | R4a wording (review round) |
 
 ## Ceiling
@@ -395,4 +404,31 @@ negative controls were rejected, and the archive was restored byte-identical.
 **Suites (final tree, run serially on a sibling test DB):** 416 passed. That is the round-3 set
 plus `test_db`, `test_repo_hygiene_files` and `test_reading_surface_pointers`. `ruff check` and
 `mypy src/` (224 files) are clean.
+
+### The PR #56 review of `155e61d`
+
+**The MINOR: a re-run skipped the step that failed.**
+
+- **How it happened:** `rewrite_vault_links` swallows `psycopg.Error` (`link_rewrite.py`). So a
+  connection lost inside it RETURNED normally, `_cache_after_sync` primed the cache, `call` saw the
+  closed connection and re-ran, and the re-run took the fence-only shortcut.
+- **The effect:** the link rewrite was never redone.
+- **The fix:** a re-run always syncs (R2). The earlier `0 if rerun else 1` counting tweak is gone.
+- **The regression test is WR6.** Its seam is a connection proxy that dies at the first statement
+  made from inside `rewrite_wiki_links`.
+- **RED at `155e61d`:** "the re-run did not redo the link rewrite: ... see [[Target]]".
+
+**In scope and pre-existing: a privacy fix in the logs.** `link_rewrite.py` logged the exception
+MESSAGE at WARNING in two places, and a psycopg DETAIL can quote row values. Both now log
+`describe_failure(exc)`, the class only.
+
+- **Tests:** P1, in `tests/test_vault_link_rewrite.py`.
+- **RED at `155e61d`:** both showed `DETAIL: Key (title)=(...)` in the log.
+- **Size:** `link_rewrite.py` is well under 800 lines.
+
+**Not fixed here (outside this PR's scope):** two more WARNINGs in `link_rewrite.py` log an
+exception object, the `OSError` on read and the YAML error on malformed frontmatter. PyYAML's
+error text can quote a snippet of the file.
+
+**Mutation rows for this round** are in round 6, below.
 

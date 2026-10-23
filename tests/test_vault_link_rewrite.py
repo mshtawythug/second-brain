@@ -11,6 +11,7 @@ The integration with ``brain vault sync`` is exercised in
 """
 import hashlib
 import json
+import logging
 import uuid
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from brain.vault.link_rewrite import (
     rewrite_vault_links,
     rewrite_wiki_links,
 )
+from brain.vault.sync import sync_vault
 
 # ---------------------------------------------------------------------------
 # Test seed helpers — kept tiny so each test reads as setup → exercise → verify.
@@ -750,3 +752,82 @@ class TestPathFormResolverRegression:
         target = resolve_link(test_db, parsed[0], exclude_doc_id=src_doc_id)
         assert target is not None
         assert target.document_id == target_id
+
+
+# ---------------------------------------------------------------------------
+# A DB error is logged by exception class only (PR #56 review): a psycopg
+# DETAIL can quote row values, which must never reach a WARNING log.
+# ---------------------------------------------------------------------------
+
+_ROW_VALUE = "row value that must never reach a log"
+
+
+class _ResolverFails:
+    """Every statement fails, as on a dead connection, with a message quoting a row."""
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        raise psycopg.OperationalError(f"DETAIL: Key (title)=({_ROW_VALUE}) already exists")
+
+
+class _TargetLookupFails:
+    """Delegates to a real connection; the target-row lookup fails past the inner catch."""
+
+    def __init__(self, inner: psycopg.Connection[Any]) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def execute(self, query: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(query).startswith("SELECT vault_path, title FROM documents WHERE id"):
+            raise psycopg.OperationalError(f"DETAIL: Key (title)=({_ROW_VALUE}) already exists")
+        return self._inner.execute(query, *args, **kwargs)
+
+
+def test_a_resolver_db_error_is_logged_by_class_only(caplog: pytest.LogCaptureFixture) -> None:
+    from brain.vault.link_rewrite import rewrite_wiki_links
+
+    with caplog.at_level(logging.WARNING, logger="brain.vault.link_rewrite"):
+        rewrite_wiki_links(
+            "see [[Target]]\n",
+            document_id=str(uuid.uuid4()),
+            conn=_ResolverFails(),  # type: ignore[arg-type]
+        )
+
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "OperationalError" in logged and _ROW_VALUE not in logged, (
+        f"the resolver failure was not logged by class only: {logged!r}"
+    )
+
+
+def test_an_escaped_db_error_is_logged_by_class_only(
+    test_db: psycopg.Connection[Any],
+    fake_embedder: Any,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from brain.vault.link_rewrite import rewrite_vault_links
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "target.md").write_text(
+        dump_frontmatter({"id": str(uuid.uuid4()), "title": "Target"}, "t\n")
+    )
+    sync_vault(test_db, embedder=fake_embedder, vault_path=vault)
+    source = vault / "source.md"
+    source.write_text(
+        dump_frontmatter({"id": str(uuid.uuid4()), "title": "Source"}, "see [[Target]]\n")
+    )
+
+    with caplog.at_level(logging.WARNING, logger="brain.vault.link_rewrite"):
+        changed = rewrite_vault_links(
+            source,
+            document_id=str(uuid.uuid4()),
+            conn=_TargetLookupFails(test_db),  # type: ignore[arg-type]
+        )
+
+    assert changed is False, "fixture: the escaped DB error must skip the rewrite"
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "OperationalError" in logged and _ROW_VALUE not in logged, (
+        f"the escaped DB error was not logged by class only: {logged!r}"
+    )

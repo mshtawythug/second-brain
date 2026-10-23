@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import sys
 import threading
 import uuid
 from collections.abc import Callable
@@ -361,10 +362,11 @@ class _KillOnReconcile:
 def test_a_rerun_after_a_completed_sync_counts_no_fence_only_skip(
     test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path
 ) -> None:
-    """WR5: the re-run finds the cache the first run primed; that is not a skip.
+    """WR5: one job, re-run once, is counted once: processed 1, no fence-only skip.
 
     PR #56 audit: the re-run took the fence-only branch, so the watcher counted
-    one sync as processed AND skipped. The data was right; the stat was not.
+    one sync as processed AND skipped. A re-run now always syncs (WR6), which
+    keeps both counts right.
     """
     from brain.vault.db_reconnect import ReconnectingConnection
 
@@ -401,3 +403,85 @@ def test_a_rerun_after_a_completed_sync_counts_no_fence_only_skip(
         f"processed/skipped_fence_only {(state.processed, state.skipped_fence_only)}, "
         "expected (1, 0): the re-run counted a fence-only skip"
     )
+
+
+def _in_frame(name: str) -> bool:
+    frame = sys._getframe(1)
+    while frame is not None:
+        if frame.f_code.co_name == name:
+            return True
+        frame = frame.f_back
+    return False
+
+
+class _DiesInsideTheLinkRewrite:
+    """A real connection that dies at the link-rewrite step's first statement.
+
+    ``rewrite_vault_links`` is a best-effort polish step that swallows
+    ``psycopg.Error``, so the loss comes back to the worker as a normal return
+    with the rewrite NOT done (PR #56 review of ``155e61d``).
+    """
+
+    def __init__(self, inner: psycopg.Connection[Any]) -> None:
+        self._inner = inner
+        self.dead = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    @property
+    def closed(self) -> bool:
+        return self.dead or self._inner.closed
+
+    def close(self) -> None:
+        self._inner.close()
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        if not self.dead and _in_frame("rewrite_wiki_links"):
+            self.dead = True
+        if self.dead:
+            raise psycopg.OperationalError("synthetic: the server closed the connection")
+        return self._inner.execute(*args, **kwargs)
+
+
+@pytest.mark.parametrize("action", ["upsert", "delete"])
+def test_a_rerun_redoes_a_link_rewrite_the_lost_connection_skipped(
+    test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path, action: str
+) -> None:
+    """WR6: a re-run SYNCS again; it must not take the fence-only shortcut.
+
+    The first run's sync returned with its link rewrite undone, and primed the
+    body cache anyway. A fence-only check on the re-run would skip the file, and
+    the link would stay unrewritten until it was next edited. ``delete`` is the
+    stale-delete path (the file still exists), which has its own fence-only check.
+    """
+    from brain.vault.db_reconnect import ReconnectingConnection
+    from brain.vault.sync import sync_one_file
+
+    vault = tmp_path / "vault"
+    _write(vault / "target.md", "Target")
+    source = vault / "source.md"
+    source.write_text(
+        dump_frontmatter({"id": str(uuid.uuid4()), "title": "Source"}, "see [[Target]]\n")
+    )
+    sync_one_file(test_db, embedder=fake_embedder, vault_path=vault, file_path=vault / "target.md")
+    factory = _Factory()
+    first = _DiesInsideTheLinkRewrite(factory())
+    first.autocommit = True
+    state = _WatcherState()
+    link = ReconnectingConnection(
+        factory,
+        label="worker",
+        sleep=lambda _d: None,
+        stopping=lambda: False,
+        conn=first,  # type: ignore[arg-type]
+    )
+    try:
+        _drain(link, fake_embedder, vault, state, _Job(action, source))  # type: ignore[arg-type]
+    finally:
+        link.close()
+        factory.close_all()
+
+    assert first.dead, "fixture: the connection never died inside the link rewrite"
+    text = source.read_text()
+    assert "[[target|Target]]" in text, f"the re-run did not redo the link rewrite: {text!r}"

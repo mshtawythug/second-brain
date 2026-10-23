@@ -40,9 +40,9 @@ Concurrency invariants worth restating:
   Graph syncs run on one background lane (``graph_lane``), so a slow startup
   reconcile never delays observing the vault. The worker and the lane reconnect
   after a Postgres restart (``db_reconnect``), which split the worker's job body
-  out into ``_run_job`` (bound per job by ``_job_runner``, so a re-run counts no
-  fence-only skip); ``WATCHER_CONNECT_TIMEOUT_S`` keeps a shutdown-time connect
-  inside the shutdown windows.
+  out into ``_run_job`` (bound per job by ``_job_runner``, so a re-run always
+  syncs); ``WATCHER_CONNECT_TIMEOUT_S`` keeps a shutdown-time connect inside the
+  shutdown windows.
   These are the 2026-10-22 race fixes, reasoned at ``_fire``,
   ``_supersede_pending`` and the drain; CLAUDE.md's ceiling table records them.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
@@ -909,9 +909,12 @@ def _job_runner(
 ) -> Callable[[psycopg.Connection[Any]], bool]:
     """``_run_job`` bound to one job, and told whether ``link.call`` is re-running it.
 
-    A re-run after the connection died at the END of a completed sync finds the
-    body cache that sync primed, so its fence-only branch is not a skip and must
-    not be counted as one (PR #56 audit).
+    A re-run always syncs, never taking the fence-only shortcut. The first run
+    may have RETURNED after losing its connection inside a step that swallows
+    ``psycopg.Error`` (``rewrite_vault_links``, a best-effort polish step), and
+    it primed the body cache anyway, so that cache proves nothing.
+    ``sync_one_file`` is idempotent by content hash (PR #56 review of
+    ``155e61d``; the earlier fix only stopped counting the skip).
     """
     runs = 0
 
@@ -993,8 +996,8 @@ def _run_job(
                 "(file still exists — likely an atomic-replace event)",
                 job.abs_path,
             )
-            if _is_fence_only_write(state, job.abs_path):
-                state.skipped_fence_only += 0 if rerun else 1  # see _job_runner
+            if not rerun and _is_fence_only_write(state, job.abs_path):  # see _job_runner
+                state.skipped_fence_only += 1
             else:
                 report = sync_one_file(
                     conn,
@@ -1039,8 +1042,8 @@ def _run_job(
                 job.abs_path,
             )
             return False  # no real work: neither processed nor errors advances
-        if _is_fence_only_write(state, job.abs_path):
-            state.skipped_fence_only += 0 if rerun else 1  # see _job_runner
+        if not rerun and _is_fence_only_write(state, job.abs_path):  # see _job_runner
+            state.skipped_fence_only += 1
             logger.debug(
                 "vault watcher: skipping fence-only write for %s",
                 job.abs_path,
