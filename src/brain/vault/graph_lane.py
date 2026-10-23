@@ -37,7 +37,7 @@ _Op = Literal["reconcile", "remove"]
 #: Leads with the targeted repair; ``build --force`` is the fallback.
 LOST_REMOVES_REPAIR = (
     "their AGE Document vertices stay until `brain graphrag remove <ids>` is run "
-    "with the ids above (it drops their vertices and edges, GCs orphan entities and "
+    "with the ids listed (it drops their vertices and edges, GCs orphan entities and "
     "refreshes the aggregates); the fallback is `brain graphrag build --force`, which "
     "re-extracts concepts for every document when concepts are on"
 )

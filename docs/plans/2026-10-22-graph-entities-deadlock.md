@@ -191,6 +191,7 @@ place that takes the lock:
 | W8 | `communities.build_communities` | `graph_communities`, `graph_community_members` (FK into `graph_entities`) | first statement |
 | W9 | `communities_summary._run_summary_phase`, write transaction | `graph_communities` | first statement |
 | W10 | `communities_summary._run_embedding_phase`, write transaction | `graph_communities` | first statement |
+| W11 | `repair.remove_deleted_documents` (PR #57), outer transaction | W2 for the batch, plus a read-only `documents` re-check | first statement, then the re-check, then W2 (re-entrant) |
 
 The per-document `build_graph` loop goes through W1, the end-of-build refresh
 through W3, and `collapse_cross_type_concepts` through W6 and W7. Every
@@ -351,7 +352,11 @@ seconds instead of hanging CI.
 the guard and per-tenant scope. One test per writer W1-W10 holds the tenant's
 lock on another connection and asserts that the writer fails with
 `LockNotAvailable` under a short `lock_timeout`. A control run of the same
-writer then succeeds once the lock is released.
+writer then succeeds once the lock is released. W11 (added by PR #57) is pinned
+in `tests/test_graphrag_remove_command.py`. Its restored-row test parks the
+remove on a lock held by another session, and that test goes red without the
+re-check made under the lock (M28 in
+`docs/plans/2026-10-22-graphrag-remove-command.md`).
 
 ## Mutation plan
 

@@ -207,12 +207,12 @@ published into ``os.environ``, so a level set in a ``.env`` was silently
 ignored. No tool and no code path beyond that ordering; the reason is inline in
 ``_load_config``'s docstring. Re-derive the net, never inherit it.
 
-**And 2026-10-22 (``brain_graphrag_remove``).** One new admin tool: the MCP twin
-of ``brain graphrag remove``, the targeted repair for graph removes the vault
-watcher's shutdown could not apply. The rulings and the logic live in
-:mod:`brain.graph_rag.repair`. What grew here is the tool's wrapper, its
-docstring and its error mapping (a non-UUID id or a live document ->
-``INVALID_PARAMS``), recorded inline above the tool.
+**And 2026-10-22 (``brain_graphrag_remove``).** One new admin tool, the MCP twin
+of ``brain graphrag remove`` (the repair for graph removes the watcher's shutdown
+could not apply); rulings and logic in :mod:`brain.graph_rag.repair`. What grew
+is the wrapper, its docstring and its error mapping (a non-UUID id, an empty list
+or a live document -> ``INVALID_PARAMS``, any other ``GraphReconcileError`` ->
+``INTERNAL_ERROR``), recorded inline above the tool.
 
 **Hazard this file has already been bitten by.** Every tool is a bare ``def``
 under a lone ``@mcp_app.tool()`` line, so inserting a helper between a decorator
