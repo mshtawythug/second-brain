@@ -104,7 +104,7 @@ jobs:
 
 | Job | What it runs |
 |-----|--------------|
-| **Lint and types (ruff + mypy)** | `ruff check` and `mypy src/`. No Docker, finishes in under a minute, so a formatting or typing mistake fails fast and cheap. |
+| **Lint and types (ruff + mypy)** | `ruff check`, `mypy src/`, and `python scripts/check_ceiling_table.py` (CLAUDE.md's file-size ceiling table must list exactly the `src/brain/` modules over 800 lines). No Docker, finishes in under a minute, so a formatting or typing mistake fails fast and cheap. |
 | **Tests (pytest, AGE Postgres)** | A bare `pytest` against the pinned AGE test instance on port 5434. |
 
 The test job runs **bare `pytest`** on purpose: `pyproject.toml` owns the marker

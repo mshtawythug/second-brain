@@ -160,6 +160,30 @@ def test_ci_runs_ruff_mypy_and_pytest() -> None:
     )
 
 
+CEILING_CHECK_RUN = "python scripts/check_ceiling_table.py"
+
+
+def test_ci_lint_job_runs_the_ceiling_table_check_after_mypy() -> None:
+    """RM-04: the lint job runs the ceiling-table check, as its own named step.
+
+    A named step reads as a policy failure, which is what a table/tree mismatch
+    is (RM-04.D1). It runs after `mypy src/` so a type error still fails first,
+    and in the lint job because that job needs no database, and neither does
+    the check.
+    """
+    lint = _jobs(load_workflow("ci.yml"))["lint"]
+    runs = [str(step.get("run", "")).strip() for step in lint["steps"] if isinstance(step, dict)]
+
+    assert CEILING_CHECK_RUN in runs, (
+        f"ci.yml's lint job never runs `{CEILING_CHECK_RUN}` — a file can cross "
+        "800 lines with no CLAUDE.md ceiling-table row and CI stays green"
+    )
+    assert "mypy src/" in runs, "ci.yml's lint job no longer runs `mypy src/`"
+    assert runs.index(CEILING_CHECK_RUN) > runs.index("mypy src/"), (
+        "the ceiling-table check must run after `mypy src/`"
+    )
+
+
 def test_ci_never_configures_pytest_through_the_environment() -> None:
     """`addopts` must be the only thing deciding what pytest runs — for real.
 

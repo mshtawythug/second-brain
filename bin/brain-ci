@@ -3,7 +3,7 @@
 #
 # Mirrors .github/workflows/ci.yml (both jobs) on your own machine:
 #
-#   lint job  →  ruff check           +  mypy src/
+#   lint job  →  ruff check  +  mypy src/  +  python scripts/check_ceiling_table.py
 #   test job  →  a BARE `pytest` against the pinned AGE Postgres on port 5434
 #
 # WHY THIS EXISTS
@@ -61,7 +61,8 @@
 #   0   everything the run attempted passed
 #   N   pytest's OWN status, verbatim, whenever pytest ran and failed
 #       (1 tests failed / 2 interrupted / 3 internal / 4 usage / 5 no tests)
-#   1   pytest passed (or did not run) but ruff / mypy failed
+#   1   pytest passed (or did not run) but ruff / mypy / the ceiling-table
+#       check failed
 #   64  usage error (bad flag)
 #   70  environment failure — no uv, no Docker, venv build failed, DB never
 #       came up, or a refusal to target the production database
@@ -160,7 +161,7 @@ $SCRIPT_NAME — run .github/workflows/ci.yml locally, faithfully.
   $SCRIPT_NAME                    the full, faithful gate (default)
   $SCRIPT_NAME --reuse-venv       fast re-run against the existing .venv;
                               NOT the gate (announced loudly)
-  $SCRIPT_NAME --lint-only        only ci.yml's 'lint' job (ruff + mypy)
+  $SCRIPT_NAME --lint-only        only ci.yml's 'lint' job (ruff + mypy + ceiling table)
   $SCRIPT_NAME --tests-only       only ci.yml's 'test' job (pytest)
   $SCRIPT_NAME --skip-compose     assume the AGE test DB on $CI_PG_PORT is up
   $SCRIPT_NAME --teardown         'compose down -v' the TEST stack afterwards
@@ -506,6 +507,7 @@ fi
 
 RUFF_STATUS=0
 MYPY_STATUS=0
+CEILING_STATUS=0
 PYTEST_STATUS=0
 PYTEST_RAN=0
 
@@ -519,6 +521,14 @@ if (( RUN_LINT )); then
   ( cd "$REPO_ROOT" && "$VENV/bin/mypy" src/ )
   MYPY_STATUS=$?
   (( MYPY_STATUS == 0 )) && ok "mypy src/ passed"
+
+  # RM-04: CLAUDE.md's ceiling table must list exactly the src/brain/ modules
+  # over 800 lines. tests/test_bin_brain_ci.py fails if this step exists here
+  # and not in ci.yml's lint job, or the reverse.
+  step "ci.yml job 'lint' — python scripts/check_ceiling_table.py"
+  ( cd "$REPO_ROOT" && "$VENV/bin/python" scripts/check_ceiling_table.py )
+  CEILING_STATUS=$?
+  (( CEILING_STATUS == 0 )) && ok "ceiling table matches the tree"
 fi
 
 if (( RUN_TESTS )); then
@@ -543,9 +553,11 @@ render() { printf '    %-24s %s\n' "$1" "$2"; }
 if (( RUN_LINT )); then
   render "ruff check" "$( (( RUFF_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $RUFF_STATUS)")"
   render "mypy src/" "$( (( MYPY_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $MYPY_STATUS)")"
+  render "ceiling table" "$( (( CEILING_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $CEILING_STATUS)")"
 else
   render "ruff check" "skipped (--tests-only)"
   render "mypy src/" "skipped (--tests-only)"
+  render "ceiling table" "skipped (--tests-only)"
 fi
 if (( PYTEST_RAN )); then
   render "pytest" "$( (( PYTEST_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $PYTEST_STATUS)")"
@@ -558,9 +570,9 @@ EXIT_REASON="everything this run attempted passed"
 if (( PYTEST_RAN && PYTEST_STATUS != 0 )); then
   EXIT_STATUS=$PYTEST_STATUS
   EXIT_REASON="pytest's own exit status, verbatim (not a wrapper's)"
-elif (( RUFF_STATUS != 0 || MYPY_STATUS != 0 )); then
+elif (( RUFF_STATUS != 0 || MYPY_STATUS != 0 || CEILING_STATUS != 0 )); then
   EXIT_STATUS=1
-  EXIT_REASON="pytest passed but ruff/mypy did not"
+  EXIT_REASON="pytest passed but ruff/mypy/the ceiling-table check did not"
 fi
 
 say ""

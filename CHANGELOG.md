@@ -22,6 +22,18 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — CI fails when the file-size ceiling table and the tree disagree
+
+`scripts/check_ceiling_table.py` compares CLAUDE.md's file-size ceiling table
+with the modules under `src/brain/` that are over 800 lines (roadmap ticket
+RM-04, backlog BL-1). It exits 1, naming the file and what to do, when a file
+crosses 800 lines without a row, when a row's file is deleted or back under the
+ceiling, or when a row names the wrong file; it exits 2 when the table's header
+row is not found. It runs as a step in `ci.yml`'s `lint` job and in
+`bin/brain-ci`'s lint stage, and `tests/test_bin_brain_ci.py` now fails when a
+lint step exists in one of the two and not the other. Development tooling only:
+no `brain` command changes.
+
 ### Changed — `brain ui` search falls back to text-only matching, with a notice
 
 When the query embedding cannot be computed, the Notes tab in `brain ui` now

@@ -329,8 +329,11 @@ suite. Fixed, and guarded from both directions by
 `tests/test_mcp_tool_registration.py`. The lesson is about the audit, not the
 rule — *how much a file grew* is a number, *what grew in it* is a review.
 
-There is **no automated gate** on this — the ceiling is a review checkpoint, not
-CI. If you add a file to this table, add the row in the same edit.
+**The row set is gated in CI; the rest of the table is not.** Since RM-04,
+`scripts/check_ceiling_table.py` fails the `lint` job when a file is over 800
+with no row, or a row's file is gone or back under (details in "The residue"
+below). What a row *says* (its trail, its recorded reasons) is still a review
+checkpoint. If you add a file to this table, add the row in the same edit.
 
 ### The F6 draft/sensitivity residue audit — a review checkpoint, re-derived
 
@@ -398,10 +401,12 @@ audit already look.
 **The residue — this table can be rot-proof in every digit and still be wrong by
 omission.** Deleting the live head counts closes one failure mode: a row stating
 a size the next commit falsifies. It does not touch the other, which is larger.
-**Nothing detects a file that newly crosses 800 and never gets a row.** A stale
-digit at least has a cell you can check; a missing row has nothing to check, so
-it cannot be caught by reading this table more carefully — the *row set itself*
-is a live claim, and the only thing re-deriving it is a human remembering to.
+**Until RM-04, nothing detected a file that newly crossed 800 and never got a
+row.** A stale digit at least has a cell you can check; a missing row has
+nothing to check, so it cannot be caught by reading this table more carefully —
+the *row set itself* is a live claim, and the only thing re-deriving it was a
+human remembering to. CI re-derives it now (the closing paragraph of this
+section says how, and what it still misses).
 
 **It is not hypothetical, and it is no longer even a prediction: it happened in
 the same change set that wrote this paragraph.** This text used to say
@@ -425,13 +430,27 @@ and matched no commit — `git show "${sha}:src/brain/related.py" | wc -l` retur
 boundary in between. A live digit had survived inside the paragraph that
 abolishes live digits, which is the same by-omission failure one level down.)*
 
-Closing it is a **build change, not a docs change**: a CI step that runs
-`find src -name '*.py' -exec wc -l {} + | sort -rn`, diffs the over-800 set
-against the rows here, and fails when a file is in one and not the other. That
-check is deliberately **not implemented** — it needs its own review, its own
-tests, and a decision about where the row set gets parsed from, none of which
-belong in a docs pass. Until it exists this paragraph is the gate: when you
-audit this section, **re-derive the row set, not just the digits.**
+**Closed by a build change, as this paragraph said it had to be (RM-04, backlog
+BL-1).** `scripts/check_ceiling_table.py` runs as the `Ceiling table matches the
+tree` step of `ci.yml`'s `lint` job, after `mypy src/`, and in `bin/brain-ci`'s
+lint stage (`tests/test_bin_brain_ci.py` fails if either has the step and the
+other does not). It walks `src/brain/**/*.py`, counts lines as `wc -l` does,
+and parses the row set from the one table whose header row is exactly
+`| File | Lines | Why it is not being split |`. It exits **1**, naming the file
+and the remedy, when a file is over 800 with no row, when a row's file is gone
+or at or under 800, or when a row is malformed (its first cell is not one
+backticked path, its Lines cell's `wc -l src/brain/<path>` names another file,
+or it repeats a row). It exits **2** when that header line is missing or
+appears twice, so rewording the header turns CI red instead of switching the check off; change `HEADER` in
+the script in the same edit. Run it locally with
+`python scripts/check_ceiling_table.py`.
+
+**What it still cannot catch:** the *contents* of a row (a trail one hop short,
+a missing docstring pointer, a recorded reason that is false), and the
+near-ceiling budgets in the roadmap spec (§2.2 of
+`docs/specs/2026-10-23-roadmap-completion-design.md`). Those stay a review: when
+you audit this section, the row set is checked for you, and **the trails are
+not.**
 
 > **Merge note — DISCHARGED 2026-09-02.** This paragraph used to say that
 > `feat/agentic-token-reduction` carried its own version of the ceiling section
