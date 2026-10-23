@@ -79,6 +79,13 @@ the real `AgeBackend`. AGE counts go through independent raw Cypher.
 | R4 | `test_remove_prints_counts_only` |
 | MCP twin: removes, idempotent | `test_mcp_twin_removes_a_ghost_and_is_idempotent` |
 | MCP twin: R1 and R2 as `INVALID_PARAMS` | `test_mcp_twin_rejects_a_prefix_and_a_live_document` |
+| R2 batch: [ghost, live] exits 1 and the ghost keeps its vertex (CLI) | `test_a_live_id_refuses_the_whole_batch_and_touches_no_ghost` |
+| R2 batch, MCP: a live id with graph state, both untouched | `test_mcp_twin_refuses_a_batch_with_a_live_id` |
+| R2 re-check under the lock: a row restored after the pre-check is refused | `test_a_document_restored_after_the_pre_check_is_still_refused` |
+| R7: a batch pays the tenant-wide steps once | `test_a_batch_pays_the_tenant_wide_steps_once` |
+| R1: an empty MCP list is `INVALID_PARAMS` | `test_mcp_twin_rejects_an_empty_list` |
+| R1: one UUID in two spellings is one id | `test_the_same_uuid_spelled_twice_is_one_id` |
+| the watcher's repair text leads with this command, which exists | `test_the_watcher_repair_text_names_this_command_first`, plus W4 in `tests/test_vault_watch_startup_blind.py` |
 
 The ghost is built the way the bug leaves it. A document is reconciled into
 AGE, then its `documents` row is deleted with no graph remove. The
@@ -89,6 +96,47 @@ WRITE set (`tests/test_mcp_confidential_discovery_gate.py`) and the
 `brain-graph` skill list the new tool.
 
 ## Results
+
+### Review round (at `42e928e`, on top of the master merge `d6b38dc`)
+
+**RED first,** with `src/` at `d6b38dc` and the review round's tests, 8 fail:
+- **the re-check:** the restored document's vertex was removed, with no refusal;
+- **batch cost:** two `CO_OCCURS` rebuilds for two ids;
+- **the repair text:** the old `LOST_REMOVES_REPAIR` named only `build --force` (the pin and W4);
+- **the new report shape:** four tests on its wording and keys.
+
+The re-check test's first version went red for the wrong reason, a Cypher
+call on a connection that had not run `LOAD 'age'`. Its remover connection
+now loads AGE, as `connect_age` does. It then fails on the missing refusal
+itself.
+
+**GREEN.** The remove tests (14) pass 5 runs of 5. `repair.py` and
+`cli_graphrag_repair.py` are at 100% branch coverage. The graph, MCP, docs,
+GraphLane, startup-blind and watcher suites pass, run serially. `ruff check`
+and `mypy src/` are clean.
+
+**Mutations.** Each ran in a fresh archive copy of `42e928e`. The five
+lock/command/watcher files (43 tests) pass unmutated.
+
+| mutation | red |
+|---|---|
+| M23 drop the batch pre-check | none: an **equivalent mutant**. The re-check under the lock refuses the same ids; the pre-check only fails fast, before taking the lock. |
+| M28 drop the re-check under the lock | the restored-row test |
+| M29 the per-id check inside the loop, still in one transaction | the batch-cost test only. Inside one transaction a refusal rolls back the ids already removed, so [ghost, live] holds by atomicity. |
+| M32 per-id checks AND per-id transactions (the reviewer's surviving mutant) | both [ghost, live] tests (CLI and MCP), the restored-row test and the batch-cost test |
+| M30 one transaction per id | the batch-cost test |
+| M24 accept prefixes | R1 (CLI, MCP, and the dedupe test) |
+| M25 report 0 vertices | the ghost, several-ids, MCP-removes, dedupe and batch-cost tests |
+| M26 never DETACH DELETE the vertices | the four tests that check the vertex is gone |
+| M27 drop the `cli.py` hook | all eight CLI tests, and the repair-text pin |
+| M31 revert the repair text's lead | the repair-text pin and W4 |
+| M3 `remove_documents` without the graph lock | only `test_w2_remove_document_takes_the_lock` |
+
+The MCP `GraphReconcileError -> INTERNAL_ERROR` mapping is defensive. No path
+in the batch raises a `GraphReconcileError` other than `DocumentStillExists`,
+so it is unmutated and uncovered by design.
+
+### Round one (at `1484f8f`)
 
 **RED first.** At `edaba1b` with the new tests, all 7 fail. The CLI tests fail
 with "No such command" and the MCP tests with no `brain_graphrag_remove`. The

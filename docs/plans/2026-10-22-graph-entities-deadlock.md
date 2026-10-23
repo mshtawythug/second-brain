@@ -182,7 +182,7 @@ place that takes the lock:
 | # | Writer (top-level transaction) | Graph writes | Lock taken |
 |---|---|---|---|
 | W1 | `reconcile.reconcile_document` | entities, mentions, contributions, index_state, relationships, GC, AGE | first statement of the write transaction (after the read transaction and the extraction) |
-| W2 | `reconcile.remove_document` | mentions, contributions, index_state, relationships, GC, AGE | first statement in the transaction |
+| W2 | `reconcile.remove_documents` (and `remove_document`, its one-id wrapper; batched since PR #57) | mentions, contributions, index_state, relationships, GC, AGE | first statement in the transaction |
 | W3 | `aggregates.refresh_aggregates` | entities (`doc_count`), relationships, GC, AGE | first statement |
 | W4 | `build.build_graph` `force` pre-pass | relationships, GC, AGE `clear_tenant` + restore | first statement |
 | W5 | `aliases.apply_aliases`, per-rule transaction | entities, mentions, contributions | first statement |
