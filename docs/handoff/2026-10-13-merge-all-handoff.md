@@ -256,17 +256,17 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        `Document` vertices stay until `brain graphrag build --force`, which, with concepts on,
        re-extracts every document. Aggregates and orphan entities heal at the next graph
        reconcile or with `brain graphrag refresh`.
-     - **The cheap repair, built:** `brain graphrag remove <id>...` (and the MCP twin
-       `brain_graphrag_remove`) calls `graph_rag.reconcile.remove_document` for the logged ids
-       (`brain/graph_rag/repair.py`, `brain/cli_graphrag_repair.py`).
+     - **The cheap repair, built (PR #57):** `brain graphrag remove <id>...` (and the MCP twin
+       `brain_graphrag_remove`) calls `graph_rag.reconcile.remove_documents` once for the logged
+       ids (`brain/graph_rag/repair.py`, `brain/cli_graphrag_repair.py`).
        - It takes full UUIDs only; a deleted document has no row to resolve a prefix against.
-       - It refuses an id whose document still exists.
+       - It refuses the whole batch if any id's document still exists, rechecked under the
+         lock.
        - It is idempotent and prints counts only.
-     - **Still open:** the shutdown WARNING in `vault/watch.py` still names only
-       `brain graphrag build --force`. It should name `brain graphrag remove <ids>` as the cheap
-       repair. It was not changed here, because PR #56 is editing `watch.py` and the lane, and
-       there is no shared repair-string constant outside `watch.py` to put it in. Update the
-       WARNING once both have landed.
+     - ~~**Still open:** the shutdown messages still named only `build --force`.~~ *[DONE in
+       PR #57.]* `LOST_REMOVES_REPAIR` (`vault/graph_lane.py`, used by both the watcher's
+       shutdown WARNING and the lane's no-connection ERROR) now leads with
+       `brain graphrag remove <ids>` and keeps `build --force` as the fallback.
 - *[FIXED 2026-10-22 by PR #53 (`fix/graph-entities-deadlock`, merged as `8711ff0`).]* **`graph_entities` deadlocks
   between graph writers.** On prod, `brain graphrag build --backfill --concepts` died with
   `DeadlockDetected` in `upsert_concept_entities` against the vault watcher. This is the same class

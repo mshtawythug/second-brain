@@ -6,12 +6,12 @@ long reconcile (PR #54), the graph removes still queued behind it are logged by
 document id and not applied. The ``documents`` row is gone, and its relational
 graph rows went with it by ``ON DELETE CASCADE``. Nothing relational records
 the lost remove, but the AGE ``Document`` vertex and its ``MENTIONED_IN`` edges
-stay. This module calls :func:`~brain.graph_rag.reconcile.remove_document` (W2
-in ``docs/plans/2026-10-22-graph-entities-deadlock.md``; it takes the tenant
-graph write lock) for exactly those ids. The alternative,
+stay. This module calls :func:`~brain.graph_rag.reconcile.remove_documents`
+(W2 in ``docs/plans/2026-10-22-graph-entities-deadlock.md``; it takes the
+tenant graph write lock) for exactly those ids. The alternative,
 ``brain graphrag build --force``, re-extracts every document's concepts.
 
-Rulings:
+Rulings (``docs/plans/2026-10-22-graphrag-remove-command.md``):
 
 * **Full UUIDs only.** A deleted document has no row, so a prefix has nothing
   to resolve against. Parsing is strict about the value, and the result is the
@@ -19,10 +19,17 @@ Rulings:
 * **Deleted documents only.** An id whose ``documents`` row still exists is
   refused, and nothing is removed. Removing a live document's graph state would
   only be re-indexed by its next reconcile; to drop the document itself, use
-  ``brain rm``. Every id is checked before any is removed.
-* **Idempotent.** An id with no graph state left is a reported no-op.
-  ``remove_document`` still recomputes the tenant aggregates and the
-  ``CO_OCCURS`` mirror for it, which converges to the same graph.
+  ``brain rm``. Every id is checked twice. A pre-check fails fast. Then, under
+  the tenant graph write lock and in the same transaction as the removal, a
+  re-check catches a document restored in between (a vault file put back with
+  its frontmatter id). Either check refuses the whole batch.
+* **One batch, one transaction.** The tenant-wide steps (aggregate recompute,
+  orphan GC, the ``CO_OCCURS`` rebuild) run once for all the ids, not once per
+  id. A failure rolls the whole batch back, and a re-run is safe.
+* **The AGE vertex is the only state reported.** A deleted document cannot keep
+  relational graph rows: every per-document graph table cascades on the
+  ``documents`` delete, by FK. So the report is the ``Document`` vertex count per
+  id, and an id whose vertex is already gone is a reported no-op.
 * **Counts only.** Results carry ids and counts, never a title or an entity
   name.
 """
@@ -37,10 +44,12 @@ import psycopg
 
 from ..errors import GraphReconcileError
 from .backends.base import GraphBackend
-from .reconcile import ReconcileConfig, remove_document
+from .reconcile import ReconcileConfig, remove_documents
+from .write_lock import acquire_graph_write_lock
 
 __all__ = [
     "DocumentStillExists",
+    "RemoveReport",
     "RemovedDocument",
     "parse_document_ids",
     "remove_deleted_documents",
@@ -57,13 +66,24 @@ class RemovedDocument:
 
     document_id: str
     document_vertices_removed: int
-    graph_rows_removed: int
+
+    @property
+    def had_document_vertex(self) -> bool:
+        """True iff the deleted document still had its AGE ``Document`` vertex."""
+        return self.document_vertices_removed > 0
+
+
+@dataclass(frozen=True)
+class RemoveReport:
+    """The whole batch: per-id results plus the batch-wide orphan GC."""
+
+    tenant_id: str
+    documents: tuple[RemovedDocument, ...]
     orphans_removed: int
 
     @property
-    def had_graph_state(self) -> bool:
-        """True iff the document had an AGE vertex or relational graph rows left."""
-        return self.document_vertices_removed > 0 or self.graph_rows_removed > 0
+    def with_document_vertex(self) -> int:
+        return sum(1 for item in self.documents if item.had_document_vertex)
 
 
 def parse_document_ids(raw_ids: Sequence[str]) -> list[str]:
@@ -71,7 +91,8 @@ def parse_document_ids(raw_ids: Sequence[str]) -> list[str]:
 
     Each id must be a full document UUID (hex, with or without hyphens). A
     prefix is refused: a deleted document has no row to resolve it against.
-    Duplicates are dropped, keeping the first occurrence.
+    Duplicates (including the same UUID spelled differently) are dropped,
+    keeping the first occurrence.
     """
     canonical: list[str] = []
     bad: list[str] = []
@@ -94,21 +115,7 @@ def parse_document_ids(raw_ids: Sequence[str]) -> list[str]:
     return canonical
 
 
-def remove_deleted_documents(
-    conn: psycopg.Connection[Any],
-    document_ids: Sequence[str],
-    *,
-    backend: GraphBackend,
-    config: ReconcileConfig,
-) -> list[RemovedDocument]:
-    """Remove each deleted document's leftover graph state, in the given order.
-
-    ``document_ids`` must already be canonical (:func:`parse_document_ids`).
-    Raises :class:`DocumentStillExists`, before removing anything, if any id
-    still has a ``documents`` row. Each removal is its own ``remove_document``
-    transaction, so one failure leaves the earlier ids removed and is safe to
-    re-run.
-    """
+def _refuse_live(conn: psycopg.Connection[Any], document_ids: Sequence[str]) -> None:
     live = conn.execute(
         "SELECT id::text FROM documents WHERE id = ANY(%s::uuid[]) ORDER BY id",
         (list(document_ids),),
@@ -120,15 +127,33 @@ def remove_deleted_documents(
             + ". Delete one with `brain rm`, or rebuild its graph with "
             "`brain graphrag build`."
         )
-    removed: list[RemovedDocument] = []
-    for document_id in document_ids:
-        result = remove_document(conn, document_id, backend=backend, config=config)
-        removed.append(
-            RemovedDocument(
-                document_id=document_id,
-                document_vertices_removed=result.document_vertices_removed,
-                graph_rows_removed=result.graph_rows_removed,
-                orphans_removed=result.orphans_removed,
+
+
+def remove_deleted_documents(
+    conn: psycopg.Connection[Any],
+    document_ids: Sequence[str],
+    *,
+    backend: GraphBackend,
+    config: ReconcileConfig,
+) -> RemoveReport:
+    """Remove each deleted document's leftover graph state, in one transaction.
+
+    ``document_ids`` must already be canonical (:func:`parse_document_ids`).
+    Raises :class:`DocumentStillExists` if any id still has a ``documents`` row,
+    at the pre-check or at the re-check under the lock; nothing is removed then.
+    """
+    _refuse_live(conn, document_ids)
+    with conn.transaction():
+        acquire_graph_write_lock(conn, config.tenant_id)
+        _refuse_live(conn, document_ids)
+        result = remove_documents(conn, document_ids, backend=backend, config=config)
+    return RemoveReport(
+        tenant_id=result.tenant_id,
+        documents=tuple(
+            RemovedDocument(document_id=document_id, document_vertices_removed=count)
+            for document_id, count in zip(
+                document_ids, result.document_vertices_removed, strict=True
             )
-        )
-    return removed
+        ),
+        orphans_removed=result.orphans_removed,
+    )

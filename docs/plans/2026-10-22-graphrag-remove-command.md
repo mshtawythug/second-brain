@@ -38,23 +38,32 @@ follow-up 6.
 | # | Ruling | Why |
 |---|---|---|
 | R1 | Full UUIDs only; a prefix exits 2 (`INVALID_PARAMS`) | A deleted document has no row to resolve a prefix against. |
-| R2 | An id whose document still exists exits 1 (`INVALID_PARAMS`), and nothing is removed | The repair is for deleted documents. A live document's graph would only be re-indexed by its next reconcile; to delete it, use `brain rm`. Every id is checked before any is removed. |
-| R3 | Idempotent: an id with no graph state is a reported no-op | `remove_document` still recomputes the tenant aggregates and the `CO_OCCURS` mirror, which converges to the same graph. |
+| R2 | If any id's document still exists, the batch exits 1 (`INVALID_PARAMS`), and nothing is removed | The repair is for deleted documents. A live document's graph would only be re-indexed by its next reconcile; to delete it, use `brain rm`. **Checked twice** (review round): a pre-check fails fast, and a re-check runs under the tenant graph write lock in the removal's own transaction. The re-check catches a document restored in between, e.g. a vault file put back with its frontmatter id. |
+| R3 | Idempotent: an id whose vertex is already gone is a reported no-op | The batch still recomputes the tenant aggregates and the `CO_OCCURS` mirror, which converges to the same graph. |
+| R7 | **One batch, one transaction** (review round) | `reconcile.remove_documents` deletes every id's relational rows, then runs the tenant-wide steps once: aggregate recompute, orphan GC, `CO_OCCURS` rebuild. It also counts each id's `Document` vertex. `remove_document` is its one-id wrapper, so W2's lock discipline is unchanged. The first version called `remove_document` per id and paid the tenant-wide pass N times. A failure now rolls the whole batch back. |
+| R8 | **Report the AGE vertex only; `graph_rows_removed` dropped** (review round) | A deleted document cannot keep relational graph rows: every per-document graph table cascades on the `documents` delete, by FK. So the count the first version reported was provably always 0, and it would never have worked as a race signal. Dropped, with `delete_doc_relational` back to returning `None`. `had_graph_state` became `had_document_vertex`, the only state a deleted document can still have. |
 | R4 | Counts only | The data flow carries ids and counts, never a title or an entity name. |
 | R5 | Exit codes as the other `brain graphrag` admin commands | `2` for a bad argument (`BadParameter`), `1` for a refused run or an AGE-less database (`_require_age_or_exit`), `0` otherwise. |
 | R6 | New modules, lazily imported | `cli.py` and `mcp_server.py` are over the 800-line ceiling. Each grows only by its hook (the import plus `register_graphrag_repair(graphrag_app)`) and the MCP wrapper, recorded inline at the growth and in its module docstring. The graph package pulls networkx, so it is imported inside the command (`tests/test_import_hygiene.py`). |
 
-**Not done here: the watcher's WARNING text.** `vault/watch.py`'s shutdown
-WARNING still names only `brain graphrag build --force`. It should name
-`brain graphrag remove <ids>`. PR #56 is editing `watch.py` and the lane, and no
-shared repair-string constant exists outside `watch.py` to put it in. Update
-the WARNING once both have landed; this is recorded in the handoff.
+**The watcher's repair text (review round).** PR #56 had put the shared
+constant `LOST_REMOVES_REPAIR` in `vault/graph_lane.py`. Both the watcher's
+shutdown WARNING (`watch.py`) and the lane's no-connection ERROR
+(`graph_lane.py`) log it after the ids. It now leads with
+`brain graphrag remove <ids>` and keeps `brain graphrag build --force` as the
+fallback. Only the constant changed; `watch.py` itself did not. The W4 test
+(`tests/test_vault_watch_startup_blind.py`) pins both commands in the WARNING.
+`test_the_watcher_repair_text_names_this_command_first` pins the order, and
+that the command it names is registered.
 
-**Not done here: the CLAUDE.md size table.** `cli.py`'s and `mcp_server.py`'s
-rows end in SHA-bound hops (`885b5a6`, `db1b60e`) and say to enumerate later
-commits with `git log`, so they remain true. Adding this change's hop to each
-row is an edit to `CLAUDE.md`. That needs the user's say-so, not an agent's, so
-it is left for the user.
+**The CLAUDE.md size table.** The first version of this plan left the rows for
+the user. The coordinator added them in `11908fe`: `cli.py` 8,816 at `1484f8f`,
+and `mcp_server.py` 5,047 at `1484f8f`, each with a growth note. The `cli.py`
+row was resolved as two sibling legs in the master merge `d6b38dc` (master's
+8,802 at `155e61d`, and this PR's 8,816 at `1484f8f`, joining at the merge). The
+review round changes `mcp_server.py`'s count again (the tool docstring and the
+`INTERNAL_ERROR` mapping). That hop goes to the coordinator to apply, and
+`cli.py` is unchanged by it.
 
 ## Tests
 

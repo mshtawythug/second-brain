@@ -1,9 +1,10 @@
 """`brain graphrag remove` — remove deleted documents' leftover graph state.
 
-The targeted repair the vault watcher's shutdown WARNING points at when graph
-removes were queued and not applied (PR #54). The logic, and the reasons for
-its rulings (full UUIDs only, deleted documents only, idempotent, counts only),
-live in :mod:`brain.graph_rag.repair`. This module is the CLI wrapper and the
+The targeted repair the vault watcher's shutdown messages point at
+(``LOST_REMOVES_REPAIR`` in :mod:`brain.vault.graph_lane`) when graph removes
+were queued and not applied (PR #54). The logic, and the reasons for its
+rulings (full UUIDs only, deleted documents only, one batch, counts only), live
+in :mod:`brain.graph_rag.repair`. This module is the CLI wrapper and the
 exit-code mapping, which matches the other ``brain graphrag`` admin commands:
 ``2`` for a bad argument (Typer ``BadParameter``), ``1`` for a refused or
 failed run, ``0`` otherwise.
@@ -27,13 +28,10 @@ if TYPE_CHECKING:
 
 
 def _describe(removed: RemovedDocument) -> str:
-    if not removed.had_graph_state:
-        return f"{removed.document_id}: no graph state, nothing to remove"
+    if not removed.had_document_vertex:
+        return f"{removed.document_id}: no document vertex, nothing to remove"
     vertex = "vertex" if removed.document_vertices_removed == 1 else "vertices"
-    return (
-        f"{removed.document_id}: removed {removed.document_vertices_removed} document "
-        f"{vertex}, {removed.graph_rows_removed} graph row(s)"
-    )
+    return f"{removed.document_id}: removed {removed.document_vertices_removed} document {vertex}"
 
 
 def graphrag_remove(
@@ -48,13 +46,13 @@ def graphrag_remove(
 ) -> None:
     """Remove deleted documents' leftover graph state (AGE vertex + edges).
 
-    For the ids a vault-watcher shutdown WARNING names as graph removes not
+    For the ids a vault-watcher shutdown message names as graph removes not
     applied. Each id must be a full UUID of a document that no longer exists.
-    Removes its AGE ``Document`` vertex and ``MENTIONED_IN`` edges, and any graph
-    rows left, then GCs now-orphaned entities and refreshes the aggregates.
-    Idempotent: an id with no graph state is a reported no-op. Prints ids and
-    counts only. Much cheaper than ``brain graphrag build --force``, which
-    re-extracts every document.
+    Removes its AGE ``Document`` vertex and ``MENTIONED_IN`` edges, then, once
+    for the batch, GCs now-orphaned entities and refreshes the aggregates (it
+    holds the tenant graph lock for that pass). Idempotent: an id whose vertex is
+    already gone is a reported no-op. Prints ids and counts only. Much cheaper
+    than ``brain graphrag build --force``, which re-extracts every document.
     """
     # Lazy: the graph package pulls networkx, which every `brain` start would
     # otherwise pay for (tests/test_import_hygiene.py).
@@ -78,19 +76,18 @@ def graphrag_remove(
         backend = AgeBackend()
         backend.bootstrap(conn)
         try:
-            removed = remove_deleted_documents(
+            report = remove_deleted_documents(
                 conn, canonical, backend=backend, config=config
             )
         except DocumentStillExists as exc:
             typer.secho(f"graphrag remove: {exc}", fg="red", err=True)
             raise typer.Exit(code=1) from exc
-    for item in removed:
+    for item in report.documents:
         typer.echo(_describe(item))
-    with_state = sum(1 for item in removed if item.had_graph_state)
-    orphans = sum(item.orphans_removed for item in removed)
     typer.echo(
-        f"graphrag remove: {with_state} of {len(removed)} id(s) had graph state, "
-        f"{orphans} orphan(s) removed (tenant {config.tenant_id!r})"
+        f"graphrag remove: {report.with_document_vertex} of {len(report.documents)} "
+        f"id(s) had a document vertex, {report.orphans_removed} orphan(s) removed "
+        f"(tenant {report.tenant_id!r})"
     )
 
 

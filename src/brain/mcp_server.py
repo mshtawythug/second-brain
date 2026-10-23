@@ -3916,10 +3916,11 @@ def brain_graphrag_remove(
 ) -> dict[str, Any]:
     """ADMIN — remove DELETED documents' leftover graph state (targeted repair).
 
-    WHEN TO USE: a vault-watcher shutdown WARNING named graph removes that were
+    WHEN TO USE: a vault-watcher shutdown message named graph removes that were
     not applied. Those documents' rows are gone, but their AGE ``Document``
-    vertices and ``MENTIONED_IN`` edges stay. This removes exactly those, GCs
-    now-orphaned entities and refreshes the aggregates, instead of
+    vertices and ``MENTIONED_IN`` edges stay. This removes exactly those and, once
+    for the batch, GCs now-orphaned entities and refreshes the aggregates
+    (holding the tenant graph lock for that pass), instead of
     ``brain_graphrag_build(force=true)``, which re-extracts every document. NOT
     for live documents and not for everyday use.
 
@@ -3929,12 +3930,12 @@ def brain_graphrag_remove(
       because a deleted document has no row to resolve it against.
     - ``tenant``: tenant to repair (default ``BRAIN_GRAPH_TENANT``).
 
-    Returns ``{tenant_id, with_graph_state, removed: [{document_id,
-    had_graph_state, document_vertices_removed, graph_rows_removed,
-    orphans_removed}]}``, ids and counts only. Idempotent: an id with no graph
-    state left is a no-op with ``had_graph_state: false``. ``INVALID_PARAMS``
-    for a non-UUID id or for a document that still exists; nothing is removed
-    then.
+    Returns ``{tenant_id, with_document_vertex, orphans_removed, removed:
+    [{document_id, had_document_vertex, document_vertices_removed}]}``, ids and
+    counts only. Idempotent: an id whose vertex is already gone is a no-op with
+    ``had_document_vertex: false``. ``INVALID_PARAMS`` for a non-UUID id, an
+    empty list, or a document that still exists; nothing is removed then.
+    ``INTERNAL_ERROR`` for any other reconcile-layer failure.
     """
     from .graph_rag.backends import AgeBackend
     from .graph_rag.repair import (
@@ -3955,27 +3956,28 @@ def brain_graphrag_remove(
             _require_age_or_mcp_error(conn)
             backend = AgeBackend()
             backend.bootstrap(conn)
-            removed = remove_deleted_documents(
+            report = remove_deleted_documents(
                 conn, canonical, backend=backend, config=config
             )
     except DocumentStillExists as exc:
         raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
+    except GraphReconcileError as exc:  # after its DocumentStillExists subclass
+        raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
     except GraphBackendError as exc:
         raise _wrap_graph_backend_error(exc) from exc
     except psycopg.Error as exc:
         raise _wrap_db_error(exc) from exc
     return {
-        "tenant_id": config.tenant_id,
-        "with_graph_state": sum(1 for item in removed if item.had_graph_state),
+        "tenant_id": report.tenant_id,
+        "with_document_vertex": report.with_document_vertex,
+        "orphans_removed": report.orphans_removed,
         "removed": [
             {
                 "document_id": item.document_id,
-                "had_graph_state": item.had_graph_state,
+                "had_document_vertex": item.had_document_vertex,
                 "document_vertices_removed": item.document_vertices_removed,
-                "graph_rows_removed": item.graph_rows_removed,
-                "orphans_removed": item.orphans_removed,
             }
-            for item in removed
+            for item in report.documents
         ],
     }
 
