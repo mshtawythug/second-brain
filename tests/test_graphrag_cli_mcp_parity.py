@@ -37,6 +37,8 @@ from brain.mcp_server import mcp_app
 EXPECTED_MAPPING: dict[str, str] = {
     "build": "brain_graphrag_build",
     "refresh": "brain_graphrag_refresh",
+    # Targeted repair for graph removes the watcher shutdown left unapplied.
+    "remove": "brain_graphrag_remove",
     "search": "brain_graphrag_search",
     "themes": "brain_graphrag_themes",
     "entity": "brain_graphrag_entity",

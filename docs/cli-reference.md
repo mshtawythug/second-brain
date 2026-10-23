@@ -690,6 +690,32 @@ deletes the `$BRAIN_HOME` runtime files (`.env`, `.shims/`, and a legacy
 **Your database and vault are kept by default** — read its `--help` before
 passing anything that widens the blast radius.
 
+## brain graphrag remove
+
+```bash
+brain graphrag remove <document-uuid> [<document-uuid> ...] [--tenant T]
+```
+
+The targeted repair for graph removes the vault watcher could not apply. When
+the watcher's shutdown times out behind a long graph reconcile, it logs a
+WARNING naming the document ids whose graph removes were not applied. Those
+documents' rows are already gone, but their AGE `Document` vertices and
+`MENTIONED_IN` edges stay. `brain graphrag remove` removes exactly those, then
+garbage-collects any entities left with no mentions and refreshes the aggregate
+edges. It is much cheaper than `brain graphrag build --force`, which
+re-extracts every document's concepts.
+
+- **Full UUIDs only.** A deleted document has no row to resolve a prefix
+  against, so a prefix exits 2 and nothing is removed.
+- **Deleted documents only.** An id whose document still exists exits 1, and
+  nothing is removed. To delete a document, use `brain rm`.
+- **Idempotent.** An id with no graph state prints
+  `<id>: no graph state, nothing to remove` and exits 0.
+- **Counts only.** It prints each id with the counts removed, then a summary
+  line. It never prints a title or an entity name.
+
+The MCP twin is `brain_graphrag_remove(document_ids, tenant=None)`.
+
 ## brain backup / brain restore
 
 ```bash

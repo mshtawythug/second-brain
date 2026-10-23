@@ -233,6 +233,9 @@ class ReconcileResult:
     concept_count: int = 0
     concept_mention_count: int = 0
     concept_contribution_count: int = 0
+    # remove_document only: what the remove found (0 and 0 = no graph state).
+    document_vertices_removed: int = 0
+    graph_rows_removed: int = 0
 
 
 class PersonResolver(Protocol):
@@ -574,7 +577,7 @@ def remove_document(
     tenant_id = cfg.tenant_id
     with conn.transaction():
         acquire_graph_write_lock(conn, tenant_id)
-        delete_doc_relational(conn, tenant_id, document_id)
+        graph_rows_removed = delete_doc_relational(conn, tenant_id, document_id)
         relationship_count = _recompute_aggregates(
             conn, tenant_id, cfg.generic_df_ratio
         )
@@ -583,7 +586,7 @@ def remove_document(
             *_gc_orphan_concepts(conn, tenant_id),
         ]
 
-        backend.detach_delete_documents(conn, tenant_id, [document_id])
+        vertices = backend.detach_delete_documents(conn, tenant_id, [document_id])
         backend.refresh_cooccur_edges(conn, tenant_id)
         if orphan_ids:
             backend.detach_delete_entities(conn, tenant_id, orphan_ids)
@@ -594,6 +597,8 @@ def remove_document(
             skipped=False,
             relationship_count=relationship_count,
             orphans_removed=len(orphan_ids),
+            document_vertices_removed=vertices,
+            graph_rows_removed=graph_rows_removed,
         )
 
 

@@ -245,27 +245,29 @@ def rewrite_doc_relational(
 
 def delete_doc_relational(
     conn: psycopg.Connection[Any], tenant_id: str, document_id: str
-) -> None:
+) -> int:
     """Delete one doc's source rows + BOTH aspects' watermarks (idempotent).
 
     Aspect-agnostic delete-all for the document — mentions/contributions of every
     entity type, and the people AND concepts ``graph_index_state`` rows — so a
     removed document leaves no graph presence regardless of which aspects indexed
-    it (wave G2-c).
+    it (wave G2-c). Returns the number of rows deleted (0 once the ``documents``
+    row's cascade has already removed them).
     """
-    conn.execute(
+    deleted = conn.execute(
         "DELETE FROM graph_entity_mentions WHERE tenant_id = %s AND document_id = %s",
         (tenant_id, document_id),
-    )
-    conn.execute(
+    ).rowcount
+    deleted += conn.execute(
         "DELETE FROM graph_edge_contributions "
         "WHERE tenant_id = %s AND document_id = %s",
         (tenant_id, document_id),
-    )
-    conn.execute(
+    ).rowcount
+    deleted += conn.execute(
         "DELETE FROM graph_index_state WHERE tenant_id = %s AND document_id = %s",
         (tenant_id, document_id),
-    )
+    ).rowcount
+    return deleted
 
 
 # ---------------------------------------------------------------------------

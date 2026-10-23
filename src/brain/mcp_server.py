@@ -207,6 +207,13 @@ published into ``os.environ``, so a level set in a ``.env`` was silently
 ignored. No tool and no code path beyond that ordering; the reason is inline in
 ``_load_config``'s docstring. Re-derive the net, never inherit it.
 
+**And 2026-10-22 (``brain_graphrag_remove``).** One new admin tool: the MCP twin
+of ``brain graphrag remove``, the targeted repair for graph removes the vault
+watcher's shutdown could not apply. The rulings and the logic live in
+:mod:`brain.graph_rag.repair`. What grew here is the tool's wrapper, its
+docstring and its error mapping (a non-UUID id or a live document ->
+``INVALID_PARAMS``), recorded inline above the tool.
+
 **Hazard this file has already been bitten by.** Every tool is a bare ``def``
 under a lone ``@mcp_app.tool()`` line, so inserting a helper between a decorator
 and the function it was written for silently moves the registration onto the
@@ -3897,6 +3904,79 @@ def brain_graphrag_refresh(
         "tenant_id": config.tenant_id,
         "relationship_count": result.relationship_count,
         "orphans_removed": result.orphans_removed,
+    }
+
+
+# Growth recorded in the module docstring ("And 2026-10-22"): the MCP twin of
+# `brain graphrag remove`. The logic lives in brain.graph_rag.repair.
+@mcp_app.tool()
+def brain_graphrag_remove(
+    document_ids: list[str],
+    tenant: str | None = None,
+) -> dict[str, Any]:
+    """ADMIN — remove DELETED documents' leftover graph state (targeted repair).
+
+    WHEN TO USE: a vault-watcher shutdown WARNING named graph removes that were
+    not applied. Those documents' rows are gone, but their AGE ``Document``
+    vertices and ``MENTIONED_IN`` edges stay. This removes exactly those, GCs
+    now-orphaned entities and refreshes the aggregates, instead of
+    ``brain_graphrag_build(force=true)``, which re-extracts every document. NOT
+    for live documents and not for everyday use.
+
+    Full parity with ``brain graphrag remove``. Params:
+
+    - ``document_ids``: one or more FULL document UUIDs. A prefix is refused,
+      because a deleted document has no row to resolve it against.
+    - ``tenant``: tenant to repair (default ``BRAIN_GRAPH_TENANT``).
+
+    Returns ``{tenant_id, with_graph_state, removed: [{document_id,
+    had_graph_state, document_vertices_removed, graph_rows_removed,
+    orphans_removed}]}``, ids and counts only. Idempotent: an id with no graph
+    state left is a no-op with ``had_graph_state: false``. ``INVALID_PARAMS``
+    for a non-UUID id or for a document that still exists; nothing is removed
+    then.
+    """
+    from .graph_rag.backends import AgeBackend
+    from .graph_rag.repair import (
+        DocumentStillExists,
+        parse_document_ids,
+        remove_deleted_documents,
+    )
+
+    state = _get_state()
+    try:
+        canonical = parse_document_ids(document_ids)
+    except ValueError as exc:
+        raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
+    config = _graphrag_reconcile_config(state.cfg, tenant)
+    try:
+        with connect_age(state.cfg.database_url) as conn:
+            conn.autocommit = True
+            _require_age_or_mcp_error(conn)
+            backend = AgeBackend()
+            backend.bootstrap(conn)
+            removed = remove_deleted_documents(
+                conn, canonical, backend=backend, config=config
+            )
+    except DocumentStillExists as exc:
+        raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
+    except GraphBackendError as exc:
+        raise _wrap_graph_backend_error(exc) from exc
+    except psycopg.Error as exc:
+        raise _wrap_db_error(exc) from exc
+    return {
+        "tenant_id": config.tenant_id,
+        "with_graph_state": sum(1 for item in removed if item.had_graph_state),
+        "removed": [
+            {
+                "document_id": item.document_id,
+                "had_graph_state": item.had_graph_state,
+                "document_vertices_removed": item.document_vertices_removed,
+                "graph_rows_removed": item.graph_rows_removed,
+                "orphans_removed": item.orphans_removed,
+            }
+            for item in removed
+        ],
     }
 
 
