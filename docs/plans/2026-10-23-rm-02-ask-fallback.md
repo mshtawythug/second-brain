@@ -22,14 +22,14 @@ other branches interpolated `{exc}` into user-facing text, which breaks DoD item
 |---|---|
 | `src/brain/ask_errors.py` (new leaf) | `ASK_FAILURES` (`EnrichmentError`, `GraphTenantError`, `GraphBackendError`, `EmbedError`) and `describe_ask_failure(exc)`: one fixed, class-only sentence per family, with the specific `EnrichmentError` subclasses tested before the base. |
 | `src/brain/ask.py` | `_retrieve_hybrid` goes through `search_with_fts_fallback(hybrid_search, …)` and returns `FallbackSearch`. `_retrieve` returns `(results, graph_summary, fallback)`. `ask` and `ask_no_loop` keep the first fallback seen. `AskResult.retrieval_fallback` (last field, default `None`); `to_dict()` merges `fallback_json`; the `fallback_used` docstring gains the line that tells the two apart. Budget: ≤ 30 lines (§2.2). |
-| `src/brain/cli.py` | `ask`: the three `except` branches collapse into one `except ASK_FAILURES`, printing `ask: <describe_ask_failure(exc)>`, then exit 1. On success it prints `retrieval_fallback.note` on stderr (yellow). `_print_ask_result` adds `Retrieval: text-only (semantic ranking unavailable)` under the answer. `_run_answer_eval_cli` passes `fallback=False` (see the deviation below). Net +4, recorded as the ninth growth. |
+| `src/brain/cli.py` | `ask`: the three `except` branches collapse into one `except ASK_FAILURES`, printing `ask: <describe_ask_failure(exc)>`, then exit 1. On success it prints `retrieval_fallback.note` on stderr (yellow). `_print_ask_result` adds `Retrieval: text-only (semantic ranking unavailable)` under the answer. `_run_answer_eval_cli` passes `fallback=False` (see the deviation below). Net −3, so no growth record is owed. |
 | `src/brain/mcp_server.py` | `brain_ask`: the same tuple maps to `INTERNAL_ERROR` with `describe_ask_failure(exc)`. `ValueError` and `psycopg.Error` keep their mappings. The tool docstring names the four keys and tells the agent to relay the note. Net −6 (two imports went unused), so no growth record is owed. |
 | `tests/test_ask_errors.py` (new) | One test per class, subclass ordering, the transient/permanent embed split, the sentinel-absent property. |
 | `tests/test_ask_fallback.py` (new) | DB tests on `ask_no_loop` / `ask` with `tests/embed_down.py`'s failing embedder (both modes), the first-fallback rule, the confidential lens on the fallback leg, non-embed errors propagating, a healthy run with `None`. |
 | `tests/test_cli_ask_fallback.py` (new) | `CliRunner`: criteria 1–6. |
 | `tests/test_mcp_ask_fallback.py` (new) | Criterion 7, plus sentinel-absent for every family. |
 | `tests/test_ask.py`, `tests/test_mcp_ask.py` | Test doubles of `_retrieve` / `_retrieve_hybrid` updated to the new return shapes. |
-| `CLAUDE.md` | `cli.py` row: promote the descriptive hop (`95a926b`, 8,819), add a descriptive one, and record the ninth growth. `mcp_server.py` row: promote RM-01's descriptive hop (`f2f57f1`, 5,077), then add a net-negative descriptive hop. |
+| `CLAUDE.md` | `cli.py` row: promote the descriptive hop (`95a926b`, 8,819), add a net-negative descriptive one (no growth record). `mcp_server.py` row: promote RM-01's descriptive hop (`f2f57f1`, 5,077), then add a net-negative descriptive hop. |
 | `docs/cli-reference.md`, `docs/configuration.md` (MCP tool list), `CHANGELOG.md`, `skills/brain-ask/SKILL.md` | Docs. |
 | Spec Appendix B, backlog BL-15 | Tracker rows. |
 
@@ -49,9 +49,9 @@ pins the opt-out. The spec's "Eval" line is corrected in this PR. RM-09's
 `run_search(..., fallback=True)` has the same shape, so `ask` will forward the flag and RM-09 has
 nothing to undo.
 
-**Consequence for the ceiling:** `cli.py` now grows (+4: the argument, its inline reason, the
-module-docstring record, net of the collapsed handler), so its CLAUDE.md row records a ninth
-growth. `mcp_server.py` still shrinks. `ask.py` lands exactly at its budget (654 + 30 = 684).
+**Consequence for the ceiling:** the argument costs `cli.py` one line, and the file still
+shrinks overall (net −3), so it owes no growth record (team-lead, second note). `mcp_server.py`
+still shrinks. `ask.py` lands exactly at its budget (654 + 30 = 684).
 
 A bug found on the way: the loop unpacked each leg's fallback into a variable named `fallback`,
 shadowing the new flag, so a healthy first sub-query would have switched the fallback off for

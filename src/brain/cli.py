@@ -98,11 +98,6 @@ refresh`` so ``brain graphrag --help`` lists it with the admin commands.
 **Eighth growth (class-only logging, PR #58): one import line.** Two WARNINGs
 log ``describe_failure(exc)``; plan ``docs/plans/2026-10-22-watcher-repair-hint-and-yaml-log.md``.
 
-**Ninth growth (RM-02, ``brain ask`` text-only fallback): one argument.** ``ask``
-now falls back on a failed query embed, so ``eval --answer`` passes
-``fallback=False`` to keep aborting (spec section 2.7; reason inline). The
-``ask`` handler itself shrank: one ``except ASK_FAILURES``, class-only.
-
 The long-deferred split into per-domain command modules is unchanged by any of
 this; ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
@@ -3916,9 +3911,7 @@ def _run_answer_eval_cli(
                 chat=chat,
                 question=question,
                 limit=cfg.ask_docs_per_iter,
-                # Over-ceiling growth (module docstring, ninth): eval never falls
-                # back (spec 2.7), so the EmbedError handler below stays reachable.
-                fallback=False,
+                fallback=False,  # eval never falls back (spec 2.7); see EmbedError below
             )
 
         try:
