@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -115,6 +116,35 @@ def test_a_plain_permanent_failure_is_not_a_context_overflow() -> None:
     # Assert
     assert fallback.context_overflow is False
     assert "brain doctor" in fallback.note
+
+
+#: The phrase ``skills/consult-brain/SKILL.md`` tells agents to look for on stderr.
+_SKILL_CUE = "showing text-only (FTS) matches"
+
+
+@pytest.mark.parametrize(
+    "fallback",
+    [
+        SearchFallback(reason="OllamaEmbedError", transient=True),
+        SearchFallback(reason="OllamaEmbedError", transient=False),
+        SearchFallback(
+            reason="OllamaEmbedContextOverflow", transient=False, context_overflow=True
+        ),
+    ],
+    ids=["transient", "permanent", "context-overflow"],
+)
+def test_every_note_carries_the_consult_brain_skill_cue(
+    fallback: SearchFallback,
+) -> None:
+    """The skill keys on one shared phrase; every variant must contain it verbatim."""
+    # Arrange
+    skill = (
+        Path(__file__).resolve().parent.parent / "skills" / "consult-brain" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    # Act / Assert
+    assert f"`{_SKILL_CUE}`" in skill
+    assert _SKILL_CUE in fallback.note
 
 
 def test_fallback_json_is_all_null_without_a_fallback() -> None:

@@ -33,9 +33,10 @@ always-present keys on `brain search --json --meta` and `brain_search` —
 never its message), `fallback_transient` and `fallback_note`. A permanent
 failure falls back too; its notice says a retry will not fix it and points at
 `brain doctor`, except for a query longer than the embedder's context window
-(`OllamaEmbedContextOverflow`), whose notice says to shorten the query. Non-embedding errors (a database failure) still fail as before.
-The bare `brain search --json` list keeps its shape. `brain eval` does **not**
-fall back, so its degraded-run semantics are unchanged. `brain ask`,
+(`OllamaEmbedContextOverflow`), whose notice says to shorten the query.
+Non-embedding errors (a database failure) still fail as before. The bare
+`brain search --json` list keeps its shape. `brain eval` does **not** fall
+back, so its degraded-run semantics are unchanged. `brain ask`,
 `brain recall` and `brain ui` are unchanged too (rulings and follow-ups in
 `docs/plans/2026-10-23-search-fts-fallback.md`).
 

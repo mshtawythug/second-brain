@@ -131,3 +131,39 @@ def test_ingest_does_not_import_embeddings_at_module_level() -> None:
         "pytest run on 2026-07-26. Import it inside the function that uses it."
         f"\n--- stderr ---\n{proc.stderr}"
     )
+
+
+#: Modules the text-only search fallback must keep light (plan
+#: docs/plans/2026-10-23-search-fts-fallback.md). ``brain.format_search`` imports
+#: ``brain.search_fallback``, and ``brain ui`` imports ``brain.format_search``.
+_FALLBACK_LIGHT_ENTRY_MODULES = (
+    "brain.format_search",
+    "brain.search_fallback",
+    "brain.ui.app",
+)
+#: Each was measured absent after these imports at ``bc3b868`` (one fresh
+#: interpreter per module), so this pins the state as it was, not a wish.
+_FALLBACK_HEAVY_MODULES = ("brain.embeddings", "httpx", "tiktoken")
+
+
+@pytest.mark.parametrize("module", _FALLBACK_LIGHT_ENTRY_MODULES)
+def test_search_fallback_keeps_embeddings_out_of_light_imports(module: str) -> None:
+    """``SearchFallback.from_error`` imports ``brain.embeddings`` at CALL time.
+
+    A module-level import there would load ``brain.embeddings`` (and with it
+    httpx and tiktoken) into everything that renders search metadata, including
+    ``brain ui``, which otherwise never loads them.
+    """
+    code = (
+        f"import sys, {module}; "
+        f"loaded = [n for n in {_FALLBACK_HEAVY_MODULES!r} if n in sys.modules]; "
+        "print(','.join(loaded)); sys.exit(1 if loaded else 0)"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+    )
+    assert proc.returncode == 0, (
+        f"importing {module} loaded {proc.stdout.strip() or '?'}; keep the "
+        "OllamaEmbedContextOverflow import inside SearchFallback.from_error."
+        f"\n--- stderr ---\n{proc.stderr}"
+    )

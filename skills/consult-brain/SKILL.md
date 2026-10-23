@@ -109,7 +109,7 @@ Use filters to sharpen. Most useful flags:
 | `--draft / --no-draft` | Tri-state; default both. `--no-draft` excludes quarantined docs |
 | `--limit/-n N` | Default 5; bump to 10–20 for synthesis — pair with `--brief`, which is what keeps a 20-result triage affordable |
 | `--brief` | `--json` only. Substitutes the doc's ingest-time summary for the chunk snippet when the summary is cheaper, and adds `snippet_source` ∈ `chunk`/`summary`. Measured −57.4% tokens over an 11-query sample. Ranking is untouched. No-op without `--json` |
-| `--fts-only` | Keyword-only fallback when vector retrieval feels off. Search also falls back by itself when the embedder is down (stderr `embedding backend unavailable` / `embedding failed`; `--json --meta`: `"fallback": "fts_only"`): tell the user the results are text-only, don't retry in a loop |
+| `--fts-only` | Keyword-only fallback when vector retrieval feels off. Search also falls back by itself when the embedder is down (a stderr line containing `showing text-only (FTS) matches`; `--json --meta`: `"fallback": "fts_only"`): tell the user the results are text-only, don't retry in a loop |
 
 Query-shape tips:
 

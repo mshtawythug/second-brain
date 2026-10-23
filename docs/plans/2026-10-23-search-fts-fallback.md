@@ -117,15 +117,19 @@ MESSAGE never reaches stderr, the JSON, or the MCP wire.
   inserts the four keys before `results`.
 - `src/brain/mcp_server.py` — `brain_search` goes through the helper and merges
   the keys; tool docstring documents them. Its `except EmbedError` mapping is
-  deleted as unreachable (`_wrap_embed_error` stays for the other tools). **Over the ceiling**: inline growth
-  comment, module-docstring pointer, and the CLAUDE.md row's trail gains a
-  descriptive hop (the previous last hop, `1054b52`, is already SHA-bound;
-  `git log 1054b52..HEAD -- src/brain/mcp_server.py` is empty).
+  deleted as unreachable (`_wrap_embed_error` stays for the other tools).
+  **Over the ceiling**: inline growth comment, module-docstring pointer, and
+  the CLAUDE.md row's trail. The first commit (`ed893f5`) added a descriptive
+  hop after `1054b52`. The review round touched the file again, so that hop
+  was promoted to `5,074 (ed893f5)` and a descriptive hop was added for the
+  review-round commit.
 - `CLAUDE.md` — the `mcp_server.py` ceiling row.
-- Tests: `tests/embed_down.py` (the failing-embedder double), `tests/test_search_fallback.py` (unit + DB),
+- Tests: `tests/embed_down.py` (the failing-embedder double),
+  `tests/test_search_fallback.py` (unit + DB),
   `tests/test_cli_search_fallback.py`, `tests/test_mcp_search_fallback.py`,
-  `tests/test_search_fallback_eval_untouched.py`; `tests/test_cli_search_meta.py` and `tests/test_search_output_unchanged.py`
-  names the new envelope keys.
+  `tests/test_search_fallback_eval_untouched.py`, and the lazy-import guard in
+  `tests/test_import_cycles.py`; `tests/test_cli_search_meta.py` and
+  `tests/test_search_output_unchanged.py` name the new envelope keys.
 - Docs: `docs/cli-reference.md`, `docs/configuration.md` (MCP table),
   `skills/consult-brain/SKILL.md`, `skills/brain-ask/SKILL.md`, `CHANGELOG.md`.
 
