@@ -32,9 +32,10 @@ L9).
   - Classing by exception would be wrong. `DeadlockDetected`,
     `LockNotAvailable` and `QueryCanceled` are `OperationalError` subclasses
     that are raised on a HEALTHY connection; the same measurement showed
-    `closed` stays False after a lock timeout. The victim of the known
-    lane/delete lock cycle (`docs/plans/2026-10-22-vault-watcher-startup-blind.md`,
-    Risks) gets `DeadlockDetected`. Reconnecting there would log a connection
+    `closed` stays False after a lock timeout. Any deadlock victim gets
+    `DeadlockDetected`, as the lane/delete lock cycle's victim did
+    (`docs/plans/2026-10-22-vault-watcher-startup-blind.md`, Risks; that cycle
+    was fixed by PR #55). Reconnecting there would log a connection
     loss that never happened, and it would run the job a second time. The state
     check also covers an `InterfaceError`, or any wrapper exception, raised
     after the connection died.

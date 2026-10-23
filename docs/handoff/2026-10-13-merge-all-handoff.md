@@ -234,14 +234,16 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        every graph writer, so they wait behind a tenant-wide writer (`graphrag refresh`, `build
        --force`, ...). That wait happens on the lane thread. The event worker never waits on the
        model call or on the tenant lock; a delete of a document being written waits for that one
-       write transaction (and, until the follow-up lands, can deadlock as its victim).
-     - **Known lock cycle, being fixed by the follow-up to PR #53 (not in #54):** the lane's write
-       transaction (`rewrite_doc_relational` DELETEs graph mention rows, then INSERTs whose FK
-       check locks `documents` row X) against the worker's `_handle_delete` DELETE of `documents`
-       X, whose `ON DELETE CASCADE` reaches the same graph rows. Reproduced by the PR #54 reviewer
-       with millisecond windows; Postgres picks the worker as the victim. The fix is in
-       `graph_rag`: `ReconcilePlan.is_current` reads `documents` X `FOR KEY SHARE`, so the lane
-       locks X before it touches any graph row. That also closes #53's same-document residual.
+       write transaction. (Before PR #55 it could deadlock against it; see the next item.)
+     - ~~**Known lock cycle:**~~ *[FIXED by PR #55 (`fix/graph-reconcile-doc-key-share`).]* The
+       cycle: the lane's write transaction (`rewrite_doc_relational` DELETEs graph mention rows,
+       then INSERTs whose FK check locks `documents` row X) against the worker's `_handle_delete`
+       DELETE of `documents` X, whose `ON DELETE CASCADE` reaches the same graph rows.
+       - **Reproduced** by the PR #54 reviewer with millisecond windows. Postgres picked the worker
+         as the victim in the reproduction.
+       - **The fix** is in `graph_rag`: `ReconcilePlan.is_current` reads `documents` X
+         `FOR KEY SHARE`, so the lane locks X before it touches any graph row. That also closes
+         #53's same-document residual.
      - **Side effect:** the graph now lags while a large startup backlog drains. It is
        best-effort: the lane catches up by itself, and `brain graphrag build --backfill`
        reconciles whatever is behind its watermark (`--force` for a full mirror rebuild).
@@ -256,7 +258,7 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
      - **The cheap repair:** a `brain graphrag remove <id>` command that calls
        `graph_rag.reconcile.remove_document` for the logged ids. It is robust to an
        already-deleted `documents` row, and it is not built yet.
-- *[FIXED 2026-10-22 on branch `fix/graph-entities-deadlock`.]* **`graph_entities` deadlocks
+- *[FIXED 2026-10-22 by PR #53 (`fix/graph-entities-deadlock`, merged as `8711ff0`).]* **`graph_entities` deadlocks
   between graph writers.** On prod, `brain graphrag build --backfill --concepts` died with
   `DeadlockDetected` in `upsert_concept_entities` against the vault watcher. This is the same class
   as the memory note on `relink-derived` hanging against the watcher and `brain-mcp`.
@@ -274,9 +276,15 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
   - Plan, root cause and mutation proofs: `docs/plans/2026-10-22-graph-entities-deadlock.md`.
   - The prod backfill can be re-run once this is merged and the daemon install is updated. The
     per-document watermarks resume it.
-  - **Still open (recorded in the plan, "Residuals"):**
-    1. A document deleted at the same moment it is reconciled can still deadlock against the
-       `documents` cascade. This is a same-document, two-statement window.
+  - **Residuals (recorded in the plan, "Residuals"):**
+    1. ~~A document deleted at the same moment it is reconciled can still deadlock against the
+       `documents` cascade.~~ *[FIXED by PR #55 (`fix/graph-reconcile-doc-key-share`).]*
+       The reconcile's write transaction now locks the document row `FOR KEY SHARE` (in
+       `ReconcilePlan.is_current`) before it touches a graph row. So a concurrent
+       `DELETE FROM documents` waits instead of deadlocking with its cascade. This also closes
+       the PR #54 reviewer's GraphLane-vs-worker cycle. In the reproduction Postgres picked the
+       worker as the victim; in this fix's red runs the victim was the delete 4 times and the
+       reconcile once. Either side can be chosen.
     2. `build_graph` raises `GraphReconcileError` if a document is deleted between id enumeration
        and its reconcile's read phase. This predates the fix. A deletion after the read phase is
        now skipped.
@@ -284,6 +292,13 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        still be overtaken. The next build re-indexes it.
     4. The cross-type collapse window between W6 and W7 is pre-existing and cosmetic (a display
        name only).
+    5. ~~`merge_aliases` (alias apply, cross-type collapse) had the same shape against a
+       concurrent document delete.~~ *[FIXED by PR #55.]* `_repoint_mentions` DO-UPDATEs a dst
+       row without an FK check, then DELETEs the source rows. `apply_aliases` now locks each
+       rule's documents `FOR KEY SHARE`, in id order, right after the graph write lock and
+       before it writes. Per rule is enough, because the locks last to the end of the outer
+       transaction (plan, Residuals). The regression test is
+       `tests/test_graphrag_alias_doc_lock.py`.
 - *[FIXED 2026-10-22 on branch `fix/vault-watcher-db-reconnect`.]* **The vault watcher never
   reconnected after a Postgres restart** (found by the PR #54 reviewer). The worker and the graph lane
   each kept their dead connection, so every later edit and graph request failed until the watcher was

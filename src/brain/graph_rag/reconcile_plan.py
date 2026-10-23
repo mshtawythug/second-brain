@@ -43,7 +43,7 @@ from ..errors import GraphReconcileError
 from .concepts import CONCEPTS_ASPECT, concept_inputs_hash
 from .extract import EntityExtractor
 from .person_resolver import ResolvedPerson
-from .relational import fetch_doc_content_at, fetch_doc_meta, index_state
+from .relational import fetch_doc_content_at, fetch_doc_meta, index_state, key_share_doc_meta
 from .weighting import suppress_ver
 
 if TYPE_CHECKING:
@@ -106,8 +106,14 @@ class ReconcilePlan:
         (or a byte-identical revert of it). Call it AFTER taking the graph write
         lock: from then on no other graph writer can index this document, so a
         plan that is current here stays current until this transaction commits.
+
+        It is also the write transaction's first touch of the document, and it
+        takes ``FOR KEY SHARE`` on its row (``relational.key_share_doc_meta``)
+        before any graph row is written. A concurrent ``DELETE`` of the document
+        therefore waits for this transaction instead of deadlocking with its
+        cascade.
         """
-        meta = fetch_doc_meta(conn, self.document_id)
+        meta = key_share_doc_meta(conn, self.document_id)
         return meta is not None and meta[0] == self.content_hash
 
 
