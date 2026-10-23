@@ -81,8 +81,8 @@ Status is the backlog's, re-checked at `02c2abc`. "Rank" is the backlog §3 row.
 
 | Item | Source | Status | Rank | Ticket |
 |---|---|---|---|---|
-| `brain recall` has no `EmbedError` handling | BL-14 (fallback plan F2) | NOT STARTED | 1a | RM-01 |
-| `brain ask` leaks `EmbedError` | BL-15 (fallback plan F1) | NOT STARTED | 1a | RM-02 |
+| `brain recall` has no `EmbedError` handling | BL-14 (fallback plan F2) | SHIPPED (PR #63) | 1a | RM-01 |
+| `brain ask` leaks `EmbedError` | BL-15 (fallback plan F1) | SHIPPED (PR #64) | 1a | RM-02 |
 | `brain ui` search has no automatic fallback | BL-13 (fallback plan F3) | NOT STARTED | 1a | RM-03 |
 | CI check for the ceiling table | BL-1 | NOT STARTED | 2 | RM-04 |
 | CSS `url()` unchecked by the offline test | BL-3 | NOT STARTED | 3 | RM-05 |
