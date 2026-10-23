@@ -90,8 +90,11 @@ class GraphLane:
         # a remove that is neither queued nor applied (PR #56 review).
         self._inflight: tuple[_Op, str] | None = None
         # Set when ``close`` times out: its caller reports the leftovers through
-        # ``undrained_removes``, so ``_abandon`` must not log them again.
+        # ``undrained_removes``, so ``_abandon`` must not log them again. The
+        # leftovers are SNAPSHOT at that moment (``_handed_off``): the lane may
+        # reach ``_abandon`` and clear its queue before the caller asks (audit F1).
         self._caller_reports = False
+        self._handed_off: list[str] = []
         self._thread = threading.Thread(
             target=self._run, name="brain-vault-watcher-graph", daemon=True
         )
@@ -137,11 +140,20 @@ class GraphLane:
             exited = not self._thread.is_alive()
             if not exited:
                 self._caller_reports = True
+                self._handed_off = self._unapplied_removes()
         return exited
 
     def undrained_removes(self) -> list[str]:
-        """Document ids of removes not yet applied: the one in flight, then the queue."""
+        """Document ids of removes not yet applied: the one in flight, then the queue.
+
+        After a ``close`` that timed out, this is the snapshot taken then, so it
+        cannot come back empty because the lane gave up (and cleared its queue)
+        before the caller asked. It may over-report a remove the lane later
+        finished, which the caller's warning words as "may not be applied".
+        """
         with self._cond:
+            if self._caller_reports:
+                return list(self._handed_off)
             return self._unapplied_removes()
 
     def _unapplied_removes(self) -> list[str]:

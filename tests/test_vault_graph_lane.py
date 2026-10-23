@@ -547,3 +547,39 @@ def test_an_applied_remove_is_not_reported_as_undrained() -> None:
         cleared = _settled(lambda: lane.undrained_removes() == [])
 
     assert cleared, "an applied remove was still reported as undrained"
+
+
+def test_a_handed_off_remove_survives_the_lane_giving_up_first(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """L15b: the race L15 leaves open, forced: the lane gives up BEFORE its caller asks.
+
+    PR #56 audit F1: ``close`` timed out and handed the report to its caller,
+    then the lane reached ``_abandon`` first. ``_abandon`` cleared the queue and
+    logged only at DEBUG (the caller owns the report), so ``undrained_removes``
+    returned ``[]`` and the remove vanished. The hand-off must be a snapshot.
+    """
+    entered, release = threading.Event(), threading.Event()
+
+    def _slow_refuse() -> Any:
+        entered.set()
+        release.wait(WAIT_FOR_BACKSTOP_S)
+        raise psycopg.OperationalError("synthetic connect failure")
+
+    lane = GraphLane(_Syncer(), _slow_refuse)  # type: ignore[arg-type]
+    lane.remove(None, "doomed")  # type: ignore[arg-type]
+    with caplog.at_level(logging.ERROR, logger="brain.vault.graph_lane"):
+        lane.start()
+        assert entered.wait(WAIT_FOR_BACKSTOP_S), "fixture: the lane never tried to connect"
+        timed_out = lane.close(0.05) is False
+        release.set()
+        lane._thread.join(WAIT_FOR_BACKSTOP_S)  # the lane has given up and exited
+        gave_up = not lane._thread.is_alive()
+        undrained = lane.undrained_removes()
+
+    assert timed_out and gave_up, "fixture: the lane must time out, then give up and exit"
+    assert undrained == ["doomed"], (
+        f"a remove handed to the caller vanished when the lane gave up first: {undrained!r}"
+    )
+    again = [r.getMessage() for r in caplog.records if "not applied" in r.getMessage()]
+    assert again == [], f"the lane logged removes its caller had already reported: {again!r}"
