@@ -111,7 +111,9 @@ Voyage error, a model that was never pulled), `brain search` and `brain explain`
 still answer from full-text matching alone and print one line on stderr saying
 so; the exit code stays 0. The line names the failure by class only and tells a
 transient outage ("comes back when the embedder does") from a configuration
-problem a retry will not fix ("run 'brain doctor'"). The bare `--json` list keeps
+problem a retry will not fix ("run 'brain doctor'"), and a query longer than the
+embedder's context window (`BRAIN_OLLAMA_EMBED_NUM_CTX`) from both ("shorten the
+query"). The bare `--json` list keeps
 its shape; `--json --meta` adds `"fallback": "fts_only"`, `fallback_reason`,
 `fallback_transient` and `fallback_note` (all `null` on a normal search), and
 `brain explain` shows `matched_filters.fts_only: true`. MCP `brain_search`

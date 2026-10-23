@@ -7,12 +7,13 @@ synthetic.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import psycopg
 import pytest
 
-from brain.embeddings import OllamaEmbedError
+from brain.embeddings import OllamaEmbedContextOverflow, OllamaEmbedError
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.search import SearchDiagnostics, SearchResult, hybrid_search
 from brain.search_fallback import (
@@ -84,6 +85,36 @@ def test_permanent_note_names_a_configuration_problem() -> None:
     assert "retry will not fix" in note
     assert "brain doctor" in note
     assert "\n" not in note
+
+
+def test_context_overflow_gets_its_own_note_not_brain_doctor() -> None:
+    """The query is too long for the embed window: not a config fault, not retryable."""
+    # Arrange
+    exc = OllamaEmbedContextOverflow(f"input too long {SECRET_DETAIL}")
+
+    # Act
+    fallback = SearchFallback.from_error(exc)
+
+    # Assert
+    assert fallback.transient is False
+    assert fallback.context_overflow is True
+    assert fallback.reason.startswith("OllamaEmbedContextOverflow")
+    assert "BRAIN_OLLAMA_EMBED_NUM_CTX" in fallback.note
+    assert "shorten the query" in fallback.note
+    assert "text-only" in fallback.note
+    assert "brain doctor" not in fallback.note
+    assert "configuration problem" not in fallback.note
+    assert SECRET_DETAIL not in fallback.note
+    assert fallback_json(fallback)["fallback_transient"] is False
+
+
+def test_a_plain_permanent_failure_is_not_a_context_overflow() -> None:
+    # Act
+    fallback = SearchFallback.from_error(OllamaEmbedError("x", transient=False))
+
+    # Assert
+    assert fallback.context_overflow is False
+    assert "brain doctor" in fallback.note
 
 
 def test_fallback_json_is_all_null_without_a_fallback() -> None:
@@ -161,6 +192,29 @@ def test_no_retry_when_the_first_call_succeeds() -> None:
     # Assert
     assert len(search_fn.calls) == 1
     assert outcome == FallbackSearch(results=[], fallback=None)
+
+
+@dataclass
+class _GrownDiagnostics(SearchDiagnostics):
+    """A diagnostics holder with a ``default_factory`` field, as a future one may have."""
+
+    extra: list[int] = field(default_factory=list)
+
+
+def test_reset_uses_real_defaults_even_for_a_default_factory_field() -> None:
+    """``Field.default`` is ``MISSING`` for a factory field; the reset must not write it."""
+    # Arrange
+    diagnostics = _GrownDiagnostics(fts_count=4, extra=[1, 2])
+    search_fn = _RecordingSearch(OllamaEmbedError("x", transient=True))
+
+    # Act
+    search_with_fts_fallback(
+        search_fn, None, embedder=object(), query="q", diagnostics=diagnostics
+    )
+
+    # Assert
+    assert diagnostics.extra == []
+    assert diagnostics.fts_count is None
 
 
 def test_a_non_embed_error_is_not_swallowed() -> None:

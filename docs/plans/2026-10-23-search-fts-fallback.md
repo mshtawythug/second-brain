@@ -59,10 +59,16 @@ Details of the retry:
   408/429/5xx): falls back. The notice says the embedder is unavailable and that
   semantic ranking will return when it is back.
 - **Permanent `EmbedError`** (model not pulled, bad API key, an unusable
-  response, `OllamaEmbedContextOverflow`): **also falls back** (the recommended
+  response): **also falls back** (the recommended
   option). Search results are still useful, and refusing to search because of a
   config problem helps nobody. The notice names it as a configuration problem
   that a retry will not fix, and points at `brain doctor`.
+- **`OllamaEmbedContextOverflow`** (the query itself is longer than
+  `BRAIN_OLLAMA_EMBED_NUM_CTX`; the transport sends `truncate: false`): permanent,
+  and falls back, but it is not a configuration fault, so `brain doctor` would be
+  the wrong advice. Its notice says to shorten the query for semantic ranking
+  (`SearchFallback.context_overflow`, detected by `isinstance` with a call-time
+  import so the leaf does not load httpx/tiktoken). Added at review, 2026-10-23.
 - **Anything else** (`psycopg.Error`, `PersonNotFound`, programming errors) is
   not caught and fails exactly as before.
 
@@ -96,8 +102,8 @@ MESSAGE never reaches stderr, the JSON, or the MCP wire.
 | `cli_search.explain` (`brain explain`) | **falls back** | same command family, same user; it is how a user debugs a search, and it must show the ranking the search really used |
 | `mcp_server.brain_search` | **falls back** | in scope |
 | `eval/runner.run_eval` | **unchanged, must not fall back** | a degraded row is the point: a transient failure scores 0.0 with `degraded=True` so record/gate refuse it, a permanent one aborts. Falling back would score an FTS-only ranking as if it were the hybrid ranking and corrupt baselines. Proven by `tests/test_search_fallback_eval_untouched.py` |
-| `ask._retrieve_hybrid` (`brain ask`, MCP `brain_ask`) | unchanged | `ask` needs the Ollama chat model for plan/reflect/synthesize; in the default config an embed outage means the chat model is down too, and the command already exits non-zero with a clear message (`OllamaUnavailable` from the chat call). An answer synthesized over a silently weaker retrieval would also carry no marker in its prose. The `brain-ask` skill already says: offer `brain search` instead, which now works |
-| `recall.recall` (`brain recall`, MCP `brain_recall`) | unchanged in this PR; **follow-up** | a budgeted context packer with its own output contract (`RecallResult`, the rendered context block). Falling back there needs its own field in that contract and its own surface tests; it is not one of the two surfaces the decision named |
+| `ask._retrieve_hybrid` (`brain ask`, MCP `brain_ask`) | unchanged in this PR; **follow-up** (F1) | Not folded in, because an answer synthesized over a silently weaker retrieval carries no marker in its prose. **Pre-existing behaviour, corrected 2026-10-23 at review** (this row first claimed the command "already exits non-zero with a clear message", which is true only when the chat call fails first): the CLI handler maps `OllamaUnavailable`, which is not an `EmbedError`. With `--no-loop`, `_retrieve` runs before any chat call; with a Voyage embedder the chat model stays up while the embed fails. In both cases `OllamaEmbedError` / `VoyageEmbedError` escapes `brain ask` as an unhandled traceback (exit 1, empty stderr), and MCP `brain_ask` has no `EmbedError` mapping either. Not fixed here: the CLI handler lives in `cli.py`, which is over the ceiling |
+| `recall.recall` (`brain recall`, MCP `brain_recall`) | unchanged in this PR; **follow-up** (F2) | A budgeted context packer with its own output contract (`RecallResult`, the rendered context block); falling back there needs its own field and its own surface tests. **Pre-existing behaviour:** `cli_recall.py` has no `EmbedError` mapping, so an embed failure escapes `brain recall` as an unhandled traceback, like `brain ask` above. MCP `brain_recall` maps it to `INTERNAL_ERROR` |
 | `graph_rag/fuse.py` (`graphrag search --mode fuse`) | unchanged | it already degrades: a failed vector arm is retried FTS-only and reported as `vector_arm_used=False`, and a dead FTS leg degrades to graph-only. Rewriting it onto the new helper would change its broader catch (any exception) for no user-visible gain |
 | `demo.search_demo` | unchanged | FTS-only by default; `--with-embeddings` uses the deterministic offline `DemoEmbedder`, which cannot raise `EmbedError` |
 | `ui/routes_search.py` (`brain ui`) | unchanged in this PR; **follow-up** | not a `hybrid_search` import (it calls an injected `search_fn`), so it was found by the `EmbedError` grep, not the call-site grep. It already answers `503 embedding_unavailable` with "retry with FTS-only search", and the client sends `fts_only`. An automatic fallback there needs a visible notice in the browser UI (a JS change and a browser test), which is its own PR |
@@ -110,7 +116,8 @@ MESSAGE never reaches stderr, the JSON, or the MCP wire.
 - `src/brain/format_search.py` — `search_envelope_json(..., fallback=None)`
   inserts the four keys before `results`.
 - `src/brain/mcp_server.py` — `brain_search` goes through the helper and merges
-  the keys; tool docstring documents them. **Over the ceiling**: inline growth
+  the keys; tool docstring documents them. Its `except EmbedError` mapping is
+  deleted as unreachable (`_wrap_embed_error` stays for the other tools). **Over the ceiling**: inline growth
   comment, module-docstring pointer, and the CLAUDE.md row's trail gains a
   descriptive hop (the previous last hop, `1054b52`, is already SHA-bound;
   `git log 1054b52..HEAD -- src/brain/mcp_server.py` is empty).
@@ -121,6 +128,19 @@ MESSAGE never reaches stderr, the JSON, or the MCP wire.
   names the new envelope keys.
 - Docs: `docs/cli-reference.md`, `docs/configuration.md` (MCP table),
   `skills/consult-brain/SKILL.md`, `skills/brain-ask/SKILL.md`, `CHANGELOG.md`.
+
+## Follow-ups (recorded, not in this PR)
+
+- **F1 — `brain ask` embed failures.** Map `EmbedError` in the `brain ask` CLI
+  handler and in MCP `brain_ask` to a clean, class-only error (exit 1 /
+  `INTERNAL_ERROR`), or decide to fall back there too with a marker in the
+  answer. Today `--no-loop` and Voyage configs escape as an unhandled
+  `EmbedError` traceback.
+- **F2 — `brain recall` embed failures.** Same gap in `cli_recall.py`: an
+  unhandled `EmbedError` traceback. Either map it, or fall back with a
+  `fallback` field in `RecallResult` and its context block.
+- **F3 — `brain ui` automatic fallback**, with a visible notice in the browser
+  (the ruling table above).
 
 ## Risks
 

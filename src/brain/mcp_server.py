@@ -218,7 +218,9 @@ or a live document -> ``INVALID_PARAMS``, any other ``GraphReconcileError`` ->
 :func:`brain.search_fallback.search_with_fts_fallback`, so a failed query embed
 returns text-only matches and four ``fallback*`` keys instead of
 ``INTERNAL_ERROR``. The policy lives in that module; what grew here is the call,
-the merged keys and the tool docstring, recorded inline at the call. Plan:
+the merged keys and the tool docstring, recorded inline at the call. The tool's
+``except EmbedError`` mapping was deleted as unreachable, with a comment in its
+place saying why; ``_wrap_embed_error`` stays for the other tools. Plan:
 ``docs/plans/2026-10-23-search-fts-fallback.md``.
 
 **Hazard this file has already been bitten by.** Every tool is a bare ``def``
@@ -742,9 +744,10 @@ def brain_search(
     always present and ``null`` unless that happened: ``fallback``
     (``"fts_only"``), ``fallback_reason`` (the failure's class, never its
     message), ``fallback_transient`` (``true``: retry later; ``false``: a
-    configuration problem a retry will not fix) and ``fallback_note`` (one
-    line to relay to the user). ``fts_only`` is ``true`` too. Tell the user
-    the results are text-only when ``fallback`` is set.
+    retry will not fix it, either a configuration problem or a query longer
+    than the embed window) and ``fallback_note`` (one line to relay to the
+    user). ``fts_only`` is ``true`` too. Tell the user the results are
+    text-only when ``fallback`` is set.
 
     ``limit`` is capped at ``BRAIN_SEARCH_MAX_LIMIT`` (default 50, == the
     candidate-chunk limit): a larger value cannot surface more documents, and
@@ -927,8 +930,9 @@ def brain_search(
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except EmbedError as e:
-        raise _wrap_embed_error(e) from e
+    # No ``except EmbedError`` here, deliberately: the query embed is this
+    # tool's only embed call, and ``search_with_fts_fallback`` absorbs its
+    # failure (the retry is ``fts_only`` and never embeds).
     # The two original keys come FIRST and are built exactly as before; the F5
     # metadata is merged in as additional named keys. The projection above is
     # the shared one the CLI uses — ``search_results_json`` at ``brief=false``

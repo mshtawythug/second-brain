@@ -54,8 +54,8 @@ Both are bounded; they differ in *where the reading happens*.
   would have already thrown that away.
 
 Rule of thumb: if you would have followed `ask` with "now show me the source",
-you wanted `recall`. If Ollama is down, `ask` exits non-zero — `recall` does
-not depend on it and is the fallback, not an unbounded `brain show` loop.
+you wanted `recall`. If Ollama is down, `ask` exits non-zero, and so does `recall` when it
+embeds via Ollama. `brain search` falls back to text-only and is the fallback, not a `brain show` loop.
 `brain recall` shares every filter with `brain search`; the full cost-ordered
 table lives in `consult-brain`, which is the one place it is maintained.
 

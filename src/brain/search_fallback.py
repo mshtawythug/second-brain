@@ -9,7 +9,10 @@ its own: on an :class:`~brain.errors.EmbedError` it calls the surface's search
 function again with ``fts_only=True``, the same path ``--fts-only`` and the
 ``BRAIN_EMBEDDER=none`` ``NullEmbedder`` already take. Both transient and
 permanent embed failures fall back; the notice tells them apart, because "retry
-later" is the wrong advice for a model that was never pulled. Anything that is
+later" is the wrong advice for a model that was never pulled. A query longer
+than the embedder's context window (``OllamaEmbedContextOverflow``) is permanent
+too, but it is not a configuration fault, so it gets its own notice. Anything
+that is
 not an ``EmbedError`` (a database error, a bug) propagates unchanged.
 
 Only the user-facing surfaces call this. ``brain eval`` deliberately does not:
@@ -27,7 +30,10 @@ from dataclasses import dataclass, fields
 from time import perf_counter
 from typing import Any
 
+import psycopg
+
 from .errors import EmbedError, describe_failure
+from .ingest import Embedder
 from .search import SearchDiagnostics, SearchResult
 
 logger = logging.getLogger(__name__)
@@ -41,19 +47,42 @@ SearchFn = Callable[..., list[SearchResult]]
 
 @dataclass(frozen=True)
 class SearchFallback:
-    """Why a search fell back: the failure's class, and whether a retry may help."""
+    """Why a search fell back: the failure's class, and whether a retry may help.
+
+    ``context_overflow`` marks an ``OllamaEmbedContextOverflow``: the query
+    itself is longer than ``BRAIN_OLLAMA_EMBED_NUM_CTX`` (the transport sends
+    ``truncate: false``). It is never transient, and "check your configuration"
+    would be the wrong advice for it.
+    """
 
     reason: str
     transient: bool
+    context_overflow: bool = False
 
     @classmethod
     def from_error(cls, exc: EmbedError) -> SearchFallback:
         """Build from the embed failure, keeping only content-free facts."""
-        return cls(reason=describe_failure(exc), transient=exc.transient)
+        # Imported here, not at module top: ``brain.embeddings`` pulls httpx and
+        # tiktoken, and this leaf is imported by ``brain.format_search`` (and so
+        # by ``brain ui``), which otherwise never loads them. A failure is the
+        # only time this runs.
+        from .embeddings import OllamaEmbedContextOverflow
+
+        return cls(
+            reason=describe_failure(exc),
+            transient=exc.transient,
+            context_overflow=isinstance(exc, OllamaEmbedContextOverflow),
+        )
 
     @property
     def note(self) -> str:
         """The one-line notice every surface shows (stderr, JSON, MCP)."""
+        if self.context_overflow:
+            return (
+                f"query is longer than the embedder's context window "
+                f"(BRAIN_OLLAMA_EMBED_NUM_CTX; {self.reason}); showing text-only "
+                "(FTS) matches; shorten the query for semantic ranking."
+            )
         if self.transient:
             return (
                 f"embedding backend unavailable ({self.reason}); showing "
@@ -99,16 +128,21 @@ def fallback_json(fallback: SearchFallback | None) -> dict[str, Any]:
 
 
 def _reset(diagnostics: SearchDiagnostics) -> None:
-    """Return every field to its default, so nothing from the failed attempt survives."""
+    """Return every field to its default, so nothing from the failed attempt survives.
+
+    Defaults are read off a FRESH instance rather than ``Field.default``, which
+    is ``MISSING`` for a ``default_factory`` field.
+    """
+    fresh = type(diagnostics)()
     for field in fields(diagnostics):
-        setattr(diagnostics, field.name, field.default)
+        setattr(diagnostics, field.name, getattr(fresh, field.name))
 
 
 def search_with_fts_fallback(
     search_fn: SearchFn,
-    conn: Any,
+    conn: psycopg.Connection[Any],
     *,
-    embedder: Any,
+    embedder: Embedder,
     query: str,
     **kwargs: Any,
 ) -> FallbackSearch:
