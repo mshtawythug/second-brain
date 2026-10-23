@@ -1003,10 +1003,10 @@ def brain_recall(
     document, each carrying a ``[N]`` citation marker.
 
     Returns ``{context_block, passages, query, budget_tokens, used_tokens,
-    candidates_considered, dropped, truncated, fts_count}``. ``context_block``
-    is the pasteable artifact; ``passages`` is the same content structured, for
-    a caller that wants to render it itself. Cite as ``[2]`` — the same
-    convention ``brain_ask`` uses.
+    candidates_considered, dropped, truncated, fts_count}`` and ``brain_search``'s
+    four ``fallback*`` keys: if the embed fails, passages are text-only
+    (``fallback="fts_only"``, header ends ``, text-only``); relay ``fallback_note``.
+    ``context_block`` is the pasteable artifact. Cite as ``[2]``, as ``brain_ask``.
 
     When the budget cannot hold even the top passage, one truncated passage is
     returned with ``truncated=true`` rather than nothing: an agent asked for
@@ -1134,8 +1134,7 @@ def brain_recall(
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except EmbedError as e:
-        raise _wrap_embed_error(e) from e
+    # No ``except EmbedError``: recall.recall falls back to text-only (RM-01).
 
     return payload
 

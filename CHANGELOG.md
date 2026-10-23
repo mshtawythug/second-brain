@@ -22,6 +22,23 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Changed — `brain recall` falls back to text-only when the embedder is down
+
+`brain recall` and MCP `brain_recall` no longer fail when the query embedding
+cannot be computed: they pack passages from full-text matching alone, through
+the same fallback `brain search` uses (roadmap ticket RM-01). The context
+block's header ends `, text-only`, so an agent pasting the block can see the
+ranking was lexical only. The CLI also prints the one-line notice on stderr
+(exit code 0). `--json` and `brain_recall` carry the four always-present
+`fallback*` keys (`null` on a normal run). A database error still fails as
+before.
+
+Fixed in the same change: the whole block now honours `--budget` for a long
+query too. The header echoes the query, and the fixed reserve held back for it
+could not cover a long one. The query the header echoes is now cut to 16 tokens,
+with a trailing `…`. The JSON `query` field keeps the full text, and a shorter
+query is echoed exactly as before.
+
 ### Changed — search falls back to text-only when the embedder is down
 
 `brain search`, `brain explain` and MCP `brain_search` no longer fail when the
@@ -36,9 +53,10 @@ failure falls back too; its notice says a retry will not fix it and points at
 (`OllamaEmbedContextOverflow`), whose notice says to shorten the query.
 Non-embedding errors (a database failure) still fail as before. The bare
 `brain search --json` list keeps its shape. `brain eval` does **not** fall
-back, so its degraded-run semantics are unchanged. `brain ask`,
-`brain recall` and `brain ui` are unchanged too (rulings and follow-ups in
-`docs/plans/2026-10-23-search-fts-fallback.md`).
+back, so its degraded-run semantics are unchanged. `brain ask` and `brain ui`
+are unchanged too (rulings and follow-ups in
+`docs/plans/2026-10-23-search-fts-fallback.md`); `brain recall` now falls back
+as well (entry above).
 
 ### Removed — the Quartz wiki (wiki-to-ui phase 9, R3)
 

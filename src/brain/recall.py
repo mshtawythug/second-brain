@@ -28,6 +28,13 @@ to the lexical leg when the backend produces no vectors. That is what makes
 recall work under ``BRAIN_EMBEDDER=none``, and
 ``tests/test_recall_null_embedder.py`` enforces it with a stub whose
 ``embed()`` raises.
+
+**When the embedder is down, recall falls back to text-only matching** (RM-01,
+``docs/specs/2026-10-23-roadmap-completion-design.md``). The search goes through
+:func:`brain.search_fallback.search_with_fts_fallback`, the policy ``brain
+search`` uses, and the outcome rides on :attr:`RecallResult.fallback`. The
+context block's header then ends ``, text-only``: the block is the artifact an
+agent pastes, so the marker has to be inside it, not only on stderr.
 """
 from __future__ import annotations
 
@@ -41,11 +48,24 @@ import psycopg
 from .config import Config
 from .ingest import Embedder
 from .search import SearchDiagnostics, SearchResult, hybrid_search
-from .token_budget import pack_greedy, truncate_to_token_budget
+from .search_fallback import SearchFallback, fallback_json, search_with_fts_fallback
+from .token_budget import TokenCost, pack_greedy, truncate_to_token_budget
 
 #: Tokens held back from the caller's budget for the ``# recall:`` header, so
 #: the WHOLE emitted block honours the budget rather than just the passages.
 _ENVELOPE_TOKENS = 48
+
+#: Cap on the query as echoed in the header. The header is the one part of the
+#: block nothing else bounds: it echoes the query, and no surface caps a query's
+#: length, so before RM-01 a long query pushed the block past its budget. Capped
+#: here, the worst-case header (this cap, the counts, ``, truncated`` and
+#: ``, text-only``) fits inside :data:`_ENVELOPE_TOKENS`, which
+#: ``tests/test_recall_fallback.py`` asserts directly. The echo is cosmetic: the
+#: JSON ``query`` field stays whole, and a query under the cap is echoed as is.
+_HEADER_QUERY_MAX_TOKENS = 16
+
+#: Appended to a query cut to :data:`_HEADER_QUERY_MAX_TOKENS`.
+_ELLIPSIS = "…"
 
 #: Floor on how many candidates to ask search for, so a tiny budget still gets
 #: a real choice of sources rather than the single top hit.
@@ -86,6 +106,14 @@ class RecallResult:
     truncated: bool
     fts_count: int | None
     passages: list[RecallPassage]
+    #: The query as the header echoes it, capped by :func:`_header_query`;
+    #: ``None`` echoes :attr:`query` whole. Not in the JSON, where ``query`` is
+    #: always the full text.
+    header_query: str | None = None
+    #: Set when the query embed failed and the passages came from text-only
+    #: (FTS) matching; ``None`` on a normal run. Last, and defaulted, so every
+    #: existing constructor call stays valid.
+    fallback: SearchFallback | None = None
 
     def context_block(self) -> str:
         """The pasteable block: a header line, then each cited passage.
@@ -95,15 +123,14 @@ class RecallResult:
         emitted with plain ``typer.echo``: Rich would parse ``[1]`` as a style
         tag and raise ``MissingStyle``.
         """
-        header = (
-            f"# recall: {self.query} "
-            f"({len(self.passages)} passage(s), ~{self.used_tokens} tokens"
+        header = _render_header(
+            self.query if self.header_query is None else self.header_query,
+            passages=len(self.passages),
+            used_tokens=self.used_tokens,
+            dropped=self.dropped,
+            truncated=self.truncated,
+            text_only=self.fallback is not None,
         )
-        if self.dropped:
-            header += f", {self.dropped} dropped"
-        if self.truncated:
-            header += ", truncated"
-        header += ")"
         return "\n\n".join([header, *(_render_passage(p) for p in self.passages)])
 
     def to_dict(self) -> dict[str, Any]:
@@ -112,6 +139,10 @@ class RecallResult:
         The ``"unknown"`` placeholder is a *rendering* choice for the human
         block; a machine consumer gets a real null so it can tell "no date"
         from a document literally titled that.
+
+        The four ``fallback*`` keys are always present (``null`` on a normal
+        run), projected by the same :func:`~brain.search_fallback.fallback_json`
+        ``brain search --json --meta`` and MCP ``brain_search`` use.
         """
         return {
             "query": self.query,
@@ -137,7 +168,44 @@ class RecallResult:
                 }
                 for p in self.passages
             ],
+            **fallback_json(self.fallback),
         }
+
+
+def _render_header(
+    query: str,
+    *,
+    passages: int,
+    used_tokens: int,
+    dropped: int,
+    truncated: bool,
+    text_only: bool,
+) -> str:
+    """``# recall: <query> (N passage(s), ~T tokens[, D dropped][, truncated][, text-only])``."""
+    header = f"# recall: {query} ({passages} passage(s), ~{used_tokens} tokens"
+    if dropped:
+        header += f", {dropped} dropped"
+    if truncated:
+        header += ", truncated"
+    if text_only:
+        # Inside the pasted artifact, not only on stderr: an agent reading the
+        # block must know the ranking was lexical only (RM-01).
+        header += ", text-only"
+    return header + ")"
+
+
+def _header_query(query: str, *, cost: TokenCost) -> str:
+    """``query`` as the header echoes it: whole, or cut to the cap plus ``…``.
+
+    Measured with the budget's own tokenizer, so the cap is in the same unit as
+    :data:`_ENVELOPE_TOKENS`.
+    """
+    if cost(query) <= _HEADER_QUERY_MAX_TOKENS:
+        return query
+    kept = truncate_to_token_budget(
+        query, cost=cost, budget=_HEADER_QUERY_MAX_TOKENS - cost(_ELLIPSIS)
+    )
+    return kept.rstrip() + _ELLIPSIS
 
 
 def _passage_header(
@@ -243,14 +311,18 @@ def recall(
     surface maps those to its own framework's error type — the same division
     of labour ``hybrid_search`` documents.
 
-    Raises nothing of its own; propagates :class:`psycopg.Error` and
-    ``EmbedError`` for the caller to map. Telemetry is best-effort by
-    ``record_search_query``'s contract — a logging failure must never cost the
-    agent its context, which is why this function does not write it (the
-    surfaces do, so they can attribute the right ``source`` and ``agent_id``).
+    Raises nothing of its own. Falls back on ``EmbedError``: the search is
+    re-run text-only and :attr:`RecallResult.fallback` says why. Propagates
+    :class:`psycopg.Error` (and anything else) for the caller to map.
+    Telemetry is best-effort by ``record_search_query``'s contract — a logging
+    failure must never cost the agent its context, which is why this function
+    does not write it (the surfaces do, so they can attribute the right
+    ``source`` and ``agent_id``).
 
     The budget is honoured end-to-end: :data:`_ENVELOPE_TOKENS` is reserved for
-    the header before packing, so ``context_block()`` as a whole fits.
+    the header before packing, and the query the header echoes is capped
+    (:data:`_HEADER_QUERY_MAX_TOKENS`) so the header always fits that reserve.
+    ``context_block()`` as a whole therefore fits.
 
     ``sensitivity`` is forwarded straight to ``hybrid_search``. ``None`` (the
     default) means both tiers, which is right for the local CLI — it sits
@@ -260,7 +332,8 @@ def recall(
     that its withheld body matched the query.
     """
     diagnostics = SearchDiagnostics()
-    results = hybrid_search(
+    outcome = search_with_fts_fallback(
+        hybrid_search,
         conn,
         embedder=embedder,
         query=query,
@@ -285,6 +358,7 @@ def recall(
         without_tag=without_tag,
         sensitivity=sensitivity,
     )
+    results = outcome.results
 
     dates = _fetch_doc_dates(conn, [r.document_id for r in results])
     # Provisional refs (1..N over ALL candidates) purely so the rendered text
@@ -351,4 +425,6 @@ def recall(
         truncated=truncated,
         fts_count=diagnostics.fts_count,
         passages=passages,
+        header_query=_header_query(query, cost=embedder.count_tokens),
+        fallback=outcome.fallback,
     )

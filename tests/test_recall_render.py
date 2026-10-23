@@ -181,6 +181,11 @@ def test_to_dict_has_the_documented_key_set() -> None:
         "truncated",
         "fts_count",
         "passages",
+        # RM-01: always present, null on a normal run.
+        "fallback",
+        "fallback_reason",
+        "fallback_transient",
+        "fallback_note",
     }
 
 

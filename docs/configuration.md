@@ -659,6 +659,7 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | Tool | What it does |
 |---|---|
 | `brain_search` | Hybrid search with `source`, `tag`, `since_days`, and `fts_only` filters. Falls back to text-only matching when the query embed fails, and says so in the `fallback*` keys. |
+| `brain_recall` | Passages packed to a token budget, with `[N]` citations. Falls back to text-only matching when the query embed fails, and says so in the `fallback*` keys and in the context block's header. |
 | `brain_show` | Return one full document by 6+ character id prefix. |
 | `brain_list` | Browse recent documents, optionally filtered by `source` or `tag`. |
 | `brain_status` | Counts, last-ingest timestamp, and by-source breakdown. |
