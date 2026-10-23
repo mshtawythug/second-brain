@@ -47,4 +47,4 @@ A first cut that re-packed in a loop until the block fit was replaced by this, b
 
 - An agent may miss that the context is lexical only. The header marker mitigates this (it is in
   the pasted artifact).
-- A long query's header shows a cut query. The JSON `query` field and the stderr notice are not cut.
+- A long query's header shows a cut query. The JSON `query` field keeps the full text.

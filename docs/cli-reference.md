@@ -277,8 +277,11 @@ If the embedding model is unavailable, `recall` falls back to text-only (FTS)
 matching, as `brain search` does. The header ends `, text-only`, a one-line
 notice goes to stderr (exit code 0), and `--json` carries `fallback`
 (`"fts_only"` or `null`), `fallback_reason` (the failure's class, never its
-message), `fallback_transient` and `fallback_note`. A permanent failure's notice
-points at `brain doctor`.
+message), `fallback_transient` and `fallback_note`. As with `brain search`, the
+notice names the failure by class only and tells a transient outage ("comes back
+when the embedder does") from a configuration problem a retry will not fix ("run
+'brain doctor'"), and a query longer than the embedder's context window
+(`BRAIN_OLLAMA_EMBED_NUM_CTX`) from both ("shorten the query").
 
 ## MCP payload ceilings — and why they do not apply to this CLI
 
