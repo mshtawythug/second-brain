@@ -9,6 +9,7 @@ is exercised directly with an injected client, the same path the enricher uses.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -559,3 +560,30 @@ def test_chat_keep_alive_duration_string_passes_through() -> None:
         num_ctx=8192,
     )
     assert captured["keep_alive"] == "30m"
+
+
+def test_a_bad_reply_is_never_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """C1: the reply is document-derived; the DEBUG line logs its class and length only.
+
+    PR #58: the DEBUG line logged ``response=%r`` (the first 200 characters of
+    the model's reply) and the decode error's message.
+    """
+    secret = "synthetic-secret-value-42"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _raw(f"not json {secret}")
+
+    with caplog.at_level(logging.DEBUG, logger="brain.chat"), pytest.raises(EnrichmentError):
+        chat_json_with_client(
+            _client(httpx.MockTransport(handler)),
+            model="m",
+            messages=[{"role": "user", "content": "q"}],
+            required_keys=("answer",),
+            keep_alive="30m",
+            num_ctx=8192,
+        )
+
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "JSONDecodeError" in logged and secret not in logged, (
+        f"the chat DEBUG line logged the model's reply: {logged!r}"
+    )

@@ -5,6 +5,8 @@ import shutil
 import threading
 from pathlib import Path
 
+from .errors import describe_failure
+
 logger = logging.getLogger(__name__)
 
 # Default per-file cap. A crash-looping daemon under launchd (ThrottleInterval
@@ -115,7 +117,7 @@ def rotate_if_oversized(path: Path, *, max_bytes: int) -> bool:
         shutil.copyfile(path, rotated)
         os.truncate(path, 0)
     except OSError as exc:
-        logger.warning("log rotation failed for %s: %s", path, exc)
+        logger.warning("log rotation failed for %s: %s", path, describe_failure(exc))
         return False
     logger.info("rotated %s (%d bytes) -> %s", path, size, rotated.name)
     return True
@@ -132,7 +134,7 @@ def rotate_daemon_logs(log_dir: Path, *, max_bytes: int | None = None) -> list[P
     try:
         candidates = sorted(log_dir.glob(DAEMON_LOG_GLOB))
     except OSError as exc:
-        logger.warning("could not list %s: %s", log_dir, exc)
+        logger.warning("could not list %s: %s", log_dir, describe_failure(exc))
         return []
     return [path for path in candidates if rotate_if_oversized(path, max_bytes=cap)]
 
@@ -199,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         rotated = rotate_daemon_logs(log_dir, max_bytes=args.max_bytes)
     except Exception as exc:  # noqa: BLE001 — best-effort, never fail daemon start
-        logger.warning("log rotation sweep failed for %s: %s", log_dir, exc)
+        logger.warning("log rotation sweep failed for %s: %s", log_dir, describe_failure(exc))
         return 0
     for path in rotated:
         print(f"rotated {path}")

@@ -1,4 +1,5 @@
 """Integration tests for the ingest pipeline (extract → chunk → embed → store)."""
+import errno
 import hashlib
 import logging
 import uuid
@@ -727,7 +728,7 @@ def test_ingest_document_mirror_failure_does_not_roll_back_db(
     # Setup — replace the imported regenerate_vault_file with one that fails.
     mocker.patch(
         "brain.ingest.regenerate_vault_file",
-        side_effect=OSError("simulated disk failure"),
+        side_effect=OSError(errno.ENOSPC, "simulated disk failure"),
     )
     vault = tmp_path / "vault"
 
@@ -749,11 +750,13 @@ def test_ingest_document_mirror_failure_does_not_roll_back_db(
     ).fetchone()
     assert db_row is not None
     assert db_row[1] == "DB write must persist"
+    # Class + errno only (PR #58): the operator sees ENOSPC; the message is not logged.
     assert any(
         "vault mirror write failed" in r.message
-        and "simulated disk failure" in r.message
+        and "OSError[ENOSPC]" in r.message
+        and "simulated disk failure" not in r.message
         for r in caplog.records
-    ), "expected a WARNING-level mirror failure record"
+    ), "expected a WARNING-level mirror failure record, by class and errno only"
 
 
 def test_update_document_mirror_failure_does_not_roll_back_db(
@@ -793,7 +796,7 @@ def test_update_document_mirror_failure_does_not_roll_back_db(
     # affects the update path.
     mocker.patch(
         "brain.ingest.regenerate_vault_file",
-        side_effect=OSError("simulated disk failure"),
+        side_effect=OSError(errno.ENOSPC, "simulated disk failure"),
     )
 
     # Exercise — body change so we know the mirror write would be triggered.
@@ -824,7 +827,8 @@ def test_update_document_mirror_failure_does_not_roll_back_db(
         if r.levelno >= logging.WARNING
         and "vault mirror write failed" in r.message
         and str(initial.document_id) in r.message
-        and "simulated disk failure" in r.message
+        and "OSError[ENOSPC]" in r.message  # class + errno only (PR #58)
+        and "simulated disk failure" not in r.message
     ]
     assert len(mirror_failures) == 1, (
         f"expected exactly one mirror-failure WARNING; got "

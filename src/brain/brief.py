@@ -24,7 +24,7 @@ import psycopg
 from . import chat
 from .activity import recent_captures
 from .config import Config
-from .errors import EnrichmentError
+from .errors import EnrichmentError, describe_failure
 from .queries import DocumentRow
 from .sensitivity import not_confidential_sql
 from .todo import TodoRow, iter_action_item_docs
@@ -245,7 +245,7 @@ def suggest_next_steps(brief: BriefData, cfg: Config) -> list[str]:
         # covers transport failure AND malformed-JSON-twice — never fail the brief.
         _logger.warning(
             "suggest_next_steps: synthesis failed (%s); returning no suggestions",
-            exc,
+            describe_failure(exc),
         )
         return []
     raw = body.get("suggestions")

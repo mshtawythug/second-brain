@@ -6,6 +6,7 @@ the CLI and MCP server layers can map them to their respective frameworks
 """
 from __future__ import annotations
 
+import errno
 import os
 from typing import TYPE_CHECKING
 
@@ -49,7 +50,17 @@ class IdPrefixAmbiguous(IdPrefixError):
 
 
 class DirectoryRefreshError(BrainError):
-    """Raised when a Calendar / Contacts refresh fails (gws missing, JSON parse, etc.)."""
+    """Raised when a Calendar / Contacts refresh fails (gws missing, JSON parse, etc.).
+
+    The message may quote gws's stderr, which can echo account data, so it is
+    never logged. ``log_detail`` is the content-free part ("gws CLI not found on
+    PATH", "exit 2"), chosen at the raise site, and :func:`describe_failure`
+    appends it.
+    """
+
+    def __init__(self, message: str, *, log_detail: str = "") -> None:
+        super().__init__(message)
+        self.log_detail = log_detail
 
 
 class EmbedError(BrainError):
@@ -352,18 +363,49 @@ class ChatOutputTruncated(EnrichmentError):
         self.num_predict = num_predict
 
 
+def _content_free_detail(exc: BaseException) -> str | None:
+    """Detail that cannot carry the text ``exc`` failed on, or None.
+
+    In order of preference:
+
+    - a raise-site ``log_detail`` string;
+    - an ``OSError``'s symbolic errno (``ENOSPC``; the path and strerror are dropped);
+    - a YAML error's ``problem_mark`` as 1-based ``line:col`` (the quoted line is dropped).
+    """
+    detail = getattr(exc, "log_detail", None)
+    if isinstance(detail, str) and detail:
+        return detail
+    if isinstance(exc, OSError) and isinstance(exc.errno, int):
+        return errno.errorcode.get(exc.errno, f"errno {exc.errno}")
+    mark = getattr(exc, "problem_mark", None)
+    line, column = getattr(mark, "line", None), getattr(mark, "column", None)
+    if isinstance(line, int) and isinstance(column, int):
+        return f"{line + 1}:{column + 1}"
+    return None
+
+
+def _label(exc: BaseException) -> str:
+    detail = _content_free_detail(exc)
+    name = type(exc).__name__
+    return f"{name}[{detail}]" if detail else name
+
+
 def describe_failure(exc: BaseException) -> str:
     """A content-free description of ``exc`` for a log line: its class, and its cause's.
 
     Exception MESSAGES can carry document-derived text -- a chat error embeds the
     model's reply (``{parsed!r}``), a psycopg error's DETAIL can quote row values
-    such as an entity name -- and CLAUDE.md forbids document content in a
-    WARNING log. Class names cannot carry it, and still say what went wrong
+    such as an entity name, a YAML error parsed from a string quotes the offending
+    line -- and CLAUDE.md forbids document content in a WARNING log. Class names
+    cannot carry it, and still say what went wrong
     (``EnrichmentError from JSONDecodeError``).
+
+    Each class gets the content-free detail an operator needs
+    (:func:`_content_free_detail`): ``OSError[ENOSPC]``, ``ScannerError[2:9]``,
+    ``DirectoryRefreshError[exit 2]``.
     """
-    name = type(exc).__name__
     cause = exc.__cause__
-    return f"{name} from {type(cause).__name__}" if cause is not None else name
+    return f"{_label(exc)} from {_label(cause)}" if cause is not None else _label(exc)
 
 
 class AudioError(BrainError):

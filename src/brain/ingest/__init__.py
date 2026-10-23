@@ -32,7 +32,7 @@ import psycopg
 from pgvector.psycopg import register_vector  # noqa: F401  (ensures adapter loaded)
 
 from brain.config import DEFAULT_SECRET_GUARD
-from brain.errors import EnrichmentError, IngestAmbiguousSource, OllamaUnavailable
+from brain.errors import EnrichmentError, IngestAmbiguousSource, OllamaUnavailable, describe_failure
 from brain.sensitivity import DEFAULT_SENSITIVITY, is_confidential, normalize_level
 from brain.tags import normalize_tags
 
@@ -869,7 +869,7 @@ def ingest_document(
                 "or recover the whole vault via `brain vault export --force` "
                 "followed by `brain vault sync`",
                 result.document_id,
-                exc,
+                describe_failure(exc),
             )
 
     # Wave G1-c — people-aspect graph sync. Runs OUTSIDE the DB transaction
@@ -1643,14 +1643,14 @@ def _enrich_post_ingest_hook(
             "auto-summary skipped for %s: Ollama unavailable (%s); "
             "run `brain enrich --backfill` later",
             document_id,
-            exc,
+            describe_failure(exc),
         )
         return
     except EnrichmentError as exc:
         _logger.warning(
             "auto-summary failed for %s: %s; row marked unenriched",
             document_id,
-            exc,
+            describe_failure(exc),
         )
         return
     # updated_at deliberately NOT bumped — an auto-summary is derived
@@ -1818,7 +1818,7 @@ def _run_post_commit_source_hooks(
             "post-commit source hook for %s failed (%s); ingest already "
             "committed — calendar/contacts refresh skipped",
             source_kind,
-            exc,
+            describe_failure(exc),
         )
 
 
@@ -1937,7 +1937,7 @@ def write_vault_mirror(
             "vault mirror write failed for document %s: %s; "
             "DB update succeeded — recover via `brain vault export`",
             document_id,
-            exc,
+            describe_failure(exc),
         )
 
 

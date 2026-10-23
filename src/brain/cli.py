@@ -88,6 +88,9 @@ exit 1 instead of a traceback. The classification lives in the backends
 ``except EmbedError`` mappings and their why-comments. Spec:
 ``docs/specs/2026-10-16-eval-degraded-all-embedders-design.md``.
 
+**Seventh growth (class-only logging, PR #58): one import line.** Two WARNINGs
+log ``describe_failure(exc)``; plan ``docs/plans/2026-10-22-watcher-repair-hint-and-yaml-log.md``.
+
 The long-deferred split into per-domain command modules is unchanged by any of
 this; ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
@@ -161,6 +164,7 @@ from .errors import (
     ReviewError,
     TtsError,
     VaultNoteSyncError,
+    describe_failure,  # class-only logging (PR #58)
 )
 
 if TYPE_CHECKING:
@@ -2062,7 +2066,7 @@ def _analyze_after_bulk_write(conn: psycopg.Connection[Any], *, context: str) ->
             "auto-ANALYZE %s failed after %s: %s",
             ", ".join(_BULK_WRITE_ANALYZE_TABLES),
             context,
-            exc,
+            describe_failure(exc),
         )
         return
     logger.info(
@@ -3070,7 +3074,7 @@ def _run_communities_build(
         logger.warning(
             "graphrag communities build: embedder construction failed (%s); "
             "writing summaries without embeddings (FTS-only)",
-            exc,
+            describe_failure(exc),
         )
         embedder = None
     with connect_age(cfg.database_url) as conn:

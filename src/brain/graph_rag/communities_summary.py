@@ -449,7 +449,7 @@ def _run_embedding_phase(
         _logger.warning(
             "summarize_communities: embedding pass failed (%s); leaving "
             "summary_embedding NULL for %d community/-ies (retried next run)",
-            exc,
+            describe_failure(exc),
             len(pending),
         )
         return 0, len(pending)

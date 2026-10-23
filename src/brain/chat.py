@@ -29,6 +29,7 @@ from .errors import (
     EnrichmentError,
     OllamaContextOverflow,
     OllamaUnavailable,
+    describe_failure,
 )
 from .ollama_budget import (
     CHAT_DEFAULT_NUM_PREDICT,
@@ -246,10 +247,10 @@ def chat_json_with_client(
                 if attempt == 1:
                     current_num_predict *= NUM_PREDICT_RETRY_FACTOR
             _logger.debug(
-                "chat attempt %d: JSON decode failed (%s); response=%r",
+                "chat attempt %d: JSON decode failed (%s); response length %d",
                 attempt,
-                exc,
-                response_text[:200],
+                describe_failure(exc),
+                len(response_text),  # the reply is document-derived: never logged
             )
             continue
         if not isinstance(parsed, dict):

@@ -526,7 +526,7 @@ class OllamaExtractor:
                 _logger.warning(
                     "concept extraction aborted: Ollama unavailable (%s); "
                     "returning no entities",
-                    exc,
+                    describe_failure(exc),
                 )
                 return []
             except EnrichmentError as exc:

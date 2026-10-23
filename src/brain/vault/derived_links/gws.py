@@ -38,9 +38,11 @@ def real_gws_runner(args: list[str]) -> str:
     ``refresh_calendar`` / ``refresh_contacts``.
     """
     if not args:
-        raise DirectoryRefreshError("gws runner invoked with empty args")
+        raise DirectoryRefreshError("gws runner invoked with empty args", log_detail="empty args")
     if not shutil.which(args[0]):
-        raise DirectoryRefreshError(f"`{args[0]}` CLI not found on PATH")
+        raise DirectoryRefreshError(
+            f"`{args[0]}` CLI not found on PATH", log_detail="gws CLI not found on PATH"
+        )
     try:
         proc = subprocess.run(
             args,
@@ -52,13 +54,17 @@ def real_gws_runner(args: list[str]) -> str:
     except subprocess.CalledProcessError as exc:
         stderr_snippet = (exc.stderr or "").strip()[:_STDERR_SNIPPET_LIMIT]
         raise DirectoryRefreshError(
-            f"gws command failed (exit {exc.returncode}): {stderr_snippet}"
+            f"gws command failed (exit {exc.returncode}): {stderr_snippet}",
+            log_detail=f"exit {exc.returncode}",
         ) from exc
     except subprocess.TimeoutExpired as exc:
         raise DirectoryRefreshError(
             f"gws command timed out after {_DEFAULT_TIMEOUT_SECONDS}s: "
-            f"{' '.join(args)}"
+            f"{' '.join(args)}",
+            log_detail=f"timed out after {_DEFAULT_TIMEOUT_SECONDS}s",
         ) from exc
     except OSError as exc:
-        raise DirectoryRefreshError(f"gws command failed: {exc}") from exc
+        raise DirectoryRefreshError(
+            f"gws command failed: {exc}", log_detail="could not run gws"
+        ) from exc
     return proc.stdout

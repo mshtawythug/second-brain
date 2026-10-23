@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
+from ..errors import describe_failure
 from ..rank_fusion import rrf_contribution
 from .router import FUSE_MODE
 from .schema import GraphContext, GraphExplanation
@@ -364,7 +365,7 @@ def _run_hybrid_leg(
             return docs, True
         except Exception as exc:  # noqa: BLE001 — never-raise: degrade to FTS-only
             _logger.warning(
-                "fuse: hybrid vector leg failed (%s); retrying FTS-only", exc
+                "fuse: hybrid vector leg failed (%s); retrying FTS-only", describe_failure(exc)
             )
 
     # FTS-only arm — no usable embedder OR the vector arm failed above. Use the
@@ -383,7 +384,7 @@ def _run_hybrid_leg(
         )
     except Exception as exc:  # noqa: BLE001 — hybrid fully dead → graph-only
         _logger.warning(
-            "fuse: hybrid FTS leg failed (%s); fuse degrades to graph-only", exc
+            "fuse: hybrid FTS leg failed (%s); fuse degrades to graph-only", describe_failure(exc)
         )
         return [], False
     return docs, False
