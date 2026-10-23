@@ -478,3 +478,64 @@ def test_a_failing_gws_is_logged_with_its_exit_code_not_its_stderr(
     assert "exit 2" in logged and _SECRET not in logged, (
         f"a failing gws was not logged by exit code alone: {logged!r}"
     )
+
+
+def test_a_malformed_frontmatter_is_reported_by_class_only_in_sync_vault(
+    test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path
+) -> None:
+    """Y5: ``sync_vault``'s ``report.errors`` (printed by the watcher and sent over MCP).
+
+    PR #58 review of ``ad67f43``: ``_sync_one`` raised
+    ``_SyncError(f"malformed frontmatter: {e}")``, and the reason reaches the launchd
+    watcher's stderr log (``cli.py``) and the MCP wire (``mcp_server.py``).
+    """
+    from brain.vault.sync import sync_vault
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "note.md").write_text(_MALFORMED)
+
+    report = sync_vault(test_db, embedder=fake_embedder, vault_path=vault)
+
+    reasons = " ".join(str(reason) for _path, reason in report.errors)
+    assert "ScannerError[" in reasons and _SECRET not in reasons, (
+        f"sync_vault's report.errors quotes the file: {reasons!r}"
+    )
+
+
+def test_a_frontmatter_yaml_error_names_the_file_line() -> None:
+    """F1: the mark counts from the top of the FILE, not of the YAML block.
+
+    The YAML block starts after the opening ``---`` fence, so PyYAML's mark is one
+    line short. ``parse_frontmatter`` shifts it, so ``title: a: …`` on file line 2
+    is reported as ``[2:9]``.
+    """
+    from brain.errors import describe_failure
+    from brain.vault.frontmatter import parse_frontmatter
+
+    with pytest.raises(Exception) as caught:
+        parse_frontmatter(_MALFORMED)
+
+    assert describe_failure(caught.value) == "ScannerError[2:9]"
+
+
+def test_an_unreadable_note_is_reported_by_class_and_errno_in_sync_vault(
+    test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path
+) -> None:
+    """Y6: the "could not read file" reason names ``PermissionError[EACCES]``, not the OS text."""
+    from brain.vault.sync import sync_vault
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "locked.md"
+    note.write_text(dump_frontmatter({"id": str(uuid.uuid4()), "title": "Locked"}, "body\n"))
+    note.chmod(0)
+    try:
+        report = sync_vault(test_db, embedder=fake_embedder, vault_path=vault)
+    finally:
+        note.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+    reasons = " ".join(str(reason) for _path, reason in report.errors)
+    assert "could not read file: PermissionError[EACCES]" in reasons, (
+        f"an unreadable note was not reported by class and errno: {reasons!r}"
+    )

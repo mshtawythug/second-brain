@@ -599,12 +599,12 @@ def _sync_one(
     try:
         text = walked.abs_path.read_text(encoding="utf-8")
     except OSError as e:
-        raise _SyncError(f"could not read file: {e}") from e
+        raise _SyncError(f"could not read file: {describe_failure(e)}") from e
 
     try:
         frontmatter, body = parse_frontmatter(text)
     except (ValueError, yaml.YAMLError) as e:
-        raise _SyncError(f"malformed frontmatter: {e}") from e
+        raise _SyncError(f"malformed frontmatter: {describe_failure(e)}") from e  # quotes the file
 
     # Files without any frontmatter block at all (no opening ``---``) are
     # treated as tooling-managed documentation (vault README, ``_ingested/``

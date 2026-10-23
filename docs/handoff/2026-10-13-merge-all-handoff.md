@@ -330,9 +330,11 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
     model reply.
   - **The fix:** every call now logs `describe_failure(exc)`. That gives the class plus content-free
     detail: `OSError[ENOSPC]`, `ScannerError[2:9]`, `DirectoryRefreshError[exit 2]`. The sites:
-    - 18 in `vault/` (including `sync_summaries`' alias form, audit F1);
+    - 20 in `vault/`: 18 log calls (including `sync_summaries`' alias form, audit F1) and
+      `sync.py`'s two `_SyncError` reasons, which reach `report.errors`, the watcher's log
+      and the MCP wire;
     - 5 in `graph_rag/`;
-    - 21 elsewhere.
+    - 20 elsewhere, in 10 modules.
   - **Kept on purpose:**
     - one raw site, `gaps.py`'s column name, which is content-free by construction;
     - nine allowlisted tracebacks: five in `watch.py`, three in `mcp_server.py`, one in `ui/app.py`.

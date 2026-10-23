@@ -50,7 +50,8 @@ CLAUDE.md forbids document content in a WARNING log.
 | Area | Sites |
 |---|---|
 | `vault/` (first pass) | 16, in `directory.py` ×4, `fence.py` ×3, `link_rewrite.py` ×3, `rename.py` ×4, `sync.py` ×2 |
-| `vault/sync_summaries.py` | 2 (the alias form: `msg = f"...({exc})"`, then logged; audit F1). So `vault/` is **18**, not the 16 this plan first said |
+| `vault/sync_summaries.py` | 2 (the alias form: `msg = f"...({exc})"`, then logged; audit F1). So `vault/` has **18** log calls, not the 16 this plan first said |
+| `vault/sync.py`'s `_SyncError` reasons | 2, not log calls: "could not read file" and "malformed frontmatter" carried `{e}`, and the reason reaches `report.errors`, which the watcher prints to its launchd log and `mcp_server.py` returns over the wire (review of `ad67f43`). So `vault/` is **20** sites |
 | `graph_rag/` | 5: `communities_summary` (embedding pass), `extract` (Ollama unavailable), `fuse` ×2, `global_` |
 | `ingest/__init__.py` | 5: mirror write ×2, auto-summary ×2 (one an `EnrichmentError` that can embed the model reply), post-commit source hook (psycopg DETAIL) |
 | `people.py` | 4 (OSError) |
@@ -76,7 +77,8 @@ Each is a deliberate design: the local server log gets the full detail for diagn
 wire or the browser gets the class only. The reason sits beside each allowlist entry.
 
 **Counting note:** the reviewer counted 31 raw sites in 15 modules outside `vault/` and `graph_rag/`.
-This scan finds 21 sites in 10 modules there. A second pass listed every level-method call inside an
+This scan finds 20 fixed sites in 10 modules there (21 call sites, counting the allowlisted
+`gaps.py` one). A second pass listed every level-method call inside an
 `except` handler whose receiver the detector does not count, and it found none. So the gap is a
 counting difference, not a missed receiver. Terminal output (`typer.echo`) and exception messages
 built for a re-raise are not log calls, and G1 does not cover them.
@@ -98,20 +100,31 @@ built for a re-raise are not log calls, and G1 does not cover them.
 - **`chat.py`'s DEBUG line logs the reply's LENGTH, not the reply.** The reply is document-derived.
 - **`eval/runner.py` keeps the eval query text.** It is not exception text, and it is the row's
   identity in a local, gitignored corpus. Only the exception is now class-only.
-- **Not covered:** a value derived from an exception OUTSIDE its handler (assigned in the handler,
-  logged after it), and exceptions stored on an attribute and logged elsewhere.
+- **A frontmatter YAML error names the FILE line (review of `ad67f43`).** The YAML block starts
+  after the opening `---` fence, so PyYAML's mark was one line short (`[1:9]` for file line 2).
+  `parse_frontmatter` now re-raises a `MarkedYAMLError` with its `problem_mark` and `context_mark`
+  shifted one line down. That changes the error's own text the same way.
+- **Not covered:**
+  - a value derived from an exception OUTSIDE its handler (assigned in the handler, logged after it);
+  - an exception stored on an attribute and logged elsewhere;
+  - a nested `def` or `lambda` inside a handler, which starts a fresh scope and so drops the taint;
+  - exception text in error reports outside vault sync: `vault/export.py`'s `summary.errors`
+    (an `OSError`: path and strerror) and `cli_sensitivity.py`'s `result.errors` (a `ValueError`
+    from `update_document`). Both are terminal output; they are recorded here, not changed.
 
 ### Tests (RED first)
 
 | ID | Test | RED |
 |---|---|---|
-| G1 | no `src/brain` logger call can carry an exception's text | at `2d900e9`, the 16 vault sites; at `35689ff` (the widened scan), the 28 listed above |
+| G1 | no `src/brain` logger call can carry an exception's text | at `2d900e9`, the 16 vault sites; at `35689ff` (the widened scan), the 27 listed above |
 | G2 | the scan flags each leak form: bare, nested `str(e)`, f-string, `%`, `.format`, an alias, an attribute receiver, a non-allowlisted `.exception`, `exc_info=True`, `.log(level, …)`, and an exception parameter | passes (it guards the guard) |
 | G3 | the scan accepts `describe_failure(e)` (bare, as an attribute, inside an f-string), `type(e).__name__`, `exc_info=False`, and a conditional on `e is not None`; an unbound `e` is ignored; both allowlists are keyed by module | passes |
 | Y1 | a malformed `_people.yml` is logged as `ScannerError[...]` without the quoted line | **at `2d900e9`, RED only on the missing class name.** `load_people_yml` parses a FILE HANDLE, and a stream `MarkedYAMLError` carries no snippet, so nothing leaked (audit F3). The fix is kept as defensive |
 | Y2 | `rewrite_vault_links` on malformed frontmatter: the same | logged the quoted line |
 | Y3 | `rewrite_derived_fences` on a synced note whose file was then broken: the same | logged the quoted line |
 | Y4 | `sync_summaries`: the WARNING and `report.errors` are class-only | at `35689ff`, logged the quoted line (the alias form) |
+| Y5 | `sync_vault`'s `report.errors` for malformed frontmatter carries `ScannerError[` and not the quoted line | at `ad67f43`, `malformed frontmatter: mapping values are not allowed here … title: a: synthetic-secret…` |
+| F1 | `parse_frontmatter`'s YAML error names the file line: `ScannerError[2:9]` for file line 2 | at `ad67f43`, `ScannerError[1:9]` |
 | H1 | a missing gws is logged as "gws CLI not found on PATH" | at `35689ff`, a bare `DirectoryRefreshError` |
 | H2 | a failing gws is logged with "exit 2" and without its stderr | at `35689ff`, no exit code |
 | D1-D7 | `describe_failure`: class only; a cause; `OSError` errno symbols (ENOSPC, EROFS, a subclass, no errno); an unknown errno; YAML line:col; `log_detail`; a cause's detail | at `35689ff`, the detail was missing and `log_detail` did not exist |
@@ -195,7 +208,7 @@ All of it is fixed above.
 
 **RED at `35689ff`** (the tests table has the messages):
 
-- G1, as re-scoped, at the 28 sites;
+- G1, as re-scoped, at the 27 sites;
 - Y4, H1, H2, D3-D7;
 - C1, `tests/test_chat.py::test_a_bad_reply_is_never_logged`. In a `35689ff` archive copy, its DEBUG
   line logged `response='not json synthetic-secret...'`.
@@ -235,5 +248,35 @@ and the archive was restored byte-identical.
 - the two `test_ingest_pipeline.py` mirror-failure tests, which fail by design under the new contract
   and now assert class + errno: 60 passed.
 
+`ruff check` and `mypy src/` are clean.
+
+### Round 3 (the PR #58 review of `ad67f43`)
+
+**The MEDIUM finding: the same leak class, through `report.errors`.**
+
+- `sync.py`'s `_sync_one` raised `_SyncError(f"malformed frontmatter: {e}")` on a STRING parse.
+- `report.errors` reaches the watcher's launchd log (`cli.py` prints `error: {path}: {reason}`)
+  and the MCP wire (`mcp_server.py`).
+- Both `_SyncError` reasons, read and malformed frontmatter, now carry `describe_failure(e)`.
+- Tests: Y5 (frontmatter) and Y6 (an unreadable file, `PermissionError[EACCES]`).
+
+**The LOW finding: frontmatter line:col was one line short.** This is fixed in `parse_frontmatter`
+(Rulings). Test: F1.
+
+**RED at `ad67f43`,** in an archive copy with the current tests copied in: exactly Y5, Y6 and F1
+failed, each at its targeted assertion, and the other 26 passed.
+
+**The mutation matrix on the final tree: 31 of 31 OK.**
+
+- **New mutants:** SY1 (the frontmatter reason quotes `e` again, killed by Y5), SY2 (the read reason,
+  Y6) and FM1 (the mark not shifted, F1).
+- **Two predictions widened:** SM2 (no errno detail) and SM3 (no YAML mark) were also killed by the new
+  tests, which postdate their predictions: SM2 by Y6, SM3 by F1 and Y5. These are correct kills, and
+  both re-ran OK.
+- **The `context_mark` shift has no mutant.** It changes only the error's own text, which is no longer
+  logged, so no log line observes it.
+
+**Suites (run serially): 797 passed.** That is the vault sync, frontmatter, rename, link-rewrite,
+derived-links, watcher, MCP-server and ingest-pipeline consumers, plus the privacy and hygiene guards.
 `ruff check` and `mypy src/` are clean.
 
