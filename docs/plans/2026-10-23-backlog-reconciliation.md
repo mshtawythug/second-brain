@@ -187,13 +187,13 @@ residues, recorded with their repairs.
 | H-4 | Watcher reconnect residue: a delete committed just before the connection died leaves a ghost AGE vertex (repair: `brain graphrag remove`); a delete not applied at shutdown is redone only by `brain vault sync --prune`. | #56 |
 | H-5 | Log-privacy blind spots of the G1 guard: a value derived from an exception and logged outside its handler; an exception stored on an attribute; a nested `def` or `lambda` inside a handler. | #58 |
 | H-6 | Two terminal error reports still carry exception text: `vault/export.py` `summary.errors` and `cli_sensitivity.py` `result.errors`. Both were judged content-free. | #58 |
-| H-7 | **IN FLIGHT. Decided 2026-10-23; implemented in PR #61** (branch `feat/search-fts-fallback`): search falls back to text-only (FTS) matching when the query embed fails. The follow-ups that PR records are BL-13 to BL-15. | #61 |
+| H-7 | **SHIPPED (#61, merged at `02c2abc`).** Decided 2026-10-23: search falls back to text-only (FTS) matching when the query embed fails. The follow-ups that PR records are BL-13 to BL-15. | #61 |
 | — | `graph_runner` has no `degraded` tolerance. | By design (its module docstring). Not backlog. |
 | — | The graph lags while a startup backlog drains. | By design (PR #54): the lane catches up by itself. Not backlog. |
 
 The same section's "Remains the user's" list is machine operations: stop the root Caddy, delete
 `<vault>/.quartz`, decide the three unmerged July branches, keep `daemon-src`. These are not code,
-so they are not ranked in §3. Item 5 (the July branches) is safe to close once H-7 merges, because
+so they are not ranked in §3. Item 5 (the July branches) is safe to close now that H-7 has merged, because
 `TRIAGE.md` judged everything else on them superseded.
 
 ### 2.3 Other open deferrals in `docs/specs`, `docs/plans` and `CLAUDE.md`
@@ -223,9 +223,9 @@ Q6, the graph diagnostic workbench, answered "Do not port. Rebuild only if you r
 
 ## 3. Open backlog, in recommended order
 
-> **Execution is now tracked by** `docs/specs/2026-10-23-roadmap-completion-design.md`: every row
-> below has a ticket there (`RM-01` to `RM-61`), and its Appendix B is the tracker. Close a row here
-> in the same PR that closes its ticket.
+> **Execution is now tracked by** `docs/specs/2026-10-23-roadmap-completion-design.md`: every open
+> row below has a ticket there (`RM-01` to `RM-61`), and its Appendix B is the tracker. Close a row
+> here in the same PR that closes its ticket.
 
 The order follows four rules. Finish what is in flight. Take small items that close a recorded hole
 before large features. Ship the one feature that already has a design. Do anything that needs an
@@ -233,7 +233,7 @@ eval only now that the eval has just been re-judged.
 
 | # | Item | Size | Why this position |
 |---|---|---|---|
-| 1 | **H-7: FTS-only search fallback** | — | IN FLIGHT. Decided 2026-10-23; implemented in PR #61. Land it before anything else that touches search. Its follow-ups BL-13 to BL-15 are rank 1a. |
+| 1 | **H-7: FTS-only search fallback** | — | SHIPPED (#61, merged at `02c2abc`). Its follow-ups BL-13 to BL-15 are rank 1a. |
 | 1a | **BL-14, BL-15, then BL-13: embedder-down handling in `brain recall`, `brain ask` and `brain ui` search** | S each | Right after PR #61, while the fallback's shape is fresh. BL-14 and BL-15 turn tracebacks into clean errors; BL-13 is the UI half of the same decision, and needs a browser test. |
 | 2 | **BL-1: ceiling-table CI check** | S | Without it there has been one unrecorded crossing and one caught only by hand (BL-1). A day of work removes a whole class of review misses. |
 | 3 | **BL-3: CSS `url()` in the offline test** | XS | A few lines. It closes the same blank-page failure class as the wheel-packaging bug. Do it before anyone adds fonts or images in CSS. |
