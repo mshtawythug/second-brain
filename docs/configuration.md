@@ -678,7 +678,7 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `brain_review_scan` | Run a contradiction / staleness scan into the review queue. Params: `scan_type` (`conflicts`\|`stale`\|`all`), `dry_run`, `limit`. |
 | `brain_review_findings_list` | Read the contradiction + staleness queue without scanning. Params: `kind` (`all`\|`conflicts`\|`stale`), `limit`. |
 | `brain_timeline` | How a theme/entity evolved over time. Params: `query`, `person`, `granularity`, `since`, `until`, `limit`, `synthesize`, `tenant`. Needs the graph layer. |
-| `brain_ask` | Agentic multi-hop cited answer synthesis. Params: `question`, `mode` (`hybrid`\|`auto`\|`fuse`\|`local`), `no_loop`, `limit`, `max_iterations`. Snippets only. |
+| `brain_ask` | Agentic multi-hop cited answer synthesis. Params: `question`, `mode` (`hybrid`\|`auto`\|`fuse`\|`local`), `no_loop`, `limit`, `max_iterations`. Snippets only. Retrieves text-only when the query embed fails, and says so in the `fallback*` keys; every other `ask` failure is `INTERNAL_ERROR` with one fixed, class-only sentence. |
 | `brain_connect_list` | List auto-link suggestions. Params: `status` (`pending`\|`accepted`\|`rejected`\|`all`), `limit`. |
 | `brain_connect_accept` | Accept a suggestion; with `write=True` append the wikilink. Params: `id` (6+ char prefix), `write`. |
 | `brain_connect_reject` | Reject a suggestion; frozen and never re-proposed. Param: `id` (6+ char prefix). |

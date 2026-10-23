@@ -233,8 +233,8 @@ zero or net negative.
 
 | Over-ceiling file | Tickets that must touch it | How growth is avoided |
 |---|---|---|
-| `cli.py` | RM-02 (net negative), RM-06 (one call), RM-15 (net negative: the two-audience body of `brief` moves to `brief_publish.py`), RM-20 (net zero: `init`'s chunks-only `ensure_embedding_column` call becomes `ensure_relational_embedding_columns`; the AGE-gated graph call stays), RM-21 (net negative), RM-48 (only if confirmed) | RM-06's seam means later command modules register through `cli_registry.py` only. RM-14a, RM-20 and RM-22b do not touch `eval_cmd`, because `run_eval` builds its own stages (RM-14a). |
-| `mcp_server.py` | RM-01 (net negative), RM-02 (about two lines), RM-06 (about +12 lines: the `ToolContext` and the registration call; recorded), RM-09 (net zero), RM-24 (one parameter), RM-46 (net negative: R1's state builders go to `mcp_state.py`), RM-57 (only if triggered) | New tools go to `src/brain/mcp_tools/` (RM-06). RM-24's and RM-57's parameters on `brain_search` cannot avoid the file, because that tool lives there; each is recorded. |
+| `cli.py` | RM-02 (net negative, −3; no growth record), RM-06 (one call), RM-15 (net negative: the two-audience body of `brief` moves to `brief_publish.py`), RM-20 (net zero: `init`'s chunks-only `ensure_embedding_column` call becomes `ensure_relational_embedding_columns`; the AGE-gated graph call stays), RM-21 (net negative), RM-48 (only if confirmed) | RM-06's seam means later command modules register through `cli_registry.py` only. RM-14a, RM-20 and RM-22b do not touch `eval_cmd`, because `run_eval` builds its own stages (RM-14a). |
+| `mcp_server.py` | RM-01 (net negative), RM-02 (net negative, −6; no growth record), RM-06 (about +12 lines: the `ToolContext` and the registration call; recorded), RM-09 (net zero), RM-24 (one parameter), RM-46 (net negative: R1's state builders go to `mcp_state.py`), RM-57 (only if triggered) | New tools go to `src/brain/mcp_tools/` (RM-06). RM-24's and RM-57's parameters on `brain_search` cannot avoid the file, because that tool lives there; each is recorded. |
 | `ingest/__init__.py` | RM-07 (net negative), RM-42 (net zero: two calls re-pointed) | The dispatcher moves to `ingest/dispatch.py`; every later extractor registers there. RM-42's chunker choice lives in `ingest/chunk_dispatch.py`. |
 | `config.py` | none | Feature settings leaves (RM-08). New fixed-ceiling chat calls (RM-54, RM-55) add `CallBudget` entries in the `ollama_budget.py` leaf, which `config.py` already consults; no knob is added. |
 | `search.py` | RM-20 (a two-line public alias for the query-embed cache), RM-24 (two keyword arguments forwarded to the predicate, about 6 lines), RM-57 (only if triggered) | Every ranking stage composes in `search_pipeline.py` (RM-09); no stage edits the ranking code. |
@@ -548,9 +548,11 @@ ranks 1a, 2 and 3, in that order.
     `ValueError` and `psycopg.Error` keep their mappings.
 - **Security / privacy:** class-only text everywhere; the confidential lens (`exclude_confidential`)
   is forwarded unchanged into the fallback call.
-- **Ceiling:** `cli.py` shrinks (promote the row; descriptive hop; no growth record). `mcp_server.py`:
-  the `brain_ask` mapping grows by about two lines; recorded inline and in the module docstring.
-  `ask.py` 654 → about 680 (budget, §2.2).
+- **Ceiling:** `cli.py` shrinks, net −3 even with `eval --answer`'s `fallback=False` (promote the
+  row; descriptive hop; no growth record). `mcp_server.py` shrinks too, net −6: one `except` replaces
+  three and two imports go (promote the row; descriptive hop; no growth record). `ask.py` 654 → 684
+  (budget, §2.2). *(As shipped in PR #64; this line first said `mcp_server.py` would grow by about
+  two lines, recorded.)*
 - **Acceptance criteria:**
   1. Embedder down, chat up, `--no-loop`: exit 0, an answer, the stderr note, and the `Retrieval:
      text-only` line; `--json` has `fallback: "fts_only"`.
@@ -567,8 +569,11 @@ ranks 1a, 2 and 3, in that order.
 - **Test plan:** unit tests for `describe_ask_failure` (one per class, subclass ordering, sentinel
   absent); `ask` tests with a fake `ChatJson` and the failing embedder (both modes); `CliRunner`
   tests for criteria 1–6, with the pre-fix traceback reproduced RED first; MCP tests.
-- **Eval:** none. `answer_eval` uses `ask` but scores answers only on a live machine; it inherits the
-  fallback, which is the user-facing behaviour, and the answer-eval docs say so.
+- **Eval:** none. `brain eval --answer` does **not** fall back: `ask()` and `ask_no_loop()` take
+  `fallback: bool = True`, and `_run_answer_eval_cli` passes `fallback=False`, so an embed failure
+  still aborts the run with exit 1 (§2.7; spec 2026-10-16 §3.4). *(Corrected during RM-02, by
+  team-lead ruling; this line first said the answer eval "inherits the fallback", which
+  contradicted §2.7 and would have left the answer eval's `except EmbedError` unreachable.)*
 - **Depends on:** nothing. It may be developed beside RM-01, but the two merge one after the other
   (both touch `mcp_server.py`).
 - **Size:** S.
@@ -3609,7 +3614,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | Id | Title | Size | Wave | Depends on | Status |
 |---|---|---|---|---|---|
 | RM-01 | `brain recall` text-only fallback | S | 1 | — | DONE (#63) |
-| RM-02 | `brain ask` fallback and clean errors | S | 1 | — | TODO |
+| RM-02 | `brain ask` fallback and clean errors | S | 1 | — | DONE (#64) |
 | RM-03 | `brain ui` search fallback notice | S | 1 | — | TODO |
 | RM-04 | Ceiling-table CI check | S | 1 | — | TODO |
 | RM-05 | CSS `url()` offline test | XS | 1 | — | TODO |

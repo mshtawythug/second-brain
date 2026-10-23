@@ -23,6 +23,12 @@ import psycopg
 
 from .chat import coerce_bool
 from .search import SearchResult, hybrid_search
+from .search_fallback import (
+    FallbackSearch,
+    SearchFallback,
+    fallback_json,
+    search_with_fts_fallback,
+)
 
 if TYPE_CHECKING:
     from .config import Config
@@ -121,6 +127,8 @@ class AskResult:
     ``fallback_used`` is ``True`` when the agentic planning loop was skipped or
     degraded: the ``no_loop`` fast path, or a plan step that yielded no usable
     sub-queries (so the raw question was used as the single sub-query).
+    ``retrieval_fallback`` is different: set when retrieval ran text-only because a
+    query embed failed (RM-02); ``to_dict()`` adds the four ``fallback*`` keys.
     """
 
     answer: str
@@ -129,6 +137,7 @@ class AskResult:
     sub_queries: list[str]
     fallback_used: bool
     session_id: str
+    retrieval_fallback: SearchFallback | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON projection shared by the CLI ``--json`` output and the MCP tool."""
@@ -139,6 +148,7 @@ class AskResult:
             "sub_queries": list(self.sub_queries),
             "fallback_used": self.fallback_used,
             "session_id": self.session_id,
+            **fallback_json(self.retrieval_fallback),
         }
 
 
@@ -372,8 +382,13 @@ def _retrieve_hybrid(
     query: str,
     limit: int,
     exclude_confidential: bool = False,
-) -> list[SearchResult]:
+    fallback: bool = True,
+) -> FallbackSearch:
     """Single hybrid-search pass for one sub-query (config-driven knobs).
+
+    A failed query embed retries text-only (:mod:`brain.search_fallback`), so
+    an unreachable embedder costs semantic ranking, not the answer (RM-02).
+    ``fallback=False`` lets it propagate: ``brain eval --answer`` (spec §2.7).
 
     ``exclude_confidential`` maps onto ``hybrid_search``'s own F6 lens. ``ask``
     is the highest-consequence retrieval surface here: its citations carry
@@ -382,17 +397,19 @@ def _retrieve_hybrid(
     twice, once verbatim and once paraphrased into prose that no marker-based
     check downstream could recognise as derived from it.
     """
-    return hybrid_search(
-        conn,
-        embedder=embedder,
-        query=query,
-        limit=limit,
-        vector_sim_floor=cfg.vector_sim_floor,
-        recency_halflife_days=cfg.recency_halflife_days,
-        snippet_context_tokens=cfg.snippet_context_tokens,
-        snippet_max_chars=cfg.snippet_max_chars,
-        sensitivity="normal" if exclude_confidential else None,
-    )
+    kwargs: dict[str, Any] = {
+        "embedder": embedder,
+        "query": query,
+        "limit": limit,
+        "vector_sim_floor": cfg.vector_sim_floor,
+        "recency_halflife_days": cfg.recency_halflife_days,
+        "snippet_context_tokens": cfg.snippet_context_tokens,
+        "snippet_max_chars": cfg.snippet_max_chars,
+        "sensitivity": "normal" if exclude_confidential else None,
+    }
+    if not fallback:
+        return FallbackSearch(results=hybrid_search(conn, **kwargs), fallback=None)
+    return search_with_fts_fallback(hybrid_search, conn, **kwargs)
 
 
 def _retrieve(
@@ -405,8 +422,9 @@ def _retrieve(
     mode: str,
     backend: GraphBackend | None,
     exclude_confidential: bool = False,
-) -> tuple[list[SearchResult], str]:
-    """Retrieve documents for one sub-query; returns (results, graph_summary).
+    fallback: bool = True,
+) -> tuple[list[SearchResult], str, SearchFallback | None]:
+    """Retrieve documents for one sub-query: (results, graph_summary, fallback).
 
     The hybrid leg always runs. For ``mode != hybrid`` the graph leg runs too
     (requires ``backend``) and its docs are appended after the hybrid docs; the
@@ -421,16 +439,17 @@ def _retrieve(
             f"mode={mode!r} requires a graph backend; pass backend=AgeBackend()"
         )
 
-    results = _retrieve_hybrid(
+    hybrid = _retrieve_hybrid(
         conn,
         cfg,
         embedder=embedder,
         query=query,
         limit=limit,
         exclude_confidential=exclude_confidential,
+        fallback=fallback,
     )
     if mode == HYBRID_MODE:
-        return results, ""
+        return hybrid.results, "", hybrid.fallback
 
     assert backend is not None  # guarded above
     from .graph_rag import graph_rag_search
@@ -445,13 +464,13 @@ def _retrieve(
         embedder=embedder,
         exclude_confidential=exclude_confidential,
     )
-    combined = list(results)
+    combined = list(hybrid.results)
     seen_ids = {r.document_id for r in combined}
     for doc in ctx.docs:
         if doc.document_id not in seen_ids:
             seen_ids.add(doc.document_id)
             combined.append(doc)
-    return combined, _graph_summary(ctx)
+    return combined, _graph_summary(ctx), hybrid.fallback
 
 
 def _clean_query_list(raw: Any, *, limit: int) -> list[str]:
@@ -493,6 +512,7 @@ def ask_no_loop(
     limit: int = 5,
     backend: GraphBackend | None = None,
     exclude_confidential: bool = False,
+    fallback: bool = True,
 ) -> AskResult:
     """Single retrieve + synthesize pass (the ``--no-loop`` fast path).
 
@@ -502,7 +522,7 @@ def ask_no_loop(
     """
     _validate_mode(mode)
     session_id = uuid.uuid4().hex
-    docs, graph_summary = _retrieve(
+    docs, graph_summary, retrieval_fallback = _retrieve(
         conn,
         cfg,
         embedder=embedder,
@@ -511,6 +531,7 @@ def ask_no_loop(
         mode=mode,
         backend=backend,
         exclude_confidential=exclude_confidential,
+        fallback=fallback,
     )
     raw_answer = _call_synthesize_step(chat, cfg, question, docs, graph_summary)
     answer = _sanitize_answer(raw_answer, len(docs))
@@ -522,6 +543,7 @@ def ask_no_loop(
         sub_queries=[question],
         fallback_used=True,
         session_id=session_id,
+        retrieval_fallback=retrieval_fallback,
     )
 
 
@@ -538,6 +560,7 @@ def ask(
     max_iterations: int = _DEFAULT_MAX_ITERATIONS,
     backend: GraphBackend | None = None,
     exclude_confidential: bool = False,
+    fallback: bool = True,
 ) -> AskResult:
     """Agentic plan -> retrieve -> reflect -> synthesize loop over the corpus.
 
@@ -549,7 +572,8 @@ def ask(
     The loop stops early when the reflect step reports coverage is sufficient,
     when an iteration surfaces no new documents, or when no follow-up sub-queries
     are produced. ``OllamaUnavailable`` / ``EnrichmentError`` from any LLM step
-    propagates to the caller (no silent degradation).
+    propagates to the caller (no silent degradation). A failed query embed
+    falls back to text-only retrieval unless ``fallback=False``.
     """
     _validate_mode(mode)
     if max_iterations < 1:
@@ -567,6 +591,7 @@ def ask(
             limit=limit,
             backend=backend,
             exclude_confidential=exclude_confidential,
+            fallback=fallback,
         )
 
     session_id = uuid.uuid4().hex
@@ -581,6 +606,8 @@ def ask(
     all_sub_queries: list[str] = list(sub_queries)
     all_docs: dict[str, SearchResult] = {}
     graph_summaries: list[str] = []
+    # Every sub-query hits the same embedder, so the first fallback is representative.
+    retrieval_fallback: SearchFallback | None = None
     iterations_used = 0
 
     for iteration in range(1, max_iterations + 1):
@@ -588,7 +615,7 @@ def ask(
         # Step 2 — Retrieve (dedup across iterations).
         new_doc_found = False
         for sub_query in sub_queries:
-            results, graph_summary = _retrieve(
+            results, graph_summary, leg_fallback = _retrieve(
                 conn,
                 cfg,
                 embedder=embedder,
@@ -597,9 +624,11 @@ def ask(
                 mode=mode,
                 backend=backend,
                 exclude_confidential=exclude_confidential,
+                fallback=fallback,
             )
             if graph_summary:
                 graph_summaries.append(graph_summary)
+            retrieval_fallback = retrieval_fallback or leg_fallback
             for result in results:
                 if result.document_id not in all_docs:
                     all_docs[result.document_id] = result
@@ -633,6 +662,7 @@ def ask(
         sub_queries=all_sub_queries,
         fallback_used=fallback_used,
         session_id=session_id,
+        retrieval_fallback=retrieval_fallback,
     )
 
 
