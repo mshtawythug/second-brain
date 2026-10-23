@@ -108,9 +108,27 @@ built for a re-raise are not log calls, and G1 does not cover them.
   - a value derived from an exception OUTSIDE its handler (assigned in the handler, logged after it);
   - an exception stored on an attribute and logged elsewhere;
   - a nested `def` or `lambda` inside a handler, which starts a fresh scope and so drops the taint;
-  - exception text in error reports outside vault sync: `vault/export.py`'s `summary.errors`
-    (an `OSError`: path and strerror) and `cli_sensitivity.py`'s `result.errors` (a `ValueError`
-    from `update_document`). Both are terminal output; they are recorded here, not changed.
+  - exception text in two terminal error reports outside vault sync. Both are recorded here,
+    not changed, by the coordinator's ruling:
+    - **`vault/export.py`'s `summary.errors`:** an `OSError`, so path and strerror only. That is
+      content-free.
+    - **`cli_sensitivity.py`'s `result.errors`:** the `str()` of a `ValueError` from
+      `update_document`, printed to the user's own terminal and never to a daemon log or the MCP
+      wire. Its messages are read below, and every one is **content-free**:
+      - **`update_document` raises four `ValueError`s:**
+        - "document not found: <id>";
+        - "embedder is required when new_content is provided";
+        - "content is empty";
+        - "content collides with existing document <id>".
+        They carry a document id, or fixed text.
+      - **Same-module callees:** an AST walk from `update_document` reaches `_chunk_search_metadata`,
+        `_content_hash`, `_embed_chunks`, `_enrich_post_ingest_hook`, `_frontmatter_allows_secrets`,
+        `_guard_content`, `_insert_chunks`, `_parse_sent_at`, `_promote_metadata_to_columns`,
+        `mirror_is_stale` and `write_vault_mirror`. None of them raises a `ValueError`; the only
+        other raise is a `TypeError`. `_parse_sent_at` swallows `fromisoformat`'s `ValueError`,
+        which would quote the date string, and returns None.
+      - **Cross-module callees:** of the chunker, the secret guard and `sub_tokens`, only
+        `ingest/guard.py` raises a `ValueError`, and its text names the configured guard mode.
 
 ### Tests (RED first)
 
