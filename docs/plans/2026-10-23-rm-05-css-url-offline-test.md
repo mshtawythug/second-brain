@@ -75,7 +75,7 @@ texture. The residue check in step 4 already makes an unparsed `url(` fail. A st
 |---|---|
 | 1. Green on `master` | `test_every_css_url_resolves_on_disk` |
 | 2. `url("missing.woff2")` fails, naming the stylesheet and the target | `test_a_missing_css_url_target_is_named` |
-| 3. A `url()` that escapes `static_dir()` fails | `test_a_css_url_escaping_static_fails` (parametrized: `../../`, `../../../`, root-relative outside `/static/`, other origin, protocol-relative), `test_a_css_url_through_a_symlink_out_of_static_fails` |
+| 3. A `url()` that escapes `static_dir()` fails | `test_a_css_url_escaping_static_fails` (parametrized: `../../`, `../../../`, root-relative outside `/static/`, other origin, protocol-relative, and both of those with a path that names a real local file), `test_a_css_url_through_a_symlink_out_of_static_fails` |
 | 4. `data:` passes, including a nested `url(%23id)` | `test_data_and_fragment_urls_pass`, and the `nested data URI` case of the extraction test |
 | 5. A comment-only `url()` is ignored | the `comment` cases of the extraction test, and `test_a_commented_out_css_url_is_not_checked` |
 | 6. An empty `url()` fails | `test_an_empty_css_url_fails` (parametrized: `url()`, `url("")`, `url('  ')`) |
@@ -95,8 +95,13 @@ Mutation proof (DoD 2), in a `git archive` copy with `PYTHONPATH` pinned:
 2. Removing the comment strip turns the comment cases red.
 3. Making the pattern stop being quote-aware (bare only) turns the nested `data:` case red.
 4. Removing the empty-target check turns `test_an_empty_css_url_fails` red.
-5. `is_file()` swapped for `exists()` turns the `./` / `..` cases red.
+5. `is_file()` swapped for `exists()` turns `test_a_css_url_naming_a_directory_fails` (`./`, `..`) red.
 6. Removing the residue check turns `test_an_unparseable_css_url_raises` red.
+7. Removing the symlink containment check turns the symlink test red.
+8. A `url()` to a real `static/fonts/x.woff2` that no glob ships turns the real-tree test red.
+9. Removing the origin check turns the `*-static-path` escape cases red. The first run of the
+   harness found this mutation surviving, because every other-origin case also had a path
+   outside `/static/`. The two cases were added for that reason.
 
 ## Risks
 
