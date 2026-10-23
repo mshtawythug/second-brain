@@ -20,6 +20,7 @@ Conventions:
 - Each test starts the watcher in a background thread and asserts on
   observations from a thread-safe collector.
 """
+import logging
 import os
 import queue
 import threading
@@ -59,6 +60,7 @@ from brain.vault.watch import (
 # guard covers every importer, in tests/test_thread_wait.py.
 from tests.thread_wait import WAIT_FOR_BACKSTOP_S
 from tests.thread_wait import wait_for as _wait_for
+from tests.watch_link import worker_link
 
 # ---------------------------------------------------------------------------
 # Test doubles for watchdog Observer.
@@ -780,7 +782,7 @@ def test_stale_upsert_event_for_vanished_file(
     # errored — it's a phantom event that should leave the counters alone.
     assert state.processed == 0, (
         f"state.processed advanced for a stale upsert (0 → {state.processed}); "
-        f"the worker should ``continue`` without counting a vanished file as work"
+        f"the worker should skip a vanished file without counting it as work"
     )
 
 
@@ -1337,7 +1339,11 @@ def test_enqueue_signature_has_no_bypass_filter(
 
 
 def test_worker_join_timeout_skips_close_when_alive(
-    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path, mocker: Any
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    tmp_path: Path,
+    mocker: Any,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Phase 5 carryover: don't close the worker connection when the
     worker thread is still alive past the join timeout.
@@ -1403,9 +1409,14 @@ def test_worker_join_timeout_skips_close_when_alive(
     state = observer.handler._state
     assert len(fake_workers) == 1, "expected one fake worker thread to be created"
 
-    state.stop_event.set()
-    thread.join(timeout=5.0)
+    with caplog.at_level(logging.WARNING, logger="brain.vault.watch"):
+        state.stop_event.set()
+        thread.join(timeout=5.0)
     assert not thread.is_alive()
+    # PR #56 review: since the reconnect, a worker past its join may be
+    # reconnecting rather than mid-statement; the warning must say both.
+    leak = " ".join(r.getMessage() for r in caplog.records)
+    assert "or reconnecting to the DB" in leak, f"the leak warning is stale: {leak!r}"
 
     # The connection's close() must NOT have been invoked — that's the
     # point of the fix. The fake worker reports ``is_alive()`` True so
@@ -2113,7 +2124,7 @@ def _run_events_through_worker(
                 job.dest_path = dest  # field only exists post-fix
             state.jobs.put(job)
     state.jobs.put(None)  # sentinel closes the worker loop
-    _worker_loop(conn, embedder, config, state)
+    _worker_loop(worker_link(conn), embedder, config, state)
     return state
 
 

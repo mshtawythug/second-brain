@@ -9,6 +9,8 @@ timeout, and no test module may define or re-export its own copy.
 """
 from __future__ import annotations
 
+import sys
+import threading
 import time
 from collections.abc import Callable
 
@@ -43,3 +45,27 @@ def wait_for(predicate: Callable[[], object], timeout: float = WAIT_FOR_BACKSTOP
         f"predicate never became true within {timeout}s "
         "(backstop, not a latency assertion)"
     )
+
+
+def blocked_in_wait(thread: threading.Thread, caller: str) -> bool:
+    """True while ``thread`` is blocked in a ``threading`` wait reached through ``caller``.
+
+    A barrier for "the thread is INSIDE its sleep", which no counter gives: a
+    counter bumped just before a sleep is also true while the thread is still
+    deciding WHETHER to sleep, and a test that acts in that gap never exercises
+    the sleep at all (found by mutation G3 of
+    ``docs/plans/2026-10-22-vault-watcher-db-reconnect.md``). The innermost
+    Python frame must be ``threading``'s ``wait`` (``Event.wait`` and
+    ``Condition.wait_for`` both end there), and a frame named ``caller`` must be
+    on the stack, so a thread idling in ``queue.get`` does not count.
+    """
+    frame = sys._current_frames().get(thread.ident or -1)
+    if frame is None or frame.f_code.co_name != "wait":
+        return False
+    if frame.f_code.co_filename != threading.__file__:
+        return False
+    while frame is not None:
+        if frame.f_code.co_name == caller:
+            return True
+        frame = frame.f_back
+    return False

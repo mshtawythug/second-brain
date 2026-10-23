@@ -28,6 +28,7 @@ from __future__ import annotations
 import ast
 import functools
 import inspect
+import threading
 from pathlib import Path
 
 import pytest
@@ -435,3 +436,27 @@ def test_guard_still_flags_the_helper_under_narrowed_matching(case: str) -> None
     found = _scan_source(f"<{case}>", source)
 
     assert found[kind], f"true positive not flagged as {kind} ({case}): {found}"
+
+
+def _park(event: threading.Event, parked: threading.Event) -> None:
+    parked.set()
+    event.wait(WAIT_FOR_BACKSTOP_S)
+
+
+def test_blocked_in_wait_sees_a_thread_inside_a_wait_from_its_caller() -> None:
+    """True only while the thread sits in ``Event.wait`` under the named caller."""
+    release, parked = threading.Event(), threading.Event()
+    thread = threading.Thread(target=_park, args=(release, parked), daemon=True)
+    thread.start()
+    try:
+        assert parked.wait(WAIT_FOR_BACKSTOP_S), "fixture: the thread never started"
+        wait_for(lambda: thread_wait.blocked_in_wait(thread, "_park"))
+        other_caller = thread_wait.blocked_in_wait(thread, "_not_on_the_stack")
+    finally:
+        release.set()
+        thread.join(WAIT_FOR_BACKSTOP_S)
+
+    assert other_caller is False, "a caller that is not on the stack counted as the sleeper"
+    assert thread_wait.blocked_in_wait(thread, "_park") is False, (
+        "a finished thread still counted as blocked in a wait"
+    )

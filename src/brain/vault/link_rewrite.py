@@ -34,6 +34,7 @@ from typing import Any
 import psycopg
 import yaml
 
+from ..errors import describe_failure
 from ._atomic import atomic_write_text
 from .frontmatter import dump_frontmatter, parse_frontmatter
 from .links import ParsedLink, iter_wiki_links_with_spans
@@ -99,10 +100,11 @@ def rewrite_wiki_links(
         try:
             target = resolve_link(conn, parsed, exclude_doc_id=document_id)
         except psycopg.Error as e:
+            # Class only: a psycopg DETAIL can quote row values (CLAUDE.md logging rule).
             logger.warning(
                 "link rewrite: resolver failed on %s — leaving link alone: %s",
                 parsed.raw,
-                e,
+                describe_failure(e),
             )
             continue
         if target is None:
@@ -190,7 +192,7 @@ def rewrite_vault_links(
         logger.warning(
             "link rewrite: DB error rewriting %s — skipping: %s",
             file_path,
-            e,
+            describe_failure(e),  # class only, as above
         )
         return False
 
