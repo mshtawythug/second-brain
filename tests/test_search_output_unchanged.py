@@ -203,7 +203,13 @@ def test_mcp_brain_search_envelope_has_exactly_the_expected_keys(
     meta_keys = set(
         mcp_server.search_meta_json(SearchDiagnostics(), returned=0, facets=None)
     )
-    assert set(payload.keys()) == {"session_id", "results"} | meta_keys
+    # 2026-10-23 — the text-only fallback keys (plan
+    # docs/plans/2026-10-23-search-fts-fallback.md), derived from their helper
+    # for the same reason as ``meta_keys``.
+    fallback_keys = set(mcp_server.fallback_json(None))
+    assert set(payload.keys()) == (
+        {"session_id", "results"} | meta_keys | fallback_keys
+    )
 
 
 def test_mcp_result_objects_keep_exactly_seven_keys(

@@ -214,6 +214,13 @@ is the wrapper, its docstring and its error mapping (a non-UUID id, an empty lis
 or a live document -> ``INVALID_PARAMS``, any other ``GraphReconcileError`` ->
 ``INTERNAL_ERROR``), recorded inline above the tool.
 
+**And 2026-10-23 (text-only search fallback).** ``brain_search`` goes through
+:func:`brain.search_fallback.search_with_fts_fallback`, so a failed query embed
+returns text-only matches and four ``fallback*`` keys instead of
+``INTERNAL_ERROR``. The policy lives in that module; what grew here is the call,
+the merged keys and the tool docstring, recorded inline at the call. Plan:
+``docs/plans/2026-10-23-search-fts-fallback.md``.
+
 **Hazard this file has already been bitten by.** Every tool is a bare ``def``
 under a lone ``@mcp_app.tool()`` line, so inserting a helper between a decorator
 and the function it was written for silently moves the registration onto the
@@ -325,6 +332,7 @@ from .queries import (
 from .recall import recall
 from .resurface import resurface_docs
 from .search import SearchDiagnostics, build_tsquery, hybrid_search
+from .search_fallback import fallback_json, search_with_fts_fallback
 from .search_predicate import build_predicate
 from .sensitivity import is_confidential
 from .source_kinds import InvalidSourceKind, validate_source_kind
@@ -728,6 +736,16 @@ def brain_search(
       ``None`` (default) → both.
     - ``fts_only``: skip the local Ollama embed call (FTS-only mode).
 
+    **Text-only fallback (additive, 2026-10-23):** when the query embedding
+    cannot be computed (embedder down, timed out, misconfigured), the search
+    still runs, on full-text matching only, instead of failing. Four keys are
+    always present and ``null`` unless that happened: ``fallback``
+    (``"fts_only"``), ``fallback_reason`` (the failure's class, never its
+    message), ``fallback_transient`` (``true``: retry later; ``false``: a
+    configuration problem a retry will not fix) and ``fallback_note`` (one
+    line to relay to the user). ``fts_only`` is ``true`` too. Tell the user
+    the results are text-only when ``fallback`` is set.
+
     ``limit`` is capped at ``BRAIN_SEARCH_MAX_LIMIT`` (default 50, == the
     candidate-chunk limit): a larger value cannot surface more documents, and
     an uncapped one could return ~80k tokens. Above it the call is rejected
@@ -793,7 +811,12 @@ def brain_search(
             # the rows beside it is the exact defect the ``none`` bucket exists
             # to fix.
             source_kind, source_missing = _split_source_filter(source)
-            results = hybrid_search(
+            # Tenth growth (2026-10-23): an embed failure falls back to
+            # text-only instead of INTERNAL_ERROR, and the response says so.
+            # Policy in brain.search_fallback; plan
+            # docs/plans/2026-10-23-search-fts-fallback.md.
+            outcome = search_with_fts_fallback(
+                hybrid_search,
                 conn,
                 embedder=state.embedder,
                 query=query,
@@ -826,6 +849,7 @@ def brain_search(
                 updated_before=updated_before_dt,
                 sensitivity=_confidential_lens(include_confidential),
             )
+            results = outcome.results
             facet_data: SearchFacets | None = None
             if facets:
                 # Rebuilt from the same kwargs rather than widening
@@ -919,6 +943,7 @@ def brain_search(
         **search_meta_json(
             diagnostics, returned=len(results), facets=facet_data
         ),
+        **fallback_json(outcome.fallback),
     }
 
 

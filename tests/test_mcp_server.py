@@ -276,8 +276,9 @@ def test_brain_search_respects_filters(
 class _BoomEmbedder:
     """Embedder stub that always raises a OllamaEmbedError on ``embed``.
 
-    Used to assert each tool wraps embedder failures as ``MCPError`` rather
-    than letting a raw ``OllamaEmbedError`` propagate to the MCP runtime.
+    Used to assert no tool lets a raw ``OllamaEmbedError`` propagate to the MCP
+    runtime: the other tools wrap it as ``MCPError``, and ``brain_search``
+    falls back to text-only matching.
 
     ``dim`` is required by the Embedder Protocol; T2's query-embed LRU
     cache reads it to build its key before any ``embed`` call fires, so
@@ -296,17 +297,23 @@ class _BoomEmbedder:
         return 1
 
 
-def test_brain_search_wraps_embed_error(
+def test_brain_search_falls_back_on_embed_error(
     monkeypatch: pytest.MonkeyPatch,
     mcp_state: mcp_server._State,
 ) -> None:
-    """An embedder failure must surface as MCPError, never a raw OllamaEmbedError."""
+    """An embedder failure never escapes as a raw ``OllamaEmbedError``.
+
+    Until 2026-10-23 it surfaced as ``MCPError("embedding failed: ...")``. The
+    user then decided that search falls back to text-only matching instead
+    (plan docs/plans/2026-10-23-search-fts-fallback.md), so the call succeeds
+    and the failure is named by class in ``fallback_reason``, never by message.
+    Full coverage: tests/test_mcp_search_fallback.py.
+    """
     monkeypatch.setattr(mcp_state, "embedder", _BoomEmbedder())
-    with pytest.raises(MCPError) as exc_info:
-        mcp_server.brain_search(query="anything")
-    msg = exc_info.value.error.message
-    assert "embedding failed" in msg
-    assert "OllamaEmbedError" in msg
+    payload = mcp_server.brain_search(query="anything")
+    assert payload["fallback"] == "fts_only"
+    assert payload["fallback_reason"] == "OllamaEmbedError"
+    assert "rate limited" not in repr(payload)
 
 
 # ---------------------------------------------------------------------------

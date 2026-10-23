@@ -105,6 +105,20 @@ brain explain "platform migration tradeoffs" --verbose --json
 ID prefixes must be at least 6 hex characters and must uniquely identify one
 document. `--json` is the machine-readable path for agents or scripts.
 
+**When the embedder is unreachable, search falls back to text-only matching.**
+If the query embedding cannot be computed (Ollama not running, a timeout, a
+Voyage error, a model that was never pulled), `brain search` and `brain explain`
+still answer from full-text matching alone and print one line on stderr saying
+so; the exit code stays 0. The line names the failure by class only and tells a
+transient outage ("comes back when the embedder does") from a configuration
+problem a retry will not fix ("run 'brain doctor'"). The bare `--json` list keeps
+its shape; `--json --meta` adds `"fallback": "fts_only"`, `fallback_reason`,
+`fallback_transient` and `fallback_note` (all `null` on a normal search), and
+`brain explain` shows `matched_filters.fts_only: true`. MCP `brain_search`
+carries the same four keys. `brain eval` never falls back: a failed embed there
+is still a degraded row or an aborted run, so a baseline is never scored on a
+text-only ranking.
+
 `brain explain` runs the same query as `brain search` but prints per-result
 ranking diagnostics — FTS rank, vector cosine, RRF contributions, and the
 recency boost — so you can see *why* a result surfaced and in what order. Add

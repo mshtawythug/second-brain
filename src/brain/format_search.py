@@ -18,6 +18,7 @@ from rich.table import Table
 
 from .facets import SearchFacets
 from .search import SearchDiagnostics, SearchResult
+from .search_fallback import SearchFallback, fallback_json
 from .token_budget import TokenCost
 
 #: Printed instead of the facet panel when nothing matched.
@@ -254,6 +255,7 @@ def search_envelope_json(
     *,
     brief: bool = False,
     cost: TokenCost = len,
+    fallback: SearchFallback | None = None,
 ) -> dict[str, Any]:
     """Build the opt-in ``brain search --json --meta`` envelope.
 
@@ -274,10 +276,18 @@ def search_envelope_json(
     choice is made by comparing two ``cost`` readings, so an envelope measured
     in characters could pick a different artifact than a bare list measured in
     ``cl100k_base`` tokens — the same drift, one level down.
+
+    ``fallback`` adds the four ``fallback*`` keys from
+    :func:`brain.search_fallback.fallback_json`, always present and ``null``
+    when the search did not fall back to text-only. They sit before
+    ``results`` and are deliberately NOT in :func:`search_meta_json`: ``brain
+    ui`` shares that projection and does not fall back (plan
+    ``docs/plans/2026-10-23-search-fts-fallback.md``).
     """
     return {
         "query": query,
         **search_meta_json(diag, returned=len(results), facets=facets),
+        **fallback_json(fallback),
         "results": (
             search_results_brief_json(results, cost=cost)
             if brief

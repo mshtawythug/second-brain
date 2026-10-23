@@ -131,7 +131,7 @@ TTS backend still leaves the script behind.
 
 | Symptom | Cause | What to do |
 |---|---|---|
-| `ask` exits non-zero citing Ollama | Ollama is down | Say so, offer `brain search` via `consult-brain`. **Do not retry in a loop.** |
+| `ask` exits non-zero citing Ollama | Ollama is down | Say so, offer `brain search` via `consult-brain` (it falls back to text-only matching when the embedder is down, and says so). **Do not retry in a loop.** |
 | `ask --mode auto/fuse/local` errors | No AGE image / no built graph | Fall back to `--mode hybrid`. |
 | `audio --topic` finds no communities | `graphrag communities build` never ran | Route to `brain-graph` / `brain-maintenance`. |
 | `audio --person` finds no such person | Name is not in the graph | Report it plainly; do not guess spellings. |

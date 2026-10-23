@@ -176,6 +176,13 @@ def test_json_meta_envelope_shape(
         "embed_cached",
         "fts_only",
         "facets",
+        # 2026-10-23 — the text-only fallback (plan
+        # docs/plans/2026-10-23-search-fts-fallback.md). Always present, null
+        # unless the query embed failed and the search fell back.
+        "fallback",
+        "fallback_reason",
+        "fallback_transient",
+        "fallback_note",
         "results",
     }
     assert payload["query"] == "quarterly"
