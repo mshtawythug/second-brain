@@ -6,8 +6,9 @@
 **Parent specs:** [`2026-07-25-brain-ui-design.md`](./2026-07-25-brain-ui-design.md) (F14) and
 [`2026-08-10-wiki-to-ui-consolidation-design.md`](./2026-08-10-wiki-to-ui-consolidation-design.md).
 **Backlog entry:** `docs/plans/2026-10-23-backlog-reconciliation.md` §3, items 4 and 6.
-**Measured at:** `second-brain/master` `0bf3e36`. Every `file:line` below was read at that commit.
-Re-derive before relying on one; prefer the symbol to the line number.
+**Measured at:** `second-brain/master` `0bf3e36`. Every `file:line` below was read and re-checked at
+that commit (last checked in review round 1). Line numbers drift; where a symbol is named, trust the
+symbol over the number.
 
 ---
 
@@ -17,7 +18,7 @@ Re-derive before relying on one; prefer the symbol to the line number.
 |---|---|---|---|
 | D1 | Where does an ingest run? | On **one dedicated worker thread**, owned by an in-process `JobRegistry`. Never in a request handler, never on the event loop, never via Starlette `BackgroundTask`. | §4.1 |
 | D2 | Progress transport | **Polling** `GET /api/jobs/{id}?after=<seq>` over an append-only event log. No SSE in v1. | §4.3 |
-| D3 | Cancellation | **Cooperative.** Honoured while queued, during extraction, and between embedding batches, all of which come before any write. Refused with 409 once the write phase starts. | §4.4 |
+| D3 | Cancellation | **Cooperative.** Honoured while queued, after staging/validation, after extraction, and before each embedding batch, all of which come before any write. Extraction itself is not interruptible. Refused with 409 once the last batch has been embedded. A cancel the runner never gets to observe ends `succeeded` with a `cancel_too_late` event. | §4.4 |
 | D4 | Server restart | Jobs are **in memory only**: no migration, no job table. Re-submitting is safe because ingest is idempotent. Staged uploads are swept at startup. | §4.6 |
 | D5 | Concurrency | **One running job, at most four queued.** A fifth gets 429. One worker for every job kind, the future Agent tab included. | §4.5 |
 | D6 | v1 inputs | **Paste first** (text or markdown, no new surface). **File upload second**, as a raw `application/octet-stream` body, not multipart. **No URL ingest. No server-side path ingest.** | §3, §5 |
@@ -46,7 +47,7 @@ matters.
 | Origin must equal the bound origin; a missing Origin is refused; `Sec-Fetch-Site` must be same-origin when sent | `ui/security.py:207-219` | **Test + code** |
 | Host allowlist (anti-DNS-rebinding), outermost | `TrustedHostMiddleware` in `build_middleware` (`ui/security.py:228-243`) | **Test + code** |
 | `--read-only` blocks every non-safe method before routing | `ui/security.py:201-205` | **Test + code** |
-| One `innerHTML` in the whole front end (the server-rendered note body) | `tests/test_ui_static_behaviour.py:297` | **Test** |
+| One `innerHTML` in the whole front end (the server-rendered note body) | `check_single_innerhtml` (`tests/test_ui_static_behaviour.py:296`) | **Test** |
 | "No new runtime dependencies" | **Nothing mechanical.** No test reads `[project.dependencies]`; `tests/test_dev_dependency_pins.py` covers dev pins and the starlette floor only. | **Rule** (F14 binding decision 1; consolidation §2.1) |
 | Search delegates to `hybrid_search` | `ui/queries.py` docstring + review rule | **Rule** |
 | Full-corpus operations never run from a request handler | `notes_service.py:27-30` docstring + review rule | **Rule** |
@@ -66,7 +67,7 @@ rule "is *enforced*". What the consolidation spec §2.1 calls enforced is the **
   true of Starlette, but no endpoint here is sync. **Consequence:** an ingest run inside a handler
   would freeze every other request, including the job's own status polls, for tens of seconds or
   minutes. D1 follows from this.
-- **Per-request connections** from `UiContext.conn_factory`, in autocommit (`ui/server.py:374-398`).
+- **Per-request connections** from `UiContext.conn_factory`, in autocommit (`ui/server.py:373-396`).
   A job needs the same thing on its own thread.
 - **No lifespan today.** `create_app` builds `Starlette(routes=…, middleware=…, exception_handlers=…)`
   (`ui/app.py:188-197`). A worker thread needs startup and teardown, which Starlette's `lifespan=`
@@ -85,7 +86,12 @@ ingest in would cross the ceiling. So this spec amends the rule in the same PR t
 > `ingest_service.py` (ingest jobs). Both delegate to functions the CLI already owns. A route module
 > that writes, or a third mutator, is a review rejection.
 
-Both docstrings are updated to say so, and so is the F14 spec's §9.3 review rule.
+The same PR updates the docstrings of both modules, plus two rules stated elsewhere:
+
+- the F14 spec's §9.3 review rule ("reject any change that … writes a vault file outside
+  `notes_service.py`");
+- the consolidation spec's §2.3 ("Mutation is confined to one module, which delegates rather than
+  implements"), which restates the `notes_service.py`-only rule as binding.
 
 ---
 
@@ -111,12 +117,27 @@ preflight, so the server would be one Origin check away from cross-site writes. 
 `application/octet-stream` body is not CORS-safelisted, so the browser must preflight it, which
 keeps the property the JSON gate provides (§7.2).
 
-**C3 — The embed runs before the write transaction.** `_resolve_ingest_action` "performs only
-SELECTs, so the caller can short-circuit `skip` (no embed, no transaction, no enrich) and defer the
-embed for `update` / `insert` / `replace` until after the slow Ollama call has run unlocked"
-(`ingest/__init__.py:928-932`). **Consequence:** a cancellation raised from inside `embed()` aborts
-before anything is written. That is what makes cooperative cancel (D3) safe without changing
-`ingest_document`. §9 pins it with a test, so a future reordering turns the suite red.
+**C3 — The embed runs inside `ingest_document`, but before the write transaction, and the
+summary runs after the commit.** The order inside `_ingest_within_transaction` is:
+
+1. the read-only dedup decision (`_resolve_ingest_action`, which "performs only SELECTs",
+   `ingest/__init__.py:929-933`); a `skip` returns at once;
+2. chunking, then `_embed_chunks` (`:1201`), **before** `with conn.transaction():` opens (`:1209`);
+3. the INSERT/UPDATE of the document and its chunks, committed in one transaction;
+4. post-commit, in autocommit: the Krisp source hook, then the auto-summary as its own `UPDATE`
+   (`_enrich_post_ingest_hook`, `:1278-1298`).
+
+Back in `ingest_document`, the vault mirror is written after that (`regenerate_vault_file`, `:845`),
+and then graph sync if a syncer was passed. The docstring of `_ingest_within_transaction` states the
+same order (steps 2–4, `:1153-1162`).
+
+**The `ingest_document` docstring is stale on one point.** It says the summary is written "inside the
+same transaction" (`:690-693`). The code, and the inner docstring, run it after the commit. The
+backlog lists this as residue R-12.
+
+**Consequence:** a cancellation raised from inside `embed()` aborts before anything is written. That
+is what makes cooperative cancel (D3) safe without changing `ingest_document`. §9 pins it with a test,
+so a future reordering turns the suite red.
 
 **C4 — The pipeline is sequential-use only.** "This pipeline is safe for sequential CLI use only; a
 concurrent dual-INSERT of the same key still raises IntegrityError on the partial unique indexes"
@@ -125,7 +146,8 @@ memory one. A concurrent CLI ingest from another process can still collide, so �
 error.
 
 **C5 — Two duck-typed capability flags live on the embedder.** `is_hosted_embedder` reads
-`hosted_egress` via `getattr`, **defaulting to `False`** (`embeddings.py:521-541`). `_embed_chunks`
+`hosted_egress` via `getattr`, **defaulting to `False`** (`embeddings.py:521-547`, the `getattr` at
+`:547`). `_embed_chunks`
 reads `produces_embeddings` the same way (`ingest/__init__.py:513-548`). Neither flag is in the
 `Embedder` Protocol (`ingest/__init__.py:66-81`). **A progress wrapper that forwards only `dim`,
 `embed` and `count_tokens` would silently disable the F6 egress veto**: a confidential upload
@@ -154,7 +176,8 @@ refused to ship (§1.1 there). Rejected in §4.1.
 
 1. **Paste ingest.** A title, a body (text or markdown), optional tags, a content type from a fixed
    list, and a sensitivity of `normal` or `confidential`. It is ingested as an **ingested-tier**
-   document from source `manual`, the same pipeline as `brain ingest-stdin --source manual`.
+   document from source `manual`, through `ingest_document`, the pipeline every `brain ingest*`
+   uses. **The call shape is new** and is not `brain ingest-stdin` (§5.1).
 2. **File upload.** One file per job: `.md`, `.markdown`, `.txt`, `.pdf` or `.docx`, which is exactly
    `ingest._EXTRACTORS` (`ingest/__init__.py:2318-2324`). Upload by picker or drag and drop.
 3. **A job panel.** Live state, phase, chunk progress, elapsed time and cancel. The outcome links to
@@ -190,11 +213,14 @@ The tab's help text names the difference in one line, so a user who wants a note
 1. Pasting a body produces a document that appears in the tree under `_ingested/manual/`, is found
    by search, has a summary when the enricher is reachable, and opens from the job panel.
 2. Pasting the same body again reports **"Already in your brain"** with a link to the existing
-   document, and writes nothing.
+   document. It writes nothing, except the owed `_ingested/` file if the existing row's mirror is
+   missing (§5.4, `mirror_repaired`).
 3. Uploading each supported type works. An unsupported or mismatched file is refused **before**
    anything is staged on disk. An oversize file is refused on the stream.
-4. Cancel works at every cancellable point (§4.4) and writes nothing. After the write phase starts,
-   cancel is refused with a clear reason.
+4. Cancel works at every cancellable point (§4.4) and writes nothing. Once the last embedding
+   batch has returned, cancel is refused with a clear reason. A cancel that arrives on a path with
+   no later cancel point (§4.4, last table row) is reported as `cancel_too_late` on a job that
+   succeeded. It is never silently dropped.
 5. Killing the server mid-job and restarting it leaves no partial document and no staged file. The
    client says the job's outcome is unknown and that re-submitting is safe.
 6. Every security test in §9.3 passes. `--read-only` and non-loopback servers render the tab
@@ -240,7 +266,7 @@ class JobHandle(Protocol):              # what a runner sees
     def progress(self, phase: str, *, done: int | None = None, total: int | None = None) -> None: ...
     def note(self, code: str) -> None: ...
     def check_cancelled(self) -> None: ...   # raises JobCancelled
-    def enter_commit(self) -> None: ...      # from here on cancel is refused
+    def enter_commit(self) -> None: ...      # from here on cancel is refused (idempotent)
 
 Runner = Callable[[JobHandle], Mapping[str, Any]]
 
@@ -276,8 +302,9 @@ class JobRegistry:
 - **Starlette `BackgroundTask`**: C8.
 - **An `asyncio` task**: the work is synchronous psycopg plus httpx, so it would run on the loop
   and block it (§1.2).
-- **`run_in_threadpool` per job**: it is unbounded (anyio's default limiter is 40 threads), it does
-  not track the job, and it cannot be cancelled.
+- **`run_in_threadpool` per job**: it shares anyio's global 40-thread limiter with every other
+  threadpool call in the process. The job would be untracked and uncancellable, and one long ingest
+  would hold a slot the watcher probe (`routes_meta.py:68`) also draws from.
 - **`multiprocessing`**: memory. A second process reloads tiktoken, psycopg and the extractors, which
   is the wrong trade on a swap-pressured machine (memory note on parallel-agent contention).
 - **A jobs table**: D4.
@@ -293,11 +320,27 @@ class JobRegistry:
                                          check_cancelled()
 ```
 
-- `cancellable` is true while queued, and while running **until** `enter_commit()` is called.
+- `cancellable` is true while queued, and while running **until** `enter_commit()` is called. The
+  registry sets it to **false on every terminal state** (`succeeded`, `failed`, `cancelled`),
+  whoever called what. So no terminal snapshot can claim it is still cancellable.
+- **A cancel that is never observed.** If a cancel was requested (202, §4.4) and the runner then
+  returns normally without passing another `check_cancelled()`, the registry finalizes the job as
+  `succeeded`. It appends one event with `code: "cancel_too_late"`, so the client can say "it
+  finished before it could stop" instead of reporting either silent success or a false cancel.
 - **Retention:** terminal jobs stay for `retain_for = 1 h`, at most `retain = 50`, evicted oldest
   first. Eviction runs on submit and on list, never on a timer.
 - **The event log is capped at 200 events per job.** Embedding progress is coalesced to at most one
-  event per batch, so a 2,000-chunk PDF at batch size 16 emits about 125 events.
+  event per batch, so a 2,000-chunk PDF at batch size 16 emits about 125 events. The cap holds even
+  for larger inputs:
+  - **Event kinds.** An event with a `code` (`secret_findings`, `cancel_too_late`, …) is
+    *notable*. A `progress` event without one is *progress*.
+  - **Never dropped:** notable events, the first event of each phase, and the latest progress event.
+  - **At the cap:** the oldest *progress* event that is not the first of its phase is removed, so the
+    newest event always survives.
+  - **Polling across a gap.** `seq` numbers are never reused or renumbered, so a gap is allowed: a
+    client polling `after=<seq>` gets every surviving event with a higher `seq`. Progress events are
+    cumulative (`done` / `total`), so one dropped from the middle loses nothing a later event does
+    not restate.
 
 ### 4.3 Progress transport (D2): polling
 
@@ -337,18 +380,36 @@ mutation. It is idempotent.
 | queued | 200, `state: "cancelled"` | Removed from the queue. It never runs. |
 | running, before `enter_commit()` | 202, `state: "running"`, `cancel_requested: true` | A flag is set. The runner raises `JobCancelled` at its next `check_cancelled()`, and the job ends `cancelled`. |
 | running, after `enter_commit()` | 409 `not_cancellable` | Nothing. The job finishes. The message says writing has started. |
+| running, before `enter_commit()`, on a path with **no later cancel point** | 202, `cancel_requested: true` (the server cannot know yet that no check is left) | The runner finishes and the job ends **`succeeded`** with a `cancel_too_late` event (§4.2). The panel says what was written. On a **skip**, the mirror repair may still write the owed `_ingested/` file of the existing row. That file is the only thing a skip can write. |
 | terminal | 200, the unchanged snapshot | Nothing. |
 
 **Cancel points in an ingest runner**, in order, each one before the write transaction (C3):
 
 1. on pick-up;
 2. after staging (upload) or validation (paste);
-3. after extraction;
+3. after extraction (`extract_path`). The extraction itself is **not interruptible**: pdfplumber on a
+   large PDF can run for seconds, and the cancel waits for it;
 4. **inside the progress embedder, before each batch** (§5.3), which covers the long phase.
 
-`enter_commit()` is called by the progress embedder **after the last batch returns**. From that
-point `ingest_document` opens its transaction, enriches inside it (`R6` in the Q1-D plan: 3–8 s
-against Ollama), commits, and writes the mirror. None of that is interrupted.
+**One design for when cancel stops being possible: the progress embedder's last batch.** This is
+the design chosen, not the alternative of an explicit pre-write hook point. The runner calls
+`handle.check_cancelled()` (point 3) and then `ingest_document` directly. It does **not** call
+`enter_commit()` first: that pre-call would close the cancel window before the embed and make
+point 4 unreachable. `enter_commit()` is called **only** by the progress embedder, after its last
+batch returns. From there `ingest_document` opens its transaction, commits, runs the post-commit
+summary (an autocommit `UPDATE`, one Ollama chat call; C3), then writes the mirror. None of that is
+interrupted.
+
+**Three paths make no embed call, so point 4 never runs and `enter_commit()` is never called:**
+
+- a dedup `skip`;
+- `produces_embeddings = False`;
+- the F6 egress veto (`_embed_chunks`, `ingest/__init__.py:541-544`).
+
+On these paths, a cancel that arrives after point 3 is the "no later cancel point" row above. It
+ends `succeeded` with `cancel_too_late`. The alternative, an extra hook inside `ingest_document`
+just before its transaction, was rejected. It would change an over-ceiling 2,369-line module for a
+window that lasts milliseconds on these paths: none of them makes an Ollama embed call.
 
 **`JobCancelled` must propagate through `ingest_document`.** It derives from `BrainError`, not from
 `EmbedError`, so no handler in the pipeline that maps embed failures can swallow it. A test (§9.2)
@@ -395,8 +456,10 @@ added**: the G1 allowlist has a reason per entry, and this path does not need a 
 
 1. Refuse new submits (503 `shutting_down`), and move queued jobs to `cancelled`.
 2. Request cancel on the running job.
-3. Join for up to 10 s. A job before its commit point exits at its next batch, which is well under
-   10 s at batch 16. A job in its write phase usually finishes, since enrichment is one model call.
+3. Join for up to 10 s. A job that is embedding exits at its next batch: one 16-text embed call,
+   normally a few seconds. A job still inside `extract_path` or in its post-commit summary call
+   cannot be interrupted, and either can outlast 10 s on a large PDF or a cold model. Step 4 exists
+   for those.
 4. If the join times out, print one line naming the job id: "its outcome is unknown. Re-submit to be
    sure; identical content is a no-op." The daemon thread dies with the process. A transaction in
    flight rolls back, so the document is atomic.
@@ -407,11 +470,13 @@ added**: the G1 allowlist has a reason per entry, and this path does not need a 
 |---|---|---|
 | queued, staging, extracting, embedding | Nothing in the DB. A staged file, maybe. | The startup sweep (§7.4) deletes staged files. Re-submit. |
 | the write transaction | Nothing. It rolls back. | Re-submit. |
-| after commit, before the mirror | A row with `vault_path IS NULL` | Re-submit. The orphan repair (#23, `ingest/__init__.py:813-837`) writes the owed mirror and reports `mirror_repaired`. |
+| the post-commit summary call | A committed row with `summary IS NULL` **and** `vault_path IS NULL`, because the mirror is written after the summary (C3) | Re-submit is a dedup `skip`. The skip returns before the summary hook, so it **never enriches**, but the orphan repair (#23, `ingest/__init__.py:829-849`) writes the owed mirror and reports `mirror_repaired`. The summary is recovered by `brain enrich --backfill`. The panel's summary status (§5.4) shows "pending" and names that command. |
+| after the summary, before the mirror | A row with its summary, and `vault_path IS NULL` | Re-submit. The orphan repair writes the owed mirror and reports `mirror_repaired`. |
 | after the mirror | A complete document | Re-submit reports "Already in your brain". |
 
 Every row ends at "re-submit", and **every re-submit is safe** because both input types dedup on
-content (§5.4). The client stores the ids of jobs it submitted in `sessionStorage`. A poll that gets
+content (§5.4). The one thing a re-submit does not redo is a lost summary, which has its own
+backfill command. The client stores the ids of jobs it submitted in `sessionStorage`. A poll that gets
 404 `job_unknown` renders the sentence above, not a generic error. `sessionStorage` is read in
 `try`, as the house rule for browser storage requires. Without it, the panel simply starts empty.
 
@@ -458,13 +523,29 @@ request is a 400, not a failed job:
 - `enrich`: a boolean, default `true` (§12 Q2).
 
 The runner builds the document with `ingest.stdin.make_doc(content=…, title=…, content_type=…,
-metadata={"ingested_via": "ui"})`, then calls `ingest_document(conn, embedder=<progress embedder>,
-doc=…, source_kind="manual", source_external_id=None, tags=…, vault_root=cfg.vault_path,
-enricher=…, enrich=…, enrich_min_tokens=cfg.enrich_min_tokens, graph_syncer=None,
-secret_guard=cfg.secret_guard, allow_secrets=False, sensitivity=…)`. These are the same arguments as
-`brain ingest-stdin` (`cli_ingest.py:496-513`), minus the Krisp-only `gws_runner`. With
-`source_external_id=None` and no source metadata, `_upsert_source` returns `None`
-(`ingest/__init__.py:487-488`), and dedup takes the content-hash path (rule 4).
+metadata={"ingested_via": "ui"})`, then calls:
+
+```python
+ingest_document(conn, embedder=<progress embedder>, doc=…, source_kind="manual",
+                source_external_id=None, tags=…, vault_root=cfg.vault_path,
+                enricher=…, enrich=…, enrich_min_tokens=cfg.enrich_min_tokens,
+                graph_syncer=None, secret_guard=cfg.secret_guard,
+                allow_secrets=False, sensitivity=…)
+```
+
+**This is a new call shape, not `brain ingest-stdin`'s**, and the differences are deliberate:
+
+| | `brain ingest-stdin` (`cli_ingest.py:399-513`) | UI paste |
+|---|---|---|
+| External id | **Required** (`--external-id`, `:403-405`), so dedup keys on `(kind, external_id)` (rule 3) | **None**, so `_upsert_source` returns `None` (`ingest/__init__.py:487-488`) and dedup is **by content hash** (rule 4): an identical body is a skip |
+| `source_metadata` | The `--metadata` blob | **None**: no `sources` row is written at all |
+| `force` | `--force` | Never (§3.2) |
+| Graph sync | `graph_syncer=_build_graph_syncer(cfg)` | `None` (D9) |
+| Agent attribution | `resolve_agent_id(--agent, cfg)` into `metadata.agent_id` (F10) | **None.** The UI is a *surface*, not an agent. F10 keeps the two axes apart (`agent.py` docstring), and the surface is recorded instead |
+| `gws_runner` | Only for `--source krisp` | Never |
+
+**Document metadata, decided:** exactly `{"ingested_via": "ui"}` for a paste, plus
+`original_filename` for an upload (§5.2). Nothing else is copied from the request.
 
 ### 5.2 File upload
 
@@ -480,10 +561,17 @@ There are two requests, so the JSON-only gate stays intact for everything except
 
 The runner calls `extract_path(staged_path)`. The staged file is named
 `<staging-dir>/<upload_id>/<sanitized-stem><ext>`, so the extractors' `Path.stem` title (C6) is the
-user's filename, not a random token. Then it applies
-`replace(doc, source_path=None, metadata={**doc.metadata, "ingested_via": "ui", "original_filename":
-<sanitized basename>})`, a new `ExtractedDoc` that never mutates the old one. Then it calls
-`ingest_document` exactly as in §5.1.
+user's filename, not a random token. Then it builds a new `ExtractedDoc`, never mutating the old
+one:
+
+```python
+replace(doc, title=spec.title or doc.title, source_path=None,
+        metadata={**doc.metadata, "ingested_via": "ui",
+                  "original_filename": <sanitized basename>})
+```
+
+The optional `title` from `POST /api/ingest/file` therefore overrides the extracted one, validated
+like a paste title (1–200 characters). Then it calls `ingest_document` exactly as in §5.1.
 
 **Why `source_path=None`.** File-based dedup keys on `source_path` (`ingest/__init__.py:628-637`). A
 staging path is meaningless after the job and would differ per upload, so dedup would never fire,
@@ -511,10 +599,10 @@ dedups on the hash of the extracted text, which is the property §3.4 item 2 nee
   concatenated vectors. Slicing does not change any vector: every backend embeds each text
   independently.
 - **No embed call at all** happens for a `skip` (dedup), under `produces_embeddings=False`, or under
-  the egress veto (`_embed_chunks`, `ingest/__init__.py:541-544`). The runner therefore calls
-  `enter_commit()` itself right before `ingest_document`, and the wrapper's call is idempotent.
-  **Correction folded in:** without that first call, a skip would end with `cancellable` still true
-  after the work had finished.
+  the egress veto (`_embed_chunks`, `ingest/__init__.py:541-544`). On these paths `enter_commit()` is
+  never called. The runner **must not** call it before `ingest_document`, because that would close
+  the cancel window before point 4 on every path (§4.4). The registry's terminal transition sets
+  `cancellable=false` (§4.2), and an unobserved cancel ends as `cancel_too_late`.
 
 The job builds **its own** embedder and enricher once per worker thread, with
 `embeddings.make_embedder(cfg)` (`embeddings.py:550`) and `enrichment.make_enricher(cfg)`
@@ -525,7 +613,7 @@ the CLI's `_build_*` helper, which lives in a Typer module the UI must not impor
 ### 5.4 Outcome mapping, dedup and what the user sees
 
 The CLI already maps an `IngestResult` to a verb in `cli_ingest._ingest_outcome_verb`
-(`cli_ingest.py:203-238`), but the UI cannot import a Typer module. **Extract it** into a new pure
+(`cli_ingest.py:203-240`), but the UI cannot import a Typer module. **Extract it** into a new pure
 module `brain/ingest/outcome.py`:
 
 ```python
@@ -557,7 +645,9 @@ Plus three notices, which can stack:
 - **The egress notice** (`IngestResult.egress_notice`), when the veto fired: "findable by full-text
   search only".
 - **Summary status**, read back from `documents.summary` after the job. `IngestResult` does not
-  report enrichment, and enrichment failure is deliberately non-fatal (`ingest/__init__.py:690-700`).
+  report enrichment, and enrichment failure is deliberately non-fatal: it runs after the commit, and
+  "a post-commit enrichment failure leaves the committed document with `summary IS NULL`"
+  (`ingest/__init__.py:1159-1162`).
   It shows "summary: written", "skipped (short or disabled)", or "pending: run
   `brain enrich --backfill`".
 
@@ -588,11 +678,17 @@ a path.
   write lock (PR #53). Running it in the job would make the job minutes long, uncancellable after
   commit, and a direct competitor of the watcher's `GraphLane` for that lock. When the watcher is
   running, its `sync_one_file` on the new mirror calls `graph_syncer.reconcile` through the watcher's
-  lane (`vault/sync.py:449-455`). The result panel reads the existing watcher probe
-  (`GET /api/watcher`): if the watcher is running it says "graph: queued (watcher)", otherwise "graph:
-  not synced; run `brain graphrag build --backfill`". **Phase 1 must verify** with a test that a
-  `sync_one_file` over a freshly written `_ingested/` mirror reaches `reconcile`, rather than
-  inheriting this claim.
+  lane (`vault/sync.py:449-455`). The result panel shows one of three states:
+  - **"graph: disabled"** when `cfg.graph_enabled` is false. That is the default
+    (`graph_enabled: bool = DEFAULT_GRAPH_ENABLED`, `config.py:1126`). The watcher then builds no
+    `GraphLane` (`vault/watch.py:285`) and nothing will sync the graph.
+  - **"graph: queued (watcher)"** when the graph is enabled and the existing watcher probe
+    (`GET /api/watcher`) reports the watcher running.
+  - **"graph: not synced; run `brain graphrag build --backfill`"** when the graph is enabled but no
+    watcher is running.
+
+  **Phase 1 must verify** with a test that a `sync_one_file` over a freshly written `_ingested/`
+  mirror reaches `reconcile`, rather than inheriting this claim.
 
 ---
 
@@ -608,7 +704,7 @@ route declares its methods explicitly, so Starlette answers 405 for anything els
 | POST | `/api/ingest/paste` | JSON §5.1 | 202 `JobSnapshot` | 400 on validation, 413 `body_too_large`, 429 `queue_full`. |
 | POST | `/api/ingest/uploads` | **octet-stream** + `X-Brain-Filename` | 201 `{upload_id, size, kind}` | 400 `bad_filename`, 413 `upload_too_large`, 415 `unsupported_file` (extension or sniff), 429 `staging_full`. **The only route that accepts a non-JSON body** (§7.2). |
 | POST | `/api/ingest/file` | JSON `{upload_id, tags?, sensitivity?, enrich?, title?}` | 202 `JobSnapshot` | 404 `upload_unknown` (also for an expired upload: staged files live 15 min), 429 `queue_full`. |
-| DELETE | `/api/ingest/uploads/{upload_id}` | — | 204 | Discards a staged file the user removed before submitting. |
+| DELETE | `/api/ingest/uploads/{upload_id}` | JSON `{}` | 200 `{upload_id, deleted: true}` | Discards a staged file the user removed before submitting. It takes a JSON body because the middleware refuses any non-safe method without one (415, `ui/security.py:221-225`), and it answers with JSON because `api.js` treats an unparseable 2xx as `malformed_response`: "there is no 204 and no empty-body 200" (`js/api.js:35-42`). Same shape as cancel. An unknown id, including one already deleted or expired, is 404 `upload_unknown`. |
 | GET | `/api/jobs` | — | 200 `{jobs: [JobSnapshot without events]}` | Recent jobs, newest first. |
 | GET | `/api/jobs/{id}?after=<seq>` | — | 200 `JobSnapshot` | 404 `job_unknown`. |
 | POST | `/api/jobs/{id}/cancel` | JSON `{}` | 200 / 202 | 409 `not_cancellable` (§4.4). |
@@ -638,7 +734,10 @@ Ingest is refused unless **all** of these hold:
    `ingest_enabled = loopback and not read_only` (`ui/server.py:371` already computes
    `loopback`). The ingest routes check it and answer 403 `ingest_requires_loopback`. The check is
    in the route, not the middleware, because it is about which routes exist on this bind, not about a
-   request's shape. A test pins it on every ingest route.
+   request's shape. A test pins it on **every ingest mutation route** (every POST and DELETE under
+   `/api/ingest/` and `/api/jobs/`). The GETs stay readable: `GET /api/ingest/config` answers 200 with
+   `reason: "requires_loopback"`, which is how the tab knows to render disabled, and the job GETs are
+   pure reads.
 3. **The registry exists**, which it always does in production.
 
 **Why loopback-only.** On a `--lan` bind the only guard is the token, and ingest is the largest cost
@@ -680,7 +779,8 @@ Why this preserves the CSRF argument:
 
 | Input | Cap | Where enforced |
 |---|---|---|
-| `/api/ingest/paste` body | 2 MiB + 4 KiB of JSON overhead | `Content-Length` precheck (413 before reading), **then** a byte counter over `request.stream()` that aborts at the cap. The route never calls `request.body()` (C7). |
+| `/api/ingest/paste`, **on the wire** | **6 × 2 MiB + 4 KiB** (12 MiB + 4 KiB) | `Content-Length` precheck (413 before reading), **then** a byte counter over `request.stream()` that aborts at the cap. The route never calls `request.body()` (C7). The multiplier is the worst case of JSON escaping: one control character becomes `\u00XX`, six bytes for one, so a legitimate body of just under 2 MiB can be up to 6× larger on the wire. Each `"` and `\` costs 2×, and a UTF-16 surrogate pair escaped as two `\uXXXX` sequences costs 12 bytes for 4 (3×). A wire cap of 2 MiB + 4 KiB would refuse legitimate pastes heavy in newlines or quotes. |
+| `/api/ingest/paste`, **decoded body** | **2 MiB** of UTF-8 | After `json.loads`, the `body` string's UTF-8 length is checked, giving 413 `body_too_large`. This is the cap the user-facing limit names. |
 | Upload, `.pdf` / `.docx` | 25 MiB | Same: the `Content-Length` precheck, then a counter while streaming to the staging file. The partial file is deleted on abort. |
 | Upload, `.md` / `.markdown` / `.txt` | 5 MiB | Same. |
 | Total staged | 64 MiB | Checked before streaming starts, from `Content-Length`. Re-checked by the counter. |
@@ -689,9 +789,10 @@ A missing `Content-Length` (chunked transfer) is allowed. The stream counter alo
 
 ### 7.4 Files on disk
 
-- **Staging root.** `tempfile.mkdtemp(prefix="brain-ui-ingest-")` once per server, mode `0700`, with
-  one subdirectory per `upload_id` (uuid4 hex, server-generated). Nothing the client sends becomes a
-  directory name.
+- **Staging root.** `tempfile.mkdtemp(prefix=f"brain-ui-ingest-{os.getpid()}-")` once per server
+  process, mode `0700`, with one subdirectory per `upload_id` (uuid4 hex, server-generated). Nothing
+  the client sends becomes a directory name. The **pid in the prefix** is what makes the startup
+  sweep safe (Lifetime, below).
 - **Filename.** `X-Brain-Filename` is percent-decoded, reduced to its final component (anything up to
   the last `/` or `\` is dropped), stripped of control characters and leading dots, and capped at 120
   characters. Its extension must be in `ingest.supported_extensions()`. An empty or dot-only result is
@@ -708,9 +809,16 @@ A missing `Content-Length` (chunked transfer) is allowed. The stream counter alo
   `zipfile.ZipInfo`, without extracting.
 - **Lifetime.** A staged file is deleted when its job reaches a terminal state, when
   `DELETE /api/ingest/uploads/{id}` is called, or after 15 minutes unsubmitted (checked on each
-  upload and submit). At startup, `brain-ui-ingest-*` directories in the temp root older than one hour
-  are removed. The age gate keeps a second `brain ui` instance on another port from losing its live
-  uploads.
+  upload and submit). **At startup, the sweep chooses roots by pid, not by age.** For each
+  `brain-ui-ingest-<pid>-*` root in the temp directory, the sweep checks whether `<pid>` is alive
+  (`os.kill(pid, 0)`; `ProcessLookupError` means it is dead). It removes the root only when the pid is
+  dead and is not this process's own. A live second `brain ui` instance on another port keeps its
+  root, however old its uploads are. An age gate was rejected: a long-lived instance's root is older
+  than any age threshold you could pick.
+  
+  **Failure direction.** If the OS has reused a dead instance's pid for an unrelated process, the
+  stale root survives until that pid dies too. Leftover files are left behind; live uploads are never
+  deleted. A root whose name carries no parseable pid is left alone.
 
 ### 7.5 Content handling
 
@@ -727,7 +835,7 @@ A missing `Content-Length` (chunked transfer) is allowed. The stream counter alo
 - **Logging.** INFO lines carry the job id, kind, outcome and document id only, never the title or
   filename. CLAUDE.md allows titles at INFO, but a filename is often more revealing than a title, and
   ids are enough to correlate. Failures are logged with `describe_failure` (§4.5). Access logging
-  stays off (`access_log=False`, `ui/server.py:547-549`).
+  stays off (`access_log=False`, `ui/server.py:547-548`).
 - **CSP is unchanged.** The tab needs no new directive: `connect-src 'self'` covers fetch, and the
   file input and drag and drop need nothing extra.
 
@@ -736,7 +844,8 @@ A missing `Content-Length` (chunked transfer) is allowed. The stream counter alo
 ## 8. Front end
 
 Constraints carried over from F14 §4: no framework, no bundler, no CDN, single-responsibility ES
-modules, one `innerHTML` in the whole app (`test_ui_static_behaviour.py:297`), and an offline tree.
+modules, one `innerHTML` in the whole app (`check_single_innerhtml`,
+`tests/test_ui_static_behaviour.py:296`), and an offline tree.
 
 | Path | Purpose | Est. LOC |
 |---|---|---|
@@ -747,8 +856,10 @@ modules, one `innerHTML` in the whole app (`test_ui_static_behaviour.py:297`), a
 | `index.html` | `#tab-ingest`'s "Deferred" panel (`index.html:158-169`) is replaced by the tab's markup: semantic `<form>`, `<fieldset>`, a `<label>` on every control, and an `aria-live="polite"` job list. | ±60 |
 
 - **`api.js` today always sets `Content-Type: application/json` when there is a body**
-  (`js/api.js:21`). `upload.js` therefore does not go through `api()`. It reuses the module's token
-  accessor, which is exported for this purpose, so token handling stays in one module.
+  (`js/api.js:21`). `upload.js` therefore does not go through `api()`. **Today `api.js` has no token
+  accessor:** `let token` is module-private (`:12`) and the module's only export is `api` (`:18`).
+  Phase 3 adds and exports `getToken()` from `api.js`. `upload.js` imports it, so the token is still
+  read from the fragment, held and stripped in exactly one module.
 - **Packaging needs no change.** `static/js/*.js` and `static/css/*.css` are already declared, and
   `test_ui_static_assets.py::test_every_shipped_asset_matches_a_declared_glob` proves the new files
   ship.
@@ -768,7 +879,8 @@ modules, one `innerHTML` in the whole app (`test_ui_static_behaviour.py:297`), a
 ## 9. Testing
 
 All tests follow the existing UI pattern (`tests/test_ui_*.py`). They use a real Postgres at
-`postgresql://brain:brain@localhost:5434/second_brain_test`, `FakeEmbedder` (`tests/conftest.py:927`),
+`postgresql://brain:brain@localhost:5434/second_brain_test`, `FakeEmbedder` (`class FakeEmbedder`,
+`tests/conftest.py:927`),
 a `tmp_path` vault, and `create_app(UiContext(...))` as the only injection seam. There is **no
 monkey-patching of production modules** (CLAUDE.md rule 13). **No test, reviewer or auditor connects
 to port 55432**, including for reads (the memory note on audits).
@@ -777,7 +889,7 @@ to port 55432**, including for reads (the memory note on audits).
 
 | File | Covers |
 |---|---|
-| `tests/test_ui_jobs.py` | State machine; `run_next` ordering (FIFO); `queue_full` at 5; cancel in each state (§4.4 table); `enter_commit` makes cancel return `not_cancellable`; `after=` slicing; the 200-event cap; retention by count and by age using an injected clock; snapshots are frozen and are copies (mutating a returned tuple is impossible, and a later event does not appear in an old snapshot); `stop()` with a runner blocked on a `threading.Event` returns its id after the timeout. The last case is the only one that starts a thread, and it waits on the event, never on a sleep. |
+| `tests/test_ui_jobs.py` | State machine; `run_next` ordering (FIFO); `queue_full` at 5; cancel in each state (§4.4 table); `enter_commit` makes cancel return `not_cancellable`; **`cancellable` is false in every terminal snapshot**, including a runner that never called `enter_commit`; **`cancel_too_late`**: a runner that calls `registry.cancel(job_id)` on itself (202) and then returns without another `check_cancelled()` ends `succeeded` with exactly one `cancel_too_late` event; the event-cap policy of §4.2 (notable events and each phase's first event survive, `seq` is never reused, `after=` across a gap returns every surviving later event); `after=` slicing; the 200-event cap; retention by count and by age using an injected clock; snapshots are frozen and are copies (mutating a returned tuple is impossible, and a later event does not appear in an old snapshot); `stop()` with a runner blocked on a `threading.Event` returns its id after the timeout. The last case is the only one that starts a thread, and it waits on the event, never on a sleep. |
 | `tests/test_ingest_outcome.py` | `classify` over every `IngestResult` shape `_ingest_outcome_verb` handles today, and the CLI's verbs re-derived from it. The existing CLI ingest tests stay green, unmodified, which proves the extraction changed nothing. |
 | `tests/test_ui_upload_names.py` | The filename sanitizer table from §7.4, plus the extension allowlist read from `supported_extensions()`, not restated. |
 
@@ -785,8 +897,8 @@ to port 55432**, including for reads (the memory note on audits).
 
 | File | Covers |
 |---|---|
-| `tests/test_ui_ingest_service.py` | Paste → row, chunks and a mirror under `_ingested/manual/`; outcome `ingested`. Same paste again → `skipped` with the same id and no new rows. A cancel raised mid-embed by a gated fake (blocks on an `Event`, then the test cancels and releases) → no `documents`, `chunks` or `sources` row and no mirror file (C3). **Hosted fake + confidential** → NULL embeddings + `egress_notice` (C5). **`produces_embeddings=False` fake** → NULL embeddings, no `embed()` call. Secret guard: `warn` → masked findings; `reject` → `secret_guard_rejected` and nothing written. A whitespace-only extraction → `empty`. A mirror that fails (a read-only vault dir) → the job succeeds, and a re-submit → `mirror_repaired`. `sync_one_file` over the new mirror reaches `reconcile` on a recording `GraphSyncTarget` (§5.6 verification). |
-| `tests/test_ui_ingest_upload.py` | Each extension round-trips. A sniff mismatch for each type → 415 and the file deleted. The zip-bomb guard. Stream caps: a body over the cap with an honest `Content-Length` → 413 before reading; with a lying or absent `Content-Length` → 413 mid-stream and the partial file deleted. The staging budget → 429. Expiry and `DELETE`. The startup sweep respects the age gate. |
+| `tests/test_ui_ingest_service.py` | Paste → row, chunks and a mirror under `_ingested/manual/`; outcome `ingested`. Same paste again → `skipped` with the same id and no new rows. **Mid-embed cancel, run through the `run_next` seam on the test thread with no second thread:** a fake embedder whose second `embed()` call itself calls `registry.cancel(job_id)` before it returns. The progress embedder's next `check_cancelled()` raises, so the job ends `cancelled`, with no `documents`, `chunks` or `sources` row and no mirror file (C3). **A cancel too late, on a no-embed path:** a `produces_embeddings = False` fake whose `count_tokens`, called by the chunker after point 3, calls `registry.cancel(job_id)`. No later cancel point exists, so the job ends `succeeded` with `cancel_too_late` and the document is written (§4.4, the "no later cancel point" row). The skip variant of that row (the mirror repair may still write) is covered in two halves: the registry's `cancel_too_late` finalization is tested in `test_ui_jobs.py`, and a skip over a row with `vault_path` set to NULL reports `mirror_repaired` here. A dedup skip calls nothing on the injected embedder, so no in-thread seam can land a cancel inside it. **Killed during the summary:** a fake enricher that raises after the commit → `summary IS NULL`; a re-submit is a skip that reports `mirror_repaired` when the mirror is owed and leaves `summary` NULL (§4.6). **Hosted fake + confidential** → NULL embeddings + `egress_notice` (C5). **`produces_embeddings=False` fake** → NULL embeddings, no `embed()` call. Secret guard: `warn` → masked findings; `reject` → `secret_guard_rejected` and nothing written. A whitespace-only extraction → `empty`. A mirror that fails (a read-only vault dir) → the job succeeds, and a re-submit → `mirror_repaired`. `sync_one_file` over the new mirror reaches `reconcile` on a recording `GraphSyncTarget` (§5.6 verification). |
+| `tests/test_ui_ingest_upload.py` | Each extension round-trips. A sniff mismatch for each type → 415 and the file deleted. The zip-bomb guard. Stream caps: a body over the cap with an honest `Content-Length` → 413 before reading; with a lying or absent `Content-Length` → 413 mid-stream and the partial file deleted. The staging budget → 429. Expiry and `DELETE` (JSON `{}` body, 200 JSON response). The startup sweep removes a root whose pid is dead, and keeps this process's own root, a root whose pid is alive (the test uses its own parent's pid), and a root with no parseable pid. |
 | `tests/test_ui_ingest_routes.py` | The §6 contract: status codes, envelopes, `ingest/config` in each mode, and `health.ingest_enabled`. |
 
 ### 9.3 Security tier (extends `tests/test_ui_security.py`)
@@ -796,8 +908,10 @@ to port 55432**, including for reads (the memory note on audits).
 - Cross-origin, missing-Origin and `Sec-Fetch-Site: cross-site` requests on both upload and paste
   get 403. A foreign Host gets 400.
 - `--read-only` → 403 on every ingest POST/DELETE. GETs are allowed.
-- Non-loopback context → 403 `ingest_requires_loopback` on every ingest route, even with a valid
-  token.
+- Non-loopback context → 403 `ingest_requires_loopback` on **every ingest mutation route** (every
+  POST and DELETE under `/api/ingest/` and `/api/jobs/`), even with a valid token. The routes are
+  enumerated from `app.routes`. On the same context, `GET /api/ingest/config` answers 200 with
+  `reason: "requires_loopback"`, and the job GETs answer normally.
 - The GET-cannot-mutate table, extended with the new routes.
 - **Mutation proof.** Each new guard is mutated (the exception widened to a prefix; the loopback
   check removed; the `hosted_egress` forward dropped) in a `git archive` copy, never the live
@@ -808,7 +922,9 @@ to port 55432**, including for reads (the memory note on audits).
 
 `tests/test_ui_browser_ingest.py`: paste → the panel shows progress → "Added" → the link opens the
 note in Notes. Paste again → "Already in your brain". Upload a small `.md` through the file input.
-Cancel a job held by a gated fake embedder. The read-only server renders the disabled reason.
+Cancel a job held by a gated fake embedder. This is the one cancel test that uses the real worker
+thread: the browser clicks Cancel while the fake blocks inside `embed()`, then the test releases it.
+The read-only server renders the disabled reason.
 Keyboard only, both themes. **The new module must be added to the explicit, byte-ordered path list
 in `.github/workflows/ci.yml`** ("Run the browser harness"). `tests/test_ci_workflow.py` discovers
 the roster by marker and fails if it is missing, which is the intended trip-wire.
@@ -830,7 +946,7 @@ job, and each runs the rule-14 review plus audit loop until both pass clean.
 |---|---|---|---|
 | **1. Jobs + paste backend** | `ui/jobs.py`; `ui/ingest_limits.py`; `ui/ingest_progress.py`; `ui/ingest_service.py` (paste only); `ui/routes_jobs.py`; `ui/routes_ingest.py` (`config`, `paste`); the lifespan in `app.py`; the `UiContext.jobs` / `ingest_enabled` fields; `brain/ingest/outcome.py`, with `cli_ingest` switched to it; the new `UiError`s; the mutation-confinement docstring amendments (§1.3). Tests §9.1, §9.2 (paste rows), §9.3 (paste rows). | Paste works end to end over HTTP against the test DB. All of C3, C5 and §5.6 are verified by tests. | ~900 src / ~1,100 tests |
 | **2. Paste front end** | `jobs.js`, `ingest.js` (paste mode), `ingest.css`, the `index.html` panel, the `tests/test_ui_tabs_static.py` copy update, the browser tests (paste rows), the `ci.yml` roster entry. | §3.4 items 1, 2, 4, 5 and 6 hold for paste. Manual pass on the demo sandbox. | ~450 src / ~300 tests |
-| **3. File upload** | The middleware exception (§7.2); upload staging, sniffing and sweep; `upload.js` plus file mode in `ingest.js`; tests §9.2 (upload) and §9.3 (Content-Type parametrized), browser upload rows. **Its own security review**, dispatched with `ecc:security-reviewer` on opus, in addition to the rule-14 loop. | §3.4 item 3. The parametrized Content-Type test proves the exception is exactly one route. | ~600 src / ~700 tests |
+| **3. File upload** | The middleware exception (§7.2); upload staging, sniffing and sweep; `getToken()` added to and exported from `api.js`; `upload.js` plus file mode in `ingest.js`; tests §9.2 (upload) and §9.3 (Content-Type parametrized), browser upload rows. **Its own security review**, dispatched with `ecc:security-reviewer` on opus, in addition to the rule-14 loop. | §3.4 item 3. The parametrized Content-Type test proves the exception is exactly one route. | ~600 src / ~700 tests |
 | **4. Optional: inbox folder** | §5.5, only if asked for. | — | — |
 | **After** | Docs: `docs/cli-reference.md` (the `brain ui` section), README, and `docs/guides/brain-ui-on-your-phone.md` (ingest is unavailable over LAN). Auto-memory: `cli.md` for the endpoints and `types.md` for `JobSnapshot`, `JobRegistry`, `IngestOutcome` and `ProgressEmbedder` (CLAUDE.md rule 11). | — | — |
 
@@ -889,7 +1005,7 @@ and only `cli_ingest.py` is in the ceiling table. **No change to `ingest/__init_
 |---|---|---|
 | Run ingest inside the request handler | It blocks the event loop and every other request (§1.2). It is also the "spinner that lies". | §4.1 |
 | Starlette `BackgroundTask` | Untracked and uncancellable, and it delays shutdown (C8). | §4.1 |
-| `asyncio` task / `run_in_threadpool` per job | Blocks the loop / unbounded and untracked. | §4.1 |
+| `asyncio` task / `run_in_threadpool` per job | The task blocks the loop. The threadpool call shares anyio's global 40-thread limiter, and the job would be untracked and uncancellable. | §4.1 |
 | Subprocess running `brain ingest` | The F14 rule: "never shells out to the CLI". It also cannot report progress or be cancelled cleanly. | F14 §9.1 |
 | SSE via `EventSource` | Cannot send the token header. | §4.3 |
 | Multipart upload | Reopens form CSRF behind a single check (C2). | §7.2 |
@@ -897,3 +1013,5 @@ and only `cli_ingest.py` is in the ceiling table. **No change to `ingest/__init_
 | A persistent jobs table | Needs a migration, duplicates confidential titles, and adds no recoverable outcome. | §4.6 |
 | Ingest inside `notes_service.py` | It would cross the 800-line ceiling, and it is a different responsibility. | §1.3 |
 | Changing `ingest_document` to take a progress callback | Not needed: the embedder seam gives progress and cancel without touching an over-ceiling 2,369-line module. | §5.3 |
+| An explicit pre-write cancel hook inside `ingest_document` | It would change the same over-ceiling module for a window measured in milliseconds on the no-embed paths. `cancel_too_late` reports that window honestly. | §4.4 |
+| Calling `enter_commit()` before `ingest_document` | It closes the cancel window before the embed, which makes the only long cancellable phase uncancellable. | §4.4, §5.3 |
