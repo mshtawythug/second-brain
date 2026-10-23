@@ -1,6 +1,134 @@
-# Session handoff — "merge all, keep going until all is done, down to 0 issues" (updated 2026-10-16; closed out 2026-10-21)
+# Session handoff — "merge all, keep going until all is done, down to 0 issues" (updated 2026-10-16; closed out 2026-10-21 and 2026-10-22)
+
+## Closed out 2026-10-22 (at `second-brain/master` `ca4968d`)
+
+Every claim in this section is dated 2026-10-22 or bound to a SHA. Re-derive before acting on it.
+The 2026-10-21 section below is kept as history and is annotated where this section supersedes it.
+
+### Merged on 2026-10-22
+
+| PR | What | Merge |
+|---|---|---|
+| #48 | vault-watcher absence tests assert on proof, not after a sleep | `a6a76fe` |
+| #47 | `brain backup` leaves the top-level `<vault>/.quartz/` out of `vault.tar`, and fails on a listing error that is not a permission error | `bb004fe` |
+| #46 | CI pulls the AGE test image first (eval and benchmark workflows); `publish-age-image` gains a PR build leg; the stale `pgv0.8.2` tags are fixed. A `full`-profile install that re-runs `brain setup` moves to the pgvector 0.8.6 image; `CHANGELOG.md` ("the `full` profile pulled the old AGE image") has the upgrade steps | `388e45c` |
+| #49 | watcher `_fire` acts only on its own debounce entry; the shutdown drain and the overflow flush enqueue the real jobs; a timer that fails to start falls back; handler guard | `2ae819c` |
+| #50 | golden corpus: all 31 rows re-judged; `ci.json` re-recorded on 2,068 documents, means 0.3191/0.4645/0.7176 (nDCG@5/MRR/Recall@20) | `94dd1cb` |
+| #51 | the watcher accepts no event after shutdown, and never loses a superseded move | `7acf133` |
+| #52 | move identity: a different document now at the path is not renamed onto | `8ad72f6` |
+| #53 | `graph_entities` deadlock: a per-tenant advisory write lock, the reconcile split into plan / extract (no transaction open) / write, and a `content_hash` re-check under the lock | `8711ff0` |
+| #54 | the watcher is no longer blind after a restart: graph work goes through one `GraphLane` thread | `5cb4e4d` |
+| #55 | a reconcile locks the document row `FOR KEY SHARE` before it writes graph rows; alias merges lock their documents the same way | `edaba1b` |
+| #56 | the watcher's worker and graph lane reconnect after a Postgres restart, with bounded connects; the job that met the dead connection re-runs; `link_rewrite` logs by class only | `2d900e9` |
+| #57 | `brain graphrag remove <uuid>...` and the MCP twin `brain_graphrag_remove`, a targeted repair for lost graph removes; `LOST_REMOVES_REPAIR` names it | `c99214f` |
+| #58 | exception logging by class only across `src/brain` (`describe_failure` adds the errno, the YAML mark or a raise-site `log_detail`), guarded repo-wide by `tests/test_log_privacy.py` | `ca4968d` |
+
+Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 58e27c6..second-brain/master`
+(`58e27c6` is PR #45, the 2026-10-21 close-out), and `gh pr view <N> --repo mshtawythug/second-brain`.
+
+### Done on 2026-10-22 (machine state, not in git)
+
+1. **The July `.claude/worktrees/agent-*` worktrees were triaged.** A bundle of all four branch
+   refs and a copy of the one worktree's uncommitted files are in
+   `~/.brain/backups/july-worktrees-20261022/`, with the per-commit classification in `TRIAGE.md`
+   there. The worktrees were removed. The fully merged branch was deleted, and the three unmerged
+   branches were kept: `worktree-agent-a76e78152efbdd69a`, `worktree-agent-aa255dfff58b8d465` and
+   `worktree-agent-aa412da9f134ae07d` (1, 5 and 3 commits outside `ca4968d`). Re-derive with
+   `git rev-list --count ca4968d..<branch>`.
+2. **A full `brain backup` was taken:** `~/.brain/backups/brain-backup-20261022-192516.tar.gz`
+   (1.2 GiB, with a `.sha256` beside it; checksums verified). It is the first full backup since PR
+   #47, so `<vault>/.quartz/` is left out of it.
+3. **Communities were refreshed on prod: 202 → 203 → 200,** all summarized, and `brain doctor`
+   reported OK afterwards (per the ops record). Re-derive read-only with
+   `brain graphrag communities list`.
+4. **The concepts watermark reached 2068/2068.** Another session's
+   `brain graphrag build --backfill --concepts` had crashed and left a backlog; the watcher's
+   `GraphLane` (PR #54) drained it (per the ops record).
+5. **The daemons were reinstalled several times, finally from `ca4968d`.** The source is still the
+   `.claude/worktrees/daemon-src` worktree, now detached at `ca4968d`. After the last install the
+   watcher was restarted, its worker and lane connections were observed, and `brain doctor` was all
+   OK. The RECORD check from "Done on 2026-10-21" item 9 printed nothing on 2026-10-22. **The
+   `build/` and `src/secondbrain_py.egg-info` delete is still a standing step:** both were back in
+   `daemon-src` after the last install on 2026-10-22. Re-check with
+   `launchctl list | grep com.brain` and `brain doctor`.
+6. **The skills were re-synced** with `bin/brain-skills-sync`; PR #57 updated `brain-graph`.
+7. **About 20 leftover sibling test DBs on 5434 were dropped** (per the ops record). On 2026-10-22
+   the listing query from "Done on 2026-10-16" item 6 returned none.
+8. **The merged worktrees and branches were removed.** On 2026-10-22, `git worktree list` showed
+   the main checkout, `daemon-src` and this close-out's worktree only.
+9. **The main checkout was fast-forwarded to `ca4968d`.** Its uncommitted `docker-compose.yml`
+   change is still there, untouched. A copy is at
+   `~/.brain/backups/worktrees-20261022/main-docker-compose.yml.uncommitted`.
+
+### Incidents on 2026-10-22
+
+- **One auditor ran a single read-only `SELECT count(*)` against prod (port 55432)**, against its
+  instructions. It wrote nothing. The rule stands: reviewers and auditors use the test DB on 5434
+  only.
+- **Another session's Krisp ingest and graph backfill ran concurrently with this one.** That was
+  expected; it was the user's own session. Its crashed backfill is "Done on 2026-10-22" item 4.
+- **A mutation harness once mutated a live worktree mid-audit.** Mutation runs now happen only in
+  `git archive` copies, never in a checked-out worktree.
+
+### Remains the user's (as of 2026-10-22)
+
+1. **Stop the ROOT Caddy that still serves the retired wiki on :8080, then delete its config.**
+   Unchanged from 2026-10-21: `sudo brew services stop caddy`, then delete
+   `/opt/homebrew/etc/Caddyfile`. On 2026-10-22, `curl -sI http://localhost:8080` still answered
+   `HTTP/1.1 200 OK`.
+2. **Delete `<vault>/.quartz` by hand** (re-derive the size with `du -sh <vault>/.quartz`), and the
+   two recent-rail leftovers (2026-10-21 item 3). Leaving them is also safe now: backups skip
+   `.quartz` since PR #47, and a full backup exists ("Done on 2026-10-22" item 2).
+3. **Optional: reboot to release swap.** Re-check with `sysctl vm.swapusage`.
+4. **Review disk held by other projects:** Docker volumes and Ollama models. Re-derive with
+   `docker system df -v` and `ollama list`.
+5. **Decide the three unmerged July branches** ("Done on 2026-10-22" item 1). `TRIAGE.md` judged
+   every commit on them superseded, except two things: the CI pull-first change, now done by PR
+   #46; and the search-fallback idea (next item). If they are unwanted, delete them with
+   `git branch -D <branch>`; the bundle keeps them.
+6. **A product decision: should search fall back to FTS when the embedder is down?** The July
+   idea (`TRIAGE.md`, "STILL-USEFUL") retries a failed query FTS-only and marks the result
+   `degraded`. At `ca4968d`, `brain_search` maps an `EmbedError` to an MCP `INTERNAL_ERROR`. Degrade
+   or fail loudly is the user's call.
+7. **Keep `.claude/worktrees/daemon-src`.** On 2026-10-22 it is still the uv receipt's source
+   (`~/.local/share/uv/tools/secondbrain-py/uv-receipt.toml`).
+
+### Follow-ups still open (as of 2026-10-22)
+
+The 2026-10-21 list below is annotated item by item. What is still open at `ca4968d`:
+
+- `graph_runner` has no `degraded` tolerance. This is by design (its module docstring).
+- **Move identity residue (PR #52):** a brand-new, never-synced, id-less file that replaces P and
+  is renamed within one debounce window still adopts the previous document's id.
+- **A closed watcher drops late events (PR #51):** the next startup `sync_vault` reconciles the
+  path, but a delete is pruned only with prune on.
+- **Graph-lock residuals 2-4 (PR #53 plan, "Residuals"):** `build_graph` raises
+  `GraphReconcileError` for a document deleted between id enumeration and its read phase; the plan
+  re-check compares `content_hash` only, so a metadata-only edit can be overtaken; the W6/W7
+  cross-type collapse window is cosmetic.
+- **The graph lags while a startup backlog drains (PR #54).** By design; the lane catches up by
+  itself.
+- **Watcher reconnect residue (PR #56):** a delete that committed just before the connection died
+  re-runs as a no-op and leaves a ghost AGE `Document` vertex (repair: `brain graphrag remove`); a
+  delete not applied at shutdown is redone only by `brain vault sync --prune`.
+- **Log-privacy blind spots (PR #58, the G1 guard's "Not covered"):** a value derived from an
+  exception and logged outside its handler; an exception stored on an attribute; a nested `def` or
+  `lambda` inside a handler.
+- **Two terminal error reports still carry exception text (PR #58):** `vault/export.py`'s
+  `summary.errors` (an `OSError`: path and strerror) and `cli_sensitivity.py`'s `result.errors`
+  (`update_document`'s `ValueError`s). Both were judged content-free and recorded, not changed. See
+  `docs/plans/2026-10-22-watcher-repair-hint-and-yaml-log.md`, "Not covered".
+
+Fixed on 2026-10-22, each marked in place below: the backup `.quartz` skip (#47), the absence tests
+(#48), the `_fire` race, the known-false comment, the drain and the overflow flush (#49), the
+post-sentinel observer job and the mixed-action debounce (#51), the coalesced move's wrong row
+(#52), the `graph_entities` deadlock (#53), the startup-blind watcher (#54), the GraphLane-vs-worker
+lock cycle and the alias-merge delete residual (#55), the missing reconnect (#56), the lost-removes
+repair and its hint (#57), and exception text in log lines (#58).
 
 ## Closed out 2026-10-21 (at `second-brain/master` `c9f6408`)
+
+*(History. Superseded by "Closed out 2026-10-22" above where the two disagree.)*
 
 Every claim in this section is dated 2026-10-21 or bound to a SHA. Re-derive before acting on it.
 The 2026-10-16 sections below are kept as history and are annotated where this section supersedes
@@ -93,6 +221,8 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
     (138.7 MiB, sha256 verified). A full backup was skipped on purpose. `brain backup` tars the vault
     unfiltered, so it would have included `<vault>/.quartz`, which held about 11 GB of dead build output
     on 2026-10-21. See "Remains the user's" item 2 and "Follow-ups still open".
+    *(2026-10-22: superseded. PR #47 made `brain backup` skip `<vault>/.quartz/`, and a full backup
+    was taken: "Done on 2026-10-22" item 2.)*
 
 ### The 2026-10-16 "Still needs the user" list, item by item
 
@@ -108,6 +238,9 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
 
 ### Remains the user's (as of 2026-10-21)
 
+*(History. The current list is "Remains the user's (as of 2026-10-22)" above. Items 1, 3, 5, 6 and
+8 carry over; items 2, 4 and 7 are annotated in place.)*
+
 1. **Stop the ROOT Caddy that still serves the retired wiki on :8080, then delete its config.** It is a
    system LaunchDaemon reading `/opt/homebrew/etc/Caddyfile`. First run
    `sudo brew services stop caddy`, then delete `/opt/homebrew/etc/Caddyfile`. Re-check with
@@ -115,6 +248,8 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
 2. **Delete `<vault>/.quartz` by hand** (about 11 GB on 2026-10-21; re-derive with
    `du -sh <vault>/.quartz`), then **run a full `brain backup`**. Only a DB-only backup exists from
    2026-10-21 ("Done on 2026-10-21" item 12). R3 deliberately touched nothing on the machine (plan §6).
+   *(2026-10-22: the full backup is DONE, "Done on 2026-10-22" item 2, and it leaves `.quartz` out
+   (PR #47). Deleting `.quartz` remains the user's.)*
    `docs/vault.md` lists the leftovers. Vault sync and watch keep skipping `.quartz/` until it is gone
    (ruling R9-8).
 3. **Delete or keep two stale recent-rail leftovers** (2026-10-21): `<vault>/_partials/recent.md`, and
@@ -136,12 +271,18 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
    unmerged work: `d0377a2`, `4a507c4` and `36c8a58`, which are 1, 5 and 3 commits outside `c9f6408`
    respectively. The fourth, `e813140`, is merged. Re-derive with `git worktree list` and
    `git rev-list --count c9f6408..<sha>`.
+   *(2026-10-22: triaged, and the worktrees removed. The three unmerged branches are kept for the
+   user to decide. See "Done on 2026-10-22" item 1 and "Remains the user's (as of 2026-10-22)"
+   items 5 and 6.)*
 8. **Keep `.claude/worktrees/daemon-src`.** After the `c9f6408` reinstall it is still the uv receipt's
    source ("Done on 2026-10-21" item 9; check
    `~/.local/share/uv/tools/secondbrain-py/uv-receipt.toml`). Delete it only after the tool has been
    reinstalled from somewhere else.
 
 ### Follow-ups still open (as of 2026-10-21)
+
+*(History. The current list is "Follow-ups still open (as of 2026-10-22)" above. Each item below
+is either marked FIXED in place with its PR or carried over to that list.)*
 
 - ~~`brain backup`'s `tar_vault` (`src/brain/backup/create.py`) archives the whole vault with no skip
   list, unlike vault sync and watch, which skip `.quartz/` (R9-8). Until `<vault>/.quartz` is deleted, a
@@ -150,8 +291,8 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
   `<vault>/.quartz/` and nothing else, and reports the skip. Rulings B1–B10 are in
   `docs/plans/2026-10-22-backup-skip-quartz.md`. `<vault>/.quartz` itself is still on disk until the
   user deletes it.
-- `graph_runner` has no `degraded` tolerance. This is deliberate, and the reason is in its module
-  docstring (PR #37 left it out on purpose).
+- *[Still open on 2026-10-22, by design.]* `graph_runner` has no `degraded` tolerance. This is
+  deliberate, and the reason is in its module docstring (PR #37 left it out on purpose).
 - ~~Watcher burst/stale-event tests that `sleep` and then assert ABSENCE can false-PASS under load.~~
   *[Tests FIXED 2026-10-22, on branch `test/vault-watcher-absence-sync`, in the commit that wrote
   this note. The status covers the tests only; the production follow-up is the next bullet.]* The vault-watcher half had seven such tests in `tests/test_vault_watcher.py`. Each now
@@ -216,7 +357,7 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        syncs by its own id. The same-id rename is unchanged.
      - **Ruling:** an id-less Q keeps the in-place rename, because `_sync_one`'s recovery branch
        already identifies an id-less file by its path (`docs/plans/2026-10-22-vault-watcher-move-identity.md`).
-     - **Residue, still open and pre-existing:** a brand-new, never-synced, id-less file that
+     - **Residue, still open and pre-existing** *(still open on 2026-10-22)*: a brand-new, never-synced, id-less file that
        replaces P and is renamed within one debounce window still adopts A's id. Nothing
        distinguishes it from A's own file after a failed id write-back.
   5. ~~**The vault watcher was blind for hours after a restart (production, 2026-10-22).**~~
@@ -248,7 +389,7 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        best-effort: the lane catches up by itself, and `brain graphrag build --backfill`
        reconciles whatever is behind its watermark (`--force` for a full mirror rebuild).
   6. ~~**Deferred: a targeted repair for lost graph removes.**~~ *[DONE: `brain graphrag remove`
-     (branch `feat/graphrag-remove-command`); see the last sub-bullet.]* When the watcher's shutdown times
+     (PR #57, `feat/graphrag-remove-command`, merged as `c99214f`); see the last sub-bullet.]* When the watcher's shutdown times
      out behind a long reconcile (PR #54), the removes queued behind it are not applied. A
      startup self-heal was declined, because every per-doc relational graph table cascades on
      documents delete, so nothing relational records a lost remove.
@@ -294,12 +435,12 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        the PR #54 reviewer's GraphLane-vs-worker cycle. In the reproduction Postgres picked the
        worker as the victim; in this fix's red runs the victim was the delete 4 times and the
        reconcile once. Either side can be chosen.
-    2. `build_graph` raises `GraphReconcileError` if a document is deleted between id enumeration
+    2. *[Still open on 2026-10-22.]* `build_graph` raises `GraphReconcileError` if a document is deleted between id enumeration
        and its reconcile's read phase. This predates the fix. A deletion after the read phase is
        now skipped.
-    3. The plan re-check compares `content_hash` only, so a metadata-only edit (participants) can
+    3. *[Still open on 2026-10-22.]* The plan re-check compares `content_hash` only, so a metadata-only edit (participants) can
        still be overtaken. The next build re-indexes it.
-    4. The cross-type collapse window between W6 and W7 is pre-existing and cosmetic (a display
+    4. *[Still open on 2026-10-22.]* The cross-type collapse window between W6 and W7 is pre-existing and cosmetic (a display
        name only).
     5. ~~`merge_aliases` (alias apply, cross-type collapse) had the same shape against a
        concurrent document delete.~~ *[FIXED by PR #55.]* `_repoint_mentions` DO-UPDATEs a dst
@@ -308,7 +449,7 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        before it writes. Per rule is enough, because the locks last to the end of the outer
        transaction (plan, Residuals). The regression test is
        `tests/test_graphrag_alias_doc_lock.py`.
-- *[FIXED 2026-10-22 on branch `fix/vault-watcher-db-reconnect`.]* **The vault watcher never
+- *[FIXED 2026-10-22 by PR #56 (`fix/vault-watcher-db-reconnect`, merged as `2d900e9`).]* **The vault watcher never
   reconnected after a Postgres restart** (found by the PR #54 reviewer). The worker and the graph lane
   each kept their dead connection, so every later edit and graph request failed until the watcher was
   restarted. A lane whose first connect failed also turned itself off for good.
@@ -326,13 +467,13 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
       `connect_raw`'s probe queries after the handshake stay unbounded. If a timed-out lane close
       happens anyway, it now names the remove in flight as well as the queued ones, and the lane does
       not log them again.
-  - **Still open:**
+  - **Still open** *(both still open on 2026-10-22)*:
     1. A delete whose `DELETE` committed just before the connection died re-runs as a no-op. So no
        graph remove is queued, and the document's AGE `Document` vertex stays. That is the same ghost,
        with the same repair, as item 6's lost removes.
     2. A delete the worker could not apply at shutdown is redone only by `brain vault sync --prune`.
   - Rulings R1-R8, tests and mutation proofs: `docs/plans/2026-10-22-vault-watcher-db-reconnect.md`.
-- *[FIXED 2026-10-22 on branch `fix/watcher-repair-hint-and-yaml-log`, PR #58.]* **Log lines
+- *[FIXED 2026-10-22 by PR #58 (`fix/watcher-repair-hint-and-yaml-log`, merged as `ca4968d`).]* **Log lines
   carried exception messages.**
   - **The leak:** logger calls across `src/brain` passed the caught exception raw. That message can
     be a YAML error parsed from a string, which quotes the offending line; a psycopg DETAIL; or a
@@ -352,8 +493,9 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
     attribute receivers, exception parameters, tracebacks), with tests that prove the scan can fail.
   - **A correction (audit F3):** `_people.yml` is parsed from a file handle, and a stream YAML error
     carries no snippet. So nothing had leaked there; that fix is defensive.
-  - **Not covered:** a value derived from an exception and logged OUTSIDE its handler, an exception
-    stored on an attribute, and terminal output (`typer.echo`).
+  - **Not covered** *(still open on 2026-10-22; carried over above)*: a value derived from an
+    exception and logged OUTSIDE its handler, an exception stored on an attribute, and terminal
+    output (`typer.echo`).
   - Plan, inventory, rulings and mutation proofs:
     `docs/plans/2026-10-22-watcher-repair-hint-and-yaml-log.md`.
 
