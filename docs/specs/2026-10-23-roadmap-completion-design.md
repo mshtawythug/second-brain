@@ -2337,7 +2337,7 @@ design.
        to the set and bumping the version makes its already-extracted documents stale, and the next
        backfill strips their concept mentions.
     4. On the next backfill both aspects match, so `reconcile_document` returns `skipped=True` and
-       `graph_rag.build`'s `BuildReport` counts the document under `skipped`, not `reconciled`.
+       `graph_rag.build`'s `BuildResult` counts the document under `skipped`, not `reconciled`.
 - **Security / privacy:** protocol points 4–6.
 - **Ceiling:** `graph_rag/reconcile.py` (757) gains at most 15 lines, within the 43 lines of headroom
   it has (§2.2 budget); `reconcile_plan.py` is well under 800.
@@ -2352,7 +2352,7 @@ design.
   6. With concepts enabled, the first `brain graphrag build --backfill --concepts` reconciles a
      `calendar_event` document (its people aspect is indexed, its stored concepts row equals the
      tuple `skip_watermark` produces, and its body is never fetched for concepts), and a second
-     `brain graphrag build --backfill --concepts` reports it under `BuildReport.skipped`, not
+     `brain graphrag build --backfill --concepts` reports it under `BuildResult.skipped`, not
      `reconciled`. A fake extractor that fails the test if called is never called.
   7. A document that was concept-extracted earlier, whose `content_type` is then added to
      `CONCEPT_SKIP_CONTENT_TYPES` with a `CONCEPT_SKIP_POLICY_VERSION` bump, loses all its concept
@@ -2994,7 +2994,7 @@ reasons the backlog gives.
   5. A re-run updates in place.
   6. A run ingests at most `--max-files` files and requests no summary by default; with concepts
      enabled, a second `brain graphrag build --backfill --concepts` reports an ingested `code`
-     document under `BuildReport.skipped`, not `reconciled`, and the fake extractor is never called
+     document under `BuildResult.skipped`, not `reconciled`, and the fake extractor is never called
      (behaviour, on the AGE test instance).
 - **Test plan:** protocol point 7, plus the cost assertions of criterion 6.
 - **Eval:** after ingesting, the owner adds 3–5 code queries to the local golden corpus and
