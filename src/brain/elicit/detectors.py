@@ -7,7 +7,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import psycopg
 
-from ..errors import EnrichmentError
+from ..errors import EnrichmentError, describe_failure
 from ..gaps import SearchFailureDetector
 from .schema import Gap
 
@@ -170,7 +170,7 @@ class ContradictionDetector:
                     "contradiction assess failed for entity %s (%s); skipping: %s",
                     eid,
                     etype,
-                    exc,
+                    describe_failure(exc),
                 )
                 continue
             if verdict.contradicts:

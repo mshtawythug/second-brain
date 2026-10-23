@@ -332,6 +332,30 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        with the same repair, as item 6's lost removes.
     2. A delete the worker could not apply at shutdown is redone only by `brain vault sync --prune`.
   - Rulings R1-R8, tests and mutation proofs: `docs/plans/2026-10-22-vault-watcher-db-reconnect.md`.
+- *[FIXED 2026-10-22 on branch `fix/watcher-repair-hint-and-yaml-log`, PR #58.]* **Log lines
+  carried exception messages.**
+  - **The leak:** logger calls across `src/brain` passed the caught exception raw. That message can
+    be a YAML error parsed from a string, which quotes the offending line; a psycopg DETAIL; or a
+    model reply.
+  - **The fix:** every call now logs `describe_failure(exc)`. That gives the class plus content-free
+    detail: `OSError[ENOSPC]`, `ScannerError[2:9]`, `DirectoryRefreshError[exit 2]`. The sites:
+    - 20 in `vault/`: 18 log calls (including `sync_summaries`' alias form, audit F1) and
+      `sync.py`'s two `_SyncError` reasons, which reach `report.errors`, the watcher's log
+      and the MCP wire;
+    - 5 in `graph_rag/`;
+    - 20 elsewhere, in 10 modules.
+  - **Kept on purpose:**
+    - one raw site, `gaps.py`'s column name, which is content-free by construction;
+    - nine allowlisted tracebacks: five in `watch.py`, three in `mcp_server.py`, one in `ui/app.py`.
+      Each is a local-log diagnosis, while the wire gets the class only.
+  - **The guard:** `tests/test_log_privacy.py` scans all of `src/brain` (aliases, f-strings, `%`,
+    attribute receivers, exception parameters, tracebacks), with tests that prove the scan can fail.
+  - **A correction (audit F3):** `_people.yml` is parsed from a file handle, and a stream YAML error
+    carries no snippet. So nothing had leaked there; that fix is defensive.
+  - **Not covered:** a value derived from an exception and logged OUTSIDE its handler, an exception
+    stored on an attribute, and terminal output (`typer.echo`).
+  - Plan, inventory, rulings and mutation proofs:
+    `docs/plans/2026-10-22-watcher-repair-hint-and-yaml-log.md`.
 
 ## Status on 2026-10-16: DONE except items that need the user
 

@@ -18,7 +18,7 @@ import psycopg
 
 from ..config import Config
 from ..enrichment import ContradictionVerdict
-from ..errors import OllamaContextOverflow, OllamaUnavailable, ReviewError
+from ..errors import OllamaContextOverflow, OllamaUnavailable, ReviewError, describe_failure
 from ..ingest import Embedder
 from . import queries
 
@@ -239,7 +239,7 @@ def _adjudicate_entity(
             _logger.warning(
                 "conflict scan: pair for %r over the context window; skipping: %s",
                 cand.canonical_key,
-                exc,
+                describe_failure(exc),
             )
             continue
         if verdict.contradicts:

@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
+from ..errors import describe_failure
 from ..rank_fusion import rrf_contribution
 from ..sensitivity import not_confidential_sql
 from ._retrieval_common import _build_doc_results, _row_to_entity
@@ -248,7 +249,7 @@ def _vector_ranked_keys(
         _logger.warning(
             "global retrieval: vector leg failed (%s); vector leg skipped "
             "(FTS-only)",
-            exc,
+            describe_failure(exc),
         )
         return [], False
     return [str(row[0]) for row in rows], True

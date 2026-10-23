@@ -13,7 +13,7 @@ from typing import Any
 
 import psycopg
 
-from ..errors import EmbedError
+from ..errors import EmbedError, describe_failure
 from ..ingest import Embedder
 from ..search import hybrid_search
 from .corpus import EvalQuery
@@ -190,7 +190,7 @@ def run_eval(
                 "%s for query %r — recording 0.0 metrics: %s",
                 type(exc).__name__,
                 q.query,
-                exc,
+                describe_failure(exc),
             )
             actual_ids = []
             degraded = True

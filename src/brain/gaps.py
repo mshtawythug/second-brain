@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
+from .errors import describe_failure
 from .set_similarity import jaccard
 
 if TYPE_CHECKING:
@@ -309,7 +310,7 @@ def record_search_query(
         logger.warning(
             "search-query logging skipped (DB blip): %s", type(exc).__name__
         )
-        logger.debug("search-query logging failed for query=%r: %s", query, exc)
+        logger.debug("search-query logging failed for query=%r: %s", query, describe_failure(exc))
 
 
 def search_queries_schema_hint(exc: psycopg.Error) -> str | None:

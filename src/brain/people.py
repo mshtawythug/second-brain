@@ -39,6 +39,8 @@ carries no ``sensitivity`` key for Quartz's ``RemoveConfidential`` to read. So
 a confidential Krisp/Gmail title reaching this function reached the site, and
 the site's table of contents, on every participant's page. Reasons inline at
 the SQL variants, at the parameter, and at each of the three call sites.
+**Class-only logging (PR #58)** adds the ``describe_failure`` import and wraps
+one DEBUG line that no longer fits: reasons inline at the import.
 """
 import logging
 from dataclasses import dataclass, field
@@ -49,6 +51,7 @@ from typing import Any
 
 import psycopg
 
+from brain.errors import describe_failure  # class-only logging (PR #58)
 from brain.person_name import (
     expand_owner_keys,
     humanize_person_name,
@@ -897,7 +900,9 @@ def _write_if_changed(target: Path, rendered: str) -> bool:
             # Read failure is not fatal — we'll still attempt the write.
             # Logged at DEBUG because the more interesting signal is the
             # write attempt that follows.
-            logger.debug("people emit: could not read %s for compare: %s", target, exc)
+            logger.debug(
+                "people emit: could not read %s for compare: %s", target, describe_failure(exc)
+            )
             existing = None
         if existing == rendered:
             return False
@@ -981,7 +986,7 @@ def emit_people_pages(
         except OSError as exc:
             logger.warning(
                 "people emit: could not delete stale page %s: %s — skipping",
-                stale, exc,
+                stale, describe_failure(exc),
             )
             continue
         report.pages_deleted += 1
@@ -996,7 +1001,7 @@ def emit_people_pages(
         except OSError as exc:
             logger.warning(
                 "people emit: could not write %s: %s — skipping",
-                target, exc,
+                target, describe_failure(exc),
             )
             continue
         if changed:
@@ -1012,7 +1017,7 @@ def emit_people_pages(
     except OSError as exc:
         logger.warning(
             "people emit: could not write index %s: %s",
-            index_target, exc,
+            index_target, describe_failure(exc),
         )
         report.index_written = False
 

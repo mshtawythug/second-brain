@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 import yaml
 
-from ..errors import SecretGuardError
+from ..errors import SecretGuardError, describe_failure
 from ..ingest import Embedder, _chunk_search_metadata, _frontmatter_allows_secrets
 from ..ingest.chunker import chunk_text
 from ..ingest.guard import apply_guard
@@ -599,12 +599,12 @@ def _sync_one(
     try:
         text = walked.abs_path.read_text(encoding="utf-8")
     except OSError as e:
-        raise _SyncError(f"could not read file: {e}") from e
+        raise _SyncError(f"could not read file: {describe_failure(e)}") from e
 
     try:
         frontmatter, body = parse_frontmatter(text)
     except (ValueError, yaml.YAMLError) as e:
-        raise _SyncError(f"malformed frontmatter: {e}") from e
+        raise _SyncError(f"malformed frontmatter: {describe_failure(e)}") from e  # quotes the file
 
     # Files without any frontmatter block at all (no opening ``---``) are
     # treated as tooling-managed documentation (vault README, ``_ingested/``
@@ -972,7 +972,7 @@ def _write_frontmatter_back(
             "missing id and rewrite the frontmatter.",
             relative_posix,
             document_id[:8],
-            e,
+            describe_failure(e),
         )
         return
 
@@ -1007,7 +1007,7 @@ def _write_frontmatter_back(
             "rewrite the frontmatter.",
             relative_posix,
             document_id[:8],
-            e,
+            describe_failure(e),
         )
 
 

@@ -34,7 +34,7 @@ from typing import Any
 import psycopg
 import yaml
 
-from ..errors import BrainError
+from ..errors import BrainError, describe_failure
 from ..ingest import Embedder
 from .frontmatter import dump_frontmatter, parse_frontmatter
 from .links import iter_wiki_links_with_spans
@@ -333,7 +333,7 @@ def apply_rename(
                     "observe a delete",
                     op.old_path,
                     op.new_path,
-                    exc,
+                    describe_failure(exc),
                 )
                 op.new_path.write_text(text, encoding="utf-8")
                 op.old_path.unlink()
@@ -358,7 +358,7 @@ def apply_rename(
         # log loudly so the user can recover from the backup_dir manually.
         logger.error(
             "vault rename: writes failed (%s); restoring from snapshot at %s",
-            exc,
+            describe_failure(exc),
             backup_dir,
         )
         _restore_from_backup(backup_dir, vault_path, snapshot_targets.keys())
@@ -375,7 +375,7 @@ def apply_rename(
                     "vault rename: failed to remove partially-written %s: %s "
                     "(snapshot at %s)",
                     op.new_path,
-                    cleanup_exc,
+                    describe_failure(cleanup_exc),
                     backup_dir,
                 )
         raise
@@ -683,5 +683,5 @@ def _restore_from_backup(
                 "vault rename: failed to restore %s from %s: %s",
                 path,
                 backup_path,
-                e,
+                describe_failure(e),
             )

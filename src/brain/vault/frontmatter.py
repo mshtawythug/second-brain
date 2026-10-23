@@ -34,6 +34,18 @@ def dump_frontmatter(fields: dict[str, Any], body: str) -> str:
     return f"{_FENCE}\n{yaml_body}{_FENCE}\n\n{body}"
 
 
+def _shifted_past_the_fence(exc: yaml.MarkedYAMLError) -> yaml.MarkedYAMLError:
+    """``exc`` with each mark moved one line down: the YAML block starts on file line 2."""
+    for attr in ("problem_mark", "context_mark"):
+        mark = getattr(exc, attr, None)
+        if mark is not None:
+            shifted = yaml.Mark(
+                mark.name, mark.index, mark.line + 1, mark.column, mark.buffer, mark.pointer
+            )
+            setattr(exc, attr, shifted)
+    return exc
+
+
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     """Split a vault file's text into ``(frontmatter_dict, body)``.
 
@@ -44,7 +56,9 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     the closing fence, with the leading blank line stripped if present.
 
     Raises :class:`yaml.YAMLError` for malformed YAML so callers can decide
-    whether to skip + warn or abort the run.
+    whether to skip + warn or abort the run. A ``MarkedYAMLError``'s marks are
+    shifted past the opening fence, so its line numbers name the FILE's lines
+    (``brain.errors.describe_failure`` logs them as ``[line:col]``).
     """
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].rstrip("\r\n") != _FENCE:
@@ -61,7 +75,10 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
                 body_text = body_text[1:]
             elif body_text.startswith("\r\n"):
                 body_text = body_text[2:]
-            parsed = yaml.safe_load(yaml_text) if yaml_text.strip() else {}
+            try:
+                parsed = yaml.safe_load(yaml_text) if yaml_text.strip() else {}
+            except yaml.MarkedYAMLError as exc:
+                raise _shifted_past_the_fence(exc) from None
             if parsed is None:
                 parsed = {}
             if not isinstance(parsed, dict):

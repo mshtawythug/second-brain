@@ -35,6 +35,7 @@ from typing import Any
 import psycopg
 import yaml
 
+from ...errors import describe_failure
 from ...sensitivity import CONFIDENTIAL, not_confidential_sql
 from .._atomic import atomic_write_text
 from ..paths import safe_wikilink_alias
@@ -475,7 +476,7 @@ def rewrite_derived_fences(
             text = target.read_text(encoding="utf-8")
         except OSError as e:
             _logger.warning(
-                "fence: could not read %s: %s — skipping", target, e
+                "fence: could not read %s: %s — skipping", target, describe_failure(e)
             )
             continue
         try:
@@ -483,7 +484,7 @@ def rewrite_derived_fences(
         except (ValueError, yaml.YAMLError) as e:
             _logger.warning(
                 "fence: malformed frontmatter in %s: %s — skipping",
-                target, e,
+                target, describe_failure(e),
             )
             continue
 
@@ -514,7 +515,7 @@ def rewrite_derived_fences(
             atomic_write_text(target, new_text)
         except OSError as e:
             _logger.warning(
-                "fence: could not rewrite %s: %s — skipping", target, e
+                "fence: could not rewrite %s: %s — skipping", target, describe_failure(e)
             )
             continue
         written += 1

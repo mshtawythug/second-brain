@@ -34,6 +34,7 @@ from pathlib import Path
 import psycopg
 import yaml
 
+from ..errors import describe_failure
 from ._atomic import atomic_write_text
 from .frontmatter import dump_frontmatter, parse_frontmatter
 
@@ -228,7 +229,9 @@ def sync_summaries(
             fields, _body = parse_frontmatter(existing_text)
         except (OSError, yaml.YAMLError, ValueError) as exc:
             report.errored += 1
-            msg = f"{row.vault_path}: parse failed ({exc})"
+            # Class only (+ line:col): a YAML error quotes the offending line, and
+            # report.errors reaches the terminal and daemon logs (PR #58 audit F1).
+            msg = f"{row.vault_path}: parse failed ({describe_failure(exc)})"
             report.errors.append(msg)
             _logger.warning("sync-summaries: %s", msg)
             continue
@@ -246,7 +249,7 @@ def sync_summaries(
             wrote = _rewrite_with_summary(target, row.summary)
         except (OSError, yaml.YAMLError, ValueError) as exc:
             report.errored += 1
-            msg = f"{row.vault_path}: rewrite failed ({exc})"
+            msg = f"{row.vault_path}: rewrite failed ({describe_failure(exc)})"  # as above
             report.errors.append(msg)
             _logger.warning("sync-summaries: %s", msg)
             continue
