@@ -13,13 +13,13 @@ The 2026-10-21 section below is kept as history and is annotated where this sect
 | #47 | `brain backup` leaves the top-level `<vault>/.quartz/` out of `vault.tar`, and fails on a listing error that is not a permission error | `bb004fe` |
 | #46 | CI pulls the AGE test image first (eval and benchmark workflows); `publish-age-image` gains a PR build leg; the stale `pgv0.8.2` tags are fixed. A `full`-profile install that re-runs `brain setup` moves to the pgvector 0.8.6 image; `CHANGELOG.md` ("the `full` profile pulled the old AGE image") has the upgrade steps | `388e45c` |
 | #49 | watcher `_fire` acts only on its own debounce entry; the shutdown drain and the overflow flush enqueue the real jobs; a timer that fails to start falls back; handler guard | `2ae819c` |
-| #50 | golden corpus: all 31 rows re-judged; `ci.json` re-recorded on 2,068 documents, means 0.3191/0.4645/0.7176 (nDCG@5/MRR/Recall@20) | `94dd1cb` |
+| #50 | golden corpus: the other 29 rows re-judged (the 2 recency rows were re-judged by #41), so all 31 are now re-judged; `ci.json` re-recorded on 2,068 documents, means 0.3191/0.4645/0.7176 (nDCG@5/MRR/Recall@20) | `94dd1cb` |
 | #51 | the watcher accepts no event after shutdown, and never loses a superseded move | `7acf133` |
 | #52 | move identity: a different document now at the path is not renamed onto | `8ad72f6` |
 | #53 | `graph_entities` deadlock: a per-tenant advisory write lock, the reconcile split into plan / extract (no transaction open) / write, and a `content_hash` re-check under the lock | `8711ff0` |
 | #54 | the watcher is no longer blind after a restart: graph work goes through one `GraphLane` thread | `5cb4e4d` |
 | #55 | a reconcile locks the document row `FOR KEY SHARE` before it writes graph rows; alias merges lock their documents the same way | `edaba1b` |
-| #56 | the watcher's worker and graph lane reconnect after a Postgres restart, with bounded connects; the job that met the dead connection re-runs; `link_rewrite` logs by class only | `2d900e9` |
+| #56 | the watcher's worker and graph lane reconnect after a Postgres restart, with bounded connects; the job that met the dead connection re-runs; `link_rewrite`'s two psycopg WARNINGs log by class only (the rest followed in #58) | `2d900e9` |
 | #57 | `brain graphrag remove <uuid>...` and the MCP twin `brain_graphrag_remove`, a targeted repair for lost graph removes; `LOST_REMOVES_REPAIR` names it | `c99214f` |
 | #58 | exception logging by class only across `src/brain` (`describe_failure` adds the errno, the YAML mark or a raise-site `log_detail`), guarded repo-wide by `tests/test_log_privacy.py` | `ca4968d` |
 
@@ -294,7 +294,7 @@ is either marked FIXED in place with its PR or carried over to that list.)*
 - *[Still open on 2026-10-22, by design.]* `graph_runner` has no `degraded` tolerance. This is
   deliberate, and the reason is in its module docstring (PR #37 left it out on purpose).
 - ~~Watcher burst/stale-event tests that `sleep` and then assert ABSENCE can false-PASS under load.~~
-  *[Tests FIXED 2026-10-22, on branch `test/vault-watcher-absence-sync`, in the commit that wrote
+  *[Tests FIXED 2026-10-22, on branch `test/vault-watcher-absence-sync` (PR #48, merged as `a6a76fe`), in the commit that wrote
   this note. The status covers the tests only; the production follow-up is the next bullet.]* The vault-watcher half had seven such tests in `tests/test_vault_watcher.py`. Each now
   asserts absence only on proof the watcher got past the point in question. The four
   debounce/filter tests use a one-hour debounce, so `pending_timers` is exact right after
@@ -416,7 +416,7 @@ is either marked FIXED in place with its PR or carried over to that list.)*
     That row-locks every entity in the tenant while the transaction still holds its own upserted
     rows. The concept extractor (a model call) also ran inside that transaction.
   - Fix: every graph write transaction now takes a per-tenant advisory lock before its first graph
-    write (`src/brain/graph_rag/write_lock.py`; closed writer list W1-W10). After the PR #53 review,
+    write (`src/brain/graph_rag/write_lock.py`; closed writer list W1-W10 (W11 added by PR #57)). After the PR #53 review,
     `reconcile_document` plans in a short read transaction (`graph_rag/reconcile_plan.py`) and runs
     the extraction with no transaction open. It then re-checks the plan under the lock, so a
     document edited or deleted meanwhile is skipped rather than overwritten (audit F1).
@@ -612,7 +612,7 @@ left out of #37 on purpose.
   guard in `tests/test_thread_wait.py` covers every importer. That guard also found a site PR #31's
   per-file guard could not see: `tests/test_cli_vault_watch.py` imported the helper through the test
   module and passed `timeout=5.0`.
-- *[Vault-watcher half FIXED 2026-10-22 on `test/vault-watcher-absence-sync`: see "Follow-ups
+- *[Vault-watcher half FIXED 2026-10-22 on `test/vault-watcher-absence-sync` (PR #48, merged as `a6a76fe`): see "Follow-ups
   still open" above and `docs/plans/2026-10-22-vault-watcher-absence-tests.md`. The build-watcher
   half is moot after R3.]* Watcher burst/stale-event tests that `sleep` then assert ABSENCE can false-PASS under load. The
   build watcher's `test_ignores_*` and coalescing tests are in the same class (listed in the
