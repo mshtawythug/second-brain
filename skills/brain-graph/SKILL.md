@@ -178,6 +178,7 @@ Admin (setup, not everyday querying):
 
 - `brain_graphrag_build(tenant=None, concepts=False, backfill=False, force=False, limit=None)` — pass `backfill=true` (or `force=true`)
 - `brain_graphrag_refresh(tenant=None)` — recompute a tenant's aggregate edges (no re-resolve)
+- `brain_graphrag_remove(document_ids, tenant=None)` — remove DELETED documents' leftover graph state (the repair a vault-watcher shutdown message names); full UUIDs only, a live id refuses the batch, idempotent
 - `brain_graphrag_communities_build(...)` — detect + summarize clusters
 - `brain_graphrag_communities_refresh(tenant=None, limit=None)` — force re-detect + re-summarize past the dirty gate
 
@@ -220,6 +221,7 @@ brain graphrag build --backfill        # build the people graph from existing do
 brain graphrag build --backfill --concepts   # also extract topic/project/org concepts
 brain graphrag build --force           # authoritative rebuild of the AGE mirror
 brain graphrag refresh                 # recompute a tenant's aggregate edges
+brain graphrag remove <doc-uuid>...    # repair: drop DELETED docs' leftover graph state (full UUIDs)
 brain graphrag communities build       # detect + summarize clusters (needed for --mode global)
 brain graphrag communities refresh     # force re-detect regardless of dirty gate
 ```

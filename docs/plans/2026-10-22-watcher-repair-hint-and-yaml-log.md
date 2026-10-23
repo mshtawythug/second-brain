@@ -155,7 +155,8 @@ now raise `OSError(ENOSPC, …)` and assert `OSError[ENOSPC]` is logged and the 
 
 - **Net-zero edits:** `ingest/__init__.py`, `graph_rag/extract.py` and `vault/sync.py`. Each row gets
   a descriptive hop, and `sync.py`'s promotes `5e3c0f2` (1,817).
-- **`cli.py` grows** by one import line and its docstring record ("Seventh growth"). Its row
+- **`cli.py` grows** by one import line and its docstring record ("Eighth growth", renumbered when
+  PR #57's "Seventh growth" merged first). Its row
   promotes `155e61d` (8,802).
 - **`people.py` grows** by the import, one wrapped DEBUG line and its docstring record. Its row
   promotes `9c41783` (1,019).

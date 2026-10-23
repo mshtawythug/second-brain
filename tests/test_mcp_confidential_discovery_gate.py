@@ -67,6 +67,7 @@ _WRITE_TOOLS = frozenset(
         "brain_connect_reject",
         "brain_graphrag_build",
         "brain_graphrag_refresh",
+        "brain_graphrag_remove",
         "brain_graphrag_communities_build",
         "brain_graphrag_communities_refresh",
         "brain_graphrag_aliases_apply",

@@ -247,7 +247,8 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
      - **Side effect:** the graph now lags while a large startup backlog drains. It is
        best-effort: the lane catches up by itself, and `brain graphrag build --backfill`
        reconciles whatever is behind its watermark (`--force` for a full mirror rebuild).
-  6. **Deferred: a targeted repair for lost graph removes.** When the watcher's shutdown times
+  6. ~~**Deferred: a targeted repair for lost graph removes.**~~ *[DONE: `brain graphrag remove`
+     (branch `feat/graphrag-remove-command`); see the last sub-bullet.]* When the watcher's shutdown times
      out behind a long reconcile (PR #54), the removes queued behind it are not applied. A
      startup self-heal was declined, because every per-doc relational graph table cascades on
      documents delete, so nothing relational records a lost remove.
@@ -255,9 +256,17 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        `Document` vertices stay until `brain graphrag build --force`, which, with concepts on,
        re-extracts every document. Aggregates and orphan entities heal at the next graph
        reconcile or with `brain graphrag refresh`.
-     - **The cheap repair:** a `brain graphrag remove <id>` command that calls
-       `graph_rag.reconcile.remove_document` for the logged ids. It is robust to an
-       already-deleted `documents` row, and it is not built yet.
+     - **The cheap repair, built (PR #57):** `brain graphrag remove <id>...` (and the MCP twin
+       `brain_graphrag_remove`) calls `graph_rag.reconcile.remove_documents` once for the logged
+       ids (`brain/graph_rag/repair.py`, `brain/cli_graphrag_repair.py`).
+       - It takes full UUIDs only; a deleted document has no row to resolve a prefix against.
+       - It refuses the whole batch if any id's document still exists, rechecked under the
+         lock.
+       - It is idempotent and prints counts only.
+     - ~~**Still open:** the shutdown messages still named only `build --force`.~~ *[DONE in
+       PR #57.]* `LOST_REMOVES_REPAIR` (`vault/graph_lane.py`, used by both the watcher's
+       shutdown WARNING and the lane's no-connection ERROR) now leads with
+       `brain graphrag remove <ids>` and keeps `build --force` as the fallback.
 - *[FIXED 2026-10-22 by PR #53 (`fix/graph-entities-deadlock`, merged as `8711ff0`).]* **`graph_entities` deadlocks
   between graph writers.** On prod, `brain graphrag build --backfill --concepts` died with
   `DeadlockDetected` in `upsert_concept_entities` against the vault watcher. This is the same class

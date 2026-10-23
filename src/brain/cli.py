@@ -88,7 +88,14 @@ exit 1 instead of a traceback. The classification lives in the backends
 ``except EmbedError`` mappings and their why-comments. Spec:
 ``docs/specs/2026-10-16-eval-degraded-all-embedders-design.md``.
 
-**Seventh growth (class-only logging, PR #58): one import line.** Two WARNINGs
+**Seventh growth (`brain graphrag remove`, 2026-10-22).** The targeted repair
+for graph removes the watcher's shutdown could not apply. The command, its
+exit-code mapping and its rulings live in :mod:`brain.cli_graphrag_repair` and
+:mod:`brain.graph_rag.repair`. What grew here is the import and the
+``register_graphrag_repair(graphrag_app)`` hook, placed after ``graphrag
+refresh`` so ``brain graphrag --help`` lists it with the admin commands.
+
+**Eighth growth (class-only logging, PR #58): one import line.** Two WARNINGs
 log ``describe_failure(exc)``; plan ``docs/plans/2026-10-22-watcher-repair-hint-and-yaml-log.md``.
 
 The long-deferred split into per-domain command modules is unchanged by any of
@@ -199,6 +206,7 @@ from .cli_docs import mark_draft as mark_draft
 from .cli_docs import mark_published as mark_published
 from .cli_docs import rm as rm
 from .cli_errors import BrainGroup
+from .cli_graphrag_repair import register as register_graphrag_repair
 from .cli_ingest import (
     _gmail_thread_subject_for_dry_run as _gmail_thread_subject_for_dry_run,
 )
@@ -2602,6 +2610,11 @@ def graphrag_refresh(
         typer.echo(alias_result_summary(alias_result))
     if collapse_result.rules_total > 0:
         typer.echo(f"cross-type collapse: {alias_result_summary(collapse_result)}")
+
+
+# Seventh growth (module docstring): `brain graphrag remove`, beside the other
+# admin commands. The command lives in cli_graphrag_repair; this is its hook.
+register_graphrag_repair(graphrag_app)
 
 
 # ---------------------------------------------------------------------------
