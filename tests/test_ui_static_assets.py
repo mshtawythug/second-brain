@@ -626,6 +626,9 @@ def test_resolvable_css_urls_pass(tmp_path: Path, target: str) -> None:
         pytest.param("/elsewhere/a.woff2", id="root-relative-outside-static"),
         pytest.param("//cdn.invalid/a.woff2", id="protocol-relative"),
         pytest.param("https://cdn.invalid/a.woff2", id="other-origin"),
+        # The path names a real local file: only the origin check rejects these.
+        pytest.param("https://cdn.invalid/static/img/logo.png", id="other-origin-static-path"),
+        pytest.param("//cdn.invalid/static/img/logo.png", id="protocol-relative-static-path"),
     ],
 )
 def test_a_css_url_escaping_static_fails(tmp_path: Path, target: str) -> None:
