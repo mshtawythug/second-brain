@@ -9,7 +9,7 @@ from typing import Any, Protocol
 import psycopg
 import yaml
 
-from brain.errors import DirectoryRefreshError
+from brain.errors import DirectoryRefreshError, describe_failure
 from brain.vault.derived_links.participants import (
     extract_gmail_addresses,
     is_email_like,
@@ -238,10 +238,10 @@ def load_people_yml(vault_path: Path) -> dict[str, str]:
         with yml_path.open("r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
     except yaml.YAMLError as exc:
-        _logger.warning("malformed _people.yml at %s: %s", yml_path, exc)
+        _logger.warning("malformed _people.yml at %s: %s", yml_path, describe_failure(exc))
         return {}
     except OSError as exc:
-        _logger.warning("could not read _people.yml at %s: %s", yml_path, exc)
+        _logger.warning("could not read _people.yml at %s: %s", yml_path, describe_failure(exc))
         return {}
 
     if data is None:
@@ -472,7 +472,7 @@ def refresh_calendar(
             "gws calendar refresh failed [%s..%s]: %s",
             since.isoformat(),
             until.isoformat(),
-            exc,
+            describe_failure(exc),
         )
         return 0
 
@@ -571,7 +571,7 @@ def refresh_contacts(
         _logger.warning(
             "gws people refresh failed (cmd=%s): %s",
             _CONTACTS_CMD,
-            exc,
+            describe_failure(exc),
         )
         return 0
 

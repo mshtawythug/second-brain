@@ -323,6 +323,17 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        with the same repair, as item 6's lost removes.
     2. A delete the worker could not apply at shutdown is redone only by `brain vault sync --prune`.
   - Rulings R1-R8, tests and mutation proofs: `docs/plans/2026-10-22-vault-watcher-db-reconnect.md`.
+- *[FIXED 2026-10-22 on branch `fix/watcher-repair-hint-and-yaml-log`.]* **Vault log lines
+  carried exception messages.**
+  - **The leak:** sixteen `src/brain/vault` logger calls passed the caught exception raw. A
+    PyYAML `MarkedYAMLError` quotes the line it failed on, which can be a `_people.yml` entry or a
+    note's frontmatter. All sixteen now log `describe_failure(exc)`, the class only.
+  - **The guard:** `tests/test_vault_log_privacy.py` runs an AST scan over `src/brain/vault`, with
+    tests that prove the scan can fail.
+  - **Still open, and recorded in `docs/plans/2026-10-22-watcher-repair-hint-and-yaml-log.md`:**
+    - five `graph_rag/` WARNINGs that pass an exception raw (`communities_summary`, `extract`,
+      `fuse` ×2, `global_`);
+    - five `logger.exception` tracebacks in `vault/watch.py`, kept on purpose for diagnosis.
 
 ## Status on 2026-10-16: DONE except items that need the user
 

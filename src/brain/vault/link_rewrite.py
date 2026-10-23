@@ -168,7 +168,7 @@ def rewrite_vault_links(
         text = file_path.read_text(encoding="utf-8")
     except OSError as e:
         logger.warning(
-            "link rewrite: could not read %s: %s — skipping", file_path, e
+            "link rewrite: could not read %s: %s — skipping", file_path, describe_failure(e)
         )
         return False
     try:
@@ -177,7 +177,7 @@ def rewrite_vault_links(
         logger.warning(
             "link rewrite: malformed frontmatter in %s: %s — skipping",
             file_path,
-            e,
+            describe_failure(e),  # a YAML error quotes the offending line
         )
         return False
 
@@ -204,7 +204,7 @@ def rewrite_vault_links(
         atomic_write_text(file_path, new_text)
     except OSError as e:
         logger.warning(
-            "link rewrite: could not write %s: %s — skipping", file_path, e
+            "link rewrite: could not write %s: %s — skipping", file_path, describe_failure(e)
         )
         return False
     return True
