@@ -8,10 +8,16 @@ and remove the watcher issues (startup step 7 and every live sync) is queued
 and run by ONE thread with its own connection. The watcher stays live, its
 worker never blocks on Ollama, and there is still exactly one graph writer per
 watcher process. Plan: ``docs/plans/2026-10-22-vault-watcher-startup-blind.md``.
+
+The lane's connection is a :class:`~brain.vault.db_reconnect.ReconnectingConnection`:
+after a Postgres restart (or a failed first connect) it reconnects with capped
+backoff and re-runs the request once, and ``close`` cuts the backoff short.
+Plan: ``docs/plans/2026-10-22-vault-watcher-db-reconnect.md``.
 """
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 from collections import deque
@@ -21,10 +27,18 @@ from typing import Any, Literal, Protocol
 import psycopg
 
 from ..errors import describe_failure
+from .db_reconnect import ReconnectAbandoned, ReconnectingConnection
 
 logger = logging.getLogger(__name__)
 
 _Op = Literal["reconcile", "remove"]
+
+#: How to repair graph removes that were never applied; logged with their ids.
+LOST_REMOVES_REPAIR = (
+    "their AGE Document vertices stay until `brain graphrag build --force` "
+    "(re-extracts concepts for every document when concepts are on); aggregates and "
+    "orphan entities heal at the next graph reconcile or with `brain graphrag refresh`"
+)
 
 
 class GraphSyncTarget(Protocol):
@@ -50,16 +64,25 @@ class GraphLane:
       :meth:`undrained_removes` for the caller to log.
 
     The caller's connection is ignored on purpose: graph work runs on the
-    lane's own connection, never on the worker's.
+    lane's own connection, never on the worker's. It is opened at the first
+    request and re-opened after a loss; ``sleep`` (tests only) replaces the
+    backoff sleep, which by default wakes on ``close``.
     """
 
     def __init__(
         self,
         syncer: GraphSyncTarget,
         conn_factory: Callable[[], psycopg.Connection[Any]],
+        *,
+        sleep: Callable[[float], object] | None = None,
     ) -> None:
         self._syncer = syncer
-        self._conn_factory = conn_factory
+        self._link = ReconnectingConnection(
+            conn_factory,
+            label="graph lane",
+            sleep=sleep if sleep is not None else self._sleep_until_closed,
+            stopping=self._is_closing,
+        )
         self._pending: deque[tuple[_Op, str]] = deque()
         self._cond = threading.Condition()
         self._closing = False
@@ -117,32 +140,13 @@ class GraphLane:
 
     def _run(self) -> None:
         try:
-            conn = self._conn_factory()
-        except psycopg.Error as exc:
-            # Without a connection the lane can do nothing: close it (before
-            # logging, so the log line proves it) so later submits are no-ops,
-            # and name the removes dropped with it: a later startup won't redo them.
-            with self._cond:
-                self._closing = True
-                dropped = [d for o, d in self._pending if o == "remove"]
-                self._pending.clear()
-            logger.error(
-                "vault watcher: graph lane could not connect: %s; graph sync is off until "
-                "the watcher restarts; %d graph remove(s) not applied (%s)",
-                describe_failure(exc),
-                len(dropped),
-                ", ".join(dropped) or "none",
-            )
-            return
-        try:
-            conn.autocommit = True
             while (item := self._next()) is not None:
                 op, document_id = item
                 try:
-                    if op == "reconcile":
-                        self._syncer.reconcile(conn, document_id)
-                    else:
-                        self._syncer.remove(conn, document_id)
+                    self._link.call(functools.partial(self._apply, op, document_id))
+                except ReconnectAbandoned as exc:
+                    self._abandon(item, exc)
+                    return
                 except Exception as exc:  # one bad request must not stop the lane
                     # Class only: a message can quote row values (CLAUDE.md logging rule).
                     logger.warning(
@@ -152,4 +156,40 @@ class GraphLane:
                         describe_failure(exc),
                     )
         finally:
-            conn.close()  # psycopg's close is idempotent and does not raise
+            self._link.close()
+
+    def _apply(self, op: _Op, document_id: str, conn: psycopg.Connection[Any]) -> None:
+        if op == "reconcile":
+            self._syncer.reconcile(conn, document_id)
+        else:
+            self._syncer.remove(conn, document_id)
+
+    def _abandon(self, item: tuple[_Op, str], exc: ReconnectAbandoned) -> None:
+        """Shutdown came while the DB was unreachable: name every remove not applied.
+
+        ``close`` already dropped the pending reconciles (the next startup redoes
+        them). The removes, the one in flight included, are not redone by a
+        startup, so they are logged here: the thread exits, ``close`` returns
+        True, and the caller only reports a lane that is still running.
+        """
+        with self._cond:
+            dropped = [item[1]] if item[0] == "remove" else []
+            dropped += [d for o, d in self._pending if o == "remove"]
+            self._pending.clear()
+        logger.error(
+            "vault watcher: graph lane has no DB connection at shutdown (%s); "
+            "%d graph remove(s) not applied (%s): %s",
+            describe_failure(exc),
+            len(dropped),
+            ", ".join(dropped) or "none",
+            LOST_REMOVES_REPAIR,
+        )
+
+    def _is_closing(self) -> bool:
+        with self._cond:
+            return self._closing
+
+    def _sleep_until_closed(self, delay: float) -> None:
+        """The default reconnect backoff sleep: ``close`` cuts it short."""
+        with self._cond:
+            self._cond.wait_for(lambda: self._closing, timeout=delay)

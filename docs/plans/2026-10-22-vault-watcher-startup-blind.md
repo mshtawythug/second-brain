@@ -187,7 +187,7 @@ injected slow syncer (a `GraphSyncTarget` whose `reconcile` blocks on an
 | L6 | lane: the syncer is called with the LANE's connection (autocommit), not the caller's | its own connection, never the worker's |
 | L7 | lane: a request that raises is logged by class only, and the next request still runs | one failure never stops the lane; no content in logs |
 | L8 | lane: `close(0.05)` with a reconcile in flight and a remove queued reports the remove as undrained | a lost remove is never silent |
-| L9 | lane: a `conn_factory` that raises leads to a logged error, an exited thread, and no-op submits | a failed connect cannot wedge the lane |
+| L9 | lane: a `conn_factory` that raises leads to a logged error, an exited thread, and no-op submits *(superseded by R5 of `docs/plans/2026-10-22-vault-watcher-db-reconnect.md`: the lane now retries its connect with backoff and requests queue; `close` still ends it, and L9 was rewritten to say so)* | a failed connect cannot wedge the lane |
 | L10 | lane: an idle lane closes at once (`close(1.0) is True`) | `close` wakes the thread (audit F1) |
 | L11 | lane + PR #53: a real `GraphSyncer` reconcile on the lane waits while another session holds the tenant graph write lock, writes nothing until it is released, then completes | the lane's autocommit connection composes with the tenant lock (merge of master `8711ff0`) |
 | W3 | `run_watcher` whose observer factory raises leaks no lane thread | the lane starts only after setup |

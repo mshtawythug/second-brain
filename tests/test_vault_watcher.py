@@ -59,6 +59,7 @@ from brain.vault.watch import (
 # guard covers every importer, in tests/test_thread_wait.py.
 from tests.thread_wait import WAIT_FOR_BACKSTOP_S
 from tests.thread_wait import wait_for as _wait_for
+from tests.watch_link import worker_link
 
 # ---------------------------------------------------------------------------
 # Test doubles for watchdog Observer.
@@ -780,7 +781,7 @@ def test_stale_upsert_event_for_vanished_file(
     # errored — it's a phantom event that should leave the counters alone.
     assert state.processed == 0, (
         f"state.processed advanced for a stale upsert (0 → {state.processed}); "
-        f"the worker should ``continue`` without counting a vanished file as work"
+        f"the worker should skip a vanished file without counting it as work"
     )
 
 
@@ -2113,7 +2114,7 @@ def _run_events_through_worker(
                 job.dest_path = dest  # field only exists post-fix
             state.jobs.put(job)
     state.jobs.put(None)  # sentinel closes the worker loop
-    _worker_loop(conn, embedder, config, state)
+    _worker_loop(worker_link(conn), embedder, config, state)
     return state
 
 

@@ -284,6 +284,25 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        still be overtaken. The next build re-indexes it.
     4. The cross-type collapse window between W6 and W7 is pre-existing and cosmetic (a display
        name only).
+- *[FIXED 2026-10-22 on branch `fix/vault-watcher-db-reconnect`.]* **The vault watcher never
+  reconnected after a Postgres restart** (found by the PR #54 reviewer). The worker and the graph lane
+  each kept their dead connection, so every later edit and graph request failed until the watcher was
+  restarted. A lane whose first connect failed also turned itself off for good.
+  - **The fix:** both now hold a `ReconnectingConnection` (`src/brain/vault/db_reconnect.py`).
+    - **Loss detection:** a connection counts as lost when psycopg marks it closed, never by
+      exception class, because `DeadlockDetected` and `LockNotAvailable` are `OperationalError`s
+      on a healthy connection.
+    - **Re-run:** the job that met the dead connection runs once more, in place, on a fresh one.
+    - **Backoff:** 1s, 2s, 4s, and so on, capped at 30s.
+    - **Shutdown:** shutdown wakes the backoff, and a failed attempt at shutdown gives up and logs
+      what was not applied. The worker logs a job count and how many were deletes. The lane logs the
+      graph-remove ids.
+  - **Still open:**
+    1. A delete whose `DELETE` committed just before the connection died re-runs as a no-op. So no
+       graph remove is queued, and the document's AGE `Document` vertex stays. That is the same ghost,
+       with the same repair, as item 6's lost removes.
+    2. A delete the worker could not apply at shutdown is redone only by `brain vault sync --prune`.
+  - Rulings R1-R8, tests and mutation proofs: `docs/plans/2026-10-22-vault-watcher-db-reconnect.md`.
 
 ## Status on 2026-10-16: DONE except items that need the user
 
