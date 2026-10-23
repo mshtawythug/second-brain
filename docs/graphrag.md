@@ -51,10 +51,11 @@ So a `build --backfill` can run while the watcher is live. The concept
 extraction (the model call) runs with no transaction open, so nothing waits on
 another document's LLM call. If a document is edited or deleted while its
 reconcile is in that call, the reconcile writes nothing, and the newer edit's
-own reconcile indexes it. One deadlock remains possible: a document deleted at
-the very moment it is being reconciled. Postgres detects it, and a re-run
-resumes. Details: `src/brain/graph_rag/write_lock.py` and
-`docs/plans/2026-10-22-graph-entities-deadlock.md` ("Residuals").
+own reconcile indexes it. A document deleted while a reconcile or an alias merge
+is writing its graph rows waits for that write to finish. Both lock the
+document's row (`FOR KEY SHARE`) before they touch the graph. Details:
+`src/brain/graph_rag/write_lock.py` and
+`docs/plans/2026-10-22-graph-entities-deadlock.md`.
 
 ## Enabling GraphRAG
 

@@ -221,13 +221,16 @@ injected slow syncer (a `GraphSyncTarget` whose `reconcile` blocks on an
   rows. Each can hold what the other needs, so this is a deadlock cycle, not just
   a lock wait. *(This bullet said "though not in a cycle" until the PR #54
   review of `8073bfb`, which reproduced the cycle with millisecond windows;
-  Postgres picks the worker as the victim.)* It is **not fixed in #54**. It is
-  being fixed in `graph_rag` by **the follow-up to PR #53**:
-  `ReconcilePlan.is_current` reads `documents` X `FOR KEY SHARE`, so the lane
-  locks X before it touches any graph row. That also closes #53's
-  same-document residual. The same pattern already exists between processes
-  (MCP or ingest writing documents while the watcher reconciles). There is still
-  only one graph WRITER per watcher process.
+  Postgres picked the worker as the victim in the reproduction.)* It was not
+  fixed in #54. **FIXED by PR #55** (`fix/graph-reconcile-doc-key-share`), in
+  `graph_rag`: `ReconcilePlan.is_current` reads `documents` X `FOR KEY SHARE`,
+  so the lane locks X before it touches any graph row, and the worker's DELETE
+  waits for that one write transaction. That also closes #53's same-document
+  residual. Its regression test is
+  `tests/test_graphrag_deadlock.py::test_a_rewrite_and_a_concurrent_document_delete_do_not_deadlock`.
+  The same cycle existed between processes (MCP or ingest writing documents
+  while the watcher reconciles); the same graph_rag fix closes it. There is
+  still only one graph WRITER per watcher process.
 - **An in-flight reconcile at shutdown** can outlive `run_watcher` as a daemon
   thread. The process exit aborts it, and the transaction rolls back.
 
@@ -413,7 +416,7 @@ with it unchanged. The lane is the watcher's only graph writer, and its reconcil
 wait behind any tenant-wide writer (`graphrag refresh`, `build --force`). That wait
 happens on the lane thread. The event worker never waits on the model call or on the
 tenant lock; a delete of a document being written waits for that one write transaction
-(and, until the follow-up lands, can deadlock as its victim; see Risks). Only the handoff
+(before PR #55 it could deadlock as its victim; see Risks). Only the handoff
 conflicted, and the merge kept both sides.
 
 L11 runs a real `GraphSyncer` (with #53's `NullBackend`) on the lane while another

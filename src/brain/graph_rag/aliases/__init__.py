@@ -183,6 +183,7 @@ def apply_aliases(
         try:
             with conn.transaction():  # SAVEPOINT
                 acquire_graph_write_lock(conn, tenant_id)
+                _lock_alias_documents(conn, tenant_id, src_id)
                 dst_id = _upsert_entity(conn, tenant_id, rule.to_type, rule.to_key)
                 mentions_repointed += _repoint_mentions(
                     conn, tenant_id, src_id, dst_id
@@ -213,6 +214,45 @@ def apply_aliases(
 # ---------------------------------------------------------------------------
 # SQL helpers — all parameterized (NEVER concat ids/keys into SQL strings).
 # ---------------------------------------------------------------------------
+
+
+#: Every document a merge of the source entity will touch (its mentions, and
+#: contributions with it at either end), locked in id order.
+_LOCK_ALIAS_DOCUMENTS = (
+    "SELECT d.id FROM documents d WHERE d.id IN ("
+    " SELECT m.document_id FROM graph_entity_mentions m"
+    " WHERE m.tenant_id = %(tenant)s AND m.entity_id = %(id)s"
+    " UNION"
+    " SELECT c.document_id FROM graph_edge_contributions c"
+    " WHERE c.tenant_id = %(tenant)s"
+    " AND (c.src_id = %(id)s OR c.dst_id = %(id)s)"
+    ") ORDER BY d.id FOR KEY SHARE OF d"
+)
+
+
+def _lock_alias_documents(
+    conn: psycopg.Connection[Any], tenant_id: str, source_id: str
+) -> None:
+    """Lock ``FOR KEY SHARE``, in id order, every document a rule's merge touches.
+
+    Call it in each rule's transaction, right after the graph write lock and
+    before the rule writes. ``_repoint_mentions`` DO-UPDATEs a target row, which
+    runs no FK check and so takes no lock on the document, and then DELETEs the
+    source rows. A concurrent ``DELETE FROM documents`` landing between those
+    two statements deadlocked with its cascade: the cascade waited on the
+    updated target row, and the merge's DELETE waited on the cascade's deleted
+    source row. Holding the documents first makes such a DELETE wait for the
+    merge. A delete that committed first leaves no row to lock, and its cascade
+    has already removed the rows the merge would have moved.
+
+    Per rule is enough. The locks last to the end of the outer transaction, so
+    every document whose rows an earlier rule touched is already held. A later
+    rule can therefore wait only on a document whose delete needs none of the
+    merge's rows. The only competitors are single-row autocommit DELETEs, which
+    hold one document, so the id order is belt-and-braces. See
+    ``docs/plans/2026-10-22-graph-entities-deadlock.md``.
+    """
+    conn.execute(_LOCK_ALIAS_DOCUMENTS, {"tenant": tenant_id, "id": source_id})
 
 
 def _entity_id_by_key(
