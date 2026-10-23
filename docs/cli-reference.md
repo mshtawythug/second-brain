@@ -1057,7 +1057,7 @@ If only the embedding model is unavailable, `ask` still answers, from text-only
 notice goes to stderr (exit code 0), and `--json` carries `fallback`
 (`"fts_only"` or `null`), `fallback_reason` (the failure's class, never its
 message), `fallback_transient` and `fallback_note`. These are separate from
-`fallback_used`, which still means the planning loop was skipped. Every other
+`fallback_used`, which still means the planning loop was skipped or degraded. Every other
 failure is one `ask: <sentence>` line on stderr and exit 1: Ollama down, a
 prompt over the chat model's context window, an answer cut off at its output
 budget, a graph-leg failure. The sentence names the class at most, never the

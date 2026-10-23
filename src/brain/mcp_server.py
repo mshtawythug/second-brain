@@ -3102,9 +3102,9 @@ def brain_ask(
 
     Returns ``{answer, citations[], iterations_used, sub_queries[],
     fallback_used, session_id}`` plus the four ``fallback*`` keys
-    ``brain_search`` emits. ``fallback_used`` means the planning loop was
-    skipped; ``fallback == "fts_only"`` means the embedder was down and
-    retrieval was text-only: relay ``fallback_note`` to the user when it is set.
+    ``brain_search`` emits. ``fallback_used``: the planning loop was skipped or
+    degraded; ``fallback == "fts_only"``: the embedder was down and retrieval
+    was text-only. Relay ``fallback_note`` to the user when it is set.
     Requires a local Ollama for the LLM steps; an unavailable Ollama (or any
     other ``ask`` failure) is ``INTERNAL_ERROR`` with one fixed sentence. A bad
     ``mode`` is ``INVALID_PARAMS``.

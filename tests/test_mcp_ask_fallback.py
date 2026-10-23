@@ -190,7 +190,32 @@ def test_a_database_error_keeps_its_mapping(
     assert excinfo.value.error.message == "database error: OperationalError"
 
 
-def test_a_value_error_keeps_its_mapping(
+def test_a_value_error_inside_the_run_keeps_its_invalid_params_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+    meadow: str,  # noqa: ARG001 — seeds the corpus
+    fake_embedder: Any,
+    tmp_path: Path,
+) -> None:
+    """A ``ValueError`` raised inside the try reaches ``brain_ask``'s own ``except ValueError``.
+
+    ``ASK_FAILURES`` sits in front of it; this proves that mapping still runs.
+    """
+    # Arrange
+    _install(monkeypatch, fake_embedder, tmp_path)
+
+    def _chat_value_error(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise ValueError("synthetic")
+
+    monkeypatch.setattr(chat, "chat_json", _chat_value_error)
+
+    # Act / Assert
+    with pytest.raises(MCPError) as excinfo:
+        mcp_server.brain_ask(question="meadow survey", no_loop=True)
+    assert excinfo.value.error.code == INVALID_PARAMS
+    assert excinfo.value.error.message == "synthetic"
+
+
+def test_an_unknown_mode_is_rejected_before_the_run(
     monkeypatch: pytest.MonkeyPatch, fake_embedder: Any, tmp_path: Path
 ) -> None:
     # Arrange

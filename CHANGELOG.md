@@ -30,7 +30,7 @@ uses, and still answer (roadmap ticket RM-02). The answer text is never edited.
 The CLI prints `Retrieval: text-only (semantic ranking unavailable)` under it
 and the one-line notice on stderr (exit code 0). `--json` and `brain_ask` carry
 the four always-present `fallback*` keys (`null` on a normal run), separate
-from `fallback_used`, which still means the planning loop was skipped.
+from `fallback_used`, which still means the planning loop was skipped or degraded.
 `brain eval --answer` does not fall back: an embed failure still stops it with
 exit 1, as in every `brain eval` mode.
 
