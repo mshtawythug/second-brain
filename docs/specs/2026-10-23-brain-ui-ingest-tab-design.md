@@ -18,7 +18,7 @@ symbol over the number.
 |---|---|---|---|
 | D1 | Where does an ingest run? | On **one dedicated worker thread**, owned by an in-process `JobRegistry`. Never in a request handler, never on the event loop, never via Starlette `BackgroundTask`. | §4.1 |
 | D2 | Progress transport | **Polling** `GET /api/jobs/{id}?after=<seq>` over an append-only event log. No SSE in v1. | §4.3 |
-| D3 | Cancellation | **Cooperative.** Honoured while queued, after staging/validation, after extraction, and before each embedding batch, all of which come before any write. Extraction itself is not interruptible. Refused with 409 once the last batch has been embedded. A cancel the runner never gets to observe ends `succeeded` with a `cancel_too_late` event. | §4.4 |
+| D3 | Cancellation | **Cooperative.** Honoured while queued, after staging/validation, after extraction, and before each embedding batch, all of which come before any write. Extraction itself is not interruptible. `enter_commit()` is an atomic check-and-close after the last batch, so a cancel accepted during any embedding path is always honoured. After that point, cancel is refused with 409. Only on the four no-embed paths can an accepted cancel go unobserved; the job then ends `succeeded` with a `cancel_too_late` event. | §4.4 |
 | D4 | Server restart | Jobs are **in memory only**: no migration, no job table. Re-submitting is safe because ingest is idempotent. Staged uploads are swept at startup. | §4.6 |
 | D5 | Concurrency | **One running job, at most four queued.** A fifth gets 429. One worker for every job kind, the future Agent tab included. | §4.5 |
 | D6 | v1 inputs | **Paste first** (text or markdown, no new surface). **File upload second**, as a raw `application/octet-stream` body, not multipart. **No URL ingest. No server-side path ingest.** | §3, §5 |
@@ -133,7 +133,7 @@ same order (steps 2–4, `:1153-1162`).
 
 **The `ingest_document` docstring is stale on one point.** It says the summary is written "inside the
 same transaction" (`:690-693`). The code, and the inner docstring, run it after the commit. The
-backlog lists this as residue R-12.
+backlog lists this as residue BL-12.
 
 **Consequence:** a cancellation raised from inside `embed()` aborts before anything is written. That
 is what makes cooperative cancel (D3) safe without changing `ingest_document`. §9 pins it with a test,
@@ -217,10 +217,11 @@ The tab's help text names the difference in one line, so a user who wants a note
    missing (§5.4, `mirror_repaired`).
 3. Uploading each supported type works. An unsupported or mismatched file is refused **before**
    anything is staged on disk. An oversize file is refused on the stream.
-4. Cancel works at every cancellable point (§4.4) and writes nothing. Once the last embedding
-   batch has returned, cancel is refused with a clear reason. A cancel that arrives on a path with
-   no later cancel point (§4.4, last table row) is reported as `cancel_too_late` on a job that
-   succeeded. It is never silently dropped.
+4. Cancel works at every cancellable point (§4.4) and writes nothing. That includes a cancel that
+   lands during the last or only embedding batch, which the atomic `enter_commit()` honours. Once
+   `enter_commit()` has closed, cancel is refused with a clear reason. A cancel accepted on one of
+   the four no-embed paths (§4.4) is reported as `cancel_too_late` on a job that succeeded. A cancel
+   is never silently dropped.
 5. Killing the server mid-job and restarting it leaves no partial document and no staged file. The
    client says the job's outcome is unknown and that re-submitting is safe.
 6. Every security test in §9.3 passes. `--read-only` and non-loopback servers render the tab
@@ -266,7 +267,7 @@ class JobHandle(Protocol):              # what a runner sees
     def progress(self, phase: str, *, done: int | None = None, total: int | None = None) -> None: ...
     def note(self, code: str) -> None: ...
     def check_cancelled(self) -> None: ...   # raises JobCancelled
-    def enter_commit(self) -> None: ...      # from here on cancel is refused (idempotent)
+    def enter_commit(self) -> None: ...      # atomic: raise JobCancelled if requested, else close (idempotent)
 
 Runner = Callable[[JobHandle], Mapping[str, Any]]
 
@@ -323,9 +324,10 @@ class JobRegistry:
 - `cancellable` is true while queued, and while running **until** `enter_commit()` is called. The
   registry sets it to **false on every terminal state** (`succeeded`, `failed`, `cancelled`),
   whoever called what. So no terminal snapshot can claim it is still cancellable.
-- **A cancel that is never observed.** If a cancel was requested (202, §4.4) and the runner then
-  returns normally without passing another `check_cancelled()`, the registry finalizes the job as
-  `succeeded`. It appends one event with `code: "cancel_too_late"`, so the client can say "it
+- **A cancel that is never observed.** This can happen only on a no-embed path (§4.4): on every
+  embedding path, `enter_commit()` re-checks the flag. If a cancel was requested (202) and the
+  runner then returns normally without passing another `check_cancelled()` or `enter_commit()`, the
+  registry finalizes the job as `succeeded`. It appends one event with `code: "cancel_too_late"`, so the client can say "it
   finished before it could stop" instead of reporting either silent success or a false cancel.
 - **Retention:** terminal jobs stay for `retain_for = 1 h`, at most `retain = 50`, evicted oldest
   first. Eviction runs on submit and on list, never on a timer.
@@ -378,9 +380,9 @@ mutation. It is idempotent.
 | Job is… | Response | Effect |
 |---|---|---|
 | queued | 200, `state: "cancelled"` | Removed from the queue. It never runs. |
-| running, before `enter_commit()` | 202, `state: "running"`, `cancel_requested: true` | A flag is set. The runner raises `JobCancelled` at its next `check_cancelled()`, and the job ends `cancelled`. |
+| running, before `enter_commit()` | 202, `state: "running"`, `cancel_requested: true` | A flag is set, under the registry lock. The runner raises `JobCancelled` at its next `check_cancelled()` **or** at `enter_commit()` itself, which re-checks the flag atomically. The job ends `cancelled`. This includes a cancel that lands while the last or only batch's `inner.embed` is in flight, which is the common case, since most pastes fit in one batch. |
 | running, after `enter_commit()` | 409 `not_cancellable` | Nothing. The job finishes. The message says writing has started. |
-| running, before `enter_commit()`, on a path with **no later cancel point** | 202, `cancel_requested: true` (the server cannot know yet that no check is left) | The runner finishes and the job ends **`succeeded`** with a `cancel_too_late` event (§4.2). The panel says what was written. On a **skip**, the mirror repair may still write the owed `_ingested/` file of the existing row. That file is the only thing a skip can write. |
+| running, on a **no-embed path** (below), after point 3 | 202, `cancel_requested: true`. The server cannot know yet that no check is left. | The runner finishes and the job ends **`succeeded`** with a `cancel_too_late` event (§4.2). The panel says what was written, if anything. On a **skip**, the mirror repair may still write the owed `_ingested/` file of the existing row; that file is the only thing a skip can write. On the **no-chunks** path nothing is written. |
 | terminal | 200, the unchanged snapshot | Nothing. |
 
 **Cancel points in an ingest runner**, in order, each one before the write transaction (C3):
@@ -396,20 +398,34 @@ the design chosen, not the alternative of an explicit pre-write hook point. The 
 `handle.check_cancelled()` (point 3) and then `ingest_document` directly. It does **not** call
 `enter_commit()` first: that pre-call would close the cancel window before the embed and make
 point 4 unreachable. `enter_commit()` is called **only** by the progress embedder, after its last
-batch returns. From there `ingest_document` opens its transaction, commits, runs the post-commit
-summary (an autocommit `UPDATE`, one Ollama chat call; C3), then writes the mirror. None of that is
-interrupted.
+batch returns.
 
-**Three paths make no embed call, so point 4 never runs and `enter_commit()` is never called:**
+**`enter_commit()` is an atomic check-and-close, under the registry lock.** If a cancel was
+requested, it raises `JobCancelled`. Otherwise it sets `cancellable = false`, and from then on every
+cancel gets 409. The check matters because nothing re-checks the flag after the last batch. A
+cancel that arrives while the final slice's `inner.embed` is running would otherwise get 202 and
+then be ignored. Raising there is safe, because nothing has been written yet: the embed returns
+before the transaction opens (C3).
+
+So the 202 window and the honour window are the same window, closed in one critical section. A
+202 is never followed by a write on an embedding path. From `enter_commit()` on, `ingest_document`
+opens its transaction, commits, runs the post-commit summary (an autocommit `UPDATE`, one Ollama
+chat call; C3), then writes the mirror. None of that is interrupted.
+
+**Four paths make no embed call, so point 4 never runs and `enter_commit()` is never called:**
 
 - a dedup `skip`;
+- **no chunks:** an insert whose content chunks to nothing returns
+  `IngestResult(document_id=None)` before any embed (`ingest/__init__.py:1192-1196`). This is the
+  `empty` outcome (§5.4);
 - `produces_embeddings = False`;
 - the F6 egress veto (`_embed_chunks`, `ingest/__init__.py:541-544`).
 
-On these paths, a cancel that arrives after point 3 is the "no later cancel point" row above. It
-ends `succeeded` with `cancel_too_late`. The alternative, an extra hook inside `ingest_document`
-just before its transaction, was rejected. It would change an over-ceiling 2,369-line module for a
-window that lasts milliseconds on these paths: none of them makes an Ollama embed call.
+On these paths, and only on these, a cancel that arrives after point 3 is the "no-embed path" row
+above: the job ends `succeeded` with `cancel_too_late`. The alternative, an extra hook inside
+`ingest_document` just before its transaction, was rejected. It would change an over-ceiling
+2,369-line module for a window that lasts milliseconds on these paths, since none of them makes an
+Ollama embed call.
 
 **`JobCancelled` must propagate through `ingest_document`.** It derives from `BrainError`, not from
 `EmbedError`, so no handler in the pipeline that maps embed failures can swallow it. A test (§9.2)
@@ -444,7 +460,7 @@ message can quote document content.
 | `EmbedError`, permanent | `embedder_unavailable` | "The embedding model is not usable (not pulled, or a bad key). Nothing was written." |
 | `psycopg.errors.UniqueViolation` | `concurrent_ingest` | "Another process ingested the same content at the same moment. Retrying is safe." |
 | other `psycopg.Error` | `database_error` | "Database error (`<ClassName>`)." |
-| anything else | `internal_error` | "Internal error (`<ClassName>`)." |
+| anything else | `internal_error` | "Internal error (`<ClassName>`). The document may already have been saved; re-submit to check (identical content is a no-op)." This message never says nothing was written, because an error after the commit (for example from the post-commit summary) lands here with the row already saved. The same is true of `database_error`, whose message also makes no such claim. Every other code is raised before the write. |
 
 The server log line is `"ui ingest job %s failed: %s", job_id, describe_failure(exc)`. That is the
 class only, and it already satisfies `tests/test_log_privacy.py` G1. **No `logger.exception` is
@@ -595,12 +611,13 @@ dedups on the hash of the extracted text, which is the property §3.4 item 2 nee
   are **mutation-verified** per the memory note "prove the check can fail".
 - `embed(texts, input_type=…)`: emits `progress("embedding", done=0, total=len(texts))`, then for each
   slice of `batch_size` calls `handle.check_cancelled()`, `inner.embed(slice, input_type=…)` and
-  `progress(..., done=…)`. After the last slice it calls `handle.enter_commit()` and returns the
-  concatenated vectors. Slicing does not change any vector: every backend embeds each text
-  independently.
-- **No embed call at all** happens for a `skip` (dedup), under `produces_embeddings=False`, or under
-  the egress veto (`_embed_chunks`, `ingest/__init__.py:541-544`). On these paths `enter_commit()` is
-  never called. The runner **must not** call it before `ingest_document`, because that would close
+  `progress(..., done=…)`. After the last slice it calls `handle.enter_commit()`, the atomic
+  check-and-close of §4.4. That call raises `JobCancelled` if a cancel arrived during the final
+  slice; otherwise it closes the window. Then the wrapper returns the concatenated vectors. Slicing
+  does not change any vector: every backend embeds each text independently.
+- **No embed call at all** happens on the four no-embed paths of §4.4: a `skip` (dedup), an insert
+  with no chunks (`ingest/__init__.py:1192-1196`), `produces_embeddings=False`, and the egress veto
+  (`_embed_chunks`, `ingest/__init__.py:541-544`). On these paths `enter_commit()` is never called. The runner **must not** call it before `ingest_document`, because that would close
   the cancel window before point 4 on every path (§4.4). The registry's terminal transition sets
   `cancellable=false` (§4.2), and an unobserved cancel ends as `cancel_too_late`.
 
@@ -889,7 +906,7 @@ to port 55432**, including for reads (the memory note on audits).
 
 | File | Covers |
 |---|---|
-| `tests/test_ui_jobs.py` | State machine; `run_next` ordering (FIFO); `queue_full` at 5; cancel in each state (§4.4 table); `enter_commit` makes cancel return `not_cancellable`; **`cancellable` is false in every terminal snapshot**, including a runner that never called `enter_commit`; **`cancel_too_late`**: a runner that calls `registry.cancel(job_id)` on itself (202) and then returns without another `check_cancelled()` ends `succeeded` with exactly one `cancel_too_late` event; the event-cap policy of §4.2 (notable events and each phase's first event survive, `seq` is never reused, `after=` across a gap returns every surviving later event); `after=` slicing; the 200-event cap; retention by count and by age using an injected clock; snapshots are frozen and are copies (mutating a returned tuple is impossible, and a later event does not appear in an old snapshot); `stop()` with a runner blocked on a `threading.Event` returns its id after the timeout. The last case is the only one that starts a thread, and it waits on the event, never on a sleep. |
+| `tests/test_ui_jobs.py` | State machine; `run_next` ordering (FIFO); `queue_full` at 5; cancel in each state (§4.4 table); `enter_commit` makes cancel return `not_cancellable`; **`enter_commit` after a requested cancel raises `JobCancelled`**, and the job ends `cancelled`. A runner that calls `registry.cancel(job_id)` and then `handle.enter_commit()` must never reach the line after it. **`cancellable` is false in every terminal snapshot**, including a runner that never called `enter_commit`; **`cancel_too_late`**: a runner that calls `registry.cancel(job_id)` on itself (202) and then returns without another `check_cancelled()` ends `succeeded` with exactly one `cancel_too_late` event; the event-cap policy of §4.2 (notable events and each phase's first event survive, `seq` is never reused, `after=` across a gap returns every surviving later event); `after=` slicing; the 200-event cap; retention by count and by age using an injected clock; snapshots are frozen and are copies (mutating a returned tuple is impossible, and a later event does not appear in an old snapshot); `stop()` with a runner blocked on a `threading.Event` returns its id after the timeout. The last case is the only one that starts a thread, and it waits on the event, never on a sleep. |
 | `tests/test_ingest_outcome.py` | `classify` over every `IngestResult` shape `_ingest_outcome_verb` handles today, and the CLI's verbs re-derived from it. The existing CLI ingest tests stay green, unmodified, which proves the extraction changed nothing. |
 | `tests/test_ui_upload_names.py` | The filename sanitizer table from §7.4, plus the extension allowlist read from `supported_extensions()`, not restated. |
 
@@ -897,7 +914,7 @@ to port 55432**, including for reads (the memory note on audits).
 
 | File | Covers |
 |---|---|
-| `tests/test_ui_ingest_service.py` | Paste → row, chunks and a mirror under `_ingested/manual/`; outcome `ingested`. Same paste again → `skipped` with the same id and no new rows. **Mid-embed cancel, run through the `run_next` seam on the test thread with no second thread:** a fake embedder whose second `embed()` call itself calls `registry.cancel(job_id)` before it returns. The progress embedder's next `check_cancelled()` raises, so the job ends `cancelled`, with no `documents`, `chunks` or `sources` row and no mirror file (C3). **A cancel too late, on a no-embed path:** a `produces_embeddings = False` fake whose `count_tokens`, called by the chunker after point 3, calls `registry.cancel(job_id)`. No later cancel point exists, so the job ends `succeeded` with `cancel_too_late` and the document is written (§4.4, the "no later cancel point" row). The skip variant of that row (the mirror repair may still write) is covered in two halves: the registry's `cancel_too_late` finalization is tested in `test_ui_jobs.py`, and a skip over a row with `vault_path` set to NULL reports `mirror_repaired` here. A dedup skip calls nothing on the injected embedder, so no in-thread seam can land a cancel inside it. **Killed during the summary:** a fake enricher that raises after the commit → `summary IS NULL`; a re-submit is a skip that reports `mirror_repaired` when the mirror is owed and leaves `summary` NULL (§4.6). **Hosted fake + confidential** → NULL embeddings + `egress_notice` (C5). **`produces_embeddings=False` fake** → NULL embeddings, no `embed()` call. Secret guard: `warn` → masked findings; `reject` → `secret_guard_rejected` and nothing written. A whitespace-only extraction → `empty`. A mirror that fails (a read-only vault dir) → the job succeeds, and a re-submit → `mirror_repaired`. `sync_one_file` over the new mirror reaches `reconcile` on a recording `GraphSyncTarget` (§5.6 verification). |
+| `tests/test_ui_ingest_service.py` | Paste → row, chunks and a mirror under `_ingested/manual/`; outcome `ingested`. Same paste again → `skipped` with the same id and no new rows. **Mid-embed cancel, three cases, all through the `run_next` seam on the test thread with no second thread.** In each, a fake embedder calls `registry.cancel(job_id)` from inside one of its own `embed()` calls, before returning. Each case ends `cancelled`, with no `documents`, `chunks` or `sources` row and no mirror file (C3). The fixture's chunk count is asserted in the test's setup by running `chunk_text` with the fake's `count_tokens`, never assumed. (a) **Two batches, cancel in the 1st call:** a body that chunks into exactly 20 chunks (16 + 4). Batch 2's `check_cancelled()` raises. (b) **Two batches, cancel in the 2nd (last) call:** the same 20-chunk body. No `check_cancelled()` is left, and `enter_commit()`'s atomic check raises. This is the race the check exists for. (c) **Single batch, cancel in the only call:** a body of 3 chunks, the common paste. `enter_commit()` raises. Without the atomic check, (b) and (c) would end `cancel_too_late` with a written document, so they are the mutation-proof cases for §4.4. **A cancel too late, on a no-embed path:** a `produces_embeddings = False` fake whose `count_tokens`, called by the chunker after point 3, calls `registry.cancel(job_id)`. This is a no-embed path, so no later cancel point exists, and the job ends `succeeded` with `cancel_too_late` and the document written (§4.4, the "no-embed path" row). The skip variant of that row (the mirror repair may still write) is covered in two halves: the registry's `cancel_too_late` finalization is tested in `test_ui_jobs.py`, and a skip over a row with `vault_path` set to NULL reports `mirror_repaired` here. A dedup skip calls nothing on the injected embedder, so no in-thread seam can land a cancel inside it. **A crash during the summary:** a fake enricher whose `summarize` raises `RuntimeError`. It must be an exception the hook does **not** catch: `_enrich_post_ingest_hook` catches `OllamaUnavailable` and `EnrichmentError`, logs them and returns (`ingest/__init__.py:1641-1654`), and the mirror is then written as usual. The `RuntimeError` instead escapes `ingest_document` before the mirror step. Expected end of the first job: `failed` / `internal_error`, with a **committed** row, `summary IS NULL` and `vault_path IS NULL`. The panel's message for that code must not claim nothing was written (§4.5). A re-submit is a skip that reports `mirror_repaired` and leaves `summary` NULL (§4.6). **A cancel too late, on the no-chunks path:** an uploaded `.txt` containing only whitespace. A whitespace-only *paste* is refused at submit with 400 (§5.1), so it never reaches this path. The fake `count_tokens` cancels during chunking. The job ends `succeeded` with `cancel_too_late` and the outcome `empty`. **Hosted fake + confidential** → NULL embeddings + `egress_notice` (C5). **`produces_embeddings=False` fake** → NULL embeddings, no `embed()` call. Secret guard: `warn` → masked findings; `reject` → `secret_guard_rejected` and nothing written. A whitespace-only extraction → `empty`. A mirror that fails (a read-only vault dir) → the job succeeds, and a re-submit → `mirror_repaired`. `sync_one_file` over the new mirror reaches `reconcile` on a recording `GraphSyncTarget` (§5.6 verification). |
 | `tests/test_ui_ingest_upload.py` | Each extension round-trips. A sniff mismatch for each type → 415 and the file deleted. The zip-bomb guard. Stream caps: a body over the cap with an honest `Content-Length` → 413 before reading; with a lying or absent `Content-Length` → 413 mid-stream and the partial file deleted. The staging budget → 429. Expiry and `DELETE` (JSON `{}` body, 200 JSON response). The startup sweep removes a root whose pid is dead, and keeps this process's own root, a root whose pid is alive (the test uses its own parent's pid), and a root with no parseable pid. |
 | `tests/test_ui_ingest_routes.py` | The §6 contract: status codes, envelopes, `ingest/config` in each mode, and `health.ingest_enabled`. |
 
@@ -1013,5 +1030,6 @@ and only `cli_ingest.py` is in the ceiling table. **No change to `ingest/__init_
 | A persistent jobs table | Needs a migration, duplicates confidential titles, and adds no recoverable outcome. | §4.6 |
 | Ingest inside `notes_service.py` | It would cross the 800-line ceiling, and it is a different responsibility. | §1.3 |
 | Changing `ingest_document` to take a progress callback | Not needed: the embedder seam gives progress and cancel without touching an over-ceiling 2,369-line module. | §5.3 |
-| An explicit pre-write cancel hook inside `ingest_document` | It would change the same over-ceiling module for a window measured in milliseconds on the no-embed paths. `cancel_too_late` reports that window honestly. | §4.4 |
+| An explicit pre-write cancel hook inside `ingest_document` | It would change the same over-ceiling module for a window measured in milliseconds on the four no-embed paths. `cancel_too_late` reports that window honestly. On embedding paths no hook is needed: the atomic `enter_commit()` is the last check, and it runs before the transaction. | §4.4 |
+| A plain `enter_commit()` that only closes the window | A cancel landing during the last or only batch would get 202 and then be ignored, with the document written. That is the common case for a paste. The check-and-close must be one critical section. | §4.4, §5.3 |
 | Calling `enter_commit()` before `ingest_document` | It closes the cancel window before the embed, which makes the only long cancellable phase uncancellable. | §4.4, §5.3 |
