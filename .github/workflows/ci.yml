@@ -10,11 +10,12 @@
 #
 # Design decisions:
 #
-#   * THREE JOBS, one workflow. `lint` needs no Docker and finishes in well
-#     under a minute, so a formatting or typing mistake fails fast and cheap
-#     instead of after a container bring-up plus the full suite. `browser`
-#     needs neither Docker nor Postgres. All three live here so a single
-#     `ci.yml` badge covers the union.
+#   * THREE JOBS, one workflow. `lint` (ruff, mypy, and the CLAUDE.md
+#     ceiling-table check, scripts/check_ceiling_table.py) needs no Docker and
+#     finishes in well under a minute, so a formatting or typing mistake fails
+#     fast and cheap instead of after a container bring-up plus the full
+#     suite. `browser` needs neither Docker nor Postgres. All three live here
+#     so a single `ci.yml` badge covers the union.
 #
 #   * BARE `pytest`, no extra flags — in the `test` job. pyproject.toml's
 #     `addopts` already carries `--cov=brain --cov-fail-under=85` and already
@@ -127,6 +128,13 @@ jobs:
 
       - name: mypy src/
         run: mypy src/
+
+      # RM-04: CLAUDE.md's file-size ceiling table must list exactly the
+      # src/brain/ modules over 800 lines. Stdlib only, no database. A missing
+      # row, a stale row, or a row naming the wrong file exits 1 and says which;
+      # a missing table header exits 2. bin/brain-ci runs the same step.
+      - name: Ceiling table matches the tree
+        run: python scripts/check_ceiling_table.py
 
   test:
     name: Tests (pytest, AGE Postgres)

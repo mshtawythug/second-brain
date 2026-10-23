@@ -53,6 +53,15 @@ VENV_DIR_RE = re.compile(r"python\s+-m\s+venv\s+(\S+)")
 SEQ_RE = re.compile(r"seq\s+1\s+(\d+)")
 SLEEP_RE = re.compile(r"(?m)^\s*sleep\s+(\d+)\s*$")
 
+# `step "ci.yml job 'lint' — <command>"` — the label each lint step prints.
+# The label names the ci.yml command verbatim, so it is what the lint-step drift
+# check below keys on (RM-04: the ceiling-table step must not exist in one file
+# and not the other).
+LINT_STEP_LABEL_RE = re.compile(r"""(?m)^\s*step "ci\.yml job 'lint' — (?P<cmd>[^"]+)"$""")
+
+# Lint-job `run:` lines that set the job up rather than check anything.
+LINT_SETUP_PREFIXES = ("pip install",)
+
 # Flags that would hollow out the gate if the script quietly added them.
 GATE_HOLLOWING_FLAGS = ("--no-cov", "--cov-fail-under", "PYTEST_ADDOPTS")
 
@@ -125,6 +134,53 @@ def _workflow_facts(workflow_text: str) -> dict[str, Any]:
     }
 
 
+def _lint_commands(workflow_text: str) -> list[str]:
+    """The checking commands of ci.yml's ``lint`` job, in order (setup steps dropped)."""
+    workflow = yaml.safe_load(workflow_text)
+    lint = workflow.get("jobs", {}).get("lint", {})
+    return [
+        str(step["run"]).strip()
+        for step in lint.get("steps", [])
+        if isinstance(step, dict)
+        and "run" in step
+        and not str(step["run"]).strip().startswith(LINT_SETUP_PREFIXES)
+    ]
+
+
+def _invokes(code: str, command: str) -> bool:
+    """Whether the script's code runs ``command`` as ``"$VENV/bin/<tool>" <args>``."""
+    tool, *args = command.split()
+    pattern = re.escape(f'"$VENV/bin/{tool}"') + "".join(
+        r"\s+" + re.escape(arg) for arg in args
+    )
+    return re.search(pattern + r"(?=\s|\)|$)", code, re.MULTILINE) is not None
+
+
+def find_lint_drift(workflow_text: str, script_text: str) -> list[str]:
+    """Lint steps present in one of ci.yml / ``bin/brain-ci`` and missing from the other."""
+    commands = _lint_commands(workflow_text)
+    labels = LINT_STEP_LABEL_RE.findall(script_text)
+    code = "\n".join(_code_lines(script_text))
+    drift: list[str] = []
+    if not commands:
+        drift.append("ci.yml's lint job runs no checking command")
+    for command in commands:
+        if command not in labels:
+            drift.append(
+                f"lint step: ci.yml runs `{command}`, bin/brain-ci has no "
+                f"`step \"ci.yml job 'lint' — {command}\"` for it"
+            )
+        if not _invokes(code, command):
+            drift.append(
+                f"lint step: ci.yml runs `{command}`, bin/brain-ci never invokes it "
+                "through \"$VENV/bin/...\""
+            )
+    for label in labels:
+        if label not in commands:
+            drift.append(f"lint step: bin/brain-ci runs `{label}`, ci.yml's lint job does not")
+    return drift
+
+
 def find_drift(workflow_text: str, script_text: str) -> list[str]:
     """Every disagreement between ci.yml and ``bin/brain-ci``'s contract block.
 
@@ -185,6 +241,7 @@ def find_drift(workflow_text: str, script_text: str) -> list[str]:
     else:
         expect("CI_WAIT_SLEEP", facts["wait_sleep"], "readiness sleep")
 
+    drift.extend(find_lint_drift(workflow_text, script_text))
     return drift
 
 
@@ -265,6 +322,93 @@ def test_script_drift_is_detected() -> None:
     drift = find_drift(_workflow_text(), mutated)
 
     assert any("pg_isready port" in complaint for complaint in drift), drift
+
+
+CEILING_STEP = "python scripts/check_ceiling_table.py"
+
+
+def test_ci_lint_job_and_script_both_run_the_ceiling_check() -> None:
+    """RM-04: the ceiling-table check is a lint step in both files."""
+    assert CEILING_STEP in _lint_commands(_workflow_text())
+    assert CEILING_STEP in LINT_STEP_LABEL_RE.findall(_script_text())
+
+
+def _remove_script_lint_block(script_text: str, command: str) -> str:
+    """Drop the script's whole block for one lint step: label, run, status, ok line."""
+    label = f"step \"ci.yml job 'lint' — {command}\""
+    lines = script_text.splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if line.strip() == label)
+    end = start + 1
+    while end < len(lines) and lines[end].strip() and not lines[end].strip().startswith("step "):
+        end += 1
+    return "".join(lines[:start] + lines[end:])
+
+
+def test_lint_step_removed_from_script_is_drift() -> None:
+    """AC8: removing the ceiling step from bin/brain-ci while ci.yml keeps it fails."""
+    script = _script_text()
+    mutated = _remove_script_lint_block(script, CEILING_STEP)
+    assert mutated != script, "mutation did not apply"
+    assert CEILING_STEP not in LINT_STEP_LABEL_RE.findall(mutated), "label survived"
+    assert '"$VENV/bin/python" scripts/check_ceiling_table.py' not in mutated, (
+        "the invocation survived the mutation"
+    )
+
+    drift = find_drift(_workflow_text(), mutated)
+
+    assert any(CEILING_STEP in complaint and "bin/brain-ci" in complaint for complaint in drift), (
+        drift
+    )
+
+
+def test_lint_step_invocation_removed_but_label_kept_is_drift() -> None:
+    """A label with no matching ``"$VENV/bin/..."`` call is not a step."""
+    script = _script_text()
+    mutated = script.replace('"$VENV/bin/python" scripts/check_ceiling_table.py', "true")
+    assert mutated != script, "fixture is stale: no ceiling invocation in bin/brain-ci"
+
+    drift = find_drift(_workflow_text(), mutated)
+
+    assert any("never invokes" in complaint for complaint in drift), drift
+
+
+def test_lint_step_removed_from_workflow_is_drift() -> None:
+    """The reverse direction: bin/brain-ci runs a lint step ci.yml no longer has."""
+    workflow = _workflow_text()
+    mutated = re.sub(
+        r"\n      - name: [^\n]*\n        run: python scripts/check_ceiling_table\.py\n",
+        "\n",
+        workflow,
+    )
+    assert mutated != workflow, "fixture is stale: ci.yml has no ceiling step in that shape"
+    assert CEILING_STEP not in _lint_commands(mutated)
+
+    drift = find_drift(mutated, _script_text())
+
+    assert any(
+        CEILING_STEP in complaint and "ci.yml's lint job does not" in complaint
+        for complaint in drift
+    ), drift
+
+
+def test_every_lint_status_feeds_the_exit_code() -> None:
+    """Each lint step's ``*_STATUS`` must reach the summary's exit condition.
+
+    A step whose status is captured and then never read prints FAIL in the
+    summary and still exits 0, which is a gate that reports and does not gate.
+    """
+    script = _script_text()
+    statuses = sorted(set(re.findall(r"(?m)^\s*([A-Z]+_STATUS)=\$\?", script)) - {"PYTEST_STATUS"})
+    condition = re.search(
+        r"(?m)^elif \(\( (?P<cond>[^)]*) \)\); then\n\s*EXIT_STATUS=1$", script
+    )
+
+    assert {"RUFF_STATUS", "MYPY_STATUS", "CEILING_STATUS"} <= set(statuses), statuses
+    assert condition is not None, "bin/brain-ci has no `elif (( ... )); then EXIT_STATUS=1`"
+    for status in statuses:
+        assert f"{status} != 0" in condition.group("cond"), (
+            f"{status} is captured but never decides the exit code"
+        )
 
 
 # ---------------------------------------------------------------------------
