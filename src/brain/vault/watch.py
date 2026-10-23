@@ -38,7 +38,11 @@ Concurrency invariants worth restating:
   move is delivered first, and a drained (closed) watcher accepts no event. A
   rename onto a different document deletes the old row (``move_identity``).
   Graph syncs run on one background lane (``graph_lane``), so a slow startup
-  reconcile never delays observing the vault.
+  reconcile never delays observing the vault. The worker and the lane reconnect
+  after a Postgres restart (``db_reconnect``), which split the worker's job body
+  out into ``_run_job`` (bound per job by ``_job_runner``, so a re-run always
+  syncs); ``WATCHER_CONNECT_TIMEOUT_S`` keeps a shutdown-time connect inside the
+  shutdown windows.
   These are the 2026-10-22 race fixes, reasoned at ``_fire``,
   ``_supersede_pending`` and the drain; CLAUDE.md's ceiling table records them.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
@@ -94,11 +98,13 @@ from watchdog.observers.polling import PollingObserver as Observer
 # PollingObserver scans the tree on a timer (default 1s) and synthesizes
 # events from mtime/size diffs. CPU cost is a stat() per file per second
 # (negligible for ~1100 docs); latency is the polling interval.
+from ..errors import describe_failure
 from ..ingest import Embedder
 from ..log_rotation import default_log_dir, start_background_rotator
+from .db_reconnect import ReconnectAbandoned, ReconnectingConnection
 from .debounce_timer import DebounceTimer, TimerFactory, daemon_timer
 from .derived_links.fence import strip_fence
-from .graph_lane import GraphLane
+from .graph_lane import LOST_REMOVES_REPAIR, GraphLane
 from .move_identity import is_another_document
 from .sync import SyncReport, sync_one_file, sync_vault
 
@@ -121,8 +127,14 @@ _Action = Literal["upsert", "delete", "move"]
 # conceptually an admission-control valve, not a normal code path.
 _MAX_PENDING = 1000
 
-# How long shutdown waits for the graph lane's in-flight reconcile to finish.
+# How long shutdown waits for the graph lane's in-flight request to finish.
 _LANE_CLOSE_TIMEOUT_S = 10.0
+# How long shutdown waits for the worker thread.
+_WORKER_JOIN_TIMEOUT_S = 10.0
+# libpq connect_timeout for every watcher connection (the CLI's factory passes
+# it). A connect attempt that starts after shutdown must fit inside both
+# windows above, and libpq applies it per resolved address (localhost: two).
+WATCHER_CONNECT_TIMEOUT_S = 2
 
 
 @dataclass
@@ -297,9 +309,19 @@ def run_watcher(
     #    shutdown.
     worker_conn = conn_factory()
     worker_conn.autocommit = True
+    # brain (2026-10-22, DB reconnect): re-opened after a Postgres restart. The
+    # first connect stays here, so a DB that is down at startup still fails fast;
+    # the backoff sleep is the stop event, so shutdown wakes it.
+    worker_link = ReconnectingConnection(
+        conn_factory,
+        label="worker",
+        sleep=state.stop_event.wait,
+        stopping=state.stop_event.is_set,
+        conn=worker_conn,
+    )
     worker_thread = threading.Thread(
         target=_worker_loop,
-        args=(worker_conn, embedder, config, state, lane),
+        args=(worker_link, embedder, config, state, lane),
         name="brain-vault-watcher-worker",
         daemon=True,
     )
@@ -384,22 +406,24 @@ def run_watcher(
         _drain_pending_timers(state, config)
         # Sentinel tells the worker its queue is now closed.
         state.jobs.put(None)
-        worker_thread.join(timeout=10.0)
+        worker_thread.join(timeout=_WORKER_JOIN_TIMEOUT_S)
         if worker_thread.is_alive():
             # The worker is mid-statement (a sync_vault call, an embed
-            # request, etc.) past our 10s patience. Closing the
-            # connection from the main thread now would race against
-            # the in-flight statement and raise from the worker thread
-            # while we're trying to return cleanly. The thread is a
-            # daemon — it carries the orphaned connection on its back,
-            # and Postgres reaps the backend after its idle timeout.
+            # request, etc.) or reconnecting, past our patience. Closing the
+            # connection from the main thread now would race against the
+            # worker and raise from its thread while we're trying to return
+            # cleanly. The thread is a daemon — it carries the orphaned
+            # connection on its back, and Postgres reaps the backend after
+            # its idle timeout.
             logger.warning(
-                "vault watcher: worker thread did not exit within 10s — "
-                "leaking its connection to avoid a mid-statement close race"
+                "vault watcher: worker thread did not exit within %ss (still running a job, "
+                "or reconnecting to the DB); leaving its connection to it, not racing a close",
+                _WORKER_JOIN_TIMEOUT_S,
             )
         else:
             try:
-                worker_conn.close()
+                # The CURRENT connection: a reconnect may have replaced worker_conn.
+                worker_link.close()
             except psycopg.Error:
                 # Connection may already be closed (e.g. server-side timeout) —
                 # nothing to recover, just don't crash on shutdown.
@@ -411,13 +435,11 @@ def run_watcher(
         if lane is not None and not lane.close(timeout=_LANE_CLOSE_TIMEOUT_S):
             undrained = lane.undrained_removes()
             logger.warning(
-                "vault watcher: graph lane still finishing a reconcile; %d graph "
-                "remove(s) not applied (%s): their AGE Document vertices stay until "
-                "`brain graphrag build --force` (re-extracts concepts for every document "
-                "when concepts are on); aggregates and orphan entities heal at the next "
-                "graph reconcile or with `brain graphrag refresh`",
+                "vault watcher: graph lane still finishing a request or reconnecting; %d "
+                "graph remove(s) may not be applied (%s): %s",
                 len(undrained),
                 ", ".join(undrained) or "none",
+                LOST_REMOVES_REPAIR,
             )
 
     logger.info(
@@ -806,7 +828,7 @@ def _enqueue(
 
 
 def _worker_loop(
-    conn: psycopg.Connection[Any],
+    link: ReconnectingConnection,
     embedder: Embedder,
     config: WatchConfig,
     state: _WatcherState,
@@ -830,132 +852,22 @@ def _worker_loop(
 
     Each call is wrapped in try/except so a single-file failure logs
     but doesn't kill the worker — the watcher should be self-healing.
+
+    brain (2026-10-22, DB reconnect): ``link`` re-opens the connection after a
+    Postgres restart and re-runs the job that met the dead one, once
+    (``brain.vault.db_reconnect``; every job here is idempotent). If shutdown
+    comes while the DB is unreachable, the rest of the queue is reported, not
+    applied (:func:`_report_unapplied`).
     """
     while True:
         job = state.jobs.get()
         if job is None:
             return
         try:
-            if job.abs_path == config.vault_path and job.action == "upsert":
-                # Overflow-recovery: do a full sync.
-                sync_vault(
-                    conn,
-                    embedder=embedder,
-                    vault_path=config.vault_path,
-                    prune=False,  # never auto-prune in watch mode
-                    dry_run=False,
-                    link_rewrite=config.link_rewrite,
-                    owner_participants=config.owner_participants,
-                    graph_syncer=graph_syncer,
-                )
-                # The full sync may have rewritten any number of fences;
-                # the cache entries from before the overflow window are
-                # now stale. Clearing forces the next per-file event to
-                # take the cold-start path (one extra sync per file,
-                # then dedup resumes) — safer than a half-stale map.
-                state.body_cache.clear()
-            elif job.action == "move" and job.dest_path is not None:
-                # Within-vault rename: UPDATE vault_path in place so the
-                # document id (and every incoming backlink) survives, then
-                # refresh the destination. See :func:`_handle_move`.
-                _handle_move(
-                    conn,
-                    embedder=embedder,
-                    config=config,
-                    state=state,
-                    src_abs=job.abs_path,
-                    dst_abs=job.dest_path,
-                    graph_syncer=graph_syncer,
-                )
-            elif job.action == "delete":
-                # Defensive re-stat: a "deleted" fsevent can fire spuriously
-                # when a file is atomically replaced. ``_atomic.atomic_write_text``
-                # does ``os.replace(tmp, path)`` (used by ``rewrite_tags`` for
-                # ``brain tag`` and by the sync engine itself), and on macOS
-                # APFS the rename can surface as a ``deleted`` on the original
-                # path with the follow-up ``created`` dropped or coalesced by
-                # watchdog. If we trust the action label blindly we'd
-                # ``DELETE FROM documents`` for a perfectly intact file —
-                # discovered live on 2026-05-01 by ``brain tag`` round-trip.
-                # The on-disk file is the source of truth here: re-stat
-                # before deletion. If the file is still there, treat as a
-                # plain upsert (which will reconcile any frontmatter changes
-                # the producer just made).
-                if job.abs_path.exists():
-                    logger.debug(
-                        "vault watcher: ignoring stale delete for %s "
-                        "(file still exists — likely an atomic-replace event)",
-                        job.abs_path,
-                    )
-                    if _is_fence_only_write(state, job.abs_path):
-                        state.skipped_fence_only += 1
-                    else:
-                        report = sync_one_file(
-                            conn,
-                            embedder=embedder,
-                            vault_path=config.vault_path,
-                            file_path=job.abs_path,
-                            link_rewrite=config.link_rewrite,
-                            owner_participants=config.owner_participants,
-                            graph_syncer=graph_syncer,
-                        )
-                        _cache_after_sync(state, job.abs_path, report)
-                else:
-                    _handle_delete(
-                        conn,
-                        job.abs_path,
-                        config.vault_path,
-                        graph_syncer=graph_syncer,
-                    )
-                    # Drop the cache entry so a future creation event for
-                    # the same path is treated as cold-start, not a
-                    # spurious fence-only no-op.
-                    state.body_cache.pop(job.abs_path, None)
-            else:
-                if not job.abs_path.exists():
-                    # Symmetric to the stale-delete guard above: an
-                    # ``upsert`` event can survive past the file's
-                    # actual existence, e.g. a transient editor temp
-                    # file, a ``brain note new`` followed immediately
-                    # by ``brain rm``, or any tool that creates +
-                    # removes within the debounce window. Without this
-                    # guard ``sync_one_file`` would record "file does not
-                    # exist" in its report and return (it does not raise),
-                    # and the worker would count the phantom as processed
-                    # work (measured 2026-10-22, PR #48). Skip the
-                    # job entirely (``continue``) so neither
-                    # ``processed`` nor ``errors`` advances — there
-                    # was no real work to count.
-                    logger.debug(
-                        "vault watcher: ignoring stale upsert for %s "
-                        "(file no longer exists — likely a transient "
-                        "create+delete)",
-                        job.abs_path,
-                    )
-                    continue
-                if _is_fence_only_write(state, job.abs_path):
-                    state.skipped_fence_only += 1
-                    logger.debug(
-                        "vault watcher: skipping fence-only write for %s",
-                        job.abs_path,
-                    )
-                else:
-                    report = sync_one_file(
-                        conn,
-                        embedder=embedder,
-                        vault_path=config.vault_path,
-                        file_path=job.abs_path,
-                        link_rewrite=config.link_rewrite,
-                        owner_participants=config.owner_participants,
-                        graph_syncer=graph_syncer,
-                    )
-                    # Prime the cache from the baseline sync indexed rather
-                    # than a fresh disk read: the fence the linker rewrote is
-                    # excluded by strip_fence, and a user edit that raced
-                    # sync's write must NOT be baselined in (which would mask
-                    # its follow-up event as fence-only). See _cache_after_sync.
-                    _cache_after_sync(state, job.abs_path, report)
-            state.processed += 1
+            counted = link.call(_job_runner(job, embedder, config, state, graph_syncer))
+        except ReconnectAbandoned as exc:
+            _report_unapplied(state, job, exc)
+            return
         except Exception:
             state.errors += 1
             logger.exception(
@@ -963,6 +875,196 @@ def _worker_loop(
                 job.action,
                 job.abs_path,
             )
+            continue
+        if counted:
+            state.processed += 1
+
+
+def _report_unapplied(state: _WatcherState, job: _Job, exc: ReconnectAbandoned) -> None:
+    """Shutdown came while the DB was unreachable: report the queue, apply none of it.
+
+    Reads to the sentinel (which shutdown always enqueues) so the drained timer
+    jobs are counted too. Edits and renames are redone by the next startup
+    sync; a delete is not, since the watcher never prunes.
+    """
+    unapplied = [job]
+    while (rest := state.jobs.get()) is not None:
+        unapplied.append(rest)
+    logger.warning(
+        "vault watcher: worker has no DB connection at shutdown (%s); %d job(s) not "
+        "applied (%d delete(s)): the next startup sync redoes edits and renames; a "
+        "delete is redone only by `brain vault sync --prune`",
+        describe_failure(exc),
+        len(unapplied),
+        sum(1 for j in unapplied if j.action == "delete"),
+    )
+
+
+def _job_runner(
+    job: _Job,
+    embedder: Embedder,
+    config: WatchConfig,
+    state: _WatcherState,
+    graph_syncer: GraphSyncTarget | None,
+) -> Callable[[psycopg.Connection[Any]], bool]:
+    """``_run_job`` bound to one job, and told whether ``link.call`` is re-running it.
+
+    A re-run always syncs, never taking the fence-only shortcut. The first run
+    may have RETURNED after losing its connection inside a step that swallows
+    ``psycopg.Error`` (``rewrite_vault_links``, a best-effort polish step), and
+    it primed the body cache anyway, so that cache proves nothing.
+    ``sync_one_file`` is idempotent by content hash (PR #56 review of
+    ``155e61d``; the earlier fix only stopped counting the skip).
+    """
+    runs = 0
+
+    def run(conn: psycopg.Connection[Any]) -> bool:
+        nonlocal runs
+        runs += 1
+        return _run_job(
+            conn,
+            job=job,
+            embedder=embedder,
+            config=config,
+            state=state,
+            graph_syncer=graph_syncer,
+            rerun=runs > 1,
+        )
+
+    return run
+
+
+def _run_job(
+    conn: psycopg.Connection[Any],
+    *,
+    job: _Job,
+    embedder: Embedder,
+    config: WatchConfig,
+    state: _WatcherState,
+    graph_syncer: GraphSyncTarget | None,
+    rerun: bool,
+) -> bool:
+    """Run one job on ``conn``; False when it was a no-op that must not be counted."""
+    if job.abs_path == config.vault_path and job.action == "upsert":
+        # Overflow-recovery: do a full sync.
+        sync_vault(
+            conn,
+            embedder=embedder,
+            vault_path=config.vault_path,
+            prune=False,  # never auto-prune in watch mode
+            dry_run=False,
+            link_rewrite=config.link_rewrite,
+            owner_participants=config.owner_participants,
+            graph_syncer=graph_syncer,
+        )
+        # The full sync may have rewritten any number of fences;
+        # the cache entries from before the overflow window are
+        # now stale. Clearing forces the next per-file event to
+        # take the cold-start path (one extra sync per file,
+        # then dedup resumes) — safer than a half-stale map.
+        state.body_cache.clear()
+    elif job.action == "move" and job.dest_path is not None:
+        # Within-vault rename: UPDATE vault_path in place so the
+        # document id (and every incoming backlink) survives, then
+        # refresh the destination. See :func:`_handle_move`.
+        _handle_move(
+            conn,
+            embedder=embedder,
+            config=config,
+            state=state,
+            src_abs=job.abs_path,
+            dst_abs=job.dest_path,
+            graph_syncer=graph_syncer,
+        )
+    elif job.action == "delete":
+        # Defensive re-stat: a "deleted" fsevent can fire spuriously
+        # when a file is atomically replaced. ``_atomic.atomic_write_text``
+        # does ``os.replace(tmp, path)`` (used by ``rewrite_tags`` for
+        # ``brain tag`` and by the sync engine itself), and on macOS
+        # APFS the rename can surface as a ``deleted`` on the original
+        # path with the follow-up ``created`` dropped or coalesced by
+        # watchdog. If we trust the action label blindly we'd
+        # ``DELETE FROM documents`` for a perfectly intact file —
+        # discovered live on 2026-05-01 by ``brain tag`` round-trip.
+        # The on-disk file is the source of truth here: re-stat
+        # before deletion. If the file is still there, treat as a
+        # plain upsert (which will reconcile any frontmatter changes
+        # the producer just made).
+        if job.abs_path.exists():
+            logger.debug(
+                "vault watcher: ignoring stale delete for %s "
+                "(file still exists — likely an atomic-replace event)",
+                job.abs_path,
+            )
+            if not rerun and _is_fence_only_write(state, job.abs_path):  # see _job_runner
+                state.skipped_fence_only += 1
+            else:
+                report = sync_one_file(
+                    conn,
+                    embedder=embedder,
+                    vault_path=config.vault_path,
+                    file_path=job.abs_path,
+                    link_rewrite=config.link_rewrite,
+                    owner_participants=config.owner_participants,
+                    graph_syncer=graph_syncer,
+                )
+                _cache_after_sync(state, job.abs_path, report)
+        else:
+            _handle_delete(
+                conn,
+                job.abs_path,
+                config.vault_path,
+                graph_syncer=graph_syncer,
+            )
+            # Drop the cache entry so a future creation event for
+            # the same path is treated as cold-start, not a
+            # spurious fence-only no-op.
+            state.body_cache.pop(job.abs_path, None)
+    else:
+        if not job.abs_path.exists():
+            # Symmetric to the stale-delete guard above: an
+            # ``upsert`` event can survive past the file's
+            # actual existence, e.g. a transient editor temp
+            # file, a ``brain note new`` followed immediately
+            # by ``brain rm``, or any tool that creates +
+            # removes within the debounce window. Without this
+            # guard ``sync_one_file`` would record "file does not
+            # exist" in its report and return (it does not raise),
+            # and the worker would count the phantom as processed
+            # work (measured 2026-10-22, PR #48). Skip the
+            # job entirely (``return False``) so neither
+            # ``processed`` nor ``errors`` advances — there
+            # was no real work to count.
+            logger.debug(
+                "vault watcher: ignoring stale upsert for %s "
+                "(file no longer exists — likely a transient "
+                "create+delete)",
+                job.abs_path,
+            )
+            return False  # no real work: neither processed nor errors advances
+        if not rerun and _is_fence_only_write(state, job.abs_path):  # see _job_runner
+            state.skipped_fence_only += 1
+            logger.debug(
+                "vault watcher: skipping fence-only write for %s",
+                job.abs_path,
+            )
+        else:
+            report = sync_one_file(
+                conn,
+                embedder=embedder,
+                vault_path=config.vault_path,
+                file_path=job.abs_path,
+                link_rewrite=config.link_rewrite,
+                owner_participants=config.owner_participants,
+                graph_syncer=graph_syncer,
+            )
+            # Prime the cache from the baseline sync indexed rather
+            # than a fresh disk read: the fence the linker rewrote is
+            # excluded by strip_fence, and a user edit that raced
+            # sync's write must NOT be baselined in (which would mask
+            # its follow-up event as fence-only). See _cache_after_sync.
+            _cache_after_sync(state, job.abs_path, report)
+    return True
 
 
 def _is_fence_only_write(state: _WatcherState, abs_path: Path) -> bool:

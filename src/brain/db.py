@@ -26,7 +26,7 @@ from .ingest import Embedder
 DEFAULT_GRAPH_NAME = "brain_graph"
 
 
-def connect_raw(database_url: str) -> psycopg.Connection:
+def connect_raw(database_url: str, *, connect_timeout: int = 10) -> psycopg.Connection:
     """Open a connection with pgvector adapter registered.
 
     Same semantics as :func:`connect` but without the context-manager
@@ -34,9 +34,10 @@ def connect_raw(database_url: str) -> psycopg.Connection:
     ``conn.close()`` themselves. Used by the long-running watcher, which
     holds a connection across many sync calls in a worker thread; the
     `with` block of :func:`connect` would auto-close it after the first
-    use.
+    use. The watcher passes a shorter ``connect_timeout`` (libpq seconds,
+    per resolved address) so a reconnect at shutdown fits its 10s windows.
     """
-    conn = psycopg.connect(database_url, connect_timeout=10)
+    conn = psycopg.connect(database_url, connect_timeout=connect_timeout)
     # The vector extension may not exist yet during the initial `brain init`
     # bootstrap; check pg_type before registering so we don't rely on
     # exception-as-control-flow. The SELECT starts an implicit transaction

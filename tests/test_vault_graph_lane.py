@@ -2,12 +2,13 @@
 
 Plan: ``docs/plans/2026-10-22-vault-watcher-startup-blind.md``. The syncer is
 a recording fake whose FIRST call blocks until released, which pins a request
-"in flight" while the test submits more. L1-L10 use no DB: the lane's
+"in flight" while the test submits more. Most tests use no DB: the lane's
 connection is a fake from an injected factory. Every list assertion waits on a
 FIFO barrier (a ``remove``, which is never deduped) rather than on a call
 count, so a mutant that changes the count still fails at the targeted
-assertion. L11 is the one DB test: a real ``GraphSyncer`` on the lane, against
-PR #53's per-tenant graph write lock.
+assertion. L11 and L13 run a real ``GraphSyncer`` on the test DB: L11 against
+PR #53's per-tenant graph write lock, L13 across a terminated lane backend
+(``docs/plans/2026-10-22-vault-watcher-db-reconnect.md``).
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import psycopg
 import pytest
 
 from brain.vault.graph_lane import GraphLane
-from tests.thread_wait import WAIT_FOR_BACKSTOP_S, wait_for
+from tests.thread_wait import WAIT_FOR_BACKSTOP_S, blocked_in_wait, wait_for
 
 
 class _Conn:
@@ -235,31 +236,54 @@ def test_close_reports_removes_left_undrained_by_a_timeout() -> None:
     assert undrained == ["gone"], f"the undrained remove was not reported: {undrained!r}"
 
 
-def test_a_failed_connect_disables_the_lane(caplog: pytest.LogCaptureFixture) -> None:
-    """L9: a lane that cannot connect logs it and turns later submits into no-ops."""
+def test_a_lane_that_cannot_connect_backs_off_and_close_still_ends_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """L9: a failed connect is retried with backoff; requests queue; close ends it.
+
+    Before the reconnect fix (``docs/plans/2026-10-22-vault-watcher-db-reconnect.md``,
+    R5) one failed connect turned the lane off for good. ``sleep`` is injected:
+    it records each delay, then parks the lane until the test has closed it.
+    """
+    sleeps: list[float] = []
+    parked = threading.Event()
+    gate = threading.Event()
 
     def _refuse() -> Any:
         raise psycopg.OperationalError("synthetic connect failure")
 
-    lane = GraphLane(_Syncer(), _refuse)  # type: ignore[arg-type]
-    lane.remove(None, "queued")  # type: ignore[arg-type]  # pending when the connect fails
+    def _sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            parked.set()
+            gate.wait(WAIT_FOR_BACKSTOP_S)
+
+    lane = GraphLane(_Syncer(), _refuse, sleep=_sleep)  # type: ignore[arg-type]
+    lane.remove(None, "queued")  # type: ignore[arg-type]
     with caplog.at_level(logging.ERROR, logger="brain.vault.graph_lane"):
         lane.start()
-        # The lane marks itself closed BEFORE it logs, so the record proves it.
-        logged = _settled(
-            lambda: any("could not connect" in r.getMessage() for r in caplog.records)
+        assert parked.wait(WAIT_FOR_BACKSTOP_S), "the lane did not keep retrying its connect"
+        lane.remove(None, "late")  # type: ignore[arg-type]  # queues during the outage
+        queued = [d for d in lane.undrained_removes() if d != "queued"]  # "queued" is in flight
+        # Close WITHOUT a timed-out close() first: a close that times out hands
+        # the reporting to its caller (L15), and this test is about the lane's own.
+        closed: list[bool] = []
+        closer = threading.Thread(
+            target=lambda: closed.append(lane.close(WAIT_FOR_BACKSTOP_S)), daemon=True
         )
-    lane.remove(None, "late")  # type: ignore[arg-type]  # no close() first
-    queued = lane.undrained_removes()
-    exited = lane.close(WAIT_FOR_BACKSTOP_S)
+        closer.start()
+        wait_for(lane._is_closing)
+        gate.set()
+        closer.join(WAIT_FOR_BACKSTOP_S)
+        exited = closed == [True]
 
-    assert logged, "the failed connect was not logged"
+    assert sleeps == [1, 2, 4], f"the connect retries did not back off: {sleeps}"
+    assert queued == ["late"], f"a request did not queue during the outage: {queued}"
+    assert exited, "close did not end a lane that cannot connect"
     errors = " ".join(r.getMessage() for r in caplog.records)
-    assert "1 graph remove(s) not applied (queued)" in errors, (
-        f"the failed connect did not name the removes it dropped: {errors!r}"
+    assert "2 graph remove(s) not applied (queued, late)" in errors, (
+        f"giving up did not name the removes it dropped: {errors!r}"
     )
-    assert queued == [], "a submit after a failed connect was queued"
-    assert exited, "the lane thread did not exit after a failed connect"
 
 
 def test_an_idle_lane_closes_at_once() -> None:
@@ -332,3 +356,230 @@ def test_lane_reconcile_waits_on_the_tenant_write_lock(test_db: Any) -> None:
     assert waited, "the lane's reconcile did not wait on the tenant write lock"
     assert written_while_held == 0, "the lane reconciled while another writer held the lock"
     assert done, "the lane's reconcile never completed after the tenant lock was released"
+
+
+# ---------------------------------------------------------------------------
+# L12-L14: the lane reconnects after a Postgres restart
+# (docs/plans/2026-10-22-vault-watcher-db-reconnect.md).
+# ---------------------------------------------------------------------------
+
+
+class _NamedConn(_Conn):
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self.name = name
+
+
+class _DyingSyncer:
+    """Like ``GraphSyncer``, never raises. Connection c1 dies on its SECOND request.
+
+    A request on a closed connection does nothing (``GraphSyncer`` would log and
+    swallow the error), so only ``applied`` shows what really ran.
+    """
+
+    def __init__(self) -> None:
+        self.applied: list[tuple[str, str, str]] = []
+        self._on_c1 = 0
+
+    def _run(self, op: str, conn: _NamedConn, document_id: str) -> None:
+        if conn.closed:
+            return
+        if conn.name == "c1":
+            self._on_c1 += 1
+            if self._on_c1 == 2:
+                conn.closed = True  # the server dropped it mid-request
+                return
+        self.applied.append((op, document_id, conn.name))
+
+    def reconcile(self, conn: Any, document_id: str) -> None:
+        self._run("reconcile", conn, document_id)
+
+    def remove(self, conn: Any, document_id: str) -> None:
+        self._run("remove", conn, document_id)
+
+
+def test_the_lane_reruns_on_a_fresh_connection_after_its_connection_dies() -> None:
+    """L12: the request that hit the dead connection, and every later one, run on c2."""
+    made: list[_NamedConn] = []
+
+    def _factory() -> _NamedConn:
+        made.append(_NamedConn(f"c{len(made) + 1}"))
+        return made[-1]
+
+    syncer = _DyingSyncer()
+    lane = GraphLane(syncer, _factory)  # type: ignore[arg-type]  # c2 never fails: no backoff
+    lane.start()
+    try:
+        for doc in ("a", "b", "c"):
+            lane.reconcile(None, doc)  # type: ignore[arg-type]
+        token = f"barrier-{uuid.uuid4()}"
+        lane.remove(None, token)  # type: ignore[arg-type]
+        ran = _settled(lambda: ("remove", token, "c2") in syncer.applied)
+    finally:
+        lane.close(WAIT_FOR_BACKSTOP_S)
+
+    assert ran and syncer.applied[:3] == [
+        ("reconcile", "a", "c1"),
+        ("reconcile", "b", "c2"),
+        ("reconcile", "c", "c2"),
+    ], f"the lane did not re-run on a fresh connection: {syncer.applied!r}"
+    assert made[0].closed and len(made) == 2, "the dead connection was not replaced exactly once"
+
+
+def _gone(conn: Any, pid: int) -> bool:
+    row = conn.execute("SELECT count(*) FROM pg_stat_activity WHERE pid = %s", (pid,)).fetchone()
+    return bool(row == (0,))
+
+
+def test_lane_reconciles_after_its_backend_is_terminated(test_db: Any) -> None:
+    """L13: real DB; the lane's backend is terminated between two reconciles."""
+    from brain.db import connect_raw
+    from brain.graph_rag.reconcile import ReconcileConfig
+    from brain.graph_rag.sync import GraphSyncer
+    from tests.conftest import TEST_DATABASE_URL
+    from tests.graph_fakes import NullBackend, seed_note_doc
+
+    assert ":5434/" in TEST_DATABASE_URL, "this test terminates a backend: test DB only"
+    first_doc = seed_note_doc(test_db, "lane-first")
+    second_doc = seed_note_doc(test_db, "lane-second")
+    made: list[Any] = []
+
+    def _factory() -> Any:
+        made.append(connect_raw(TEST_DATABASE_URL))
+        return made[-1]
+
+    syncer = GraphSyncer(
+        ReconcileConfig(tenant_id="default", generic_df_ratio=1.0),
+        enabled=True,
+        backend=NullBackend(),  # type: ignore[arg-type]
+    )
+    lane = GraphLane(syncer, _factory)
+    lane.start()
+    try:
+        lane.reconcile(None, first_doc)  # type: ignore[arg-type]
+        wait_for(lambda: _watermarks(test_db, first_doc) >= 1)
+        pid = made[0].info.backend_pid
+        test_db.execute("SELECT pg_terminate_backend(%s)", (pid,))
+        wait_for(lambda: _gone(test_db, pid))
+        lane.reconcile(None, second_doc)  # type: ignore[arg-type]
+        done = _settled(lambda: _watermarks(test_db, second_doc) >= 1)
+    finally:
+        lane.close(WAIT_FOR_BACKSTOP_S)
+        for conn in made:
+            conn.close()
+
+    assert done, "the lane's reconcile after its backend was terminated never completed"
+
+
+def test_close_wakes_a_lane_in_reconnect_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L14: the DEFAULT sleep wakes on close; a 600s backoff must not hold up shutdown.
+
+    ``close`` itself is bounded, not just its result: a sleep that holds the
+    lane's condition (mutation G3, round 2) makes ``close`` block on that lock
+    for the whole backoff and THEN report a clean exit.
+    """
+    monkeypatch.setattr("brain.vault.db_reconnect.BACKOFF_INITIAL_S", 600.0)
+    monkeypatch.setattr("brain.vault.db_reconnect.BACKOFF_MAX_S", 600.0)
+
+    def _refuse() -> Any:
+        raise psycopg.OperationalError("synthetic connect failure")
+
+    lane = GraphLane(_Syncer(), _refuse)  # type: ignore[arg-type]
+    lane.reconcile(None, "a")  # type: ignore[arg-type]
+    lane.start()
+    # INSIDE the sleep, not just past the failed connect: a close that lands
+    # before the lane's stopping() check never exercises the sleep (mutation G3).
+    wait_for(lambda: blocked_in_wait(lane._thread, "_connect"))
+    closed: list[bool] = []
+    closer = threading.Thread(
+        target=lambda: closed.append(lane.close(WAIT_FOR_BACKSTOP_S)), daemon=True
+    )
+    closer.start()
+    closer.join(WAIT_FOR_BACKSTOP_S)
+
+    assert closed == [True], "close did not wake a lane sleeping out its reconnect backoff"
+
+
+def test_a_remove_in_flight_during_a_slow_reconnect_is_named_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """L15: a close that times out names the remove the lane has already popped.
+
+    PR #56 review: ``undrained_removes`` named only QUEUED removes, so a remove
+    in flight while the lane was still reconnecting was in neither list. The
+    timed-out close hands the report to its caller; when the lane later gives
+    up, it must not log the same remove again.
+    """
+    entered, release = threading.Event(), threading.Event()
+
+    def _slow_refuse() -> Any:
+        entered.set()
+        release.wait(WAIT_FOR_BACKSTOP_S)
+        raise psycopg.OperationalError("synthetic connect failure")
+
+    lane = GraphLane(_Syncer(), _slow_refuse)  # type: ignore[arg-type]
+    lane.remove(None, "doomed")  # type: ignore[arg-type]
+    with caplog.at_level(logging.ERROR, logger="brain.vault.graph_lane"):
+        lane.start()
+        assert entered.wait(WAIT_FOR_BACKSTOP_S), "fixture: the lane never tried to connect"
+        timed_out = lane.close(0.05) is False
+        undrained = lane.undrained_removes()
+        release.set()
+        exited = lane.close(WAIT_FOR_BACKSTOP_S)
+
+    assert timed_out, "fixture: close must time out while the lane is connecting"
+    assert undrained == ["doomed"], (
+        f"a remove in flight during a slow reconnect was not named: {undrained!r}"
+    )
+    assert exited, "the lane did not exit once its connect gave up"
+    again = [r.getMessage() for r in caplog.records if "not applied" in r.getMessage()]
+    assert again == [], f"the lane logged removes its caller had already reported: {again!r}"
+
+
+def test_an_applied_remove_is_not_reported_as_undrained() -> None:
+    """L16: a finished request is no longer in flight, even while the lane idles."""
+    syncer = _Syncer()
+    syncer.release.set()
+    with _lane(syncer) as (lane, _conn):
+        token = f"barrier-{uuid.uuid4()}"
+        lane.remove(None, token)  # type: ignore[arg-type]
+        wait_for(lambda: ("remove", token) in syncer.calls)
+        cleared = _settled(lambda: lane.undrained_removes() == [])
+
+    assert cleared, "an applied remove was still reported as undrained"
+
+
+def test_a_handed_off_remove_survives_the_lane_giving_up_first(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """L15b: the race L15 leaves open, forced: the lane gives up BEFORE its caller asks.
+
+    PR #56 audit F1: ``close`` timed out and handed the report to its caller,
+    then the lane reached ``_abandon`` first. ``_abandon`` cleared the queue and
+    logged only at DEBUG (the caller owns the report), so ``undrained_removes``
+    returned ``[]`` and the remove vanished. The hand-off must be a snapshot.
+    """
+    entered, release = threading.Event(), threading.Event()
+
+    def _slow_refuse() -> Any:
+        entered.set()
+        release.wait(WAIT_FOR_BACKSTOP_S)
+        raise psycopg.OperationalError("synthetic connect failure")
+
+    lane = GraphLane(_Syncer(), _slow_refuse)  # type: ignore[arg-type]
+    lane.remove(None, "doomed")  # type: ignore[arg-type]
+    with caplog.at_level(logging.ERROR, logger="brain.vault.graph_lane"):
+        lane.start()
+        assert entered.wait(WAIT_FOR_BACKSTOP_S), "fixture: the lane never tried to connect"
+        timed_out = lane.close(0.05) is False
+        release.set()
+        lane._thread.join(WAIT_FOR_BACKSTOP_S)  # the lane has given up and exited
+        gave_up = not lane._thread.is_alive()
+        undrained = lane.undrained_removes()
+
+    assert timed_out and gave_up, "fixture: the lane must time out, then give up and exit"
+    assert undrained == ["doomed"], (
+        f"a remove handed to the caller vanished when the lane gave up first: {undrained!r}"
+    )
+    again = [r.getMessage() for r in caplog.records if "not applied" in r.getMessage()]
+    assert again == [], f"the lane logged removes its caller had already reported: {again!r}"

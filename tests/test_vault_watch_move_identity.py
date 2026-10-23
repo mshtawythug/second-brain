@@ -23,6 +23,7 @@ from brain.vault.frontmatter import dump_frontmatter, read_frontmatter_id
 from brain.vault.move_identity import is_another_document
 from brain.vault.sync import sync_vault
 from brain.vault.watch import WatchConfig, _Job, _WatcherState, _worker_loop
+from tests.watch_link import worker_link
 
 
 def _write(path: Path, fields: dict[str, Any], body: str) -> None:
@@ -37,7 +38,7 @@ def _move_through_worker(
     state = _WatcherState()
     state.jobs.put(_Job(action="move", abs_path=src, dest_path=dst))
     state.jobs.put(None)  # sentinel closes the worker loop
-    _worker_loop(conn, embedder, WatchConfig(vault_path=vault, debounce_ms=10), state)
+    _worker_loop(worker_link(conn), embedder, WatchConfig(vault_path=vault, debounce_ms=10), state)
     return state
 
 

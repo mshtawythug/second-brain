@@ -308,6 +308,30 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        before it writes. Per rule is enough, because the locks last to the end of the outer
        transaction (plan, Residuals). The regression test is
        `tests/test_graphrag_alias_doc_lock.py`.
+- *[FIXED 2026-10-22 on branch `fix/vault-watcher-db-reconnect`.]* **The vault watcher never
+  reconnected after a Postgres restart** (found by the PR #54 reviewer). The worker and the graph lane
+  each kept their dead connection, so every later edit and graph request failed until the watcher was
+  restarted. A lane whose first connect failed also turned itself off for good.
+  - **The fix:** both now hold a `ReconnectingConnection` (`src/brain/vault/db_reconnect.py`).
+    - **Loss detection:** a connection counts as lost when psycopg marks it closed, never by
+      exception class, because `DeadlockDetected` and `LockNotAvailable` are `OperationalError`s
+      on a healthy connection.
+    - **Re-run:** the job that met the dead connection runs once more, in place, on a fresh one.
+    - **Backoff:** 1s, 2s, 4s, and so on, capped at 30s.
+    - **Shutdown:** shutdown wakes the backoff, and a failed attempt at shutdown gives up and logs
+      what was not applied. The worker logs a job count and how many were deletes. The lane logs the
+      graph-remove ids.
+    - **Bounded connects (PR #56 review):** every watcher connection uses a 2s `connect_timeout`, so a
+      connect attempt that starts after shutdown fits inside the 10s lane-close and worker-join windows.
+      `connect_raw`'s probe queries after the handshake stay unbounded. If a timed-out lane close
+      happens anyway, it now names the remove in flight as well as the queued ones, and the lane does
+      not log them again.
+  - **Still open:**
+    1. A delete whose `DELETE` committed just before the connection died re-runs as a no-op. So no
+       graph remove is queued, and the document's AGE `Document` vertex stays. That is the same ghost,
+       with the same repair, as item 6's lost removes.
+    2. A delete the worker could not apply at shutdown is redone only by `brain vault sync --prune`.
+  - Rulings R1-R8, tests and mutation proofs: `docs/plans/2026-10-22-vault-watcher-db-reconnect.md`.
 
 ## Status on 2026-10-16: DONE except items that need the user
 

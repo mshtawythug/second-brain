@@ -337,7 +337,7 @@ from .vault.slug import slugify
 from .vault.sync import SyncReport, sync_one_file, sync_vault
 from .vault.sync_summaries import sync_summaries
 from .vault.templates import list_template_names
-from .vault.watch import WatchConfig, run_watcher
+from .vault.watch import WATCHER_CONNECT_TIMEOUT_S, WatchConfig, run_watcher
 
 logger = logging.getLogger(__name__)
 
@@ -6374,11 +6374,10 @@ def vault_sync(
         typer.echo(f"watching {target} (Ctrl-C to stop)")
 
         def _conn_factory() -> psycopg.Connection[Any]:
-            # Use ``connect_raw`` from ``brain.db`` so pgvector adapter
-            # registration happens in the watcher's thread the same way
-            # it does for every other CLI command. The watcher owns the
-            # connection lifetime (closed inside ``run_watcher``).
-            return connect_raw(database_url)
+            # ``connect_raw`` registers pgvector in the watcher's thread like
+            # every other CLI command; the watcher owns the connection. Its
+            # bounded connect_timeout keeps a shutdown-time reconnect short.
+            return connect_raw(database_url, connect_timeout=WATCHER_CONNECT_TIMEOUT_S)
 
         report = run_watcher(
             _conn_factory,
