@@ -255,12 +255,17 @@ reproduction aborted the worker; in this PR's 5 red runs it aborted the delete
 *The fix.* `ReconcilePlan.is_current` is the write transaction's first
 statement after the graph write lock. It now reads the row `FOR KEY SHARE`
 (`relational.key_share_doc_meta`), so the reconcile holds X's key-share lock
-before it touches any graph row. A DELETE that comes later waits for the short
-write transaction while holding nothing the reconcile needs. A DELETE that
-came first and committed leaves no row, and the plan is skipped. The old note
-above weighed "the delete would then wait out a whole reconcile". That cost is
-now only the write phase, because the model call runs before this transaction
-opens.
+before it touches any graph row. A DELETE that comes later waits for the write
+transaction while holding nothing the reconcile needs. A DELETE that came first
+and committed leaves no row, and the plan is skipped.
+
+The old note above weighed "the delete would then wait out a whole reconcile".
+That cost is now only the write phase, because the model call runs before this
+transaction opens. The write phase is short, but not trivially so. Outside a
+bulk build (`defer_tenant_refresh=False`) it includes the tenant-wide aggregate
+recompute (`_recompute_aggregates`: every entity's `doc_count` and every
+`graph_relationships` row) and the AGE `CO_OCCURS` refresh. A delete of the
+document waits that long.
 
 *Why it cannot deadlock elsewhere.* The lock order is now: graph write lock,
 then the document's `KEY SHARE`, then graph rows. A cycle would need a
@@ -385,16 +390,24 @@ writing. Its red is the base code.
 ### Follow-up, part 2: alias document lock (PR #55, at `fad5b8a`, after merging master `5cb4e4d`)
 
 **RED.** `src/` at `9a251f8`, the merged tree before the alias fix: D10 fails
-in 10 of 10 runs with `DeadlockDetected`, the document DELETE as the victim.
-An earlier version of the test, before the roles were ordered by id, went red
-in only 3 of 5 runs. The merge's DELETE could reach X's source row before the
-gate, and then no cycle formed.
+in 10 of 10 runs with `DeadlockDetected`. The victim varies, as it does for D9.
+In these runs it was the document DELETE, but the reviewer saw the merge
+aborted in 1 of 3 M21 runs. The test asserts that neither side raises, so
+either victim fails it. An earlier version of the test, before the roles were
+ordered by id, went red in only 3 of 5 runs. The merge's DELETE could reach X's
+source row before the gate, and then no cycle formed.
 
 **GREEN.** D10 passes 5 runs of 5.
 
 **Mutations.** Each ran in a fresh archive copy of `fad5b8a`. The three files
 (23 tests) pass unmutated. M21 and M22 each turn only D10 red. Every other row
 is unchanged.
+
+**Re-verified at `4de18d5`** (PR #55 audit, MINOR). `_lock_alias_documents` was
+narrowed to take the one source id; the SQL compares with `= %(id)s` and keeps
+`ORDER BY d.id ... FOR KEY SHARE`. D10 passes 5 of 5 runs. In a fresh archive
+copy, the three files (23 tests) pass, and M21 and M22 each still turn only
+D10 red, with `DeadlockDetected`.
 
 ### Follow-up: document `KEY SHARE` (PR #55, at `80a57bf`)
 

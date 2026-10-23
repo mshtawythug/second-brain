@@ -59,7 +59,9 @@ def key_share_doc_meta(
     runs an FK check that needs this same lock. Taking it last, inside those
     inserts, deadlocked against a concurrent ``DELETE FROM documents``: the
     delete held the tuple and its cascade waited on the rewrite's deleted rows.
-    Taken first, the delete simply waits for this short transaction. ``None``
+    Taken first, the delete simply waits for this write transaction (which,
+    outside a bulk build, includes the tenant aggregate recompute and the AGE
+    ``CO_OCCURS`` refresh, but never the model call). ``None``
     means the row is gone, including a delete that committed while this
     waited. ``KEY SHARE`` does not conflict with a plain ``UPDATE`` of the
     document: every unique index on ``documents`` but the primary key is

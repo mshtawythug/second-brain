@@ -227,9 +227,10 @@ injected slow syncer (a `GraphSyncTarget` whose `reconcile` blocks on an
   so the lane locks X before it touches any graph row, and the worker's DELETE
   waits for that one write transaction. That also closes #53's same-document
   residual. Its regression test is
-  `tests/test_graphrag_deadlock.py::test_a_rewrite_and_a_concurrent_document_delete_do_not_deadlock`. The same pattern already exists between processes
-  (MCP or ingest writing documents while the watcher reconciles). There is still
-  only one graph WRITER per watcher process.
+  `tests/test_graphrag_deadlock.py::test_a_rewrite_and_a_concurrent_document_delete_do_not_deadlock`.
+  The same cycle existed between processes (MCP or ingest writing documents
+  while the watcher reconciles); the same graph_rag fix closes it. There is
+  still only one graph WRITER per watcher process.
 - **An in-flight reconcile at shutdown** can outlive `run_watcher` as a daemon
   thread. The process exit aborts it, and the transaction rolls back.
 
