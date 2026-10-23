@@ -157,6 +157,21 @@ kbd.hint {
   font-family: var(--font-mono); font-size: var(--t-meta);
   color: var(--ink-muted);
 }
+/* The text-only fallback notice (RM-03). Amber, the draft flag's colour,
+   because it qualifies the results rather than reporting a failure: the
+   oxide danger colour is reserved for destructive actions. No author
+   `display` competes today; `[hidden]` is restated so that one added later
+   cannot beat the UA rule on origin (see `.thread-message[hidden]` in
+   thread.css). It is standing insurance, not a fix for today. */
+.search-fallback {
+  margin-top: var(--s-2);
+  padding: var(--s-1) var(--s-2);
+  border-left: 3px solid var(--flag-draft);
+  background: var(--paper);
+  font-size: var(--t-meta);
+  color: var(--ink);
+}
+.search-fallback[hidden] { display: none; }
 
 .results { list-style: none; margin: 0; padding: 0; }
 .result {

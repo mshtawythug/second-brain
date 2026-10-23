@@ -810,6 +810,16 @@ non-loopback bind.) On a **non-loopback** bind they are withheld unless you pass
 a network bind: a token is required, and bodies are withheld unless you pass
 `--include-confidential`. The startup banner states which of the three you got.
 
+**When the embedder is unreachable, the Notes tab searches text-only.** If the
+query embedding cannot be computed, `GET /api/search` still answers 200 with
+full-text matches, and a notice above the results says so: the failure by class
+only, and whether it is a transient outage, a configuration problem (`brain
+doctor`) or a query longer than the embedder's context window. The meta line
+reads `fts-only`, and the next search tries the embedder again. The response
+carries the same four `fallback*` keys as `brain search --json --meta` (all
+`null` on a normal search). It used to answer `503 embedding_unavailable` and
+show nothing.
+
 ## brain people
 
 ```bash

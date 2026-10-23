@@ -370,6 +370,7 @@ jobs:
           tests/test_ui_browser_reading.py
           tests/test_ui_browser_refresh.py
           tests/test_ui_browser_related.py
+          tests/test_ui_browser_search_fallback.py
           tests/test_ui_browser_tabs.py
           tests/test_ui_browser_watcher.py
           -m browser --no-cov

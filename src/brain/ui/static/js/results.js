@@ -27,6 +27,7 @@ const sourceIconFor = (kind) => SOURCE_ICONS[kind] || SOURCE_ICONS.vault;
 export function renderResults() {
   const host = $("results");
   host.textContent = "";
+  renderFallbackNotice();
 
   /* THE PAGER IS LEFT ALONE WHILE LOADING, and that is not an oversight.
      Clicking Next dispatches `loading` before the request resolves; hiding or
@@ -144,6 +145,21 @@ export function renderResults() {
   if (note) host.appendChild(el("li", "ledger-note", note));
 
   renderPager(meta);
+}
+
+
+/* The text-only notice (RM-03). Shown only beside the results of a READY
+   answer whose `fallback` is set; every other render (loading, error, idle, a
+   normal answer) hides AND empties it, so a notice can never outlive the
+   search it describes. The note is server-built and class-only, and it is
+   still set as textContent, never parsed: the one innerHTML in the front end
+   is the server-rendered note body. */
+function renderFallbackNotice() {
+  const notice = $("search-fallback");
+  const meta = state.meta || {};
+  const shown = state.searchStatus === "ready" && meta.fallback != null;
+  notice.textContent = shown ? (meta.fallback_note || "") : "";
+  notice.hidden = !shown;
 }
 
 

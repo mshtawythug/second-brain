@@ -1452,13 +1452,14 @@ def _winning_display(keys: frozenset[str], declarations: list[_Decl]) -> _Decl |
 def check_hidden_toggles_survive_the_cascade(bundle: str) -> None:
     """Anything the JS hides must actually be hidden by the stylesheet.
 
-    Written after running it. The scan finds ten ``.hidden =`` sites across six
-    modules and resolves every one; four of the resolved elements have a
+    Written after running it. The scan finds eleven ``.hidden =`` sites across
+    six modules and resolves every one; four of the resolved elements have a
     competing author ``display`` and are saved by an explicit ``[hidden]`` rule
     (``.shell``, ``#discovery``, ``.field``, ``.pager``), two have none and are
-    left to the UA sheet (``#mode-badge``, ``#new-note``), and two carry a
+    left to the UA sheet (``#mode-badge``, ``#new-note``), and three carry a
     defensive ``[hidden]`` rule with nothing to compete against
-    (``.toast``, ``.thread-message``). The guard does not demand the last pair —
+    (``.toast``, ``.thread-message``, and RM-03's ``.search-fallback``). The
+    guard does not demand the last three —
     requiring a rule that changes no pixel would be the roster habit in a new
     costume — it demands only that the winner is ``none`` wherever a winner
     exists at all.
@@ -2040,9 +2041,9 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
     # ANTI-VACUITY, and it is the assertion this guard most needs. Every other
     # clause here reports on what the scan FOUND; if the scan finds nothing the
     # guard is green while looking at an empty list. Renaming the property at
-    # all ten sites is the shape that produces that.
+    # all eleven sites is the shape that produces that.
     ("hidden-toggle-scan-finds-nothing", check_hidden_toggles_survive_the_cascade,
-     "static/*", ".hidden =", ".hiddenFlag =", 10),
+     "static/*", ".hidden =", ".hiddenFlag =", 11),
     # The DISCOVERY clause. `toast()`'s element stops being resolvable, the site
     # count is unchanged so the first assertion stays green, and only
     # "cannot tell what this hides" can fire. A guard that skipped the site
