@@ -229,9 +229,9 @@ eval only now that the eval has just been re-judged.
 
 | # | Item | Size | Why this position |
 |---|---|---|---|
-| 1 | **H-7: FTS-only search fallback** | — | IN FLIGHT. Decided 2026-10-23; implemented in PR #61. Land it before anything else that touches search. Its follow-ups BL-13 to BL-15 are rank 2a. |
+| 1 | **H-7: FTS-only search fallback** | — | IN FLIGHT. Decided 2026-10-23; implemented in PR #61. Land it before anything else that touches search. Its follow-ups BL-13 to BL-15 are rank 1a. |
+| 1a | **BL-14, BL-15, then BL-13: embedder-down handling in `brain recall`, `brain ask` and `brain ui` search** | S each | Right after PR #61, while the fallback's shape is fresh. BL-14 and BL-15 turn tracebacks into clean errors; BL-13 is the UI half of the same decision, and needs a browser test. |
 | 2 | **BL-1: ceiling-table CI check** | S | Without it there has been one unrecorded crossing and one caught only by hand (BL-1). A day of work removes a whole class of review misses. |
-| 2a | **BL-14, BL-15, then BL-13: embedder-down handling in `brain recall`, `brain ask` and `brain ui` search** | S each | Right after PR #61, while the fallback's shape is fresh. BL-14 and BL-15 turn tracebacks into clean errors; BL-13 is the UI half of the same decision, and needs a browser test. |
 | 3 | **BL-3: CSS `url()` in the offline test** | XS | A few lines. It closes the same blank-page failure class as the wheel-packaging bug. Do it before anyone adds fonts or images in CSS. |
 | 4 | **Ingest tab, phases 1–2: paste ingest** (spec §10) | M | The first deferred UI tab, fully designed. It also delivers the job subsystem the Agent tab needs. |
 | 5 | **BL-6: `brain_related` + `brain_explain` MCP tools** | S | Pure parity, since both cores exist. Agents currently cannot see related documents, which the UI shows by default. |
