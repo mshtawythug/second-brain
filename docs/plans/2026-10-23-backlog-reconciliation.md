@@ -223,6 +223,10 @@ Q6, the graph diagnostic workbench, answered "Do not port. Rebuild only if you r
 
 ## 3. Open backlog, in recommended order
 
+> **Execution is now tracked by** `docs/specs/2026-10-23-roadmap-completion-design.md`: every row
+> below has a ticket there (`RM-01` to `RM-61`), and its Appendix B is the tracker. Close a row here
+> in the same PR that closes its ticket.
+
 The order follows four rules. Finish what is in flight. Take small items that close a recorded hole
 before large features. Ship the one feature that already has a design. Do anything that needs an
 eval only now that the eval has just been re-judged.
