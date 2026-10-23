@@ -120,9 +120,11 @@ MESSAGE never reaches stderr, the JSON, or the MCP wire.
   deleted as unreachable (`_wrap_embed_error` stays for the other tools).
   **Over the ceiling**: inline growth comment, module-docstring pointer, and
   the CLAUDE.md row's trail. The first commit (`ed893f5`) added a descriptive
-  hop after `1054b52`. The review round touched the file again, so that hop
-  was promoted to `5,074 (ed893f5)` and a descriptive hop was added for the
-  review-round commit.
+  hop after `1054b52`. The review round (`bc3b868`) touched the file again,
+  so that hop was promoted to `5,074 (ed893f5)`, and the review round itself
+  is recorded SHA-bound as `5,078 (bc3b868)`: the commits that recorded it
+  do not touch the file, so a descriptive hop would have been lossy. The row
+  is authoritative through `bc3b868`, with no descriptive hop after it.
 - `CLAUDE.md` — the `mcp_server.py` ceiling row.
 - Tests: `tests/embed_down.py` (the failing-embedder double),
   `tests/test_search_fallback.py` (unit + DB),
