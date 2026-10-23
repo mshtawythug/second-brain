@@ -49,9 +49,9 @@ Ingest spec"), [`2026-07-25-brain-ui-design.md`](./2026-07-25-brain-ui-design.md
 | G2 | How do new ingest extractors avoid growing `ingest/__init__.py` (2,369)? | The extension dispatcher `_EXTRACTORS` / `extract_path` moves to a new leaf, `ingest/dispatch.py`, with a registration function (RM-07). `ingest/__init__.py` re-exports it and shrinks. | RM-07 |
 | G3 | How do new knobs avoid growing `config.py` (2,669)? | New knob groups live in **feature settings leaves** under `src/brain/settings/`, read from `os.environ` **after** `Config.load()` has published the dotenv chain into it (`config.py`, the `os.environ.setdefault` loop in `_load_field_dict`). `config.py` is not grown for any ticket here (RM-08). | §2.3, RM-08 |
 | G4 | How do ranking stages (fallback, reranker, document leg, engagement) compose without each surface wiring them separately? | One composition function, `brain.search_pipeline.run_search` (RM-09), called by every user-facing surface. No stage edits the ranking code in `search.py` (823, over the ceiling); RM-20 adds only a two-line public alias there. `brain eval` calls the stages it measures directly, and never the fallback. | §2.7, RM-09 |
-| G5 | How is a new source added? | A fixed eight-step protocol (§2.4): extractor or stdin recipe, dispatcher or source-kind entry, credentials, a **mandatory scope flag**, PII rules, synthetic fixtures, dependency evidence, docs. Prefer the **agent-orchestrated MCP → `brain ingest-stdin`** pattern (as Krisp and Slack do) over a new API client. | §2.4 |
+| G5 | How is a new source added? | A fixed nine-point protocol (§2.4): extractor or stdin recipe, dispatcher or source-kind entry, credentials, a **mandatory scope flag**, PII rules, synthetic fixtures, dependency evidence, and the graph and enrichment cost. Prefer the **agent-orchestrated MCP → `brain ingest-stdin`** pattern (as Krisp and Slack do) over a new API client. | §2.4 |
 | G6 | Where do long-running UI tasks run? | On the Ingest spec's `JobRegistry` (Ingest spec §4), reused by the Agent tab. One worker for every job kind. | RM-10, RM-18 |
-| G7 | Reranker runtime | Ollama has **no rerank endpoint** (upstream issue ollama/ollama#3368 is still open, and #16076, opened in 2026, says there is no `/api/rerank`). The local backend is **`llama-server` from llama.cpp, started with `--embedding --pooling rank --reranking`**, serving `bge-reranker-v2-m3` (an external binary over HTTP, no new Python dependency). Voyage is the hosted fallback, through the already-declared `voyageai`, using **the model Voyage currently recommends, re-checked at build time** (`rerank-3` per third-party model listings on 2026-10-23; `rerank-2.5` is still served). **Default OFF** until `brain eval` proves a gain. | RM-14 |
+| G7 | Reranker runtime | Ollama has **no rerank endpoint** (upstream issue ollama/ollama#3368 is still open, and #16076, opened in 2026, says there is no `/api/rerank`). The local backend is **`llama-server` from llama.cpp, started with `--embedding --pooling rank --reranking`**, serving `bge-reranker-v2-m3` (an external binary over HTTP, no new Python dependency). Voyage is the hosted fallback, through the already-declared `voyageai`, using **the model Voyage currently recommends, re-checked at build time**: on 2026-10-23 Voyage's reranker docs (docs.voyageai.com/docs/reranker) recommend `rerank-3`, with `rerank-3-lite` for latency-sensitive use; both were announced on Voyage's blog on 2026-09-30 as drop-in upgrades of `rerank-2.5`. **Default OFF** until `brain eval` proves a gain. | RM-14 |
 | G8 | Brief delivery channel | **Email to the owner's own address through the existing `gws` CLI**, opt-in, default off. Slack is supported through an incoming webhook to a private channel. The `#team` channel is **rejected**: it is shared, and a personal brief is not a team post. | RM-16 |
 | G9 | Saved-search notification | Through the **daily brief**: a "Watch hits" section, delivered by whatever G8 channel is enabled. There is no per-ingest push. | RM-15 |
 | G10 | Agent tab transport | **Polling** the job registry, as the Ingest tab does. **No NDJSON stream in v1**: `ask`'s LLM steps are non-streaming JSON calls (`chat.chat_json`), so a stream would carry the same five to eight step events polling already delivers. | RM-18 |
@@ -228,12 +228,12 @@ A ticket is done when **all** of the following hold. A reviewer checks each item
 
 The over-800 set at `02c2abc` is the sixteen files in the CLAUDE.md table, and the table matches it
 (re-derived with `find src -name '*.py' -exec wc -l {} + | sort -rn`). This program touches six of
-them. The seams in Wave 2 exist so that each is touched rarely, and so that most touches are net
+them, plus `setup.py` if RM-14c adopts the reranker. The seams in Wave 2 exist so that each is touched rarely, and so that most touches are net
 zero or net negative.
 
 | Over-ceiling file | Tickets that must touch it | How growth is avoided |
 |---|---|---|
-| `cli.py` | RM-02 (net negative), RM-06 (one call), RM-15 (net negative: the `brief --wiki` body moves to `brief_publish.py`), RM-20 (net zero or negative: the two `ensure_embedding_column` calls in `init` become one), RM-21 (net negative), RM-48 (only if confirmed) | RM-06's seam means later command modules register through `cli_registry.py` only. RM-14a, RM-20 and RM-22b do not touch `eval_cmd`, because `run_eval` builds its own stages (RM-14a). |
+| `cli.py` | RM-02 (net negative), RM-06 (one call), RM-15 (net negative: the two-audience body of `brief` moves to `brief_publish.py`), RM-20 (net zero: `init`'s chunks-only `ensure_embedding_column` call becomes `ensure_relational_embedding_columns`; the AGE-gated graph call stays), RM-21 (net negative), RM-48 (only if confirmed) | RM-06's seam means later command modules register through `cli_registry.py` only. RM-14a, RM-20 and RM-22b do not touch `eval_cmd`, because `run_eval` builds its own stages (RM-14a). |
 | `mcp_server.py` | RM-01 (net negative), RM-02 (about two lines), RM-06 (about +12 lines: the `ToolContext` and the registration call; recorded), RM-09 (net zero), RM-24 (one parameter), RM-46 (net negative: R1's state builders go to `mcp_state.py`), RM-57 (only if triggered) | New tools go to `src/brain/mcp_tools/` (RM-06). RM-24's and RM-57's parameters on `brain_search` cannot avoid the file, because that tool lives there; each is recorded. |
 | `ingest/__init__.py` | RM-07 (net negative), RM-42 (net zero: two calls re-pointed) | The dispatcher moves to `ingest/dispatch.py`; every later extractor registers there. RM-42's chunker choice lives in `ingest/chunk_dispatch.py`. |
 | `config.py` | none | Feature settings leaves (RM-08). New fixed-ceiling chat calls (RM-54, RM-55) add `CallBudget` entries in the `ollama_budget.py` leaf, which `config.py` already consults; no knob is added. |
@@ -255,7 +255,8 @@ The budget is a cap the reviewer checks; a ticket that would exceed it extracts 
 | `ui/notes_service.py` | 711 | 0 | Ingest lives in `ui/ingest_service.py` (Ingest spec §1.3). |
 | `ui/queries.py` | 724 | +50 | RM-15 (watch-hit titles, if the UI shows them), RM-19 (duplicate pairs). New SQL beyond that goes to a new `ui/queries_*.py` leaf. |
 | `ask.py` | 654 | +120 | RM-02 (≤ 30), RM-09 (net zero), RM-18a (`on_step`, ≤ 25), RM-18c (`history`, ≤ 50). |
-| `doctor_runtime.py` | 563 | +60 | RM-14b, RM-16, RM-31, RM-32, RM-33, RM-36, RM-38, RM-43, RM-52 (one probe each). The ticket that would pass +60 first moves the source probes into `doctor_sources.py`. |
+| `graph_rag/reconcile.py` | 757 | +15 | RM-30 (the concept-skip gate and its watermark write). Anything more extracts first. |
+| `doctor_runtime.py` | 563 | +60 | RM-14b, RM-16, RM-31, RM-32, RM-33, RM-36, RM-38, RM-43, RM-47, RM-52 (one probe each). The ticket that would pass +60 first moves the source probes into `doctor_sources.py`. |
 
 **BL-1 (RM-04) turns this from a review habit into a CI check** for the over-800 set. The near-ceiling
 budgets stay a review checkpoint.
@@ -279,6 +280,10 @@ Each feature has a frozen dataclass and a loader, `load_<feature>_settings(env: 
 -> <Feature>Settings`. Callers pass `os.environ` **after** `Config.load()`, which has already
 published the dotenv chain into the process environment (`Config._load_field_dict`, the
 `os.environ.setdefault` loop). Tests pass a plain dict, so no test touches the real environment.
+**One carve-out:** `eval/runner.run_eval(stages=None, env=None)` falls back to `os.environ` when
+neither is given (RM-14a), so `eval_cmd` needs no change. Every test of `run_eval`, existing and
+new, passes `stages` or `env` explicitly, so a variable exported in the developer's shell cannot
+change a test's result.
 Secrets (webhook URLs, API tokens) are fields with `repr=False`, and `brain doctor` reports only
 whether they are set.
 
@@ -335,7 +340,8 @@ block inside its design:
    `GraphLane` at about 8–10 minutes per document (memory note "Ollama + GraphRAG perf"). A bulk
    source would therefore occupy the lane for days. Each source ticket states: whether its
    `content_type` skips concept extraction (a new leaf, `graph_rag/extract_policy.py`, holds
-   `CONCEPT_SKIP_CONTENT_TYPES`; the people aspect still runs), whether the summary is skipped by
+   `CONCEPT_SKIP_CONTENT_TYPES`, and RM-30 wires it into `reconcile_plan` and `reconcile_document`
+   with a skip watermark, so a skipped document counts as done; the people aspect still runs), whether the summary is skipped by
    default, its per-run cap, and the worst-case drain time of one capped run.
 
 ### 2.5 Egress rules for anything that leaves the machine
@@ -412,10 +418,12 @@ Every ticket lists its fields in this order: **Source**, **Goal**, **Scope in / 
 **Design**, **Security / privacy**, **Ceiling**, **Acceptance criteria** (numbered), **Test plan**,
 **Eval**, **Depends on**, **Size**, **Risks**, **Decisions**. "Ceiling" names the over-ceiling and
 budgeted files touched (§2.2) and how growth is avoided; "Eval" says whether ranking moves and
-whether `ci.json` is re-recorded. §2.1 (DoD) applies to every ticket and is not repeated. Three
+whether `ci.json` is re-recorded. §2.1 (DoD) applies to every ticket and is not repeated. Four
 kinds of ticket deviate, and say so: a parent of sub-tickets carries only the fields its
 sub-tickets share; the three Ingest-tab tickets (RM-10, RM-11, RM-13) delegate design, acceptance
-and tests to numbered sections of the Ingest spec; and a closure (RM-61) has no design.
+and tests to numbered sections of the Ingest spec; the trigger-gated group (RM-56 to RM-60) is one
+table plus shared fields, and its acceptance criteria and test plans are written when a trigger
+fires; and a closure (RM-61) has no design.
 
 ### Wave 1 — Embedder-down handling and two cheap guards
 
@@ -757,16 +765,25 @@ the ceiling rules allow: extraction *rather than growth*, not a split to satisfy
     ```
 
     and `mcp_tools/__init__.py` exposes `register_extension_tools(app: MCPServerProtocol, ctx:
-    ToolContext) -> None`, which imports each tool module and calls its `register(app, ctx)`. Each
-    tool module keeps the context in a module global set by `register`, defines its `brain_*`
-    functions at module scope, and registers them with `app.tool()(fn)`, never a decorator (so the
-    helper-between-decorator trap that once dropped `brain_recall` cannot happen there). Because the
-    context holds the **running** module's own functions, `_get_state` reads the `_state` that
+    ToolContext, *, modules: Sequence[ModuleType] | None = None) -> None`. With `modules=None` it
+    imports every tool module of the package and calls its `register(app, ctx)`; a test passes
+    `modules=[its_test_module]`, so a throwaway server never touches the real modules. Each tool
+    module keeps the context in a module global set by `register`, defines its `brain_*` functions
+    at module scope, and registers them with `app.tool()(fn)`, never a decorator (so the
+    helper-between-decorator trap that once dropped `brain_recall` cannot happen there).
+    **`register` refuses to rebind**: if the module already holds a different context it raises,
+    unless the test-only helper `mcp_tools._reset_contexts_for_tests()` was called first. Because the
+    context holds the importable module's own functions, `_get_state` reads the `_state` that
     `main()` set, and the tests' `monkeypatch.setattr(mcp_server, "_state", …)` (used in 39 test
     files) keeps working.
   - `mcp_server.py` gains, after its last tool, the `ToolContext(...)` construction and
-    `register_extension_tools(mcp_app, ctx)`. Its `__main__` block becomes `from brain.mcp_server
-    import main as _main; _main()`, so `python -m` runs the importable module's server.
+    `register_extension_tools(mcp_app, ctx)`, **guarded by `if __name__ != "__main__":`**. Its
+    `__main__` block becomes `from brain.mcp_server import main as _main; _main()`. So under
+    `python -m brain.mcp_server`, the `__main__` copy defines its built-in tools but registers no
+    extension (its context would be the wrong copy's), the import of `brain.mcp_server` then
+    registers the extensions exactly once with that module's context, and `_main()` serves that
+    module's `mcp_app`. Correctness under `python -m` therefore rests on that single registration,
+    which the refusal to rebind would expose if it ever happened twice.
   - `tests/test_mcp_tool_registration.py` extends its roster to every module-level `brain_*`
     function in `brain.mcp_tools.*`, and asserts each is advertised by `mcp_app.list_tools()`.
 - **Security / privacy:** none; no tool is added. `mcp_tools/__init__.py`'s docstring lists the lens
@@ -776,15 +793,17 @@ the ceiling rules allow: extraction *rather than growth*, not a split to satisfy
 - **Acceptance criteria:**
   1. A test-only extension command, registered through `EXTENSION_REGISTRARS` on a throwaway app,
      appears in `--help` after every built-in command.
-  2. A test-only tool module registered through `register_extension_tools` on a throwaway server is
-     listed by `list_tools()`, and calling it reads the state the test installed with
-     `monkeypatch.setattr(mcp_server, "_state", …)`.
-  3. The registration guard fails if a module-level `brain_*` function in `brain.mcp_tools` is not
+  2. A test-only tool module, registered with `register_extension_tools(throwaway_app, ctx,
+     modules=[test_module])`, is listed by that server's `list_tools()`, calling it reads the state
+     the test installed with `monkeypatch.setattr(mcp_server, "_state", …)`, and no real tool
+     module's context changes.
+  3. A second `register` with a different context raises, unless the reset helper ran first.
+  4. The registration guard fails if a module-level `brain_*` function in `brain.mcp_tools` is not
      advertised.
-  4. Over `python -m brain.mcp_server`, the advertised tool list equals the in-process
-     `list_tools()` (so extension registration runs in the served process). RM-12 extends this test
-     to **call** its first extension tool over stdio.
-  5. `import brain.cli` still does not load starlette or uvicorn (`tests/test_cli_ui.py`).
+  5. Over `python -m brain.mcp_server`, the advertised tool list equals the in-process
+     `list_tools()` (so extension registration runs exactly once, in the served module). RM-12
+     extends this test to **call** its first extension tool over stdio.
+  6. `import brain.cli` still does not load starlette or uvicorn (`tests/test_cli_ui.py`).
 - **Test plan:** the tests named in the criteria, plus the existing registration and import-cost
   tests.
 - **Eval:** none.
@@ -1073,7 +1092,7 @@ RM-13 add only what the roadmap needs on top, and delegate the rest to numbered 
   5. `limit` above the ceiling is `INVALID_PARAMS`.
   6. Both tools appear in `list_tools()`, and the registration guard covers them.
   7. `tests/test_mcp_server_protocol.py` calls `brain_related` over `python -m brain.mcp_server`
-     and gets a result (the first extension tool called over stdio; RM-06 criterion 4).
+     and gets a result (the first extension tool called over stdio; RM-06 criterion 5).
 - **Test plan:** DB tests on a synthetic three-document corpus (one confidential); a parity test
   against the UI route and the CLI; MCP error-mapping tests; the stdio protocol test.
 - **Eval:** none.
@@ -1141,7 +1160,7 @@ as the May roadmap assumed, is not available. The candidates:
 | **`llama-server` (llama.cpp)**, serving a `bge-reranker-v2-m3` GGUF | **None** (an external binary over HTTP, through the already-declared `httpx`) | Recommended. A local service on loopback, Metal-accelerated, installed with Homebrew (`llama.cpp`). It must be started with `--embedding --pooling rank --reranking`: `--reranking` only enables the endpoint, and the rank pooling is what makes the model score pairs. API: `POST {BRAIN_RERANK_URL}/v1/rerank` (aliases `/rerank` and `/reranking`), body `{query, documents, top_n}`, response `results[]` of `{index, relevance_score}`. **Verify the flags, path and payload against the llama.cpp server README at implementation**, and pin the tested `llama-server` version in the guide. |
 | `sentence-transformers` `CrossEncoder` | Yes: `torch` (hundreds of MB) | Rejected: the heaviest dependency in the tree, for one stage. |
 | `fastembed` / ONNX Runtime | Yes: `onnxruntime` | Rejected for v1: smaller than torch, but a new native wheel, and `bge-reranker-v2-m3` support there is not confirmed. Recorded as the fallback if `llama-server` proves unworkable. |
-| **Voyage** (hosted) | **None** (`voyageai` is declared) | The hosted alternative, subject to §2.5. Model: the one Voyage currently recommends, re-checked at build time. On 2026-10-23 third-party model listings show `rerank-3` as the newest (with `rerank-3-lite`), and `rerank-2.5` still served. |
+| **Voyage** (hosted) | **None** (`voyageai` is declared) | The hosted alternative, subject to §2.5. Model: the one Voyage currently recommends, re-checked at build time. On 2026-10-23 Voyage's reranker docs (docs.voyageai.com/docs/reranker) recommend `rerank-3`, and `rerank-3-lite` for latency-sensitive use. |
 
 ##### RM-14a — The reranker stage, backends, settings and eval wiring (default OFF)
 
@@ -1201,9 +1220,11 @@ as the May roadmap assumed, is not available. The candidates:
     (an override for one run). MCP and the UI follow the setting. The UI's meta line shows `rerank
     0.4` beside `embed` and `rank`.
   - **Eval, without touching `cli.py`.** `run_eval` gains `stages: Sequence[SearchStage] | None =
-    None`. `None` means "build them from the environment", `search_pipeline.build_stages(os.environ)`,
-    which `eval_cmd` has already populated by calling `Config.load()`; tests pass `stages=()` or a
-    fake. After its own `hybrid_search` call, `run_eval` runs `search_pipeline.apply_stages` (never
+    None` and `env: Mapping[str, str] | None = None`. With `stages=None` it builds them with
+    `search_pipeline.build_stages(env if env is not None else os.environ)`; `eval_cmd` has already
+    populated `os.environ` by calling `Config.load()` (the §2.3 carve-out). **Every test passes
+    `stages` or `env` explicitly**: existing `run_eval` tests are updated to pass `stages=()`, so a
+    `BRAIN_RERANKER` exported in a developer's shell cannot change them. After its own `hybrid_search` call, `run_eval` runs `search_pipeline.apply_stages` (never
     `run_search`, so it never falls back). Each stage's `signature()` is merged into
     `config_signature` (`eval/runner.py`, the dict built after the loop), so the signature is
     unchanged while every stage is off. Each `EvalResult` gains `stage_ms: dict[str, float]` from
@@ -1221,8 +1242,10 @@ as the May roadmap assumed, is not available. The candidates:
   5. A non-loopback `BRAIN_RERANK_URL` is a `ConfigError`.
   6. `run_eval(stages=[fake])` scores the reranked order and records `stage_ms`; a transient embed
      failure is still a degraded row (no fallback).
-  7. With `stages=None` and `BRAIN_RERANKER=llamacpp` in the environment, `run_eval` builds the
-     stage itself and `config_signature` gains the three keys.
+  7. With `stages=None` and `env={"BRAIN_RERANKER": "llamacpp", …}` (a dict, not the process
+     environment), `run_eval` builds the stage itself and `config_signature` gains the three keys.
+  8. Every existing `run_eval` test passes `stages=()` and is unaffected by an exported
+     `BRAIN_RERANKER`.
 - **Test plan:** pure tests for the stage (ordering, ties, tail, egress filter, failure); backend
   tests against an `httpx.MockTransport` (llama.cpp, using the documented request and response
   shape) and a fake Voyage client passed to the constructor; settings tests; eval-runner tests;
@@ -1250,15 +1273,20 @@ as the May roadmap assumed, is not available. The candidates:
   `BRAIN_RERANKER=llamacpp`. The plist runs `llama-server -m <gguf> --embedding --pooling rank
   --reranking --host 127.0.0.1 --port 8081`; its `ProgramArguments` are fixed in the template, and
   only the model path is a variable, so the host cannot be set to `0.0.0.0`. It is installed only
-  by an explicit `--with-reranker` flag on `brain-install-launchd`. The guide names the tested
+  by an explicit `--with-reranker` flag, parsed in `brain.bin.launchd:install_main` (the
+  `bin/brain-install-launchd` script is a passthrough to it). The label is **sticky**, as RM-33
+  specifies for optional labels: the flagless install `brain-up.sh` runs on every start re-renders an
+  already-installed reranker plist and never removes it. The guide names the tested
   `llama.cpp` version, the GGUF's source and size, and its measured resident memory.
 - **Security / privacy:** loopback bind only; the model file is local.
 - **Ceiling:** `doctor_runtime.py` +≤ 25 (budget, §2.2). `setup.py` is not touched.
 - **Acceptance criteria:**
   1. The doctor row reports "ok", "not running" and "not configured" in the three states.
   2. The plist renders with `127.0.0.1`, the three flags and the configured model path.
-  3. `brain-install-launchd` without `--with-reranker` does not install it; `brain-uninstall-launchd`
-     removes it when present.
+  3. A first `brain-install-launchd` without `--with-reranker` does not install it;
+     `brain-uninstall-launchd` removes it when present.
+  4. After `--with-reranker`, a plain flagless `brain-up` keeps `com.brain.reranker` installed and
+     re-renders it.
 - **Test plan:** a doctor test against an `httpx.MockTransport`; a plist render test; install and
   uninstall tests in the style of the existing launchd tests (no real `launchctl`).
 - **Eval:** none.
@@ -1312,19 +1340,28 @@ as the May roadmap assumed, is not available. The candidates:
 - **Source:** roadmap 4.4, F13 ("accepted in principle, cut for scope"), BL-9; backlog rank 8.
 - **Goal:** `brain watch add "<query>"` saves a search; each morning's brief lists documents that
   newly match it.
-- **Scope in:** first, the extraction of `brief --wiki`'s body out of `cli.py` into a new leaf
+- **Scope in:** first, the extraction of `brief`'s two-audience sequence out of `cli.py` into a new leaf
   `src/brain/brief_publish.py` (the prerequisite RM-16 and RM-19 also build on); then migration
   029, `src/brain/saved_search.py` (core), `src/brain/cli_watch.py` (a `watch` sub-app, through
   RM-06), `src/brain/mcp_tools/saved_search.py`, and a section in `brief.py`. **Scope out:**
   per-ingest push; macOS notifications; a UI panel.
 - **Design:**
-  - **Step 1, the extraction.** `cli.py`'s `def brief` builds a permissive payload and, under
-    `--wiki`, a second gated one (`assemble_brief(…, exclude_confidential=True)`), decides whether
-    the gated page needs its own suggestions call, and writes the page with `write_brief_to_vault`.
-    That `--wiki` body moves, unchanged, into `brief_publish.publish_brief(conn, cfg, *, on_date,
-    since_hours, todo_since_days, permissive: BriefData) -> BriefData` (it returns the published
-    payload). `cli.py` keeps one call. The two-audience comment moves with it. `cli.py` shrinks; its
-    row is updated. This is a pure move, proven by the existing `brief` tests passing unchanged.
+  - **Step 1, the extraction.** In `cli.py`'s `def brief` (read at `02c2abc`) the `--wiki` work is
+    interleaved with enrichment, so it cannot move alone. The function opens one connection and
+    assembles the permissive payload (`exclude_confidential=False`) and, under `--wiki`, the gated
+    one (`exclude_confidential=True`); closes the connection; computes `withheld = published is not
+    None and published != data` while both still carry `suggestions=[]`; then, unless `--no-enrich`,
+    calls `suggest_next_steps(data, cfg)` and gives the gated payload its own call only when
+    `withheld`, else the same suggestions; and finally writes the page with `write_brief_to_vault`
+    before the `--json` early return. That **whole two-audience sequence** moves into
+    `brief_publish.build_brief(cfg: Config, *, on_date: date, since_hours: int, todo_since_days: int,
+    enrich: bool, wiki: bool, connect: Callable[[str], AbstractContextManager[psycopg.Connection[Any]]]
+    = db.connect) -> tuple[BriefData, Path | None]`, returning the terminal payload and the written
+    page's path (or `None`). The connection opener is injected so tests use the 5434 database and
+    RM-15's watch check (below) runs on the same connection. `cli.py` keeps argument parsing, the
+    call, and the printing (`emit_json` or `_print_brief` plus the published-page note). The
+    two-audience comment moves with the code. The move is behaviour-identical, proven by the
+    existing `brief` tests passing unchanged, including `--json --wiki` still writing the page.
   - **Data model (`029_saved_searches.sql`, additive):**
 
     ```sql
@@ -1374,12 +1411,18 @@ as the May roadmap assumed, is not available. The candidates:
     notified or not); `rm NAME`; `pause NAME`; `resume NAME`. Filters are validated with the
     functions `brain search` uses (`validate_source_kind`, `resolve_person_to_keys`).
   - **Brief.** `BriefData` gains `watch_hits: list[WatchHit]` (default empty) and its `to_dict` key.
-    `brief_publish.publish_brief` (the 07:00 daemon run, `brain brief --wiki`) runs a check of every
-    enabled watch first, then reads the **unnotified** hits through the gated lens, shows at most 5
-    per watch plus "and N more (`brain watch hits <name>`)", and marks **every** hit it found as
-    notified: the ones beyond the display cap, and also the confidential ones the gated page
-    withholds. Nothing is lost by marking them: the terminal `brain brief` (permissive) and `brain
-    watch hits` still list them. A plain `brain brief` and MCP `brain_brief` only peek.
+    Every `brain brief` (with or without `--wiki`) runs a check of every enabled watch **first**,
+    inside `build_brief`, on its connection, **before** either payload is assembled; the check
+    records new hits but marks nothing. The two payloads then read different sets:
+    - the **terminal** payload (permissive lens) lists every hit whose `first_seen_at` falls inside
+      the brief's own window (`since_hours`), **whether or not it is notified**, so a hit the 07:00
+      run already published still shows in a later terminal `brain brief` that day;
+    - the **published** payload (gated lens, `--wiki` only) lists the **unnotified** hits, at most 5
+      per watch plus "and N more (`brain watch hits <name>`)". After the page is written,
+      `build_brief` marks **every** hit it found unnotified as notified, including the ones beyond
+      the display cap and the confidential ones the gated page withheld; the terminal brief and
+      `brain watch hits` still show them.
+    MCP `brain_brief` runs no check; it reads the terminal set through its MCP lens.
   - **MCP** (`mcp_tools/saved_search.py`): `brain_watch_list()`, `brain_watch_add(name, query, …)`,
     `brain_watch_check(name=None, include_confidential=False)` (peek only: an agent never consumes
     the owner's notifications), `brain_watch_remove(name, confirm=False)`.
@@ -1394,11 +1437,13 @@ as the May roadmap assumed, is not available. The candidates:
   4. An edited old document that newly matches is reported; an old match is never re-reported.
   5. Filters apply (a `--source` mismatch is not a hit).
   6. `brief --wiki` lists unnotified non-confidential hits (at most 5 per watch), marks all found
-     hits notified, including the withheld and the over-cap ones; a second run lists none.
-  7. Two concurrent checks of one watch report each new hit exactly once, and `last_checked_at` is
+     hits notified, including the withheld and the over-cap ones; a second `--wiki` run lists none.
+  7. A hit marked notified by a `--wiki` run still appears in a later plain `brain brief` whose
+     window covers its `first_seen_at`, and a confidential hit appears there too.
+  8. Two concurrent checks of one watch report each new hit exactly once, and `last_checked_at` is
      the later of the two start times.
-  8. A semantic check that falls back records nothing and leaves `last_checked_at` unchanged.
-  9. MCP `brain_watch_check` never marks; lexical mode works with the embedder down.
+  9. A semantic check that falls back records nothing and leaves `last_checked_at` unchanged.
+  10. MCP `brain_watch_check` never marks; lexical mode works with the embedder down.
 - **Test plan:** DB tests for the core (seed, diff, window, filters, mark and peek, the race with
   two connections and a barrier); CLI tests; brief tests (section, gating, marking); MCP tests; a
   migration test (idempotent re-apply).
@@ -1416,7 +1461,7 @@ as the May roadmap assumed, is not available. The candidates:
   10, "a product decision". This ticket makes it a setting with a recommended default.
 - **Goal:** The 07:00 brief can arrive in the owner's inbox, without anyone opening a terminal.
 - **Scope in:** new `src/brain/brief_delivery.py`; `src/brain/settings/brief_delivery.py`; a call in
-  `brief_publish.publish_brief` (RM-15); the subject exclusion in `ingest/gmail.py`'s query
+  `brief_publish.build_brief` (RM-15); the subject exclusion in `ingest/gmail.py`'s query
   builder; a `brain doctor` row; docs. **Scope out:** HTML email; per-section toggles beyond the two
   below; any edit to `cli.py` or the daemon script.
 - **Design:**
@@ -1441,7 +1486,7 @@ as the May roadmap assumed, is not available. The candidates:
                       channel: DeliveryChannel | None) -> DeliveryOutcome: ...
     ```
 
-  - **What is sent:** the **gated** payload only (the one `publish_brief` writes, built with
+  - **What is sent:** the **gated** payload only (the one `build_brief` writes, built with
     `exclude_confidential=True`). By default: the date, counts, capture titles, pinned titles, watch
     hits (RM-15), new entities (RM-17), and "open `brain brief` for detail". **Todo text is
     body-derived** and is sent only when `BRAIN_BRIEF_DELIVERY_INCLUDE_TODOS=true`.
@@ -1452,8 +1497,8 @@ as the May roadmap assumed, is not available. The candidates:
     `BRAIN_BRIEF_SLACK_WEBHOOK_URL` (a secret; it must start `https://hooks.slack.com/`, else
     `ConfigError`); `BRAIN_BRIEF_DELIVERY_INCLUDE_TODOS` = false. `email` with no `BRAIN_USER_EMAIL`
     is a `ConfigError` naming the variable.
-  - **Wiring:** `publish_brief` calls `deliver_brief` after the vault page is written, when delivery
-    is configured. Nothing changes in `cli.py` or `_brain-brief-fg.sh`.
+  - **Wiring:** `build_brief` calls `deliver_brief` after the vault page is written, when `wiki`
+    is set and delivery is configured. Nothing changes in `cli.py` or `_brain-brief-fg.sh`.
   - **Failure:** a delivery error never fails the brief: the page is already written, one class-only
     WARNING is logged (`describe_failure`), and the exit code is 0. `gws`'s scope for sending is not
     verified on this machine (`ingest-gmail` only reads), so an authorization failure from `gws` is
@@ -1473,7 +1518,7 @@ as the May roadmap assumed, is not available. The candidates:
   5. No log line or error contains the webhook URL (a sentinel test).
   6. Every Gmail query `ingest/gmail.py` builds excludes the brief's subject.
 - **Test plan:** pure render tests; channel tests with an injected runner or transport; settings
-  tests; a `publish_brief` test with a fake channel; the sentinel test; a gmail query-builder test.
+  tests; a `build_brief` test with a fake channel; the sentinel test; a gmail query-builder test.
 - **Eval:** none.
 - **Depends on:** RM-08, RM-15 (`brief_publish`); best after RM-17 so its section exists.
 - **Size:** S.
@@ -1893,8 +1938,11 @@ adopted, which is why both depend on it.
   `engagement_stats(conn, *, days: int = 90) -> EngagementStats` returns opens and clicks by surface,
   distinct documents opened, `rated_useful`, `rated_irrelevant`, the share of opens that came from a
   search session, `interactions_rows` (the table's row count) and `interactions_bytes`
-  (`pg_total_relation_size('interactions')`). The readout prints whether the gate is met. **The gate
-  (recommended values):** at least **500 opens across at least 100 distinct documents** and **30
+  (`pg_total_relation_size('interactions')`). The readout prints whether the gate is met. `brain
+  usage` already has `--days/-d` (default 30, `cli_usage.py`); with `--engagement`, `--days` sets
+  only the window of the readout's counts, and **the gate line is always computed over 90 days**,
+  whatever `--days` says, so the gate cannot be met by widening a window. **The gate (recommended
+  values):** at least **500 opens across at least 100 distinct documents** and **30
   explicit ratings** over 90 days.
 - **Security / privacy:** counts only; no titles.
 - **Ceiling:** none (`cli_usage.py` is small; `usage.py`, 623 lines, is not touched).
@@ -1903,6 +1951,8 @@ adopted, which is why both depend on it.
   2. The gate line flips exactly at the thresholds.
   3. `interactions_rows` and `interactions_bytes` are reported.
   4. `brain usage` without the flag is byte-identical to before.
+  5. `brain usage --engagement --days 7` and `--days 365` print different counts but the same gate
+     line, computed over 90 days.
 - **Test plan:** DB tests on a synthetic fixture; CLI tests for both forms.
 - **Eval:** none.
 - **Depends on:** nothing.
@@ -2208,9 +2258,10 @@ design.
 - **Goal:** Meetings without a transcript (external events, interviews, conferences) are searchable,
   filterable by `--person`, and dated by their start time.
 - **Scope in:** `src/brain/ingest/calendar.py`, `src/brain/cli_ingest_calendar.py` (`brain
-  ingest-calendar`, through RM-06), the `calendar` kind, `graph_rag/extract_policy.py` (created
-  here, §2.4 point 9), the three front-end tables. **Scope out:** writing to the calendar; a daily
-  daemon run (RM-30.D2).
+  ingest-calendar`, through RM-06), the `calendar` kind, the three front-end tables, and the
+  **concept-skip policy and its consumer** (below): a new leaf `graph_rag/extract_policy.py`,
+  `graph_rag/reconcile_plan.py` and `graph_rag/reconcile.py`. **Scope out:** writing to the
+  calendar; a daily daemon run (RM-30.D2).
 - **Design — Protocol:**
   1. *Path (b):* a `gws` shell-out, reusing the `gws calendar events list` call shape and the
      injectable runner type of `directory.refresh_calendar`.
@@ -2244,8 +2295,27 @@ design.
      what an event is about, still runs); summaries are skipped by default (events are short;
      `--enrich` opts in). The cap is the 92-day window; at a few events a day, one run is a few
      hundred documents with no concept extraction, so it drains in minutes.
+  - **The concept-skip policy, wired to its consumer.** A constant alone would do nothing: the
+    concept aspect is gated by `ReconcileConfig.concepts_enabled` and runs inside
+    `graph_rag.reconcile.reconcile_document`, and whether a document needs it is decided by
+    `graph_rag.reconcile_plan`, which compares the document's `graph_index_state` watermark for
+    `aspect = 'concepts'` (`CONCEPTS_ASPECT`) with `concept_inputs_hash` (`reconcile_plan.py`, the
+    `concept_stale` test). `graph_rag/build.py`'s backfill re-plans every document it is given, and
+    the plan alone decides whether extraction runs, so a skipped document with no watermark would be
+    re-planned as stale on every backfill and would never count as done. So:
+    1. `extract_policy.py` holds `CONCEPT_SKIP_CONTENT_TYPES: frozenset[str]` and
+       `CONCEPT_SKIP_POLICY_VERSION` (bumped whenever the set changes).
+    2. `reconcile_plan` reads the document's `content_type` (it already selects it) and, for a
+       skipped type, computes the concept watermark's inputs as a fixed marker,
+       `skip:<content_type>:<policy version>`, so the plan is stale only until that marker is written.
+    3. `reconcile_document`, for a skipped type, calls no extractor, writes no concept mentions, and
+       writes the concept watermark with that marker and `extractor_ver = "skipped-by-policy"`
+       (through the existing `upsert_index_state`). The people aspect runs unchanged.
+    4. A concept-coverage count (concept watermarks over eligible documents) therefore treats a
+       skipped document as done, because it has a current watermark.
 - **Security / privacy:** protocol points 4–6.
-- **Ceiling:** none.
+- **Ceiling:** `graph_rag/reconcile.py` (757) gains at most 15 lines, within the 43 lines of headroom
+  it has (§2.2 budget); `reconcile_plan.py` is well under 800.
 - **Acceptance criteria:**
   1. Each fixture class lands as specified (single, series, declined skipped, private confidential,
      all-day).
@@ -2254,8 +2324,12 @@ design.
   3. `brain search --source calendar --person "<synthetic>"` finds the event.
   4. A window over 92 days, or ending more than 14 days ahead, is refused.
   5. No attendee address appears in a document body.
+  6. With concepts enabled, a `calendar_event` document is reconciled without an extractor call,
+     its concept watermark carries the skip marker, a second backfill does not re-plan it as stale,
+     and the concept-coverage count includes it as done; its people aspect is still indexed.
 - **Test plan:** as protocol point 7, plus a test that a metadata-only re-run does not call the
-  embedder.
+  embedder, and AGE-instance tests (5434) for criterion 6 with a fake extractor that fails the test
+  if it is called.
 - **Eval:** none.
 - **Depends on:** RM-06, RM-07.
 - **Size:** M.
@@ -2394,10 +2468,14 @@ design.
      `run` moves each file to `<path>/imported/<stem>-<sha8><ext>`, where `sha8` is the first 8 hex
      digits of the file's SHA-256, and ingests it from that final path, so the stored
      `source_path` is the file's permanent location. The document's title is set from the original
-     stem, not the renamed file (a PDF's title is otherwise its file's stem, Ingest spec C6). If the
-     ingest fails, the file is moved back and the failure is reported. Two different files that
-     both arrive as `New Recording 1.m4a` therefore become two documents, and the same file dropped
-     twice is a no-op.
+     stem, not the renamed file (a PDF's title is otherwise its file's stem, Ingest spec C6). Two
+     different files that both arrive as `New Recording 1.m4a` therefore become two documents.
+     **The destination may already exist**, when the same file is dropped twice. Then the content
+     hash in its name matches, the earlier import already holds the only copy that matters, and the
+     run is a no-op that deletes the redundant drop copy and ingests nothing (the existing document
+     already has that `source_path`). **Only a file this run itself moved is ever moved back:** if the
+     ingest fails after a move this run made, the file returns to the drop folder and the failure is
+     reported; a destination that existed before the run is never moved or deleted.
   2. *Kind:* `screenshot`. Front end: a glyph in both tables; `_ingested/screenshot` in
      `MONTH_GROUPED_PATHS`.
   3. *Dedup:* `source_path` (the `imported/` path, stable and content-addressed by its suffix).
@@ -2423,9 +2501,14 @@ design.
     `_brain-brief-fg`); the label in a new `_OPTIONAL_LABELS` tuple in `bin/launchd.py` (RM-14b
     introduces it for the reranker, or this ticket does if it lands first), which uninstall sweeps
     and which `brain doctor` checks only when the plist exists, because `doctor_runtime.py` imports
-    `_INSTALLED_LABELS` as the set of daemons that must be running; and a `--with-dropfolders` flag on
-    `bin/brain-install-launchd`. `setup.py`'s `_SHIM_NAMES` is **not** touched (the brief's wrapper
-    is not in it either).
+    `_INSTALLED_LABELS` as the set of daemons that must be running; and a `--with-dropfolders` flag.
+    `bin/brain-install-launchd` is a passthrough to `brain.bin.launchd:install_main`, which parses no
+    arguments today, so the flag is parsed **in `install_main`** (`src/brain/bin/launchd.py`).
+    `brain-up.sh` runs the installer **without flags** on every start, so an optional label is
+    **sticky**: a flagless install re-renders and re-bootstraps every optional plist that is already
+    installed (so a template change reaches it) and never removes one; only `brain-uninstall-launchd`
+    removes it. `setup.py`'s `_SHIM_NAMES` is **not** touched (the brief's wrapper is not in it
+    either).
 - **Security / privacy:** protocol point 6; configured folders only; no symlink is followed.
 - **Ceiling:** none (`doctor_runtime.py` budget).
 - **Acceptance criteria:**
@@ -2434,11 +2517,15 @@ design.
   2. A symlink, a `.icloud` stub and a dataless file are skipped; files in `imported/` are never
      rescanned.
   3. Two different files with the same name, dropped in two runs, become two documents.
-  4. The same file dropped twice is a no-op the second time.
-  5. A failed ingest leaves the file back in the drop folder.
+  4. The same file dropped twice is a no-op the second time: the drop copy is removed, the
+     earlier `imported/` file is untouched, and no document is added.
+  5. A failed ingest after this run's own move leaves the file back in the drop folder; a failure
+     on a file whose destination already existed never moves or deletes that destination.
   6. `--since` excludes older files; a folder with `auto = false` is skipped by `--configured`.
-  7. The plist renders; install without `--with-dropfolders` does not install it; doctor does not
-     report it missing when it was never installed.
+  7. The plist renders; a first install without `--with-dropfolders` does not install it; doctor
+     does not report it missing when it was never installed.
+  8. After `brain-install-launchd --with-dropfolders`, a plain flagless `brain-up` keeps
+     `com.brain.dropfolders` installed and re-renders it; only `brain-uninstall-launchd` removes it.
 - **Test plan:** protocol point 7, plus plist render and launchd install/uninstall tests in the
   style of the existing ones (no real `launchctl`).
 - **Eval:** none.
@@ -2673,15 +2760,18 @@ design.
   sheet is missing.
 - **Goal:** Share text or a link from the phone into the capture inbox, with no network surface on
   the Mac.
-- **Scope in:** `docs/guides/mobile-capture.md` (the Shortcut, step by step); `brain capture import`
-  on the existing `capture` sub-app (`_capture_command.py`, 469 lines); `mode = "capture"` folders in
-  RM-33's runner. **Scope out:** an HTTP endpoint (RM-39.D1); an iOS app.
+- **Scope in:** `docs/guides/mobile-capture.md` (the Shortcut, step by step); a new leaf
+  `src/brain/capture_import.py` (`import_file`); `brain capture import` on the existing `capture`
+  sub-app (`_capture_command.py`, 469 lines); the `mode = "capture"` branch of RM-33's runner. **Scope out:** an HTTP endpoint (RM-39.D1); an iOS app.
 - **Design:** an iOS Shortcut ("Save to Brain") writes the shared text or URL, plus an optional
   comment, as a `.md` file into an iCloud Drive folder. On the Mac that folder is a configured drop
   folder with `mode = "capture"`. `brain capture import --dir <folder> --since 7d` takes each file
   through RM-33's move-first step (so two shares with the same file name stay two notes), and turns
-  it into a capture-inbox note through the same path `brain capture` uses. RM-33's launchd job runs
-  it every 10 minutes when the folder is configured. Dataless (evicted) files and `.icloud` stubs
+  it into a capture-inbox note through the same path `brain capture` uses. **There is one code
+  path:** `drop_folder.run` dispatches on `mode`, and for `mode = "capture"` it calls the same
+  function `brain capture import` calls (`capture_import.import_file`, a new leaf), so `brain
+  ingest-folder --configured` (which RM-33's launchd job runs every 10 minutes) and `brain capture
+  import` cannot diverge. Dataless (evicted) files and `.icloud` stubs
   are skipped until they download.
 - **Security / privacy:** **the content passes through a third-party sync service.** Between the
   phone and the Mac, the shared text sits in the owner's iCloud Drive, so Apple's service stores it
@@ -2699,6 +2789,9 @@ design.
   3. Dataless files and `.icloud` stubs are skipped.
   4. A file with `sensitivity: confidential` frontmatter becomes a confidential note.
   5. The source file is gone from the iCloud folder after a successful import.
+  6. `brain ingest-folder --configured` over a `mode = "capture"` folder produces exactly the notes
+     `brain capture import` produces for the same files (both go through `capture_import.import_file`;
+     a test asserts the call).
 - **Test plan:** a `tmp_path` folder, DB plus a `tmp_path` vault, CLI tests.
 - **Eval:** none.
 - **Depends on:** RM-33.
@@ -2867,8 +2960,9 @@ reasons the backlog gives.
   3. The planted key is rejected.
   4. The default sensitivity is `confidential`.
   5. A re-run updates in place.
-  6. A run ingests at most `--max-files` files, requests no summary by default, and the graph lane
-     skips concept extraction for `code` (a test against `extract_policy`).
+  6. A run ingests at most `--max-files` files and requests no summary by default; with concepts
+     enabled, reconciling an ingested `code` document makes no extractor call, writes the skip
+     watermark, and a second backfill does not re-plan it (behaviour, on the AGE test instance).
 - **Test plan:** protocol point 7, plus the cost assertions of criterion 6.
 - **Eval:** after ingesting, the owner adds 3–5 code queries to the local golden corpus and
   re-records `ci.json` (triggers: a document-set change and a golden-corpus edit), so code retrieval
@@ -3304,15 +3398,15 @@ default, and it follows the condition each source attached. The tracker marks th
 |---|---|---|---|---|---|
 | RM-56 | MCP twin of `brain eval` (Q1-B "MCP") | The owner starts asking agents to run evals in chat | A request to that effect | In: `mcp_tools/eval.py`, `brain_eval_diff(baseline="ci")`, read-only, never records, returning the three mean deltas and the changed config keys. Out: recording baselines over MCP. | S |
 | RM-57 | `--tier vault\|ingested` filter (Q1-C D11) | A request to filter by tier | A request | In: `build_predicate` gains `tier` → `d.kind = %s`; the CLI, MCP `brain_search` and the UI filter row; recorded growth of `search.py` and `mcp_server.py`. Out: new tiers. | XS |
-| RM-58 | Pruning `interactions` (Q1-C non-goals) | The table passes 1,000,000 rows or 500 MB | `brain usage --engagement` (RM-22a reports `interactions_rows` and `interactions_bytes`) | In: `brain usage prune --older-than 2y`, dry-run by default, never deleting ratings or pins. Out: pruning `search_queries`. | S |
+| RM-58 | Pruning `interactions` (Q1-C non-goals) | The table passes 1,000,000 rows or 500 MB | `brain usage --engagement` (RM-22a reports `interactions_rows` and `interactions_bytes`) | In: a separate command, `brain interactions prune --older-than 2y [--apply]` (through RM-06; `brain usage` stays a single command, RM-22a.D2), dry-run by default, never deleting ratings or pins. Out: pruning `search_queries`. | S |
 | RM-59 | Cap on the auto-tag vocabulary prompt (Q1-D D18) | The vocabulary sent by `brain tag --auto` outgrows D18's threshold | `brain tags list --json` (RM-21) gives the vocabulary size | In: send the top-K tags by frequency plus tags co-occurring with the document's nearest neighbours. Out: changing the tag model. | S |
 | RM-60 | `documents.parent_document_id` (Q1-D D17) | A feature needs parent/child documents | A ticket that needs it (RM-45 deliberately does not) | In: a migration at the next free number at merge (§2.8), a nullable self-reference with `ON DELETE SET NULL` and an index. Out: any UI. | S |
 
 **Fields shared by RM-56 to RM-60.** **Security / privacy:** RM-56 is read-only; the others are
 local. **Ceiling:** none beyond the growth each row names, recorded when built. **Acceptance
 criteria and test plan:** written in the ticket's plan when its trigger fires, following §2.1, and
-numbered there. **Eval:** none. **Depends on:** RM-58 on RM-22a, RM-59 on RM-21, the rest on
-nothing. **Risks:** building them early adds surface nobody uses. **Decisions:** wait for the
+numbered there. **Eval:** none. **Depends on:** RM-58 on RM-22a and RM-06, RM-59 on RM-21, RM-56
+on RM-06, the rest on nothing. **Risks:** building them early adds surface nobody uses. **Decisions:** wait for the
 trigger.
 
 #### RM-61 — A background enrichment daemon (closed: not needed)
@@ -3382,12 +3476,12 @@ Two separate rules govern ordering:
 | `templates/bin/_brain-brief-fg.sh` | RM-19 |
 | `source_kinds.py`, and the per-kind tables in `results.js`, `discovery.js`, `tree.js` | RM-30, RM-31, RM-33, RM-34, RM-35, RM-36, RM-38, RM-41, RM-43, RM-44 |
 | `ingest/dispatch.py` registrations | RM-07, then RM-33, RM-38 |
-| `graph_rag/extract_policy.py` | RM-30 (creates it), RM-33, RM-41, RM-43, RM-44 |
+| `graph_rag/extract_policy.py`, `graph_rag/reconcile_plan.py`, `graph_rag/reconcile.py` | RM-27 (`reconcile_plan.py`), RM-30 (creates the policy and wires it), then RM-33, RM-41, RM-43, RM-44 (add types; bump the policy version) |
 | `ui/static/index.html` | RM-03, RM-11, RM-18b |
 | `ci.yml` (browser roster, lint job) and `tests/test_ci_workflow.py` | RM-03, RM-04, RM-11, RM-13, RM-18b, RM-23, RM-40, RM-50, RM-49 (if reopened) |
 | `ui/routes_ingest.py`, `ui/static/js/ingest.js` | RM-10, RM-11, RM-13, RM-40 |
 | `skills/ingest-brain/SKILL.md` | RM-31, RM-34 |
-| `doctor_runtime.py` (budget, §2.2) | RM-14b, RM-16, RM-31, RM-32, RM-33, RM-36, RM-38, RM-43, RM-52 |
+| `doctor_runtime.py` (budget, §2.2) | RM-14b, RM-16, RM-31, RM-32, RM-33, RM-36, RM-38, RM-43, RM-47, RM-52 |
 | `pyproject.toml` | RM-32, RM-46, RM-50, RM-53 |
 | `bin/launchd.py`, `bin/brain-install-launchd`, `bin/brain-uninstall-launchd` | RM-14b, RM-33 |
 | `docs/configuration.md` | every ticket with a knob or an MCP tool: RM-08, RM-12, RM-14a, RM-15, RM-16, RM-19, RM-20, RM-21, RM-22b, RM-32, RM-33, RM-38, RM-46, RM-55 |
@@ -3435,7 +3529,10 @@ default and needs no answer.
 Two choices are **not** questions, because the owner already decided them on 2026-05-11 and this
 document follows them: browser history is built, allowlist-only (RM-41), and the trackers are Notion
 and Jira (RM-34, RM-35). Brief delivery (RM-16) and the MCP HTTP transport (RM-46) send content off
-the machine only when the owner turns them on; both default off.
+the machine only when the owner turns them on; both default off. In particular, the brief-delivery
+channel, which the backlog (rank 10) calls a product decision, is decided by the owner setting
+`BRAIN_BRIEF_DELIVERY` (`none`, `email` or `slack`); building the opt-in needs no answer first,
+which is why RM-16 is not a fifth question.
 
 ---
 
@@ -3533,9 +3630,9 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-53 | `brain examples` | XS | 9 | RM-06 | TODO |
 | RM-54 | Opt-in `--rewrite` | S | 9 | RM-09 | TODO |
 | RM-55 | Summarize a tag | S | 9 | RM-21, RM-02 | TODO |
-| RM-56 | MCP twin of `brain eval` (trigger-gated) | S | 9 | — | TODO |
+| RM-56 | MCP twin of `brain eval` (trigger-gated) | S | 9 | RM-06 | TODO |
 | RM-57 | `--tier` filter (trigger-gated) | XS | 9 | — | TODO |
-| RM-58 | Prune `interactions` (trigger-gated) | S | 9 | RM-22a | TODO |
+| RM-58 | Prune `interactions` (trigger-gated) | S | 9 | RM-22a, RM-06 | TODO |
 | RM-59 | Auto-tag vocabulary cap (trigger-gated) | S | 9 | RM-21 | TODO |
 | RM-60 | `documents.parent_document_id` (trigger-gated) | S | 9 | — | TODO |
 | RM-61 | Background enrichment daemon (closure note, no code) | XS | 9 | — | TODO |
