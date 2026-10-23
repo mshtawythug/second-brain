@@ -196,7 +196,7 @@ while (( $# )); do
       shift ;;
     --tests-only)
       RUN_LINT=0
-      mark_not_the_gate "--tests-only: only ci.yml's 'test' job ran; ruff/mypy did not."
+      mark_not_the_gate "--tests-only: only ci.yml's 'test' job ran; ruff/mypy/the ceiling-table check did not."
       shift ;;
     --skip-compose) USE_COMPOSE=0; shift ;;
     --teardown)     TEARDOWN=1; shift ;;

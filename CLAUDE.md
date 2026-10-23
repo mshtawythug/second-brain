@@ -110,8 +110,8 @@ The rule as it actually applies here:
   that introduced this section — the ambiguity was ours and had not yet shipped.
   Caught when `cli.py`'s first growth of that branch satisfied (1) and not (2).)*
 
-**Files over the ceiling** (`find src -name '*.py' | xargs wc -l | sort -rn` —
-re-derive, never inherit.)
+**Files over the ceiling** (`find src/brain -name '*.py' | xargs wc -l | sort -rn`
+— re-derive, never inherit.)
 
 **Re-derived on the merged tree, 2026-09-02, at the merge of
 `second-brain/master` (`f495f66`, PR #8) into `feat/wiki-to-ui-consolidation`
@@ -331,8 +331,8 @@ rule — *how much a file grew* is a number, *what grew in it* is a review.
 
 **The row set is gated in CI; the rest of the table is not.** Since RM-04,
 `scripts/check_ceiling_table.py` fails the `lint` job when a file is over 800
-with no row, or a row's file is gone or back under (details in "The residue"
-below). What a row *says* (its trail, its recorded reasons) is still a review
+with no row, or a row's file is gone or back under (details in the "Closed by a
+build change" paragraph below). What a row *says* (its trail, its recorded reasons) is still a review
 checkpoint. If you add a file to this table, add the row in the same edit.
 
 ### The F6 draft/sensitivity residue audit — a review checkpoint, re-derived
@@ -405,8 +405,8 @@ a size the next commit falsifies. It does not touch the other, which is larger.
 row.** A stale digit at least has a cell you can check; a missing row has
 nothing to check, so it cannot be caught by reading this table more carefully —
 the *row set itself* is a live claim, and the only thing re-deriving it was a
-human remembering to. CI re-derives it now (the closing paragraph of this
-section says how, and what it still misses).
+human remembering to. CI re-derives it now (the "Closed by a build change"
+paragraph below says how, and what it still misses).
 
 **It is not hypothetical, and it is no longer even a prediction: it happened in
 the same change set that wrote this paragraph.** This text used to say
@@ -438,11 +438,12 @@ other does not). It walks `src/brain/**/*.py`, counts lines as `wc -l` does,
 and parses the row set from the one table whose header row is exactly
 `| File | Lines | Why it is not being split |`. It exits **1**, naming the file
 and the remedy, when a file is over 800 with no row, when a row's file is gone
-or at or under 800, or when a row is malformed (its first cell is not one
-backticked path, its Lines cell's `wc -l src/brain/<path>` names another file,
-or it repeats a row). It exits **2** when that header line is missing or
-appears twice, so rewording the header turns CI red instead of switching the check off; change `HEADER` in
-the script in the same edit. Run it locally with
+or at or under 800, or when a row is malformed: its first cell is not one
+backticked path; it has no Lines cell; its Lines cell has no
+`wc -l src/brain/<path>`, or that command names another file; or it repeats a
+row. It exits **2** when that header line is missing or appears more than once,
+so rewording the header turns CI red instead of switching the check off; change
+`HEADER` in the script in the same edit. Run it locally with
 `python scripts/check_ceiling_table.py`.
 
 **What it still cannot catch:** the *contents* of a row (a trail one hop short,

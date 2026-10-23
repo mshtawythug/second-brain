@@ -39,8 +39,9 @@ reinstall follows. No skill documents the CI gate, so `skills/` is unchanged.
 - First cell: one backticked path relative to `src/brain/`. Second cell (Lines): must contain
   `` `wc -l src/brain/<path>` `` naming the same path. Only these two cells are read; a `|` inside the
   Why cell cannot shift them.
-- A row whose first cell is not a single backticked path, whose Lines cell names no `wc -l` command
-  or names another path, or that repeats an earlier row's path, is a **mismatched** row.
+- A row whose first cell is not a single backticked path, that has no Lines cell (fewer than two
+  cell separators), whose Lines cell names no `wc -l` command or names another path, or that
+  repeats an earlier row's path, is a **mismatched** row.
 
 ### Comparing
 
@@ -64,7 +65,7 @@ reinstall follows. No skill documents the CI gate, so `skills/` is unchanged.
 | 5. Lines cell names another path → 1 | `test_lines_cell_naming_another_path_fails` |
 | 6. No header → 2 | `test_claude_md_without_header_exits_2` (+ reworded header, duplicated header line, missing `CLAUDE.md`, missing `src/brain/`) |
 | 7. Deleting a real row turns it red | `test_deleting_any_real_row_is_caught` (every row, parametrized) + a `git archive` mutation run reported in the PR |
-| 8. Step removed from `bin/brain-ci` → drift test fails | `test_lint_step_drift_is_detected` (both directions) |
+| 8. Step removed from `bin/brain-ci` → drift test fails | `test_lint_step_removed_from_script_is_drift`, `test_lint_step_removed_from_workflow_is_drift` (the reverse direction), and `test_brain_ci_matches_the_ci_workflow` (which a real removal turns red) |
 
 Parser coverage of the real table: `test_parser_reads_every_real_row` counts the real rows by an
 independent line scan and checks each Lines cell names its own path.

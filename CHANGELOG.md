@@ -28,8 +28,10 @@ git tag scheme:
 with the modules under `src/brain/` that are over 800 lines (roadmap ticket
 RM-04, backlog BL-1). It exits 1, naming the file and what to do, when a file
 crosses 800 lines without a row, when a row's file is deleted or back under the
-ceiling, or when a row names the wrong file; it exits 2 when the table's header
-row is not found. It runs as a step in `ci.yml`'s `lint` job and in
+ceiling, or when a row is malformed (no Lines cell, a Lines cell without
+`wc -l src/brain/<path>` or naming the wrong file, a duplicate row); it exits 2
+when the table's header row is missing or appears more than once, or when
+`CLAUDE.md` or `src/brain/` is missing. It runs as a step in `ci.yml`'s `lint` job and in
 `bin/brain-ci`'s lint stage, and `tests/test_bin_brain_ci.py` now fails when a
 lint step exists in one of the two and not the other. Development tooling only:
 no `brain` command changes.
