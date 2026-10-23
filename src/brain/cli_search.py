@@ -12,6 +12,10 @@ module-level import back would be a cycle. Reading the attribute at call time
 additionally keeps ``monkeypatch.setattr("brain.cli.<name>", ...)`` — the patch
 point the existing test suite uses — effective for these commands. Same pattern
 as :mod:`brain._capture_command`.
+
+Since 2026-10-23 both commands fall back to text-only (FTS) matching when the
+query embed fails, with a stderr notice and exit 0, via
+:mod:`brain.search_fallback` (plan ``docs/plans/2026-10-23-search-fts-fallback.md``).
 """
 from __future__ import annotations
 
@@ -42,6 +46,7 @@ from .gaps import record_search_query
 from .ingest import Embedder
 from .queries import PersonMatch
 from .search import SearchDiagnostics, build_tsquery
+from .search_fallback import SearchFallback, search_with_fts_fallback
 from .search_predicate import build_predicate
 from .sensitivity import VALID_SENSITIVITY_LEVELS
 from .token_report import count_results_tokens
@@ -217,6 +222,18 @@ def _warn_if_fts_only_degraded(embedder: Embedder) -> None:
         )
 
 
+def _warn_if_fell_back(fallback: SearchFallback | None) -> None:
+    """Print the one-line text-only fallback notice on stderr, if there was one.
+
+    Stderr, like :func:`_warn_if_fts_only_degraded`, so ``--json`` stdout stays
+    parseable and the exit code stays 0: the results are real, only weaker.
+    The bare ``--json`` list keeps its shape, so this notice is its only
+    signal; ``--json --meta`` also carries the ``fallback*`` keys.
+    """
+    if fallback is not None:
+        typer.echo(fallback.note, err=True)
+
+
 def search(
     query: str = typer.Argument(...),
     limit: int = typer.Option(5, "--limit", "-n", min=1),
@@ -336,6 +353,10 @@ def search(
     ``N matched`` counts documents that LEXICALLY match the query; the vector
     leg may additionally surface near-neighbours that this number does not
     include.
+
+    If the embedder is unreachable or misconfigured, the search falls back to
+    text-only (FTS) matches and says so on **stderr**; ``--json --meta`` also
+    carries ``"fallback": "fts_only"`` and a class-only ``fallback_reason``.
     """
     _validate_source_choice(source)
     effective_tag = _reconcile_tag_flags(tag, has_tag)
@@ -363,7 +384,11 @@ def search(
         # search already does (no extra query) — the lexical-miss signal that
         # `brain gaps` keys off (the vector leg always returns filler).
         diagnostics = SearchDiagnostics()
-        results = hybrid_search(
+        # Text-only fallback when the query embed fails (plan
+        # docs/plans/2026-10-23-search-fts-fallback.md); the notice is printed
+        # straight away so it lands above the results.
+        outcome = search_with_fts_fallback(
+            hybrid_search,
             conn,
             embedder=embedder,
             query=query,
@@ -392,6 +417,8 @@ def search(
             without_tag=without_tag,
             sensitivity=sensitivity,
         )
+        results = outcome.results
+        _warn_if_fell_back(outcome.fallback)
         if facets:
             # ``hybrid_search`` does not return its predicate, so rebuild it
             # here from the SAME kwargs rather than widening that function's
@@ -504,6 +531,7 @@ def search(
                     facet_data,
                     brief=brief,
                     cost=embedder.count_tokens,
+                    fallback=outcome.fallback,
                 )
             )
         else:
@@ -616,7 +644,11 @@ def explain(
     _warn_if_fts_only_degraded(embedder)
     with connect(cfg.database_url) as conn:
         person_match = _resolve_search_person(conn, person)
-        results = hybrid_search(
+        # Text-only fallback when the query embed fails (plan
+        # docs/plans/2026-10-23-search-fts-fallback.md); the notice is printed
+        # straight away so it lands above the results.
+        outcome = search_with_fts_fallback(
+            hybrid_search,
             conn,
             embedder=embedder,
             query=query,
@@ -643,6 +675,8 @@ def explain(
             draft=draft,
             without_tag=without_tag,
         )
+        results = outcome.results
+        _warn_if_fell_back(outcome.fallback)
 
     if json_output:
         # The seven public keys come from the one shared projection; ``explain``

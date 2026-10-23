@@ -54,8 +54,9 @@ Both are bounded; they differ in *where the reading happens*.
   would have already thrown that away.
 
 Rule of thumb: if you would have followed `ask` with "now show me the source",
-you wanted `recall`. If Ollama is down, `ask` exits non-zero — `recall` does
-not depend on it and is the fallback, not an unbounded `brain show` loop.
+you wanted `recall`. If Ollama is down, `ask` exits non-zero, and so does
+`recall` when it embeds via Ollama. `brain search` falls back to text-only and
+is the fallback, not a `brain show` loop.
 `brain recall` shares every filter with `brain search`; the full cost-ordered
 table lives in `consult-brain`, which is the one place it is maintained.
 
@@ -131,7 +132,7 @@ TTS backend still leaves the script behind.
 
 | Symptom | Cause | What to do |
 |---|---|---|
-| `ask` exits non-zero citing Ollama | Ollama is down | Say so, offer `brain search` via `consult-brain`. **Do not retry in a loop.** |
+| `ask` exits non-zero citing Ollama | Ollama is down | Say so, offer `brain search` via `consult-brain` (it falls back to text-only matching when the embedder is down, and says so). **Do not retry in a loop.** |
 | `ask --mode auto/fuse/local` errors | No AGE image / no built graph | Fall back to `--mode hybrid`. |
 | `audio --topic` finds no communities | `graphrag communities build` never ran | Route to `brain-graph` / `brain-maintenance`. |
 | `audio --person` finds no such person | Name is not in the graph | Report it plainly; do not guess spellings. |

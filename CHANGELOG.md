@@ -22,6 +22,24 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Changed — search falls back to text-only when the embedder is down
+
+`brain search`, `brain explain` and MCP `brain_search` no longer fail when the
+query embedding cannot be computed (Ollama down, a timeout, a Voyage error, a
+model not pulled, a bad API key). They answer from full-text matching alone and
+say so: a one-line stderr notice on the CLI (exit code 0), and four new,
+always-present keys on `brain search --json --meta` and `brain_search` —
+`fallback` (`"fts_only"` or `null`), `fallback_reason` (the failure's class,
+never its message), `fallback_transient` and `fallback_note`. A permanent
+failure falls back too; its notice says a retry will not fix it and points at
+`brain doctor`, except for a query longer than the embedder's context window
+(`OllamaEmbedContextOverflow`), whose notice says to shorten the query.
+Non-embedding errors (a database failure) still fail as before. The bare
+`brain search --json` list keeps its shape. `brain eval` does **not** fall
+back, so its degraded-run semantics are unchanged. `brain ask`,
+`brain recall` and `brain ui` are unchanged too (rulings and follow-ups in
+`docs/plans/2026-10-23-search-fts-fallback.md`).
+
 ### Removed — the Quartz wiki (wiki-to-ui phase 9, R3)
 
 `brain ui` is the reading surface; the rendered Quartz wiki, dormant since the
