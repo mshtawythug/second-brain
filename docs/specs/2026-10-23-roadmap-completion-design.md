@@ -1211,9 +1211,11 @@ as the May roadmap assumed, is not available. The candidates:
   - **Settings** (`settings/rerank.py`): `BRAIN_RERANKER` = `none` (default) | `llamacpp` |
     `voyage`; `BRAIN_RERANK_DEPTH` = 20 (2 to 50; `CANDIDATE_LIMIT` is 50); `BRAIN_RERANK_TIMEOUT_S`
     = 5.0; `BRAIN_RERANK_URL` = `http://127.0.0.1:8081` (loopback only: a non-loopback host is a
-    `ConfigError`, because the passages are document text); `BRAIN_RERANK_MODEL` (default
-    `bge-reranker-v2-m3` for `llamacpp`, and for `voyage` the current recommended model named in the
-    guide); `BRAIN_RERANK_MAX_CHARS` = 1,500. The Voyage key is read from `VOYAGE_API_KEY`, the
+    `ConfigError`, because the passages are document text); `BRAIN_RERANK_MODEL` (defaults
+    are named constants in `settings/rerank.py`: `LLAMACPP_RERANK_DEFAULT_MODEL =
+    "bge-reranker-v2-m3"` and `VOYAGE_RERANK_DEFAULT_MODEL = "rerank-3"`, the model Voyage's reranker
+    docs recommend as of 2026-10-23; the constant is re-checked against those docs at build time and
+    its value and check date are recorded in the guide); `BRAIN_RERANK_MAX_CHARS` = 1,500. The Voyage key is read from `VOYAGE_API_KEY`, the
     variable `Config` already uses.
   - **Surfaces.** `build_stages(env)` adds `RerankStage` when `BRAIN_RERANKER != none`, so every
     surface on the pipeline gets it. `brain search` and `brain explain` gain `--rerank/--no-rerank`
@@ -2299,20 +2301,31 @@ design.
     concept aspect is gated by `ReconcileConfig.concepts_enabled` and runs inside
     `graph_rag.reconcile.reconcile_document`, and whether a document needs it is decided by
     `graph_rag.reconcile_plan`, which compares the document's `graph_index_state` watermark for
-    `aspect = 'concepts'` (`CONCEPTS_ASPECT`) with `concept_inputs_hash` (`reconcile_plan.py`, the
-    `concept_stale` test). `graph_rag/build.py`'s backfill re-plans every document it is given, and
-    the plan alone decides whether extraction runs, so a skipped document with no watermark would be
-    re-planned as stale on every backfill and would never count as done. So:
-    1. `extract_policy.py` holds `CONCEPT_SKIP_CONTENT_TYPES: frozenset[str]` and
-       `CONCEPT_SKIP_POLICY_VERSION` (bumped whenever the set changes).
-    2. `reconcile_plan` reads the document's `content_type` (it already selects it) and, for a
-       skipped type, computes the concept watermark's inputs as a fixed marker,
-       `skip:<content_type>:<policy version>`, so the plan is stale only until that marker is written.
-    3. `reconcile_document`, for a skipped type, calls no extractor, writes no concept mentions, and
-       writes the concept watermark with that marker and `extractor_ver = "skipped-by-policy"`
-       (through the existing `upsert_index_state`). The people aspect runs unchanged.
-    4. A concept-coverage count (concept watermarks over eligible documents) therefore treats a
-       skipped document as done, because it has a current watermark.
+    `aspect = 'concepts'` (`CONCEPTS_ASPECT`) with an expected watermark. At `02c2abc`,
+    `plan_reconcile` compares the **whole tuple** `(content_hash, c_inputs_hash, extractor_ver, sver)`,
+    with `extractor_ver = extractor.version`, against `index_state(…, CONCEPTS_ASPECT)`, and when the
+    aspect is stale it also fetches the body (`content=fetch_doc_content_at(…) if concept_stale`).
+    `reconcile_document` then writes the watermark from the plan's `concept_inputs_hash` and
+    `concept_extractor_ver`. `graph_rag/build.py`'s backfill re-plans every document it is given, so
+    a skipped document whose stored row did not equal the expected tuple would be re-planned as stale
+    forever. So the write and the comparison must come from one place:
+    1. `extract_policy.py` holds `CONCEPT_SKIP_CONTENT_TYPES: frozenset[str]`,
+       `CONCEPT_SKIP_POLICY_VERSION` (bumped whenever the set changes), and **one helper**,
+       `skip_watermark(content_type: str) -> tuple[str, str] | None`, which returns
+       `("skip:<content_type>:<policy version>", "skipped-by-policy")` (the inputs hash and the
+       extractor version) for a skipped type, and `None` otherwise.
+    2. `plan_reconcile`, when the concept aspect is active and `skip_watermark(content_type)` is not
+       `None`, uses **that pair** in place of `(c_inputs_hash, extractor.version)`: the expected
+       watermark is exactly `(content_hash, "skip:<type>:<ver>", "skipped-by-policy", sver)`, and the
+       plan carries the same pair in `concept_inputs_hash` and `concept_extractor_ver`. When such a
+       document is stale, the plan **does not fetch the body** (`content` stays `""`), because nothing
+       will be extracted from it; `ReconcilePlan` gains `concept_skipped: bool` to say so.
+    3. `reconcile_document`, for a plan with `concept_skipped`, calls no extractor and writes no
+       concept mentions, and writes the concept watermark from the plan's pair through the existing
+       `upsert_index_state`, so the stored row is the same tuple step 2 expects. The people aspect
+       runs unchanged.
+    4. On the next backfill both aspects match, so `reconcile_document` returns `skipped=True` and
+       `graph_rag.build`'s `BuildReport` counts the document under `skipped`, not `reconciled`.
 - **Security / privacy:** protocol points 4–6.
 - **Ceiling:** `graph_rag/reconcile.py` (757) gains at most 15 lines, within the 43 lines of headroom
   it has (§2.2 budget); `reconcile_plan.py` is well under 800.
@@ -2324,9 +2337,11 @@ design.
   3. `brain search --source calendar --person "<synthetic>"` finds the event.
   4. A window over 92 days, or ending more than 14 days ahead, is refused.
   5. No attendee address appears in a document body.
-  6. With concepts enabled, a `calendar_event` document is reconciled without an extractor call,
-     its concept watermark carries the skip marker, a second backfill does not re-plan it as stale,
-     and the concept-coverage count includes it as done; its people aspect is still indexed.
+  6. With concepts enabled, the first `brain graphrag build --backfill --concepts` reconciles a
+     `calendar_event` document (its people aspect is indexed, its stored concepts row equals the
+     tuple `skip_watermark` produces, and its body is never fetched for concepts), and a second
+     `brain graphrag build --backfill --concepts` reports it under `BuildReport.skipped`, not
+     `reconciled`. A fake extractor that fails the test if called is never called.
 - **Test plan:** as protocol point 7, plus a test that a metadata-only re-run does not call the
   embedder, and AGE-instance tests (5434) for criterion 6 with a fake extractor that fails the test
   if it is called.
@@ -2961,8 +2976,9 @@ reasons the backlog gives.
   4. The default sensitivity is `confidential`.
   5. A re-run updates in place.
   6. A run ingests at most `--max-files` files and requests no summary by default; with concepts
-     enabled, reconciling an ingested `code` document makes no extractor call, writes the skip
-     watermark, and a second backfill does not re-plan it (behaviour, on the AGE test instance).
+     enabled, a second `brain graphrag build --backfill --concepts` reports an ingested `code`
+     document under `BuildReport.skipped`, not `reconciled`, and the fake extractor is never called
+     (behaviour, on the AGE test instance).
 - **Test plan:** protocol point 7, plus the cost assertions of criterion 6.
 - **Eval:** after ingesting, the owner adds 3–5 code queries to the local golden corpus and
   re-records `ci.json` (triggers: a document-set change and a golden-corpus edit), so code retrieval
@@ -3467,7 +3483,7 @@ Two separate rules govern ordering:
 | `vault/watch.py`, `vault/move_identity.py` | RM-25, RM-26 |
 | `setup.py` | RM-14c (if adopted) |
 | `backup/restore.py` | RM-20, RM-47 |
-| `cli_registry.py` | RM-06, then every command added through the seam: RM-15, RM-19, RM-20, RM-21, RM-30, RM-31, RM-33, RM-35, RM-36, RM-41, RM-43, RM-44, RM-46, RM-53 |
+| `cli_registry.py` | RM-06, then every command added through the seam: RM-15, RM-19, RM-20, RM-21, RM-30, RM-31, RM-33, RM-35, RM-36, RM-41, RM-43, RM-44, RM-46, RM-53, RM-58 (if triggered) |
 | `mcp_tools/__init__.py` | RM-06, then RM-12, RM-15, RM-19, RM-21, RM-55, RM-56 |
 | `search_pipeline.py` | RM-09, then RM-14a, RM-20, RM-22b, RM-54 |
 | `cli_search.py` (budget, §2.2) | RM-03 (no change), RM-09, RM-12, RM-14a, RM-24, RM-52, RM-54; each checks the remaining budget at rebase |
