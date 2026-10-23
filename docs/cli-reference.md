@@ -273,6 +273,13 @@ If the budget cannot hold even the top passage, you get **one truncated
 passage** rather than nothing: an agent asked for context, and silence is a
 worse answer than a shortened excerpt.
 
+If the embedding model is unavailable, `recall` falls back to text-only (FTS)
+matching, as `brain search` does. The header ends `, text-only`, a one-line
+notice goes to stderr (exit code 0), and `--json` carries `fallback`
+(`"fts_only"` or `null`), `fallback_reason` (the failure's class, never its
+message), `fallback_transient` and `fallback_note`. A permanent failure's notice
+points at `brain doctor`.
+
 ## MCP payload ceilings — and why they do not apply to this CLI
 
 Six ceilings bound how much a single response can cost an agent's context

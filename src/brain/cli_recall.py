@@ -101,6 +101,10 @@ def recall(
 
     Unlike ``brain search``, this returns the material itself, so it is what
     you want when the next step is reading rather than choosing.
+
+    If the embedding model is unavailable, recall falls back to text-only
+    matching: the header ends ``, text-only``, a one-line notice goes to
+    stderr, and ``--json`` carries ``"fallback": "fts_only"``.
     """
     cfg = Config.load()
     effective_budget = cfg.recall_budget_tokens if budget is None else budget
@@ -185,6 +189,14 @@ def recall(
             payload_tokens=payload_tokens,
             tenant_id=cfg.graph_tenant_id,
         )
+
+    if result.fallback is not None:
+        # The query embed failed and recall fell back to text-only matching
+        # (RM-01). Stderr, so stdout stays the pasteable block or parseable
+        # JSON, and the exit code stays 0: the passages are real, only ranked
+        # lexically. The header's ``, text-only`` carries the same fact inside
+        # the block itself.
+        typer.secho(result.fallback.note, fg=typer.colors.YELLOW, err=True)
 
     if rendered is None:
         emit_json(result.to_dict())

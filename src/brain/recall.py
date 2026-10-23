@@ -28,11 +28,18 @@ to the lexical leg when the backend produces no vectors. That is what makes
 recall work under ``BRAIN_EMBEDDER=none``, and
 ``tests/test_recall_null_embedder.py`` enforces it with a stub whose
 ``embed()`` raises.
+
+**When the embedder is down, recall falls back to text-only matching** (RM-01,
+``docs/specs/2026-10-23-roadmap-completion-design.md``). The search goes through
+:func:`brain.search_fallback.search_with_fts_fallback`, the policy ``brain
+search`` uses, and the outcome rides on :attr:`RecallResult.fallback`. The
+context block's header then ends ``, text-only``: the block is the artifact an
+agent pastes, so the marker has to be inside it, not only on stderr.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -41,10 +48,14 @@ import psycopg
 from .config import Config
 from .ingest import Embedder
 from .search import SearchDiagnostics, SearchResult, hybrid_search
-from .token_budget import pack_greedy, truncate_to_token_budget
+from .search_fallback import SearchFallback, fallback_json, search_with_fts_fallback
+from .token_budget import TokenCost, pack_greedy, truncate_to_token_budget
 
-#: Tokens held back from the caller's budget for the ``# recall:`` header, so
-#: the WHOLE emitted block honours the budget rather than just the passages.
+#: Tokens first held back from the caller's budget for the ``# recall:``
+#: header, so the WHOLE emitted block honours the budget rather than just the
+#: passages. It is a starting reserve, not a bound: the header echoes the query,
+#: which nothing caps, so :func:`recall` measures the real block and re-packs
+#: when it is over (see :func:`_pack_within_budget`).
 _ENVELOPE_TOKENS = 48
 
 #: Floor on how many candidates to ask search for, so a tiny budget still gets
@@ -86,6 +97,10 @@ class RecallResult:
     truncated: bool
     fts_count: int | None
     passages: list[RecallPassage]
+    #: Set when the query embed failed and the passages came from text-only
+    #: (FTS) matching; ``None`` on a normal run. Last, and defaulted, so every
+    #: existing constructor call stays valid.
+    fallback: SearchFallback | None = None
 
     def context_block(self) -> str:
         """The pasteable block: a header line, then each cited passage.
@@ -103,6 +118,10 @@ class RecallResult:
             header += f", {self.dropped} dropped"
         if self.truncated:
             header += ", truncated"
+        if self.fallback is not None:
+            # Inside the pasted artifact, not only on stderr: an agent reading
+            # the block must know the ranking was lexical only.
+            header += ", text-only"
         header += ")"
         return "\n\n".join([header, *(_render_passage(p) for p in self.passages)])
 
@@ -112,6 +131,10 @@ class RecallResult:
         The ``"unknown"`` placeholder is a *rendering* choice for the human
         block; a machine consumer gets a real null so it can tell "no date"
         from a document literally titled that.
+
+        The four ``fallback*`` keys are always present (``null`` on a normal
+        run), projected by the same :func:`~brain.search_fallback.fallback_json`
+        ``brain search --json --meta`` and MCP ``brain_search`` use.
         """
         return {
             "query": self.query,
@@ -137,6 +160,7 @@ class RecallResult:
                 }
                 for p in self.passages
             ],
+            **fallback_json(self.fallback),
         }
 
 
@@ -243,14 +267,17 @@ def recall(
     surface maps those to its own framework's error type — the same division
     of labour ``hybrid_search`` documents.
 
-    Raises nothing of its own; propagates :class:`psycopg.Error` and
-    ``EmbedError`` for the caller to map. Telemetry is best-effort by
+    Raises nothing of its own. Falls back on ``EmbedError``: the search is
+    re-run text-only and :attr:`RecallResult.fallback` says why; propagates
+    :class:`psycopg.Error` (and anything else) for the caller to map. Telemetry is best-effort by
     ``record_search_query``'s contract — a logging failure must never cost the
     agent its context, which is why this function does not write it (the
     surfaces do, so they can attribute the right ``source`` and ``agent_id``).
 
     The budget is honoured end-to-end: :data:`_ENVELOPE_TOKENS` is reserved for
-    the header before packing, so ``context_block()`` as a whole fits.
+    the header before packing, and a block still over budget is re-packed
+    tighter (:func:`_pack_within_budget`), so ``context_block()`` as a whole
+    fits.
 
     ``sensitivity`` is forwarded straight to ``hybrid_search``. ``None`` (the
     default) means both tiers, which is right for the local CLI — it sits
@@ -260,7 +287,8 @@ def recall(
     that its withheld body matched the query.
     """
     diagnostics = SearchDiagnostics()
-    results = hybrid_search(
+    outcome = search_with_fts_fallback(
+        hybrid_search,
         conn,
         embedder=embedder,
         query=query,
@@ -285,6 +313,7 @@ def recall(
         without_tag=without_tag,
         sensitivity=sensitivity,
     )
+    results = outcome.results
 
     dates = _fetch_doc_dates(conn, [r.document_id for r in results])
     # Provisional refs (1..N over ALL candidates) purely so the rendered text
@@ -293,11 +322,71 @@ def recall(
         _render_candidate(i + 1, r, dates.get(r.document_id))
         for i, r in enumerate(results)
     ]
-
-    packable = max(0, budget_tokens - _ENVELOPE_TOKENS)
-    packed = pack_greedy(
-        rendered, cost=embedder.count_tokens, budget=packable
+    shell = RecallResult(
+        query=query,
+        budget_tokens=budget_tokens,
+        used_tokens=0,
+        candidates_considered=len(results),
+        dropped=len(results),
+        truncated=False,
+        fts_count=diagnostics.fts_count,
+        passages=[],
+        fallback=outcome.fallback,
     )
+    return _pack_within_budget(
+        shell, results, rendered, dates, cost=embedder.count_tokens
+    )
+
+
+def _pack_within_budget(
+    shell: RecallResult,
+    results: list[SearchResult],
+    rendered: list[str],
+    dates: dict[str, datetime | None],
+    *,
+    cost: TokenCost,
+) -> RecallResult:
+    """Pack, then measure the WHOLE block and re-pack tighter if it is over.
+
+    The header echoes the query, and no surface caps a query's length, so the
+    fixed :data:`_ENVELOPE_TOKENS` reserve cannot cover every header: on a long
+    query the block overran the budget (RM-01's budget test reproduces it on a
+    run with no fallback). So the reserve is raised by the measured overshoot
+    and the packing re-run until the block fits. A block that fits on the first
+    pass, which is every recall that already honoured its budget, is packed
+    exactly as before.
+
+    The reserve rises by at least one token per pass, so the loop ends; at a
+    reserve of the whole budget nothing packs. One case cannot fit: a header
+    that alone costs more than the budget. It is returned with no passages.
+    """
+    reserve = _ENVELOPE_TOKENS
+    while True:
+        packed = _pack(
+            shell,
+            results,
+            rendered,
+            dates,
+            cost=cost,
+            packable=max(0, shell.budget_tokens - reserve),
+        )
+        overshoot = cost(packed.context_block()) - shell.budget_tokens
+        if overshoot <= 0 or reserve >= shell.budget_tokens:
+            return packed
+        reserve += overshoot
+
+
+def _pack(
+    shell: RecallResult,
+    results: list[SearchResult],
+    rendered: list[str],
+    dates: dict[str, datetime | None],
+    *,
+    cost: TokenCost,
+    packable: int,
+) -> RecallResult:
+    """Pack the rendered candidates into ``packable`` tokens and fill ``shell``."""
+    packed = pack_greedy(rendered, cost=cost, budget=packable)
 
     truncated = False
     kept_indices = list(packed.indices)
@@ -309,11 +398,11 @@ def recall(
         # nothing would be a worse answer than returning the top passage cut
         # to fit — the agent asked for context, not for silence.
         truncated_text = truncate_to_token_budget(
-            rendered[0], cost=embedder.count_tokens, budget=packable
+            rendered[0], cost=cost, budget=packable
         )
         if truncated_text:
             kept_indices = [0]
-            used_tokens = embedder.count_tokens(truncated_text)
+            used_tokens = cost(truncated_text)
             truncated = True
 
     passages: list[RecallPassage] = []
@@ -337,18 +426,15 @@ def recall(
                 tags=result.tags,
                 score=result.score,
                 text=text,
-                tokens=embedder.count_tokens(text),
+                tokens=cost(text),
                 truncated=truncated,
             )
         )
 
-    return RecallResult(
-        query=query,
-        budget_tokens=budget_tokens,
+    return replace(
+        shell,
         used_tokens=used_tokens,
-        candidates_considered=len(results),
         dropped=len(results) - len(passages),
         truncated=truncated,
-        fts_count=diagnostics.fts_count,
         passages=passages,
     )
