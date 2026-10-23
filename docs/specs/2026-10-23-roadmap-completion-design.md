@@ -2320,10 +2320,22 @@ design.
        plan carries the same pair in `concept_inputs_hash` and `concept_extractor_ver`. When such a
        document is stale, the plan **does not fetch the body** (`content` stays `""`), because nothing
        will be extracted from it; `ReconcilePlan` gains `concept_skipped: bool` to say so.
-    3. `reconcile_document`, for a plan with `concept_skipped`, calls no extractor and writes no
-       concept mentions, and writes the concept watermark from the plan's pair through the existing
-       `upsert_index_state`, so the stored row is the same tuple step 2 expects. The people aspect
-       runs unchanged.
+    3. `reconcile_document` runs its **normal concept path with an empty extraction**. At
+       `02c2abc` it extracts with `extracted = extractor.extract(plan.content)` under `if
+       plan.concept_stale:` (step 2 of the function), then, still under `plan.concept_stale`, calls
+       `rewrite_doc_relational(…, entity_types=CONCEPT_ENTITY_TYPES)`, which also **deletes the
+       document's previous concept mentions and contributions**, and, unless the tenant refresh is
+       deferred, `_gc_orphan_concepts`. For a plan with `concept_skipped`, only the extraction call
+       changes: the guard becomes `if plan.concept_stale and not plan.concept_skipped`, so
+       `extracted` stays `[]` and no extractor is called. Everything after it runs as for any stale
+       concept aspect: the rewrite with empty rows clears whatever concept mentions the document had,
+       the orphan concept GC runs (per document, or in `build_graph`'s deferred
+       `refresh_aggregates`), the AGE sync re-reads the document's now concept-free mentions so its
+       concept `MENTIONED_IN` edges go, and the watermark is written from the plan's pair through
+       the existing `upsert_index_state`, so the stored row is the tuple step 2 expects. The people
+       aspect runs unchanged. This is what makes `CONCEPT_SKIP_POLICY_VERSION` work: adding a type
+       to the set and bumping the version makes its already-extracted documents stale, and the next
+       backfill strips their concept mentions.
     4. On the next backfill both aspects match, so `reconcile_document` returns `skipped=True` and
        `graph_rag.build`'s `BuildReport` counts the document under `skipped`, not `reconciled`.
 - **Security / privacy:** protocol points 4–6.
@@ -2342,9 +2354,14 @@ design.
      tuple `skip_watermark` produces, and its body is never fetched for concepts), and a second
      `brain graphrag build --backfill --concepts` reports it under `BuildReport.skipped`, not
      `reconciled`. A fake extractor that fails the test if called is never called.
+  7. A document that was concept-extracted earlier, whose `content_type` is then added to
+     `CONCEPT_SKIP_CONTENT_TYPES` with a `CONCEPT_SKIP_POLICY_VERSION` bump, loses all its concept
+     mentions, contributions and concept `MENTIONED_IN` edges on the next `brain graphrag build
+     --backfill --concepts`, while its people mentions remain; concept entities left with no
+     mentions are garbage-collected.
 - **Test plan:** as protocol point 7, plus a test that a metadata-only re-run does not call the
-  embedder, and AGE-instance tests (5434) for criterion 6 with a fake extractor that fails the test
-  if it is called.
+  embedder, and AGE-instance tests (5434) for criteria 6 and 7, with a fake extractor that fails the
+  test if it is called (criterion 7 first extracts with a working fake, then bumps the policy).
 - **Eval:** none.
 - **Depends on:** RM-06, RM-07.
 - **Size:** M.
