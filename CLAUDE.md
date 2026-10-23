@@ -332,8 +332,9 @@ rule — *how much a file grew* is a number, *what grew in it* is a review.
 **The row set is gated in CI; the rest of the table is not.** Since RM-04,
 `scripts/check_ceiling_table.py` fails the `lint` job when a file is over 800
 with no row, or a row's file is gone or back under (details in the "Closed by a
-build change" paragraph below). What a row *says* (its trail, its recorded reasons) is still a review
-checkpoint. If you add a file to this table, add the row in the same edit.
+build change" paragraph below). What a row *says* (its trail, its recorded
+reasons) is still a review checkpoint. If you add a file to this table, add the
+row in the same edit.
 
 ### The F6 draft/sensitivity residue audit — a review checkpoint, re-derived
 

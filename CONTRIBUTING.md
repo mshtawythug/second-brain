@@ -143,8 +143,9 @@ for a real v0.3.0 failure:
 | Exits with **pytest's own status** | A wrapper that ends in `\| tail` reports *tail's* status. That nearly published a broken release, so pytest is never piped and the summary names the exit code's source. |
 
 Exit codes: `0` pass · pytest's own status when pytest failed · `1` when only
-ruff/mypy/the ceiling-table check failed · `64` usage error · `70` environment failure (no `uv`/Docker,
-venv build failed, DB never came up, or a refusal to target production).
+ruff/mypy/the ceiling-table check failed · `64` usage error · `70` environment
+failure (no `uv`/Docker, venv build failed, DB never came up, or a refusal to
+target production).
 
 Any mode that is not the full run — `--reuse-venv`, `--lint-only`,
 `--tests-only`, pass-through arguments — prints a loud **"THIS RUN IS NOT THE
