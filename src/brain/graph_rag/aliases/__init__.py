@@ -183,7 +183,7 @@ def apply_aliases(
         try:
             with conn.transaction():  # SAVEPOINT
                 acquire_graph_write_lock(conn, tenant_id)
-                _lock_alias_documents(conn, tenant_id, [src_id])
+                _lock_alias_documents(conn, tenant_id, src_id)
                 dst_id = _upsert_entity(conn, tenant_id, rule.to_type, rule.to_key)
                 mentions_repointed += _repoint_mentions(
                     conn, tenant_id, src_id, dst_id
@@ -216,24 +216,24 @@ def apply_aliases(
 # ---------------------------------------------------------------------------
 
 
-#: Every document a merge of the given source entities will touch (their
-#: mentions, and contributions with them at either end), locked in id order.
+#: Every document a merge of the source entity will touch (its mentions, and
+#: contributions with it at either end), locked in id order.
 _LOCK_ALIAS_DOCUMENTS = (
     "SELECT d.id FROM documents d WHERE d.id IN ("
     " SELECT m.document_id FROM graph_entity_mentions m"
-    " WHERE m.tenant_id = %(tenant)s AND m.entity_id = ANY(%(ids)s::uuid[])"
+    " WHERE m.tenant_id = %(tenant)s AND m.entity_id = %(id)s"
     " UNION"
     " SELECT c.document_id FROM graph_edge_contributions c"
     " WHERE c.tenant_id = %(tenant)s"
-    " AND (c.src_id = ANY(%(ids)s::uuid[]) OR c.dst_id = ANY(%(ids)s::uuid[]))"
+    " AND (c.src_id = %(id)s OR c.dst_id = %(id)s)"
     ") ORDER BY d.id FOR KEY SHARE OF d"
 )
 
 
 def _lock_alias_documents(
-    conn: psycopg.Connection[Any], tenant_id: str, source_ids: list[str]
+    conn: psycopg.Connection[Any], tenant_id: str, source_id: str
 ) -> None:
-    """Lock ``FOR KEY SHARE``, in id order, every document the merge will touch.
+    """Lock ``FOR KEY SHARE``, in id order, every document a rule's merge touches.
 
     Call it in each rule's transaction, right after the graph write lock and
     before the rule writes. ``_repoint_mentions`` DO-UPDATEs a target row, which
@@ -252,8 +252,7 @@ def _lock_alias_documents(
     hold one document, so the id order is belt-and-braces. See
     ``docs/plans/2026-10-22-graph-entities-deadlock.md``.
     """
-    if source_ids:
-        conn.execute(_LOCK_ALIAS_DOCUMENTS, {"tenant": tenant_id, "ids": source_ids})
+    conn.execute(_LOCK_ALIAS_DOCUMENTS, {"tenant": tenant_id, "id": source_id})
 
 
 def _entity_id_by_key(
