@@ -207,6 +207,13 @@ published into ``os.environ``, so a level set in a ``.env`` was silently
 ignored. No tool and no code path beyond that ordering; the reason is inline in
 ``_load_config``'s docstring. Re-derive the net, never inherit it.
 
+**And 2026-10-22 (``brain_graphrag_remove``).** One new admin tool, the MCP twin
+of ``brain graphrag remove`` (the repair for graph removes the watcher's shutdown
+could not apply); rulings and logic in :mod:`brain.graph_rag.repair`. What grew
+is the wrapper, its docstring and its error mapping (a non-UUID id, an empty list
+or a live document -> ``INVALID_PARAMS``, any other ``GraphReconcileError`` ->
+``INTERNAL_ERROR``), recorded inline above the tool.
+
 **Hazard this file has already been bitten by.** Every tool is a bare ``def``
 under a lone ``@mcp_app.tool()`` line, so inserting a helper between a decorator
 and the function it was written for silently moves the registration onto the
@@ -3897,6 +3904,81 @@ def brain_graphrag_refresh(
         "tenant_id": config.tenant_id,
         "relationship_count": result.relationship_count,
         "orphans_removed": result.orphans_removed,
+    }
+
+
+# Growth recorded in the module docstring ("And 2026-10-22"): the MCP twin of
+# `brain graphrag remove`. The logic lives in brain.graph_rag.repair.
+@mcp_app.tool()
+def brain_graphrag_remove(
+    document_ids: list[str],
+    tenant: str | None = None,
+) -> dict[str, Any]:
+    """ADMIN — remove DELETED documents' leftover graph state (targeted repair).
+
+    WHEN TO USE: a vault-watcher shutdown message named graph removes that were
+    not applied. Those documents' rows are gone, but their AGE ``Document``
+    vertices and ``MENTIONED_IN`` edges stay. This removes exactly those and, once
+    for the batch, GCs now-orphaned entities and refreshes the aggregates
+    (holding the tenant graph lock for that pass), instead of
+    ``brain_graphrag_build(force=true)``, which re-extracts every document. NOT
+    for live documents and not for everyday use.
+
+    Full parity with ``brain graphrag remove``. Params:
+
+    - ``document_ids``: one or more FULL document UUIDs. A prefix is refused,
+      because a deleted document has no row to resolve it against.
+    - ``tenant``: tenant to repair (default ``BRAIN_GRAPH_TENANT``).
+
+    Returns ``{tenant_id, with_document_vertex, orphans_removed, removed:
+    [{document_id, had_document_vertex, document_vertices_removed}]}``, ids and
+    counts only. Idempotent: an id whose vertex is already gone is a no-op with
+    ``had_document_vertex: false``. ``INVALID_PARAMS`` for a non-UUID id, an
+    empty list, or a document that still exists; nothing is removed then.
+    ``INTERNAL_ERROR`` for any other reconcile-layer failure.
+    """
+    from .graph_rag.backends import AgeBackend
+    from .graph_rag.repair import (
+        DocumentStillExists,
+        parse_document_ids,
+        remove_deleted_documents,
+    )
+
+    state = _get_state()
+    try:
+        canonical = parse_document_ids(document_ids)
+    except ValueError as exc:
+        raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
+    config = _graphrag_reconcile_config(state.cfg, tenant)
+    try:
+        with connect_age(state.cfg.database_url) as conn:
+            conn.autocommit = True
+            _require_age_or_mcp_error(conn)
+            backend = AgeBackend()
+            backend.bootstrap(conn)
+            report = remove_deleted_documents(
+                conn, canonical, backend=backend, config=config
+            )
+    except DocumentStillExists as exc:
+        raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
+    except GraphReconcileError as exc:  # after its DocumentStillExists subclass
+        raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
+    except GraphBackendError as exc:
+        raise _wrap_graph_backend_error(exc) from exc
+    except psycopg.Error as exc:
+        raise _wrap_db_error(exc) from exc
+    return {
+        "tenant_id": report.tenant_id,
+        "with_document_vertex": report.with_document_vertex,
+        "orphans_removed": report.orphans_removed,
+        "removed": [
+            {
+                "document_id": item.document_id,
+                "had_document_vertex": item.had_document_vertex,
+                "document_vertices_removed": item.document_vertices_removed,
+            }
+            for item in report.documents
+        ],
     }
 
 

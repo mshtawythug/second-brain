@@ -352,9 +352,12 @@ def test_undrained_removes_at_shutdown_are_logged(
         syncer.release.set()
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any(doomed_id in m and "brain graphrag build --force" in m for m in warnings), (
-        f"an undrained graph remove was not logged with its id and the repair: {warnings!r}"
-    )
+    assert any(
+        doomed_id in m
+        and "brain graphrag remove <ids>" in m
+        and "brain graphrag build --force" in m
+        for m in warnings
+    ), f"an undrained graph remove was not logged with its id and the repair: {warnings!r}"
     assert any("still finishing a request or reconnecting" in m for m in warnings), (
         f"the lane warning does not cover a lane that is reconnecting: {warnings!r}"
     )

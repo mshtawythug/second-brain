@@ -98,6 +98,7 @@ caller still owns the outer transaction (G1-c wiring relies on this).
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -153,6 +154,8 @@ __all__ = [
     "reconcile_document",
     "refresh_aggregates",
     "remove_document",
+    "remove_documents",
+    "RemoveResult",
 ]
 
 # The ``entity_type``s the person aspect owns — the scope of its aspect-scoped
@@ -233,6 +236,18 @@ class ReconcileResult:
     concept_count: int = 0
     concept_mention_count: int = 0
     concept_contribution_count: int = 0
+
+
+@dataclass(frozen=True)
+class RemoveResult:
+    """Outcome of :func:`remove_documents` (one batch, one tenant)."""
+
+    tenant_id: str
+    #: Per input id, in input order: AGE ``Document`` vertices DETACH DELETEd
+    #: (0 or 1; 0 means the document had no vertex left).
+    document_vertices_removed: tuple[int, ...]
+    relationship_count: int = 0
+    orphans_removed: int = 0
 
 
 class PersonResolver(Protocol):
@@ -553,28 +568,52 @@ def remove_document(
 ) -> ReconcileResult:
     """Remove one document from the graph — BOTH aspects (all delete paths; §7).
 
+    The one-id form of :func:`remove_documents`, which documents the contract.
+    """
+    batch = remove_documents(conn, [document_id], backend=backend, config=config)
+    return ReconcileResult(
+        document_id=document_id,
+        tenant_id=batch.tenant_id,
+        skipped=False,
+        relationship_count=batch.relationship_count,
+        orphans_removed=batch.orphans_removed,
+    )
+
+
+def remove_documents(
+    conn: psycopg.Connection[Any],
+    document_ids: Sequence[str],
+    *,
+    backend: GraphBackend,
+    config: ReconcileConfig | None = None,
+) -> RemoveResult:
+    """Remove documents from the graph — BOTH aspects — in one transaction.
+
     Aspect-agnostic: a document being removed loses ALL of its graph presence
     (person AND concept), regardless of ``config.concepts_enabled`` — so no
     ``extractor`` is needed. Takes the SAME :class:`ReconcileConfig` as
     :func:`reconcile_document` so the full-tenant aggregate is recomputed with the
     identical ``generic_df_ratio`` used to build it (a mismatch would corrupt the
-    surviving weights). Runs entirely inside ``with conn.transaction()`` (see the
-    module "Connection contract").
+    surviving weights). Runs entirely inside ``with conn.transaction()``, graph
+    write lock first (see the module "Connection contract").
 
-    Explicitly deletes the document's relational source rows (all mentions, all
+    Explicitly deletes each document's relational source rows (all mentions, all
     contributions, BOTH aspects' watermarks) — robust whether the ``documents``
     row still exists or was already deleted (its ``ON DELETE CASCADE`` would have
-    cleared these). Then recomputes the tenant aggregate, GCs now-orphaned person
-    AND concept entities, and syncs AGE (DETACH DELETE the ``Document`` vertex +
-    its ``MENTIONED_IN`` edges, rematerialize ``CO_OCCURS``, DETACH DELETE orphan
-    vertices). Idempotent: a second call is a stable no-op that converges to the
-    same graph.
+    cleared these). Then, ONCE for the whole batch, recomputes the tenant
+    aggregate, GCs now-orphaned person AND concept entities, and syncs AGE: each
+    document's ``Document`` vertex + ``MENTIONED_IN`` edges are DETACH DELETEd
+    (counted per id), ``CO_OCCURS`` is rematerialized, and orphan vertices are
+    DETACH DELETEd. The tenant-wide steps are the cost, so a batch pays them once
+    rather than per id. Idempotent: a second call is a stable no-op that
+    converges to the same graph.
     """
     cfg = config if config is not None else ReconcileConfig()
     tenant_id = cfg.tenant_id
     with conn.transaction():
         acquire_graph_write_lock(conn, tenant_id)
-        delete_doc_relational(conn, tenant_id, document_id)
+        for document_id in document_ids:
+            delete_doc_relational(conn, tenant_id, document_id)
         relationship_count = _recompute_aggregates(
             conn, tenant_id, cfg.generic_df_ratio
         )
@@ -583,15 +622,17 @@ def remove_document(
             *_gc_orphan_concepts(conn, tenant_id),
         ]
 
-        backend.detach_delete_documents(conn, tenant_id, [document_id])
+        vertices = tuple(
+            backend.detach_delete_documents(conn, tenant_id, [document_id])
+            for document_id in document_ids
+        )
         backend.refresh_cooccur_edges(conn, tenant_id)
         if orphan_ids:
             backend.detach_delete_entities(conn, tenant_id, orphan_ids)
 
-        return ReconcileResult(
-            document_id=document_id,
+        return RemoveResult(
             tenant_id=tenant_id,
-            skipped=False,
+            document_vertices_removed=vertices,
             relationship_count=relationship_count,
             orphans_removed=len(orphan_ids),
         )

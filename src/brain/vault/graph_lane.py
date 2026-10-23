@@ -33,11 +33,13 @@ logger = logging.getLogger(__name__)
 
 _Op = Literal["reconcile", "remove"]
 
-#: How to repair graph removes that were never applied; logged with their ids.
+#: How to repair graph removes that were never applied; logged after their ids.
+#: Leads with the targeted repair; ``build --force`` is the fallback.
 LOST_REMOVES_REPAIR = (
-    "their AGE Document vertices stay until `brain graphrag build --force` "
-    "(re-extracts concepts for every document when concepts are on); aggregates and "
-    "orphan entities heal at the next graph reconcile or with `brain graphrag refresh`"
+    "their AGE Document vertices stay until `brain graphrag remove <ids>` is run "
+    "with the ids listed (it drops their vertices and edges, GCs orphan entities and "
+    "refreshes the aggregates); the fallback is `brain graphrag build --force`, which "
+    "re-extracts concepts for every document when concepts are on"
 )
 
 

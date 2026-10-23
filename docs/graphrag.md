@@ -42,8 +42,8 @@ two graph writers can no longer deadlock on each other's rows. The writers are:
 - the vault watcher, `brain-mcp`, ingest and `brain vault relink-derived`. These
   sync one document at a time and hold the lock only for that document's
   writes.
-- `brain graphrag refresh`, `build --force`, `aliases apply` and `communities
-  build`. These hold it for a whole tenant-wide pass. While one runs, every
+- `brain graphrag refresh`, `build --force`, `aliases apply`, `communities
+  build` and `remove`. These hold it for a whole tenant-wide pass. While one runs, every
   other graph write in the tenant waits, the watcher's included, with no
   timeout.
 
@@ -120,11 +120,12 @@ brain graphrag communities list         # admin view of materialized communities
 brain graphrag build --backfill         # reconcile every existing doc into the graph
 brain graphrag build --force            # authoritative full rebuild (recover a dropped mirror)
 brain graphrag refresh                  # recompute edge weights + collapse cross-type duplicates
+brain graphrag remove <doc-uuid>...     # repair: drop DELETED docs' leftover graph state
 ```
 
 The same surface is available to any MCP client (Claude Desktop, Claude Code, and others) through the
 `brain_graphrag_search`, `brain_graphrag_themes`, `brain_graphrag_entity`,
-`brain_graphrag_build`, and `brain_graphrag_communities_build` MCP tools.
+`brain_graphrag_build`, `brain_graphrag_remove`, and `brain_graphrag_communities_build` MCP tools.
 
 ## Upgrading an existing brain to the AGE image
 
