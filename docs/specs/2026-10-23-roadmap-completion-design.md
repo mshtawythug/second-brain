@@ -451,9 +451,14 @@ ranks 1a, 2 and 3, in that order.
     `fallback_note`) that `brain search --json --meta` and MCP `brain_search` emit.
   - `RecallResult.context_block()` appends `, text-only` to the header when `fallback` is set. The
     header is the pasted artifact an agent reads, so the marker has to be inside it, not only on
-    stderr. The header already carries the query and is covered by the fixed `_ENVELOPE_TOKENS`
-    reserve (48 tokens); the reserve is re-measured with the marker appended, and raised if the
-    worst-case header no longer fits.
+    stderr. *(As shipped; this paragraph first said the header "is covered by the fixed
+    `_ENVELOPE_TOKENS` reserve (48 tokens)".)* That claim was false: the header echoes the query,
+    which nothing caps, and a long query overran the budget on `master` even without a fallback
+    (13 of 53 budgets in the RM-01 sweep). So the query the header echoes is capped at
+    `_HEADER_QUERY_MAX_TOKENS` (16, measured with `count_tokens`, with one `…` appended when cut),
+    and a test asserts that the worst-case header (the cap, the counts, `, truncated` and
+    `, text-only`) fits the 48-token reserve, which therefore stays 48. Packing is untouched, and a
+    query under the cap is echoed exactly as before. The JSON `query` stays whole.
   - `cli_recall.recall` prints `fallback.note` to stderr (yellow, `err=True`) when set, and exits 0.
   - MCP `brain_recall`: its `except EmbedError` branch becomes unreachable and is deleted, with a
     one-line comment naming `recall.recall` as where the failure is now handled (the treatment PR

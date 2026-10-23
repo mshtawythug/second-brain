@@ -35,8 +35,9 @@ before.
 
 Fixed in the same change: the whole block now honours `--budget` for a long
 query too. The header echoes the query, and the fixed reserve held back for it
-could not cover a long one. A block that is still over the budget is now packed
-again more tightly. Recalls that already fitted are packed exactly as before.
+could not cover a long one. The query the header echoes is now cut to 16 tokens,
+with a trailing `…`. The JSON `query` field keeps the full text, and a shorter
+query is echoed exactly as before.
 
 ### Changed — search falls back to text-only when the embedder is down
 

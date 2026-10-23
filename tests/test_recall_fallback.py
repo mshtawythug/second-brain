@@ -18,9 +18,16 @@ import psycopg
 import pytest
 
 from brain.config import Config
-from brain.embeddings import OllamaEmbedContextOverflow
+from brain.embeddings import NullEmbedder, OllamaEmbedContextOverflow
 from brain.ingest import Embedder, ExtractedDoc, ingest_document
-from brain.recall import RecallResult, recall
+from brain.recall import (
+    _ENVELOPE_TOKENS,
+    _HEADER_QUERY_MAX_TOKENS,
+    RecallResult,
+    _header_query,
+    _render_header,
+    recall,
+)
 from brain.search_fallback import SearchFallback
 from tests.conftest import TEST_DATABASE_URL
 from tests.embed_down import SECRET_DETAIL, BrokenEmbedder, QueryEmbedDownEmbedder
@@ -32,8 +39,9 @@ _BODY = (
     "and the supply boat schedule for the winter season. "
 ) * 30
 
-#: Every word occurs in ``_BODY``, so the FTS leg matches it; long enough that
-#: the ``# recall:`` header alone costs more than the old fixed 48-token reserve.
+#: Every word occurs in ``_BODY``, so the FTS leg matches it; long enough that,
+#: echoed whole, the ``# recall:`` header alone would cost more than the 48-token
+#: reserve.
 _LONG_QUERY = (
     "lighthouse keeper logged lamp maintenance fog signal tests supply boat "
     "schedule winter season "
@@ -164,6 +172,84 @@ def test_to_dict_carries_the_fallback_when_one_happened() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The header's query echo is capped, so the header fits its reserve
+# ---------------------------------------------------------------------------
+
+
+def _fake_cost(text: str) -> int:
+    """``tests.conftest.FakeEmbedder.count_tokens``: one token per four chars."""
+    return max(1, len(text) // 4)
+
+
+@pytest.mark.parametrize("tokens", [_HEADER_QUERY_MAX_TOKENS - 1, _HEADER_QUERY_MAX_TOKENS])
+def test_a_query_at_or_under_the_cap_is_echoed_whole(tokens: int) -> None:
+    # Arrange
+    query = "abcd" * tokens
+    assert _fake_cost(query) == tokens
+
+    # Act / Assert
+    assert _header_query(query, cost=_fake_cost) == query
+
+
+def test_a_query_one_token_over_the_cap_is_cut_with_one_ellipsis() -> None:
+    # Arrange
+    query = "abcd" * (_HEADER_QUERY_MAX_TOKENS + 1)
+
+    # Act
+    echoed = _header_query(query, cost=_fake_cost)
+
+    # Assert
+    assert echoed.endswith("…")
+    assert echoed.count("…") == 1
+    assert query.startswith(echoed[:-1])
+    assert _fake_cost(echoed) <= _HEADER_QUERY_MAX_TOKENS
+
+
+@pytest.mark.parametrize(
+    "cost", [_fake_cost, NullEmbedder().count_tokens], ids=["fake", "cl100k"]
+)
+def test_worst_case_header_fits_the_envelope_reserve(cost: Any) -> None:
+    """Asserted directly, so a future header edit cannot silently overrun it.
+
+    Worst case: a query cut to the cap, four-digit counts, a seven-digit token
+    total, and every optional suffix (``dropped``, ``truncated``, ``text-only``).
+    """
+    # Arrange
+    capped = _header_query("lighthouse keeper " * 40, cost=cost)
+
+    # Act
+    header = _render_header(
+        capped,
+        passages=9999,
+        used_tokens=9_999_999,
+        dropped=9999,
+        truncated=True,
+        text_only=True,
+    )
+
+    # Assert
+    assert cost(capped) <= _HEADER_QUERY_MAX_TOKENS
+    assert cost(header) <= _ENVELOPE_TOKENS
+
+
+def test_json_keeps_the_full_query_while_the_header_is_capped(
+    test_db: psycopg.Connection[Any], fake_embedder: Any
+) -> None:
+    # Arrange
+    _seed(test_db, fake_embedder)
+
+    # Act
+    result = _recall(test_db, fake_embedder, query=_LONG_QUERY)
+
+    # Assert
+    assert result.to_dict()["query"] == _LONG_QUERY
+    assert "header_query" not in result.to_dict()
+    header = result.context_block().splitlines()[0]
+    assert "… (" in header
+    assert _LONG_QUERY not in header
+
+
+# ---------------------------------------------------------------------------
 # recall(), against the test database
 # ---------------------------------------------------------------------------
 
@@ -259,8 +345,8 @@ def test_long_query_with_marker_still_fits_the_whole_budget(
 ) -> None:
     """The budget is honoured end to end, header and ``, text-only`` included.
 
-    REGRESSION: the header echoes the query, and a fixed 48-token reserve held
-    back for it cannot cover a long one; the block then overran the budget.
+    REGRESSION: the header echoes the query, and the 48-token reserve held back
+    for it could not cover a long one until the echo was capped.
     """
     # Arrange
     _seed(test_db, fake_embedder)
@@ -283,8 +369,8 @@ def test_long_query_fits_the_whole_budget_without_a_fallback_too(
 ) -> None:
     """The same overrun, on a healthy run: it predates the marker.
 
-    REGRESSION: the fixed reserve assumed a short query. This passes only once
-    the reserve is measured against the header actually emitted.
+    REGRESSION: the fixed reserve assumed a short query (13 of these 53 budgets
+    overflowed on master). It passes because the header's query echo is capped.
     """
     # Arrange
     _seed(test_db, fake_embedder)
