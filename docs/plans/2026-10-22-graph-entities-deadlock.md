@@ -287,16 +287,34 @@ document's graph rows and inserts none that reference `documents`, so it never
 waits on the document row. A concurrent cascade waits on W2's deleted rows, and
 W2 then commits.
 
-*Found while checking, NOT fixed: `merge_aliases` (W5/W6) has the same shape.*
-`_repoint_mentions` INSERTs dst-keyed mentions for every document of a source
-entity. On conflict it DO-UPDATEs the existing dst row, without an FK check.
-It then DELETEs the source rows. Suppose a document X is deleted between those
-two statements. The cascade waits on the dst row the alias updated, and the
-alias's DELETE of X's source row waits on the cascade. It needs an alias apply
-or a cross-type collapse concurrent with deleting a document that mentions the
-merged entity. The fix shape is the same: lock the affected documents
-`FOR KEY SHARE`, in id order, right after the graph write lock in
-`merge_aliases`. A follow-up.
+*`merge_aliases` (W5/W6) had the same shape: FIXED in the same PR (#55).*
+
+*The cycle.* `_repoint_mentions` INSERTs dst-keyed mentions for every document
+of a source entity. On conflict it DO-UPDATEs the existing dst row, without an
+FK check. It then DELETEs the source rows. Suppose a document X is deleted
+between those two statements. The cascade deletes X's source row and then waits
+on the dst row the alias updated. The alias's DELETE then reaches X's source
+row and waits on the cascade. It needs an alias apply (`brain graphrag aliases
+apply`, also run by `build` / `refresh`), or a cross-type collapse, concurrent
+with deleting a document that mentions the merged entity.
+
+*The fix.* `apply_aliases` locks, in each rule's transaction right after the
+graph write lock, every document the rule will touch `FOR KEY SHARE`, in id
+order (`_lock_alias_documents`). The documents are the source's mentions and
+its contributions at either end. The DELETE then waits for the merge.
+
+*Per rule is enough.* The first commit (`a071d6c`) also locked every rule's
+documents up front in `merge_aliases`. Its comment said a per-rule lock alone
+would let rule 2 wait on a document whose rows rule 1 holds. That was wrong,
+and `fad5b8a` removed the up-front lock. Each rule's lock lasts to the end of
+the outer transaction, so any document whose rows an earlier rule touched is
+already held. A later rule can wait only on a document that a DELETE holds and
+whose cascade needs none of the merge's rows. The DELETE then commits, and the
+later rule finds no row.
+
+*Other alias paths.* `collapse_cross_type_concepts` goes through `merge_aliases`.
+Its `_restore_winner_display_names` (W7) only UPDATEs entity names, a row no
+document delete cascades into.
 
 Separately, `build_graph` already raises `GraphReconcileError` if a document is
 deleted between id enumeration and its reconcile's read phase. That is
@@ -322,6 +340,7 @@ seconds instead of hanging CI.
 | D7 one edit's concepts are never indexed under another edit's hash | `test_the_plan_never_pairs_one_edits_hash_with_another_edits_body` |
 | D8 an indexed document is planned without reading its body | `test_an_indexed_document_is_planned_without_reading_its_body` |
 | D9 a rewrite and a concurrent document DELETE do not deadlock | `test_a_rewrite_and_a_concurrent_document_delete_do_not_deadlock` |
+| D10 an alias merge and a concurrent document DELETE do not deadlock | `tests/test_graphrag_alias_doc_lock.py::test_an_alias_merge_and_a_concurrent_document_delete_do_not_deadlock` |
 
 `tests/test_graphrag_write_lock.py` holds the lock contract. Unit tests cover
 the guard and per-tenant scope. One test per writer W1-W10 holds the tenant's
@@ -349,6 +368,9 @@ Mutations are applied only in a `git archive` copy, never in this worktree.
 | `8711ff0` (no document lock before the rewrite) | D9 |
 | M19 drop `FOR KEY SHARE` from `key_share_doc_meta` | D9 |
 | M20 make `is_current` use the unlocked `fetch_doc_meta` | D9 |
+| `9a251f8` (the merged tree before the alias fix) | D10 |
+| M21 drop `_lock_alias_documents` from `apply_aliases` | D10 |
+| M22 drop `FOR KEY SHARE` from the alias document lock | D10 |
 | M3-M11 drop the call in each of W2-W10, one at a time | that writer's lock test only |
 | M12 key `acquire_graph_write_lock` on a constant instead of the tenant | the per-tenant test |
 | M13 remove the not-in-a-transaction guard | the guard test |
@@ -360,7 +382,21 @@ writing. Its red is the base code.
 
 ## Results
 
-### Follow-up: document `KEY SHARE` (branch `fix/graph-reconcile-doc-key-share`, at `80a57bf`)
+### Follow-up, part 2: alias document lock (PR #55, at `fad5b8a`, after merging master `5cb4e4d`)
+
+**RED.** `src/` at `9a251f8`, the merged tree before the alias fix: D10 fails
+in 10 of 10 runs with `DeadlockDetected`, the document DELETE as the victim.
+An earlier version of the test, before the roles were ordered by id, went red
+in only 3 of 5 runs. The merge's DELETE could reach X's source row before the
+gate, and then no cycle formed.
+
+**GREEN.** D10 passes 5 runs of 5.
+
+**Mutations.** Each ran in a fresh archive copy of `fad5b8a`. The three files
+(23 tests) pass unmutated. M21 and M22 each turn only D10 red. Every other row
+is unchanged.
+
+### Follow-up: document `KEY SHARE` (PR #55, at `80a57bf`)
 
 **RED.** `src/` at `8711ff0` with the new test: D9 fails in 5 of 5 runs with
 `DeadlockDetected`. The victim was the document DELETE 4 times and the

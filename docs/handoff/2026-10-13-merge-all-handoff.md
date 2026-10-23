@@ -292,11 +292,13 @@ Re-derive: `git log --first-parent --format='%h %ad %s' --date=short 69a780d..se
        still be overtaken. The next build re-indexes it.
     4. The cross-type collapse window between W6 and W7 is pre-existing and cosmetic (a display
        name only).
-    5. **Still open, found while fixing item 1:** `merge_aliases` (alias apply, cross-type
-       collapse) has the same shape against a concurrent document delete. `_repoint_mentions`
-       DO-UPDATEs a dst row without an FK check, then DELETEs the source rows. The fix shape is to
-       lock the affected documents `FOR KEY SHARE`, in id order, right after the graph write
-       lock.
+    5. ~~`merge_aliases` (alias apply, cross-type collapse) had the same shape against a
+       concurrent document delete.~~ *[FIXED by PR #55.]* `_repoint_mentions` DO-UPDATEs a dst
+       row without an FK check, then DELETEs the source rows. `apply_aliases` now locks each
+       rule's documents `FOR KEY SHARE`, in id order, right after the graph write lock and
+       before it writes. Per rule is enough, because the locks last to the end of the outer
+       transaction (plan, Residuals). The regression test is
+       `tests/test_graphrag_alias_doc_lock.py`.
 
 ## Status on 2026-10-16: DONE except items that need the user
 
