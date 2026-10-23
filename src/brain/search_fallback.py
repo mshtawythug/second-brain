@@ -2,9 +2,9 @@
 
 The user's decision (plan ``docs/plans/2026-10-23-search-fts-fallback.md``):
 when the embedder is unreachable, ``brain search``, ``brain explain`` and MCP
-``brain_search``, (RM-01) ``brain recall`` / MCP ``brain_recall``, and (RM-02)
-the retrieval of ``brain ask`` / MCP ``brain_ask``, return text-only matches and
-SAY SO, instead of failing.
+``brain_search``, (RM-01) ``brain recall`` / MCP ``brain_recall``, (RM-02) the
+retrieval of ``brain ask`` / MCP ``brain_ask``, and (RM-03) ``brain ui``'s
+``GET /api/search``, return text-only matches and SAY SO, instead of failing.
 
 This module is the one place that policy lives, and it adds no search code of
 its own: on an :class:`~brain.errors.EmbedError` it calls the surface's search

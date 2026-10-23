@@ -22,6 +22,17 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Changed — `brain ui` search falls back to text-only matching, with a notice
+
+When the query embedding cannot be computed, the Notes tab in `brain ui` now
+shows full-text matches instead of an error, with a notice above the results
+saying they are text-only and why (by failure class only), and the meta line
+still reads `fts-only` (roadmap ticket RM-03). `GET /api/search` answers 200
+with the four always-present `fallback*` keys `brain search --json --meta` and
+MCP `brain_search` carry (`null` on a normal search); it used to answer `503
+embedding_unavailable`. The next search retries the embedder, and the page size
+is the same with and without a fallback.
+
 ### Changed — `brain ask` answers from text-only retrieval when the embedder is down
 
 `brain ask` and MCP `brain_ask` no longer fail when the query embedding cannot

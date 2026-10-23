@@ -9,6 +9,13 @@ embedder produces no vectors. All of it is regression-tested and **eval-gated**
 — ``brain eval --fail-below`` exits 3 on an nDCG@5 / MRR / Recall@20 regression,
 enforced in CI. A parallel SQL path in the UI would be invisible to that gate
 and would drift silently.
+
+**An embed failure falls back to text-only matching** (roadmap ticket RM-03),
+through :func:`brain.search_fallback.search_with_fts_fallback`, the helper
+``brain search`` and MCP ``brain_search`` already use. The route used to answer
+``503 embedding_unavailable`` and show nothing; it now returns the text-only
+results with the four ``fallback*`` keys, and the Notes tab shows the
+class-only ``fallback_note`` above the ledger (``static/js/results.js``).
 """
 from __future__ import annotations
 
@@ -20,15 +27,16 @@ import psycopg
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ..errors import EmbedError, PersonAmbiguous, PersonNotFound
+from ..errors import PersonAmbiguous, PersonNotFound
 from ..facets import compute_facets
 from ..format_search import search_meta_json
 from ..search import SearchDiagnostics, build_tsquery
+from ..search_fallback import fallback_json, search_with_fts_fallback
 from ..search_predicate import build_predicate
 from ..sensitivity import DEFAULT_SENSITIVITY
 from . import telemetry
 from ._http import context_of, db_guard, ok
-from .errors import UiBadRequest, UiUnavailable
+from .errors import UiBadRequest
 from .schemas import parse_search_params, ranking_payload, search_result_payload
 
 
@@ -61,9 +69,20 @@ async def search(request: Request) -> JSONResponse:
     started = perf_counter()
     try:
         with ctx.connect() as conn:
-            results = ctx.search_fn(
+            # ``query`` and ``limit`` come out of the filter kwargs and are
+            # passed by keyword: the helper names ``query`` itself, so leaving
+            # it in the splat would pass it twice. ``limit`` is ``fetch_limit``
+            # on both attempts, so a fallback neither changes the page size nor
+            # over-fetches twice (RM-03 criterion 5).
+            filters = spec.filter_kwargs()
+            query = filters.pop("query")
+            fetch_limit = filters.pop("limit")
+            searched = search_with_fts_fallback(
+                ctx.search_fn,
                 conn,
                 embedder=ctx.embedder,
+                query=query,
+                limit=fetch_limit,
                 diagnostics=diagnostics,
                 total_count=True,
                 sensitivity=sensitivity_filter,
@@ -74,8 +93,9 @@ async def search(request: Request) -> JSONResponse:
                 recency_halflife_days=ctx.cfg.recency_halflife_days,
                 snippet_context_tokens=ctx.cfg.snippet_context_tokens,
                 snippet_max_chars=ctx.cfg.snippet_max_chars,
-                **spec.filter_kwargs(),
+                **filters,
             )
+            results = searched.results
             # Paging (T6). ``filter_kwargs`` asked for ``offset + limit`` rows;
             # everything from here down works on the PAGE, never on the
             # over-fetch. Redacting or counting the rows the caller will not
@@ -93,11 +113,9 @@ async def search(request: Request) -> JSONResponse:
                 fts_count=diagnostics.fts_count,
                 duration_ms=int((perf_counter() - started) * 1000),
             )
-    except EmbedError as exc:
-        raise UiUnavailable(
-            "the embedding backend is unavailable; retry with FTS-only search",
-            code="embedding_unavailable",
-        ) from exc
+    # No ``except EmbedError``: ``search_with_fts_fallback`` catches it and
+    # retries text-only, so the old ``503 embedding_unavailable`` branch here
+    # could no longer be reached and was deleted (RM-03).
     except (PersonNotFound, PersonAmbiguous) as exc:
         raise UiBadRequest(str(exc), code="person_unresolved") from exc
     except psycopg.Error as exc:
@@ -131,6 +149,10 @@ async def search(request: Request) -> JSONResponse:
                 total_documents=diagnostics.total_documents,
             ),
             **meta,
+            # Always present, ``null`` unless the query embed failed and the
+            # search ran text-only — the same four keys ``brain search --json
+            # --meta`` and MCP ``brain_search`` carry.
+            **fallback_json(searched.fallback),
             "results": [
                 _redact(search_result_payload(r), redacted) for r in page
             ],

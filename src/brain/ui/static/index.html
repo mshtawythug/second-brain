@@ -120,6 +120,12 @@
       </div>
       <p class="meta-line" id="meta" aria-live="polite"></p>
       <p class="meta-sub" id="meta-sub"></p>
+      <!-- THE TEXT-ONLY NOTICE (RM-03). When the query embed fails, /api/search
+           answers with text-only results and a class-only `fallback_note`;
+           js/results.js puts that note here as textContent and un-hides it, and
+           hides it again on every render that is not such an answer. Above the
+           ledger, so it is read before the rows it qualifies. -->
+      <p class="search-fallback" id="search-fallback" role="status" hidden></p>
     </div>
     <!-- The ledger's IDLE state (T17). js/results.js clears #results and returns
          early while `searchStatus === "idle"`, so this column was blank until a
