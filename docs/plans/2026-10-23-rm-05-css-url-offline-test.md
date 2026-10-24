@@ -110,6 +110,9 @@ and `static/css/x.css` are not, so both an accept-all and a reject-all helper fa
 `test_stylesheet_problems_include_an_unshipped_target` runs `_stylesheet_problems` on a synthetic
 `ui/static/` whose stylesheet names a real `static/fonts/a.woff2`, against the real globs, and
 expects exactly one "matches no package-data glob" problem.
+`test_stylesheet_problems_include_a_missing_target` runs the same helper on a stylesheet with a
+missing target and on one with an unparseable `url(`, and expects exactly one problem naming
+`css/x.css` (and `missing.woff2` or "could not parse").
 `test_stylesheet_problems_report_an_empty_walk` covers the no-stylesheet problem. The unparseable
 cases include an upper-case `URL(`, so the residue check stays case-insensitive. Positive cases
 are included so that a resolver that rejects everything also fails.
@@ -157,6 +160,13 @@ empty-walk problem, which replaced the test's stylesheet floor in the same round
 21. Widening the `data:` skip to `startswith("data")` turns `data-prefixed-file-name` and
     `data-prefixed-missing` red.
 22. Removing the target `.strip()` turns `whitespace-inside-quotes` red.
+
+Added in review round 3 (PR #67), which survived at `52bf12c`:
+
+23. Deleting `problems.extend(found)` from `_stylesheet_problems` turns both
+    `test_stylesheet_problems_include_a_missing_target` cases red. Before that test it was
+    fail-open: the real tree has no failing target, so every test stayed green while the
+    real-tree check ignored every load problem.
 
 ## Risks
 
