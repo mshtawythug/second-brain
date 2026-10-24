@@ -24,13 +24,13 @@ git tag scheme:
 
 ### Added — the offline test resolves every CSS `url()` in `brain ui`
 
-`tests/test_ui_static_assets.py` now checks every `url()` in every shipped
-stylesheet, as it already checked `index.html`'s `href`/`src` (roadmap ticket
-RM-05, backlog BL-3). The test fails, naming the stylesheet and the target, when
-a target does not exist, is empty or query-only (has no path), names a
-directory, leaves `static/` (through `..`, a root path outside `/static/`,
-another origin or a symlink), or names a file that no `package-data` glob
-ships. `url()`s inside comments are ignored,
+A new test module, `tests/test_ui_static_css_urls.py`, checks every `url()` in
+every shipped stylesheet, as `tests/test_ui_static_assets.py` already checked
+`index.html`'s `href`/`src` (roadmap ticket RM-05, backlog BL-3). The test
+fails, naming the stylesheet and the target, when a target does not exist, is
+empty or query-only (has no path), names a directory, leaves `static/` (through
+`..`, a root path outside `/static/`, another origin or a symlink), or names a
+file that no `package-data` glob ships. `url()`s inside comments are ignored,
 `data:` and `#fragment` targets pass (including a `data:` SVG that nests its own
 `url(%23id)`), and a `url(` the test cannot parse fails instead of going
 unchecked. Test only: no `brain` command changes.

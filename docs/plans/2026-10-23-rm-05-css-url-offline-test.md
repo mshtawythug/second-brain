@@ -5,16 +5,24 @@
 **Ticket:** RM-05 in [`docs/specs/2026-10-23-roadmap-completion-design.md`](../specs/2026-10-23-roadmap-completion-design.md)
 (§3, Wave 1). The ticket is the spec. This plan is the task list, as DoD item 1 asks.
 **Backlog row:** BL-3 in [`2026-10-23-backlog-reconciliation.md`](./2026-10-23-backlog-reconciliation.md).
-**Reuses:** `tests/test_ui_static_assets.py`'s own helpers: `static_dir()`, `_shipped_by_suffix`,
-`_package_data_globs` and `_glob_matches`. No `src/` change.
+**Reuses:** `static_dir()` from `brain.ui.app`, and `_IGNORED_PARTS`, `_package_data_globs` and
+`_glob_matches`, imported from `tests/test_ui_static_assets.py` (not copied). No `src/` change.
 
 ## Files
 
 | File | Change |
 |---|---|
-| `tests/test_ui_static_assets.py` | Two regexes (`_CSS_COMMENT_RE`, `_CSS_URL_RE`), four helpers (`_css_url_targets`, `_css_url_problems`, `_unshipped_targets`, `_stylesheet_problems`), the test `test_every_css_url_resolves_on_disk`, a parametrized test of the extraction, and synthetic-tree tests for each acceptance criterion. |
+| `tests/test_ui_static_css_urls.py` (new) | Two regexes (`_CSS_COMMENT_RE`, `_CSS_URL_RE`), four helpers (`_css_url_targets`, `_css_url_problems`, `_unshipped_targets`, `_stylesheet_problems`), the test `test_every_css_url_resolves_on_disk`, a parametrized test of the extraction, and synthetic-tree tests for each acceptance criterion. |
+| `tests/test_ui_static_assets.py` | Unchanged at the end of the PR (384 lines, byte-identical to `a50edde`). |
 | `CHANGELOG.md` | An Unreleased entry. |
 | Spec Appendix B, backlog BL-3 | Tracker rows, in a follow-up commit once the PR number exists. |
+
+**Why a module of its own.** The ticket's scope names `tests/test_ui_static_assets.py`, and the
+work first landed there. That took the file from 384 to 892 lines, past the 800-line rule for new
+growth, so before merge every RM-05 addition moved unchanged to `tests/test_ui_static_css_urls.py`
+(`871796b`). The only edit in the move is one docstring that said "the packaging test above". The
+new module imports the three shared helpers above from the original rather than duplicating them;
+`tests/` is a package, and test modules already import from `tests.conftest` the same way.
 
 **Not touched:** every file under `src/`, so no ceiling row needs a promoted hop and no daemon
 reinstall follows. No skill or memory file documents the static-asset tests.
