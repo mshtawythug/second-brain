@@ -29,19 +29,22 @@ blank variable as its default, and refuses a bad value with a
 dotenv chain into the process environment (``Config._load_field_dict``, the
 ``os.environ.setdefault`` loop), so a leaf knob is read from the same ``.env``
 files as every other knob, with the process environment still winning. Tests
-pass a plain ``dict``. The one place that falls back to ``os.environ`` on its
-own is ``eval.runner.run_eval`` (§2.3's carve-out, RM-14a), and every test of it
-passes ``stages`` or ``env`` explicitly.
+pass a plain ``dict``. One fallback to ``os.environ`` is planned, not built:
+RM-14a will let ``eval.runner.run_eval(stages=None, env=None)`` read it when
+neither argument is given (§2.3's carve-out), and every test of ``run_eval``
+will pass ``stages`` or ``env`` explicitly.
 
 **Rules a leaf keeps**, each enforced by ``tests/test_settings_leaf_guards.py``
 for every module in this package:
 
-- A leaf never reads ``os.environ`` or calls ``os.getenv`` itself; it reads the
-  ``env`` it was given.
+- A leaf never imports ``os``, ``posix`` or ``nt`` and never names
+  ``environ`` / ``getenv`` (it uses ``pathlib`` for paths); it reads the ``env``
+  it was given.
 - A field that holds a secret (an API token, a webhook URL) is declared
   ``field(repr=False)``, and its name ends in ``_token``, ``_secret``,
-  ``_password``, ``_api_key`` or ``_webhook_url``, which is how the guard finds
-  it. ``brain doctor`` reports only whether a secret is set.
+  ``_password``, ``_api_key``, ``_secret_key``, ``_private_key`` or
+  ``_webhook_url`` (in any case), which is how the guard finds it.
+  ``brain doctor`` reports only whether a secret is set.
 - ``brain.config`` never imports this package (it would be a cycle: the parsers
   raise ``brain.config.ConfigError``).
 """

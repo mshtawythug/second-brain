@@ -47,7 +47,8 @@ Each parser takes `(env, name, default, ...)`:
 - **`env_int` / `env_float`**: `minimum` is required and inclusive; `maximum` is an optional,
   keyword-only, inclusive bound (RM-14a's `BRAIN_RERANK_DEPTH` is 2 to 50). `env_float` refuses
   `nan` and `inf`: `float()` accepts them, and `nan` passes every `<` comparison, so a bound check
-  alone would admit it.
+  alone would admit it. Empty bounds (`minimum > maximum`) or a `default` outside them is a
+  programming error and raises `ValueError` at the call, as `env_choice` does (review round 1).
 - **`env_str`**: the stripped value, or `default` (which may be `None`). It never refuses; a leaf
   validates the shape itself (RM-14a's loopback URL, RM-16's webhook prefix) and raises
   `ConfigError` naming the variable only.
@@ -70,8 +71,11 @@ The spec text is left as written (§0); these are recorded here and in the PR bo
 3. **Two guard tests** that §2.3 implies but does not list: leaves never read the process
    environment (§2.3: "Tests pass a plain dict, so no test touches the real environment"), and
    secret-named fields are `repr=False` (§2.3, the ticket's security line). The secret guard keys on
-   field names ending in `_token`, `_secret`, `_password`, `_api_key` or `_webhook_url`; a leaf that
-   holds a secret under another name must use one of those suffixes.
+   field names ending in `_token`, `_secret`, `_password`, `_api_key`, `_secret_key`,
+   `_private_key` or `_webhook_url`, in any case; a leaf that holds a secret under another name must
+   use one of those suffixes. The environment guard refuses any import of `os`, `posix` or `nt`, any
+   attribute or string `environ` / `environb` / `getenv` / `getenvb`, and a dynamic import of a
+   banned module (review round 1 closed four bypasses of the first version).
 
 ## Acceptance criteria → tests
 
