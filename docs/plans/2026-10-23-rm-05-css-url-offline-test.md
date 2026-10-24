@@ -146,7 +146,8 @@ Added in review round 1 (PR #67), each of which survived before its test existed
 16. Restoring the old, symlink-only wording of the containment problem turns the symlink test
     and the `encoded-dot-dot` case red.
 
-Added in review round 2 (PR #67), each of which survived at `8ac8e23`:
+Added in review round 2 (PR #67). 17, 18 and 20–22 survived at `8ac8e23`. 19 covers the
+empty-walk problem, which replaced the test's stylesheet floor in the same round:
 
 17. A greedy comment strip (`/\*.*\*/`) turns the `between-comments` case red.
 18. Replacing the packaging clause in `_stylesheet_problems` with `pass` turns
