@@ -36,6 +36,14 @@ def _raw(env: Mapping[str, str], name: str) -> str | None:
     return stripped or None
 
 
+def _check_bounds(name: str, default: float, minimum: float, maximum: float | None) -> None:
+    """Refuse bounds a calling leaf got wrong: ``ValueError``, since no user can fix them."""
+    if maximum is not None and minimum > maximum:
+        raise ValueError(f"bounds for {name} are empty: minimum exceeds maximum")
+    if not (minimum <= default and (maximum is None or default <= maximum)):
+        raise ValueError(f"default for {name} must lie within its bounds")
+
+
 def _bounds_phrase(kind: str, minimum: float, maximum: float | None) -> str:
     if maximum is None:
         return f"{kind} >= {minimum}"
@@ -83,7 +91,12 @@ def env_int(
     minimum: int,
     maximum: int | None = None,
 ) -> int:
-    """Parse ``name`` as an integer in ``[minimum, maximum]`` (``maximum`` optional, inclusive)."""
+    """Parse ``name`` as an integer in ``[minimum, maximum]`` (``maximum`` optional, inclusive).
+
+    Empty bounds, or a ``default`` outside them, is a bug in the calling leaf and
+    raises ``ValueError`` whether or not the variable is set.
+    """
+    _check_bounds(name, default, minimum, maximum)
     raw = _raw(env, name)
     if raw is None:
         return default
@@ -108,8 +121,11 @@ def env_float(
     """Parse ``name`` as a finite float in ``[minimum, maximum]`` (``maximum`` optional, inclusive).
 
     ``nan`` and ``inf`` are refused: ``float()`` accepts them, and ``nan`` fails
-    every comparison, so a bound check alone would let it through.
+    every comparison, so a bound check alone would let it through. Empty bounds,
+    or a ``default`` outside them (``nan`` included), raises ``ValueError`` as
+    :func:`env_int` does.
     """
+    _check_bounds(name, default, minimum, maximum)
     raw = _raw(env, name)
     if raw is None:
         return default

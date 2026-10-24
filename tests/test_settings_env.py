@@ -15,6 +15,8 @@ import pytest
 from brain.config import ConfigError
 from brain.settings._env import env_bool, env_choice, env_float, env_int, env_str
 
+pytestmark = pytest.mark.nodb
+
 NAME = "BRAIN_SETTINGS_TEST_KNOB"
 COLOURS = frozenset({"red", "green", "blue"})
 # Shaped like a credential, so a refusal that echoed it would be a leak.
@@ -185,6 +187,23 @@ def test_env_int_refuses_outside_a_closed_range(raw: str) -> None:
     assert str(caught.value) == f"{NAME} must be an integer in [2, 50]"
 
 
+@pytest.mark.parametrize(
+    ("default", "minimum", "maximum"),
+    [(0, 1, None), (51, 2, 50), (1, 2, 50)],
+    ids=["below", "above", "below_range"],
+)
+def test_env_int_default_outside_bounds_is_a_programming_error(
+    default: int, minimum: int, maximum: int | None
+) -> None:
+    with pytest.raises(ValueError, match="default"):
+        env_int({NAME: "5"}, NAME, default, minimum=minimum, maximum=maximum)
+
+
+def test_env_int_empty_bounds_are_a_programming_error() -> None:
+    with pytest.raises(ValueError, match="minimum exceeds maximum"):
+        env_int({}, NAME, 5, minimum=10, maximum=2)
+
+
 # ---------------------------------------------------------------------------
 # AC1 — env_float
 # ---------------------------------------------------------------------------
@@ -233,6 +252,23 @@ def test_env_float_refuses_outside_a_closed_range(raw: str) -> None:
         env_float({NAME: raw}, NAME, 0.5, minimum=0.0, maximum=1.0)
 
     assert str(caught.value) == f"{NAME} must be a finite number in [0.0, 1.0]"
+
+
+@pytest.mark.parametrize(
+    ("default", "maximum"),
+    [(-0.5, None), (1.5, 1.0), (math.nan, None)],
+    ids=["below", "above", "nan"],
+)
+def test_env_float_default_outside_bounds_is_a_programming_error(
+    default: float, maximum: float | None
+) -> None:
+    with pytest.raises(ValueError, match="default"):
+        env_float({NAME: "0.5"}, NAME, default, minimum=0.0, maximum=maximum)
+
+
+def test_env_float_empty_bounds_are_a_programming_error() -> None:
+    with pytest.raises(ValueError, match="minimum exceeds maximum"):
+        env_float({}, NAME, 0.5, minimum=1.0, maximum=0.0)
 
 
 # ---------------------------------------------------------------------------
