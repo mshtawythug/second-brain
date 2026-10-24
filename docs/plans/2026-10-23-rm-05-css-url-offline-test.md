@@ -12,7 +12,7 @@
 
 | File | Change |
 |---|---|
-| `tests/test_ui_static_assets.py` | Two regexes (`_CSS_COMMENT_RE`, `_CSS_URL_RE`), three helpers (`_css_url_targets`, `_css_url_problems`, `_unshipped_targets`), the test `test_every_css_url_resolves_on_disk`, a parametrized test of the extraction, and synthetic-tree tests for each acceptance criterion. |
+| `tests/test_ui_static_assets.py` | Two regexes (`_CSS_COMMENT_RE`, `_CSS_URL_RE`), four helpers (`_css_url_targets`, `_css_url_problems`, `_unshipped_targets`, `_stylesheet_problems`), the test `test_every_css_url_resolves_on_disk`, a parametrized test of the extraction, and synthetic-tree tests for each acceptance criterion. |
 | `CHANGELOG.md` | An Unreleased entry. |
 | Spec Appendix B, backlog BL-3 | Tracker rows, in a follow-up commit once the PR number exists. |
 
@@ -67,13 +67,15 @@ no mutation could turn red.
 
 ### The test on the real tree
 
-`test_every_css_url_resolves_on_disk` checks every shipped `.css` file, found with
-`_shipped_by_suffix(".css")`. That covers `css/*.css` and any future top-level `static/*.css`,
-which pyproject also declares. It asserts:
+`test_every_css_url_resolves_on_disk` is one assertion:
+`_stylesheet_problems(static_dir(), _package_data_globs("brain.ui"))` is empty.
 
-- At least one stylesheet was found.
-- No problems.
-- Every resolved file matches a declared `package-data` glob (`_unshipped_targets`).
+`_stylesheet_problems(static_root, globs) -> list[str]` walks every `.css` file under
+`static_root`, skipping `__pycache__`. That covers `css/*.css` and any future top-level
+`static/*.css`, which pyproject also declares. For each file it calls `_css_url_problems` and
+then `_unshipped_targets`, with `static_root.parent` as the package root. Finding no stylesheet
+is itself a problem. The loop is a helper so the packaging clause can be tested on a synthetic
+tree; inline in the test, removing that clause survived, because today's tree resolves no files.
 
 **The packaged copy.** `static_dir()` reads through `importlib.resources`, so in CI (an editable
 install) it reads `src/`. No wheel is built: `test_every_shipped_asset_matches_a_declared_glob`
@@ -90,24 +92,32 @@ texture. The residue check in step 4 already makes an unparsed `url(` fail. A st
 | AC | Test |
 |---|---|
 | 1. Green on `master` | `test_every_css_url_resolves_on_disk` |
-| 2. `url("missing.woff2")` fails, naming the stylesheet and the target | `test_a_missing_css_url_target_is_named` |
+| 2. `url("missing.woff2")` fails, naming the stylesheet and the target | `test_a_missing_css_url_target_is_named` (`missing.woff2`, `data-missing.woff2`) |
 | 3. A `url()` that escapes `static_dir()` fails | `test_a_css_url_escaping_static_fails` (parametrized: `../../`, `../../../`, root-relative outside `/static/`, other origin, protocol-relative, both of those with a path that names a real local file, and an encoded `%2e%2e/%2e%2e/`), `test_a_css_url_through_a_symlink_out_of_static_fails` |
 | 4. `data:` passes, including a nested `url(%23id)` | `test_data_and_fragment_urls_pass`, and the `nested data URI` case of the extraction test |
 | 5. A comment-only `url()` is ignored | the `comment` cases of the extraction test, and `test_a_commented_out_css_url_is_not_checked` |
 | 6. An empty `url()` fails | `test_an_empty_css_url_fails` (parametrized: `url()`, `url("")`, `url('  ')`, and the query-only `url("?v=1")`, `url("?#iefix")`) |
 
 Extraction, parametrized (`test_css_url_extraction`): double-quoted, single-quoted, bare,
-whitespace inside the parentheses, several on one line, upper-case `URL(`, a comment (one-line and
-multi-line), a nested `data:` URI, an empty target. `test_an_unparseable_css_url_raises` covers
+whitespace inside the parentheses and inside the quotes, several on one line, upper-case `URL(`, a
+comment (one-line, multi-line, and a target between two comments, which pins the non-greedy strip),
+a nested `data:` URI, an empty target. `test_an_unparseable_css_url_raises` covers
 the residue check, and `test_an_unparseable_css_url_is_a_problem` covers how `_css_url_problems`
 reports it. `test_unshipped_targets_reports_only_files_no_glob_ships` runs `_unshipped_targets`
 against the real `brain.ui` globs: `static/fonts/a.woff2` is reported, and `static/brain-logo.png`
 and `static/css/x.css` are not, so both an accept-all and a reject-all helper fail. Each
-`test_a_css_url_escaping_static_fails` case asserts which check fired. Positive cases are included so that a resolver that rejects everything also
-fails.
+`test_a_css_url_escaping_static_fails` case asserts which check fired.
+`test_stylesheet_problems_include_an_unshipped_target` runs `_stylesheet_problems` on a synthetic
+`ui/static/` whose stylesheet names a real `static/fonts/a.woff2`, against the real globs, and
+expects exactly one "matches no package-data glob" problem.
+`test_stylesheet_problems_report_an_empty_walk` covers the no-stylesheet problem. The unparseable
+cases include an upper-case `URL(`, so the residue check stays case-insensitive. Positive cases
+are included so that a resolver that rejects everything also fails.
 
 Resolution positives: `test_resolvable_css_urls_pass` (sibling, `../` into a sibling directory,
-root-relative `/static/...`, query and fragment, percent-encoded space).
+root-relative `/static/...`, query and fragment, percent-encoded space, and `data-logo.png`, a real
+file whose name starts with "data"). `test_a_missing_css_url_target_is_named` also names a missing
+`data-missing.woff2`, so the `data:` skip cannot widen to any "data" prefix.
 
 Mutation proof (DoD 2), in a `git archive` copy with `PYTHONPATH` pinned:
 
@@ -135,6 +145,17 @@ Added in review round 1 (PR #67), each of which survived before its test existed
 15. Letting the bare alternative accept a backslash again turns the `escaped-paren` case red.
 16. Restoring the old, symlink-only wording of the containment problem turns the symlink test
     and the `encoded-dot-dot` case red.
+
+Added in review round 2 (PR #67), each of which survived at `8ac8e23`:
+
+17. A greedy comment strip (`/\*.*\*/`) turns the `between-comments` case red.
+18. Replacing the packaging clause in `_stylesheet_problems` with `pass` turns
+    `test_stylesheet_problems_include_an_unshipped_target` red.
+19. Removing the empty-walk problem turns `test_stylesheet_problems_report_an_empty_walk` red.
+20. Dropping `re.IGNORECASE` from the residue pattern turns `upper-case-unparseable` red.
+21. Widening the `data:` skip to `startswith("data")` turns `data-prefixed-file-name` and
+    `data-prefixed-missing` red.
+22. Removing the target `.strip()` turns `whitespace-inside-quotes` red.
 
 ## Risks
 
