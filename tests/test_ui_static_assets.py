@@ -436,7 +436,8 @@ def _css_url_problems(stylesheet: Path, static_root: Path) -> tuple[list[Path], 
     root-relative ``/static/…`` one resolves to the file the server would send.
     ``data:`` and ``#fragment`` targets fetch no file and are skipped.
 
-    An EMPTY target is a problem in its own right: joined as a URL it names the
+    A target with NO PATH is a problem in its own right: an empty ``url()``,
+    or a query-only one such as ``url("?v=1")``. Joined as a URL it names the
     stylesheet itself, and joined as a path it names the directory, so neither
     ``exists()`` nor ``is_file()`` would catch it. For the same reason every
     resolved target must pass ``is_file()``, never ``exists()``.
@@ -455,8 +456,8 @@ def _css_url_problems(stylesheet: Path, static_root: Path) -> tuple[list[Path], 
         if target.lower().startswith("data:") or target.startswith("#"):
             continue
         where = f"{name}: url({target!r})"
-        if not target:
-            problems.append(f"{where} is empty, so it names no file")
+        if not urlsplit(target).path:
+            problems.append(f"{where} has no path, so it names no file")
             continue
         joined = urlsplit(urljoin(sheet_url, target))
         path = unquote(joined.path)
@@ -474,6 +475,27 @@ def _css_url_problems(stylesheet: Path, static_root: Path) -> tuple[list[Path], 
         else:
             files.append(candidate)
     return files, problems
+
+
+def _unshipped_targets(
+    name: str, files: list[Path], package_root: Path, globs: list[str]
+) -> list[str]:
+    """A problem for each of ``files`` that no ``package-data`` glob ships.
+
+    ``name`` is the stylesheet that names the files. ``package_root`` is the
+    directory the globs are relative to (``brain/ui``). A file found on disk
+    but outside every glob loads in the dev tree and is missing from the wheel.
+    """
+    root = package_root.resolve()
+    problems: list[str] = []
+    for target in files:
+        relative = target.relative_to(root).as_posix()
+        if not any(_glob_matches(relative, pattern) for pattern in globs):
+            problems.append(
+                f"{name}: {relative} exists but matches no package-data glob, "
+                f"so the wheel would not ship it"
+            )
+    return problems
 
 
 def test_every_css_url_resolves_on_disk() -> None:
@@ -502,13 +524,7 @@ def test_every_css_url_resolves_on_disk() -> None:
     for name in stylesheets:
         files, found = _css_url_problems(static_root / name, static_root)
         problems.extend(found)
-        for target in files:
-            relative = target.relative_to(package_root.resolve()).as_posix()
-            if not any(_glob_matches(relative, pattern) for pattern in globs):
-                problems.append(
-                    f"{name}: {relative} exists but matches no package-data glob, "
-                    f"so the wheel would not ship it"
-                )
+        problems.extend(_unshipped_targets(name, files, package_root, globs))
     assert not problems, "stylesheet url() targets that would not load:\n" + "\n".join(problems)
 
 
@@ -618,20 +634,32 @@ def test_resolvable_css_urls_pass(tmp_path: Path, target: str) -> None:
     assert files[0].is_file()
 
 
+_OUTSIDE_STATIC = "outside /static/"
+_NOT_SAME_ORIGIN = "not same-origin"
+
+
 @pytest.mark.parametrize(
-    "target",
+    ("target", "reason"),
     [
-        pytest.param("../../app.py", id="parent-of-static"),
-        pytest.param("../../../../etc/hosts", id="far-above-root"),
-        pytest.param("/elsewhere/a.woff2", id="root-relative-outside-static"),
-        pytest.param("//cdn.invalid/a.woff2", id="protocol-relative"),
-        pytest.param("https://cdn.invalid/a.woff2", id="other-origin"),
+        pytest.param("../../app.py", _OUTSIDE_STATIC, id="parent-of-static"),
+        pytest.param("../../../../etc/hosts", _OUTSIDE_STATIC, id="far-above-root"),
+        pytest.param("/elsewhere/a.woff2", _OUTSIDE_STATIC, id="root-relative-outside-static"),
+        pytest.param("//cdn.invalid/a.woff2", _NOT_SAME_ORIGIN, id="protocol-relative"),
+        pytest.param("https://cdn.invalid/a.woff2", _NOT_SAME_ORIGIN, id="other-origin"),
         # The path names a real local file: only the origin check rejects these.
-        pytest.param("https://cdn.invalid/static/img/logo.png", id="other-origin-static-path"),
-        pytest.param("//cdn.invalid/static/img/logo.png", id="protocol-relative-static-path"),
+        pytest.param(
+            "https://cdn.invalid/static/img/logo.png",
+            _NOT_SAME_ORIGIN,
+            id="other-origin-static-path",
+        ),
+        pytest.param(
+            "//cdn.invalid/static/img/logo.png",
+            _NOT_SAME_ORIGIN,
+            id="protocol-relative-static-path",
+        ),
     ],
 )
-def test_a_css_url_escaping_static_fails(tmp_path: Path, target: str) -> None:
+def test_a_css_url_escaping_static_fails(tmp_path: Path, target: str, reason: str) -> None:
     """AC 3: a target outside ``static_dir()`` fails, even when the file exists."""
     static_root, stylesheet = _static_tree(tmp_path, f'a {{ src: url("{target}"); }}')
     (tmp_path / "app.py").write_text("", encoding="utf-8")
@@ -642,6 +670,46 @@ def test_a_css_url_escaping_static_fails(tmp_path: Path, target: str) -> None:
     assert len(problems) == 1
     assert "css/x.css" in problems[0]
     assert target in problems[0]
+    # The reason, too: each check must be the one that fires, or removing it
+    # would leave the case red only because a later check happened to catch it.
+    assert reason in problems[0]
+
+
+def test_an_unparseable_css_url_is_a_problem(tmp_path: Path) -> None:
+    """The resolver reports a ``url(`` it cannot parse; it never drops it."""
+    static_root, stylesheet = _static_tree(tmp_path, 'a { src: url("a\\"b.png"); }')
+
+    files, problems = _css_url_problems(stylesheet, static_root)
+
+    assert files == []
+    assert len(problems) == 1
+    assert "css/x.css" in problems[0]
+    assert "could not parse" in problems[0]
+
+
+def test_unshipped_targets_reports_only_files_no_glob_ships(tmp_path: Path) -> None:
+    """The ``package-data`` clause of the real-tree test, against the real globs.
+
+    Today's stylesheets name no file at all (their one ``url()`` is a ``data:``
+    SVG), so on the real tree this clause checks nothing. This test is what
+    keeps it honest until RM-50 gives it a font to check.
+    """
+    globs = _package_data_globs("brain.ui")
+    package_root = tmp_path / "ui"
+    unshipped = package_root / "static" / "fonts" / "a.woff2"
+    shipped_image = package_root / "static" / "brain-logo.png"
+    shipped_sheet = package_root / "static" / "css" / "x.css"
+    for path in (unshipped, shipped_image, shipped_sheet):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"asset")
+
+    problems = _unshipped_targets(
+        "css/x.css", [unshipped, shipped_image, shipped_sheet], package_root, globs
+    )
+
+    assert len(problems) == 1
+    assert "css/x.css" in problems[0]
+    assert "static/fonts/a.woff2" in problems[0]
 
 
 def test_a_css_url_through_a_symlink_out_of_static_fails(tmp_path: Path) -> None:
@@ -691,10 +759,12 @@ def test_a_commented_out_css_url_is_not_checked(tmp_path: Path) -> None:
         pytest.param("a { src: url(); }", id="bare"),
         pytest.param('a { src: url(""); }', id="double-quoted"),
         pytest.param("a { src: url('  '); }", id="whitespace"),
+        pytest.param('a { src: url("?v=1"); }', id="query-only"),
+        pytest.param('a { src: url("?#iefix"); }', id="query-and-fragment-only"),
     ],
 )
 def test_an_empty_css_url_fails(tmp_path: Path, body: str) -> None:
-    """AC 6: an empty target fails instead of resolving to the stylesheet or its directory."""
+    """AC 6: a target with no path fails instead of resolving to the stylesheet itself."""
     static_root, stylesheet = _static_tree(tmp_path, body)
 
     files, problems = _css_url_problems(stylesheet, static_root)
@@ -702,7 +772,7 @@ def test_an_empty_css_url_fails(tmp_path: Path, body: str) -> None:
     assert files == []
     assert len(problems) == 1
     assert "css/x.css" in problems[0]
-    assert "empty" in problems[0]
+    assert "names no file" in problems[0]
 
 
 @pytest.mark.parametrize(
