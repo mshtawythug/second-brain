@@ -179,12 +179,28 @@ def test_rejected_spec_registers_none_of_its_extensions() -> None:
     assert ".new" not in registry.supported_extensions()
 
 
-@pytest.mark.parametrize("bad", ["md", ".MD", ".", "", ". md"])
+# ``.tar.gz``, ``.a/b`` and ``".x\t"`` are the regression cases: they once
+# passed validation, yet ``spec_for`` matches on ``Path.suffix`` alone, so a
+# spec registered with one could never dispatch (it was silently dead).
+@pytest.mark.parametrize(
+    "bad", ["md", ".MD", ".", "", ". md", ".tar.gz", ".a/b", ".x\t", ".m d", ".é"]
+)
 def test_register_rejects_malformed_extension(bad: str) -> None:
     registry = ExtractorRegistry()
     spec = ExtractorSpec(name="bad", extensions=(bad,), load=lambda: _probe_extract)
     with pytest.raises(ValueError, match="extension"):
         registry.register(spec)
+    assert registry.supported_extensions() == []
+
+
+# Every extension the roadmap's source tickets plan to register (RM-32, RM-33,
+# RM-38) must still validate, and each must be what ``Path.suffix`` yields.
+@pytest.mark.parametrize("ext", [".png", ".jpg", ".jpeg", ".m4a", ".mp3", ".wav"])
+def test_register_accepts_planned_extensions(ext: str) -> None:
+    registry = ExtractorRegistry()
+    registry.register(ExtractorSpec(name="planned", extensions=(ext,), load=lambda: _probe_extract))
+    assert registry.supported_extensions() == [ext]
+    assert Path(f"file{ext}").suffix == ext
 
 
 def test_register_rejects_empty_extensions() -> None:

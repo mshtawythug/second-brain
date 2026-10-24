@@ -24,6 +24,7 @@ fields keep the base CLI light and ``brain ingest-dir`` stable:
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,9 @@ if TYPE_CHECKING:
     from . import ExtractedDoc
 
 ExtractorFn: TypeAlias = "Callable[[Path], ExtractedDoc]"
+
+#: What ``Path.suffix`` can return and the registry can match: ``.md``, ``.m4a``.
+_EXTENSION_RE = re.compile(r"\.[a-z0-9]+")
 
 
 def _no_wrapped_errors() -> tuple[type[Exception], ...]:
@@ -60,10 +64,12 @@ def _validate_extensions(spec: ExtractorSpec, taken: dict[str, ExtractorSpec]) -
         raise ValueError(f"extractor {spec.name!r} declares no extensions")
     seen: set[str] = set()
     for ext in spec.extensions:
-        if len(ext) < 2 or not ext.startswith(".") or ext != ext.lower() or " " in ext:
+        # One plain suffix only: ``spec_for`` matches on ``Path.suffix``, so an
+        # extension such as ``.tar.gz`` or ``.a/b`` would register and never fire.
+        if _EXTENSION_RE.fullmatch(ext) is None:
             raise ValueError(
-                f"extractor {spec.name!r}: extension {ext!r} must be lowercase "
-                f"with a leading dot, like '.md'"
+                f"extractor {spec.name!r}: extension {ext!r} must be one lowercase "
+                f"suffix of ASCII letters and digits with a leading dot, like '.md'"
             )
         if ext in seen:
             raise ValueError(f"extractor {spec.name!r} lists {ext} twice")
