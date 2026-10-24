@@ -24,12 +24,23 @@ when the summary is really written. Nothing changes for any existing file type o
 | `tests/test_ingest_dispatch.py` (new) | AC1–AC3, the before/after equivalence table, laziness. |
 | `tests/test_source_kinds_identity.py` (new) | AC4, plus the pinned kind set and every re-export's identity. |
 | `tests/test_ingest_docstring.py` (new) | AC5. |
+| `tests/test_cli_ingest_dir_walk.py` (new) | `ingest-dir` with no `--ext` skips an extractor registered with `in_directory_walks=False`; `--ext` still reaches it. |
+| `tests/test_import_hygiene.py` | Importing `brain.cli` / `brain.mcp_server` loads neither `pypdf` nor `docx`. |
 | `CLAUDE.md` | Ceiling rows: promote `ingest/__init__.py`'s descriptive last hop to `ad67f43` (2,369), add this ticket's hop; add a hop to `cli_ingest.py`'s row. |
 | `docs/specs/2026-10-23-brain-ui-ingest-tab-design.md` | §3.1 item 2 names `ingest.dispatch.supported_extensions()` instead of `ingest._EXTRACTORS` (ticket scope). |
 | `CONTRIBUTING.md`, `CHANGELOG.md` | "Adding a file extractor or a source kind"; Unreleased entry. |
 | Spec Appendix B; backlog BL-12 | Follow-up commit after the PR opens: RM-07 → DONE (#PR); BL-12 → SHIPPED. |
 
 ## Design notes beyond the ticket
+
+**Deviations from the ticket, both approved by the coordinator on 2026-10-23.** The spec's RM-07
+text is left as written (§0); they are recorded here and in the PR body.
+
+1. `ExtractorSpec.wrap_errors` is a zero-argument loader, `Callable[[], tuple[type[Exception], ...]]`,
+   not the ticket's `tuple[type[Exception], ...]` (first note below).
+2. An `ExtractorRegistry` class carries the table; the ticket's three module functions delegate to
+   one default instance. It exists so tests inject a fresh registry instead of mutating the
+   process-wide one (third note below).
 
 - **`wrap_errors` is a zero-argument loader, not a tuple.** The ticket types it as
   `tuple[type[Exception], ...]` and also asks for "the same lazy imports" `extract_path` has today.
@@ -74,10 +85,10 @@ when the summary is really written. Nothing changes for any existing file type o
 |---|---|
 | 1. Existing extractor tests pass unchanged | `tests/test_cli_ingest.py`, `tests/test_ingest_{text,markdown,pdf,docx}.py` untouched and green |
 | 2. Duplicate extension raises | `test_register_duplicate_extension_raises` |
-| 3. Runtime extractor used, listed, and excluded from walks when `in_directory_walks=False` | `test_registered_extractor_is_dispatched_and_listed`, `test_non_walk_extractor_absent_from_directory_walk`, `test_module_functions_use_the_default_registry` |
+| 3. Runtime extractor used, listed, and excluded from walks when `in_directory_walks=False` | `test_registered_extractor_is_dispatched_and_listed`, `test_non_walk_extractor_absent_from_directory_walk`, `test_module_functions_use_the_default_registry`, `test_ingest_dir_default_walk_skips_non_walk_extractor`, `test_ingest_dir_explicit_ext_reaches_non_walk_extractor` |
 | 4. `vault.links._SOURCE_KINDS is source_kinds.VALID_SOURCE_KINDS` | `test_vault_links_source_kinds_is_canonical` |
 | 5. Docstring no longer says "inside the same transaction" | `test_ingest_document_docstring_says_summary_runs_after_commit` |
-| No behaviour change | `test_builtin_dispatch_table_unchanged`, `test_builtin_extract_matches_direct_extractor`, `test_source_kind_set_unchanged` |
+| No behaviour change | `test_builtin_dispatch_table_unchanged`, `test_builtin_extract_matches_direct_extractor`, `test_source_kind_set_unchanged`, `test_base_imports_do_not_load_document_parsers` |
 
 ## Risks
 
