@@ -18,6 +18,8 @@ from brain.config import Config
 from brain.settings._env import env_bool, env_choice, env_float, env_int, env_str
 from tests.conftest import isolate_config_dotenv
 
+pytestmark = pytest.mark.nodb
+
 INT_KNOB = "BRAIN_SETTINGS_PROBE_INT"
 BOOL_KNOB = "BRAIN_SETTINGS_PROBE_BOOL"
 CHOICE_KNOB = "BRAIN_SETTINGS_PROBE_CHOICE"
