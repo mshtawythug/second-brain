@@ -396,8 +396,12 @@ _CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 #: consumes the whole outer target, and ``finditer`` never overlaps matches, so
 #: the inner ``url(`` is never matched by itself. A bare-only pattern would
 #: match it and report ``%23n`` as a missing file.
+#:
+#: The bare alternative refuses a backslash, so a CSS escape there
+#: (``url(a\)b)``) matches nothing and the residue check raises. Otherwise it
+#: would be cut short at the escape and checked as ``a\``.
 _CSS_URL_RE = re.compile(
-    r"""\burl\(\s*(?:"([^"]*)"|'([^']*)'|([^\s"'()]*))\s*\)""", re.IGNORECASE
+    r"""\burl\(\s*(?:"([^"]*)"|'([^']*)'|([^\s"'()\\]*))\s*\)""", re.IGNORECASE
 )
 _CSS_URL_OPEN_RE = re.compile(r"\burl\(", re.IGNORECASE)
 
@@ -405,13 +409,15 @@ _CSS_URL_OPEN_RE = re.compile(r"\burl\(", re.IGNORECASE)
 #: joins them. Only its identity matters: a target that leaves it is external.
 _UI_ORIGIN = "http://brain-ui.invalid"
 _STATIC_URL_PREFIX = "/static/"
+_OUTSIDE_STATIC_DIR = "outside static/ (through a link or an encoded ..)"
 
 
 def _css_url_targets(css: str) -> list[str]:
     """Every ``url()`` target in ``css``, comments excluded, whitespace stripped.
 
     Raises :class:`ValueError` when a ``url(`` is left over that the pattern
-    could not parse (an escaped quote, a quote inside a bare target). Without
+    could not parse: a backslash escape in a quoted or bare target, or a quote
+    inside a bare target. Without
     that, a ``url()`` the regex did not understand would go unchecked and the
     test would stay green.
     """
@@ -469,7 +475,7 @@ def _css_url_problems(stylesheet: Path, static_root: Path) -> tuple[list[Path], 
             continue
         candidate = (root / path.removeprefix(_STATIC_URL_PREFIX)).resolve()
         if not candidate.is_relative_to(root):
-            problems.append(f"{where} resolves through a link to {candidate}, outside static/")
+            problems.append(f"{where} resolves to {candidate}, {_OUTSIDE_STATIC_DIR}")
         elif not candidate.is_file():
             problems.append(f"{where} resolves to {path}, which is not a file")
         else:
@@ -575,6 +581,7 @@ def test_css_url_extraction(css: str, expected: list[str]) -> None:
     [
         pytest.param('a { src: url("a\\"b.png"); }', id="escaped-quote"),
         pytest.param("a { src: url(a'b.png); }", id="quote-in-bare-target"),
+        pytest.param("a { src: url(a\\)b.png); }", id="escaped-paren"),
     ],
 )
 def test_an_unparseable_css_url_raises(css: str) -> None:
@@ -644,6 +651,9 @@ _NOT_SAME_ORIGIN = "not same-origin"
         pytest.param("../../app.py", _OUTSIDE_STATIC, id="parent-of-static"),
         pytest.param("../../../../etc/hosts", _OUTSIDE_STATIC, id="far-above-root"),
         pytest.param("/elsewhere/a.woff2", _OUTSIDE_STATIC, id="root-relative-outside-static"),
+        # Percent-decoded only after urljoin, so the `..` survives the /static/
+        # prefix check and is caught by the containment check after resolve().
+        pytest.param("%2e%2e/%2e%2e/app.py", _OUTSIDE_STATIC_DIR, id="encoded-dot-dot"),
         pytest.param("//cdn.invalid/a.woff2", _NOT_SAME_ORIGIN, id="protocol-relative"),
         pytest.param("https://cdn.invalid/a.woff2", _NOT_SAME_ORIGIN, id="other-origin"),
         # The path names a real local file: only the origin check rejects these.
@@ -724,6 +734,7 @@ def test_a_css_url_through_a_symlink_out_of_static_fails(tmp_path: Path) -> None
     assert files == []
     assert len(problems) == 1
     assert "leak.woff2" in problems[0]
+    assert _OUTSIDE_STATIC_DIR in problems[0]
 
 
 def test_data_and_fragment_urls_pass(tmp_path: Path) -> None:
