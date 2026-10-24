@@ -34,12 +34,12 @@ class InvalidSourceKind(BrainError):
 
 
 #: The four kinds the ingest paths may write to ``sources.kind``. **This is the
-#: canonical definition** — :data:`brain.ui.schemas.VALID_SOURCE_KINDS` and
-#: :data:`brain.cli._VALID_SOURCE_KINDS` are re-exports *of this object*, so the
-#: mirroring runs toward them, not from them. (The direction was stated backwards
-#: here until 2026-08-21, which matters: a reader treating this as the mirror
-#: edits one of the re-exports and expects the enum to change.)
-#: :data:`brain.vault.links._SOURCE_KINDS` is a genuine separate copy.
+#: canonical definition** — :data:`brain.ui.schemas.VALID_SOURCE_KINDS`,
+#: :data:`brain.cli._VALID_SOURCE_KINDS` and :data:`brain.vault.links._SOURCE_KINDS`
+#: are re-exports *of this object*, so the mirroring runs toward them, not from
+#: them. (The direction was stated backwards here until 2026-08-21, which matters:
+#: a reader treating this as the mirror edits one of the re-exports and expects the
+#: enum to change.) A new kind is added here and nowhere else in Python (RM-07).
 VALID_SOURCE_KINDS: frozenset[str] = frozenset({"manual", "krisp", "gmail", "slack"})
 
 
