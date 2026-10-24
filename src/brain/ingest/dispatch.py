@@ -7,8 +7,12 @@ registers here instead of growing ``ingest/__init__.py``, which is over the
 working.
 
 **Adding an extractor.** Write ``ingest/<kind>.py`` with a
-``(path: Path) -> ExtractedDoc`` function, then call :func:`register_extractor`
-with an :class:`ExtractorSpec` (the four built-ins below are the pattern). Two
+``(path: Path) -> ExtractedDoc`` function, then add an :class:`ExtractorSpec`
+for it to :data:`BUILTIN_EXTRACTORS` below. That is the one way to add one.
+:func:`register_extractor` is for code imported before dispatch runs (tests,
+extension modules loaded at startup), never for the extractor module itself:
+``load`` imports that module only after dispatch has found its spec. Register
+at import time only; the registry is a plain dict that dispatch iterates. Two
 fields keep the base CLI light and ``brain ingest-dir`` stable:
 
 - ``load`` and ``wrap_errors`` are **loaders**, called only when a file of that
@@ -184,7 +188,10 @@ _DEFAULT_REGISTRY = ExtractorRegistry(BUILTIN_EXTRACTORS)
 
 
 def register_extractor(spec: ExtractorSpec) -> None:
-    """Register ``spec`` process-wide; ``ValueError`` on a duplicate extension."""
+    """Register ``spec`` process-wide; ``ValueError`` on a duplicate extension.
+
+    Register at import time only, never while files are being dispatched.
+    """
     _DEFAULT_REGISTRY.register(spec)
 
 
