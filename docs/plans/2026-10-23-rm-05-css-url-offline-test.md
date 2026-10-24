@@ -28,9 +28,11 @@ reinstall follows. No skill or memory file documents the static-asset tests.
 2. `finditer` with one quote-aware pattern, case-insensitive (CSS function names are ASCII
    case-insensitive): `\burl\(\s*("…"|'…'|bare)\s*\)`. Matches do not overlap, so the
    double-quoted `data:` target in `css/base.css` consumes the `url(%23n)` nested inside it.
+   The bare alternative refuses a backslash, so a CSS escape there (`url(a\)b)`) matches
+   nothing, instead of being cut short and checked as `a\`.
 3. Each target is stripped of surrounding whitespace, as the URL parser does.
 4. **Nothing is skipped silently.** After every match is removed, a `url(` that is still left is
-   one the pattern could not parse (an escaped quote, a stray quote in a bare target). That raises
+   one the pattern could not parse (a backslash escape, a stray quote in a bare target). That raises
    `ValueError`, which the test reports as a failure. Without this, a `url()` the regex did not
    understand would simply go unchecked.
 
@@ -46,7 +48,9 @@ reinstall follows. No skill or memory file documents the static-asset tests.
   own directory, as the ticket says. A root-relative `/static/...` target resolves to the same
   file the server would send (the form `index.html` uses), rather than failing.
 - A target on another origin is a problem. So is a path outside `/static/`, and so is a file that
-  resolves (through a symlink) outside `static_dir()`. Together these are AC 3.
+  resolves outside `static_dir()` after `resolve()`. That last one happens through a symlink, or
+  through a percent-encoded `%2e%2e/`, which is decoded only after `urljoin` and so passes the
+  `/static/` prefix check. Together these are AC 3.
 - The query and fragment are dropped (`font.woff2?v=1#iefix` fetches `font.woff2`). The path is
   percent-decoded, and the result must pass `is_file()`.
 - Each problem names the stylesheet (relative to `static_dir()`) and the target (AC 2), and says
@@ -87,7 +91,7 @@ texture. The residue check in step 4 already makes an unparsed `url(` fail. A st
 |---|---|
 | 1. Green on `master` | `test_every_css_url_resolves_on_disk` |
 | 2. `url("missing.woff2")` fails, naming the stylesheet and the target | `test_a_missing_css_url_target_is_named` |
-| 3. A `url()` that escapes `static_dir()` fails | `test_a_css_url_escaping_static_fails` (parametrized: `../../`, `../../../`, root-relative outside `/static/`, other origin, protocol-relative, and both of those with a path that names a real local file), `test_a_css_url_through_a_symlink_out_of_static_fails` |
+| 3. A `url()` that escapes `static_dir()` fails | `test_a_css_url_escaping_static_fails` (parametrized: `../../`, `../../../`, root-relative outside `/static/`, other origin, protocol-relative, both of those with a path that names a real local file, and an encoded `%2e%2e/%2e%2e/`), `test_a_css_url_through_a_symlink_out_of_static_fails` |
 | 4. `data:` passes, including a nested `url(%23id)` | `test_data_and_fragment_urls_pass`, and the `nested data URI` case of the extraction test |
 | 5. A comment-only `url()` is ignored | the `comment` cases of the extraction test, and `test_a_commented_out_css_url_is_not_checked` |
 | 6. An empty `url()` fails | `test_an_empty_css_url_fails` (parametrized: `url()`, `url("")`, `url('  ')`, and the query-only `url("?v=1")`, `url("?#iefix")`) |
@@ -128,6 +132,9 @@ Added in review round 1 (PR #67), each of which survived before its test existed
 13. The no-path check narrowed back to `if not target:` turns the two query-only cases red.
 14. Removing the `/static/` prefix check turns the three "outside /static/" escape cases red. The
     origin check used to catch them by accident; they now assert the reason.
+15. Letting the bare alternative accept a backslash again turns the `escaped-paren` case red.
+16. Restoring the old, symlink-only wording of the containment problem turns the symlink test
+    and the `encoded-dot-dot` case red.
 
 ## Risks
 
