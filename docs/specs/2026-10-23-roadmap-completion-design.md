@@ -3620,7 +3620,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-05 | CSS `url()` offline test | XS | 1 | — | DONE (#67) |
 | RM-06 | CLI and MCP registration seams | S | 2 | — | DONE (#68) |
 | RM-07 | Extractor registry, one kind definition, BL-12 | S | 2 | — | DONE (#69) |
-| RM-08 | Feature settings leaves | XS | 2 | — | TODO |
+| RM-08 | Feature settings leaves | XS | 2 | — | DONE (#70) |
 | RM-09 | One search pipeline | S | 2 | RM-01, RM-02, RM-03 | TODO |
 | RM-10 | Ingest tab phase 1: jobs + paste backend | M | 3 | — | TODO |
 | RM-11 | Ingest tab phase 2: paste front end | M | 3 | RM-10 | TODO |

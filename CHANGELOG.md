@@ -22,6 +22,20 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — feature settings leaves, where new knobs go
+
+New configuration knobs now live in small per-feature modules under
+`brain.settings` instead of `config.py`, which is over the 800-line ceiling
+(roadmap ticket RM-08). A leaf is a frozen dataclass and one loader that reads
+`os.environ` after `Config.load()` has published the `.env` chain into it, so
+a leaf knob is set in the same `.env` files as every other knob. The shared
+parsers in `brain.settings._env` (`env_bool`, `env_choice`, `env_int`,
+`env_float`, `env_str`) treat an unset or blank variable as the default, and
+refuse a bad value with a `ConfigError` that names the variable and never quotes
+the value, so a secret cannot leak through an error message. No existing knob
+moved, and nothing changes for any current setting. How to add a knob is in
+`docs/configuration.md`, "Adding a knob: feature settings leaves".
+
 ### Added — an extractor registry, and one definition of the source kinds
 
 File extractors now register in a new leaf module, `brain.ingest.dispatch`,
