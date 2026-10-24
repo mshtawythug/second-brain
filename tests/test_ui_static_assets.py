@@ -775,6 +775,34 @@ def test_stylesheet_problems_include_an_unshipped_target(tmp_path: Path) -> None
     assert "matches no package-data glob" in problems[0]
 
 
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        pytest.param('a { src: url("missing.woff2"); }', "missing.woff2", id="missing-target"),
+        pytest.param('a { src: url("a\\"b.png"); }', "could not parse", id="unparseable"),
+    ],
+)
+def test_stylesheet_problems_include_a_missing_target(
+    tmp_path: Path, body: str, expected: str
+) -> None:
+    """The real-tree test's load clause, through the helper it calls.
+
+    Today's stylesheets have no target that fails to load, so on the real tree
+    nothing shows that :func:`_stylesheet_problems` keeps what
+    :func:`_css_url_problems` reports. Without this test, dropping those
+    problems would leave the real-tree check passing whatever the CSS says.
+    """
+    static_root = tmp_path / "ui" / "static"
+    (static_root / "css").mkdir(parents=True)
+    (static_root / "css" / "x.css").write_text(body, encoding="utf-8")
+
+    problems = _stylesheet_problems(static_root, _package_data_globs("brain.ui"))
+
+    assert len(problems) == 1
+    assert "css/x.css" in problems[0]
+    assert expected in problems[0]
+
+
 def test_stylesheet_problems_report_an_empty_walk(tmp_path: Path) -> None:
     """No stylesheet found is a failure, never a vacuous pass."""
     static_root = tmp_path / "ui" / "static"
