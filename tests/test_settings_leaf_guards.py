@@ -57,8 +57,11 @@ def _settings_modules() -> list[ModuleType]:
 
 # A settings leaf needs nothing from these modules (paths come from pathlib), so
 # importing any of them is refused outright: ``from os import *`` and
-# ``from posix import environ`` reach the environment without an ``os.`` prefix.
-_BANNED_ROOT_MODULES = frozenset({"os", "posix", "nt"})
+# ``from posix import environ`` reach the environment without an ``os.`` prefix,
+# and ``dotenv`` (a shipped dependency) would read ``.env`` files around the
+# chain ``Config.load()`` resolves, and write into ``os.environ``. Relative
+# imports are refused too: a sibling module named ``os`` is not worth a carve-out.
+_BANNED_ROOT_MODULES = frozenset({"os", "posix", "nt", "dotenv"})
 _ENV_NAMES = frozenset({"environ", "environb", "getenv", "getenvb"})
 
 
@@ -67,7 +70,8 @@ def environ_reads(source: str) -> list[str]:
 
     Four rules, each catching what the others miss:
 
-    1. any import of ``os``, ``posix`` or ``nt`` (including ``from os import *``);
+    1. any import of ``os``, ``posix``, ``nt`` or ``dotenv`` (including
+       ``from os import *``, and relative imports of a module of those names);
     2. attribute access to ``environ`` / ``environb`` / ``getenv`` / ``getenvb``
        on anything;
     3. one of those names as a string constant (``getattr(m, "environ")``,
@@ -83,7 +87,7 @@ def environ_reads(source: str) -> list[str]:
                     found.append(f"line {node.lineno}: import {alias.name}")
         elif isinstance(node, ast.ImportFrom):
             root = (node.module or "").split(".")[0]
-            if node.level == 0 and root in _BANNED_ROOT_MODULES:
+            if root in _BANNED_ROOT_MODULES:
                 found.append(f"line {node.lineno}: from {node.module} import ...")
         elif isinstance(node, ast.Attribute) and node.attr in _ENV_NAMES:
             found.append(f"line {node.lineno}: .{node.attr}")
@@ -130,6 +134,9 @@ ENVIRONMENT_READS = {
     "from_os_import_star": "from os import *\nX = environ\n",
     "from_posix_import_environ": "from posix import environ\n",
     "import_nt": "import nt\n",
+    "relative_from_os": "from .os import thing\n",
+    "import_dotenv": "import dotenv\n",
+    "from_dotenv_import_load_dotenv": "from dotenv import load_dotenv\n",
     "attribute_environ": "X = module.environ.get('A')\n",
     "attribute_getenv": "X = module.getenv('A')\n",
     "attribute_getenvb": "X = module.getenvb(b'A')\n",
@@ -150,7 +157,7 @@ def test_environ_checker_accepts_a_leaf_that_reads_only_its_env_argument() -> No
     source = (
         "from collections.abc import Mapping\n"
         "from pathlib import Path\n"
-        "from .os_helpers import thing\n"
+        "from .rerank_defaults import DEFAULT_MODEL\n"
         "def f(env: Mapping[str, str]) -> str | None:\n"
         "    return env.get('BRAIN_X')\n"
     )

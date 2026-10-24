@@ -199,6 +199,10 @@ def test_env_int_default_outside_bounds_is_a_programming_error(
         env_int({NAME: "5"}, NAME, default, minimum=minimum, maximum=maximum)
 
 
+def test_env_int_equal_bounds_are_a_legal_closed_range() -> None:
+    assert env_int({NAME: "5"}, NAME, 5, minimum=5, maximum=5) == 5
+
+
 def test_env_int_empty_bounds_are_a_programming_error() -> None:
     with pytest.raises(ValueError, match="minimum exceeds maximum"):
         env_int({}, NAME, 5, minimum=10, maximum=2)
@@ -264,6 +268,10 @@ def test_env_float_default_outside_bounds_is_a_programming_error(
 ) -> None:
     with pytest.raises(ValueError, match="default"):
         env_float({NAME: "0.5"}, NAME, default, minimum=0.0, maximum=maximum)
+
+
+def test_env_float_equal_bounds_are_a_legal_closed_range() -> None:
+    assert env_float({NAME: "0.5"}, NAME, 0.5, minimum=0.5, maximum=0.5) == 0.5
 
 
 def test_env_float_empty_bounds_are_a_programming_error() -> None:

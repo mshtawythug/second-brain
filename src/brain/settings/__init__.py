@@ -37,7 +37,7 @@ will pass ``stages`` or ``env`` explicitly.
 **Rules a leaf keeps**, each enforced by ``tests/test_settings_leaf_guards.py``
 for every module in this package:
 
-- A leaf never imports ``os``, ``posix`` or ``nt`` and never names
+- A leaf never imports ``os``, ``posix``, ``nt`` or ``dotenv`` and never names
   ``environ`` / ``getenv`` (it uses ``pathlib`` for paths); it reads the ``env``
   it was given.
 - A field that holds a secret (an API token, a webhook URL) is declared

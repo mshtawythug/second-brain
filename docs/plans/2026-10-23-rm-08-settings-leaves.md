@@ -73,9 +73,11 @@ The spec text is left as written (§0); these are recorded here and in the PR bo
    secret-named fields are `repr=False` (§2.3, the ticket's security line). The secret guard keys on
    field names ending in `_token`, `_secret`, `_password`, `_api_key`, `_secret_key`,
    `_private_key` or `_webhook_url`, in any case; a leaf that holds a secret under another name must
-   use one of those suffixes. The environment guard refuses any import of `os`, `posix` or `nt`, any
-   attribute or string `environ` / `environb` / `getenv` / `getenvb`, and a dynamic import of a
-   banned module (review round 1 closed four bypasses of the first version).
+   use one of those suffixes. The environment guard refuses any import of `os`, `posix`, `nt` or
+   `dotenv` (relative imports included), any attribute or string `environ` / `environb` / `getenv` /
+   `getenvb`, and a dynamic import of a banned module (review round 1 closed four bypasses of the
+   first version; round 2 added `dotenv`, which would read `.env` files around the chain, and
+   dropped the relative-import carve-out).
 
 ## Acceptance criteria → tests
 
