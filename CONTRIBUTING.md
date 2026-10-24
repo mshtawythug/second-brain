@@ -342,7 +342,7 @@ src/brain/
   uninstall.py        — `brain uninstall` (removes launchd plists + runtime state)
   cli_claude.py       — `brain claude install-skill` (installs the Claude Code skill)
   templates/          — packaged docker-compose.yml.j2, env.example, AGE Dockerfile, skill, launchd plists + bin wrappers
-  ingest/             — extractors per file type + chunker + Embedder Protocol + graph sync hook
+  ingest/             — extractors per file type, their registry (dispatch.py) + chunker + Embedder Protocol + graph sync hook
   vault/              — vault-model modules (slug, templates, frontmatter, export, links, resolver, sync, rename, graph, watch, paths)
   graph_rag/          — GraphRAG package: backend (AGE), schema (frozen value objects), extractor (Ollama), cooccur, weighting, traversal, router, communities, sync, reconcile
   eval/               — retrieval + answer eval harness (metrics, baselines, corpus, runner, answer_eval for `brain eval --answer`)
@@ -417,6 +417,80 @@ a module on a throwaway server with
 `register_extension_tools(make_server("t"), ctx, modules=[module])`, and call
 `brain.mcp_tools._reset_contexts_for_tests([module])` before binding it again;
 `tests/mcp_extension_probe.py` is a working example.
+
+## Adding a file extractor or a source kind
+
+`ingest/__init__.py` is over the 800-line ceiling, so the extension → extractor
+table lives in its own leaf, `src/brain/ingest/dispatch.py` (RM-07). A new
+source follows the nine-point protocol in §2.4 of
+`docs/specs/2026-10-23-roadmap-completion-design.md`; this section covers the
+two pieces of Python it touches.
+
+**A file extractor.** Write `src/brain/ingest/<kind>.py` with a
+`(path: Path) -> ExtractedDoc` function, then add an `ExtractorSpec` for it to
+`BUILTIN_EXTRACTORS` in `dispatch.py`, next to the four built-ins. That is the
+one way to add an extractor:
+
+```python
+def _load_example() -> ExtractorFn:
+    from .example import extract_example  # imported only when a file is extracted
+
+    return extract_example
+
+
+def _example_errors() -> tuple[type[Exception], ...]:
+    from example_parser import ParseError  # re-raised as ValueError("malformed EXAMPLE: ...")
+
+    return (ParseError,)
+
+
+BUILTIN_EXTRACTORS = (
+    ...,  # the four built-ins
+    ExtractorSpec(
+        name="example",
+        extensions=(".example",),
+        load=_load_example,
+        wrap_errors=_example_errors,
+        in_directory_walks=False,  # keep it out of `brain ingest-dir`'s default walk
+    ),
+)
+```
+
+`load` and `wrap_errors` are both loaders, so a parser loads only when a file of
+its type is extracted (`tests/test_import_hygiene.py` checks that `brain.cli`
+does not import `pypdf` or `docx`). Each extension must be one lowercase suffix
+of ASCII letters and digits (`.md`, `.m4a`), because dispatch matches on
+`Path.suffix`; a duplicate or malformed extension raises `ValueError`. Leave
+`in_directory_walks` at `True` only if every existing `brain ingest-dir` run
+should start picking the new type up; `--ext` reaches it either way.
+
+`register_extractor(spec)` is for code that is already imported before dispatch
+runs: tests, and extension modules loaded at startup. Do **not** call it from
+the extractor module itself. That module is imported lazily, by `load`, only
+after dispatch has already found its spec, so a registration there never runs
+in time. Register at import time only, never while files are being dispatched:
+the registry is a plain dict, and a registration racing a
+`supported_extensions()` call can fail mid-iteration.
+
+`brain.ingest` re-exports `extract_path` and `supported_extensions`, so existing
+`from brain.ingest import extract_path` imports keep working. New code imports
+both from `brain.ingest.dispatch`.
+
+**A source kind.** Add it to `VALID_SOURCE_KINDS` in `src/brain/source_kinds.py`.
+That is its one Python definition: `brain.ui.schemas`, `brain.cli` and
+`brain.vault.links` re-export that object, and
+`tests/test_source_kinds_identity.py` fails if one of them restates the literal.
+Some per-kind lists are **not** derived from it, and a source ticket updates
+each of them, or states why it does not:
+
+- `VAULT_SUBDIRS` in `src/brain/vault/__init__.py`, which hardcodes
+  `_ingested/{krisp,slack,gmail,manual}` for `brain vault init`;
+- the `--source` help text of `brain demo query` in `src/brain/cli_demo.py`,
+  which lists the kinds;
+- the front-end glyph and month-grouping tables (§2.4 point 2 lists them).
+
+The kind is a single lowercase word, because it becomes the mirror directory
+`_ingested/<kind>/` and a `[[<kind>:<id>]]` link prefix.
 
 ## Tests
 

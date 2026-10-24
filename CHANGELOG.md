@@ -22,6 +22,28 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — an extractor registry, and one definition of the source kinds
+
+File extractors now register in a new leaf module, `brain.ingest.dispatch`,
+instead of a table inside `ingest/__init__.py`, which is over the 800-line
+ceiling (roadmap ticket RM-07). An `ExtractorSpec` names its extensions, loads
+its extractor and its parser's error types lazily, and can stay out of
+`brain ingest-dir`'s default walk (`in_directory_walks=False`), so a later image
+or audio extractor does not change what an existing `ingest-dir` run picks up.
+`brain.ingest` still exports `extract_path` and `supported_extensions`.
+`brain.vault.links` now re-exports `brain.source_kinds.VALID_SOURCE_KINDS`
+instead of keeping its own copy, so a new source kind is defined in one place.
+Nothing changes for any existing file type or source kind: the same five
+extensions map to the same four extractors, in the same order, with the same
+error messages. How to add either is in `CONTRIBUTING.md`, "Adding a file
+extractor or a source kind".
+
+### Fixed — `ingest_document`'s docstring says when the summary is written
+
+It said the auto-summary was written "inside the same transaction". It has run
+after the commit, as its own autocommit `UPDATE`, since Wave perf-T3 (backlog
+BL-12). Documentation only.
+
 ### Added — registration seams for new CLI commands and MCP tools
 
 New commands and MCP tools can now be added without editing `cli.py` or

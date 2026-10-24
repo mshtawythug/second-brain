@@ -43,14 +43,9 @@ from .config import Config
 from .db import connect
 from .embeddings import is_hosted_embedder
 from .errors import SecretGuardError, SensitivityError
-from .ingest import (
-    Embedder,
-    IngestResult,
-    extract_path,
-    ingest_document,
-    supported_extensions,
-)
+from .ingest import Embedder, IngestResult, ingest_document
 from .ingest import gmail as gmail_ingest
+from .ingest.dispatch import extract_path, supported_extensions
 from .ingest.gmail import GmailError
 from .ingest.stdin import make_doc as _stdin_make_doc
 from .queries import (
@@ -337,7 +332,7 @@ def ingest_dir(
     extensions = (
         [f".{e.strip().lstrip('.').lower()}" for e in ext.split(",")]
         if ext
-        else supported_extensions()
+        else supported_extensions(directory_walk=True)
     )
     files = [
         p

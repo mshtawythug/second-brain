@@ -52,6 +52,7 @@ from brain.vault.derived_links.participants import (
 from brain.vault.export import regenerate_vault_file
 
 from .chunker import Chunk, chunk_text
+from .dispatch import extract_path, supported_extensions  # noqa: F401  (re-export, RM-07)
 from .guard import GuardOutcome, SecretFinding, apply_guard, format_findings
 from .sub_tokens import extract_sub_tokens
 
@@ -689,15 +690,15 @@ def ingest_document(
 
     Wave Q1-D enrichment: when ``enrich=True`` (default) AND ``enricher`` is
     not None, a post-ingest hook generates a 2-3 sentence summary via local
-    Ollama and writes it to ``documents.summary`` inside the same
-    transaction. Skip rules: caller passes ``enrich=False``, content is
-    shorter than ``enrich_min_tokens`` tokens, ``documents.summary`` is
-    already populated with the same ``content_hash``, or Ollama is
-    unavailable (logged at WARNING — the ingest still commits;
-    ``brain enrich --backfill`` picks the row up later). Passing
+    Ollama and writes it to ``documents.summary`` after the commit, in
+    autocommit mode, as its own short ``UPDATE`` (point 4 of
+    :func:`_ingest_within_transaction`), so it never rolls the ingest back.
+    Skip rules: ``enrich=False``, content shorter than ``enrich_min_tokens``
+    tokens, ``documents.summary`` already populated for the same
+    ``content_hash``, or Ollama unavailable (logged at WARNING; the summary
+    stays NULL and ``brain enrich --backfill`` picks the row up later).
     ``enricher=None`` with ``enrich=True`` is a no-op with a debug log
-    (library callers / tests that don't care about enrichment leave it
-    None).
+    (library callers / tests that don't care about enrichment leave it None).
 
     Wave G1-c graph sync: when ``graph_syncer`` is supplied AND the call
     actually wrote a row (``created`` / ``body_changed`` / ``force``), the
@@ -2313,57 +2314,3 @@ def update_document(
         secret_findings=secret_findings,
         secret_notice=secret_notice,
     )
-
-
-_EXTRACTORS = {
-    ".txt": "text",
-    ".md": "markdown",
-    ".markdown": "markdown",
-    ".pdf": "pdf",
-    ".docx": "docx",
-}
-
-
-def extract_path(path: Path) -> ExtractedDoc:
-    """Dispatch to the correct extractor based on file extension.
-
-    Raises ``ValueError`` for unsupported extensions or malformed input files;
-    ``OSError`` for unreadable files. Backend-specific parser errors (e.g.
-    :class:`pypdf.errors.PyPdfError`) are wrapped as ``ValueError`` so callers
-    only need to handle a narrow set of exception types.
-    """
-    ext = Path(path).suffix.lower()
-    name = _EXTRACTORS.get(ext)
-    if name is None:
-        raise ValueError(f"unsupported file type: {ext}")
-    try:
-        if name == "text":
-            from .text import extract_text
-            return extract_text(path)
-        if name == "markdown":
-            from .markdown import extract_markdown
-            return extract_markdown(path)
-        if name == "pdf":
-            from pypdf.errors import PyPdfError
-
-            from .pdf import extract_pdf
-            try:
-                return extract_pdf(path)
-            except PyPdfError as e:
-                raise ValueError(f"malformed PDF: {e}") from e
-        if name == "docx":
-            from docx.opc.exceptions import PackageNotFoundError
-
-            from .docx import extract_docx
-            try:
-                return extract_docx(path)
-            except PackageNotFoundError as e:
-                raise ValueError(f"malformed DOCX: {e}") from e
-    except UnicodeDecodeError as e:  # pragma: no cover - extractors use errors="replace"
-        raise ValueError(f"could not decode file as UTF-8: {e}") from e
-    raise AssertionError("unreachable")  # pragma: no cover
-
-
-def supported_extensions() -> list[str]:
-    """Return the list of file extensions that :func:`extract_path` can handle."""
-    return list(_EXTRACTORS.keys())

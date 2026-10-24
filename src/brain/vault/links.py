@@ -22,10 +22,12 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-# Source kinds the parser recognizes in ``[[<source>:<external_id>]]`` form.
-# ``brain`` is reserved for direct document-id lookup; other identifiers are
-# routed to the ``sources`` table.
-_SOURCE_KINDS: frozenset[str] = frozenset({"krisp", "slack", "gmail", "manual"})
+from ..source_kinds import VALID_SOURCE_KINDS
+
+# Source kinds the parser recognizes in ``[[<source>:<external_id>]]`` form:
+# the canonical set itself, re-exported (RM-07), not a copy of it. ``brain`` is
+# reserved for direct document-id lookup; other identifiers go to ``sources``.
+_SOURCE_KINDS: frozenset[str] = VALID_SOURCE_KINDS
 
 # Bracket inside a wiki-link must not contain another ``]]``. Allowing nested
 # brackets would conflict with Markdown reference-style links and is not part

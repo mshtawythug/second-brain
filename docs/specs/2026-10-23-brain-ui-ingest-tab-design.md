@@ -179,7 +179,8 @@ refused to ship (§1.1 there). Rejected in §4.1.
    document from source `manual`, through `ingest_document`, the pipeline every `brain ingest*`
    uses. **The call shape is new** and is not `brain ingest-stdin` (§5.1).
 2. **File upload.** One file per job: `.md`, `.markdown`, `.txt`, `.pdf` or `.docx`, which is exactly
-   `ingest._EXTRACTORS` (`ingest/__init__.py:2318-2324`). Upload by picker or drag and drop.
+   `ingest.dispatch.supported_extensions()` (the extractor registry, `ingest/dispatch.py`, since
+   RM-07). Upload by picker or drag and drop.
 3. **A job panel.** Live state, phase, chunk progress, elapsed time and cancel. The outcome links to
    the new document and opens it in the Notes tab.
 4. **The job subsystem** (§4), built to be reused by the Agent tab.
