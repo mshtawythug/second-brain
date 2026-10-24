@@ -16,10 +16,23 @@ even though both live in :mod:`brain.cli_docs`: ``resurface`` / ``tag`` /
 Extracted command modules must never import ``brain.cli`` at module scope —
 ``cli.py`` imports them, so the dependency only runs the other way at call
 time. See the delegation block in each module.
+
+**The extension seam (RM-06).** A NEW command module does not touch ``cli.py``
+at all: it adds one import and one :data:`EXTENSION_REGISTRARS` entry here, and
+``cli.py``'s single :func:`register_extensions` call (after its last
+registration) attaches it. Typer lists every command before every sub-app, in
+registration order within each kind, so an extension command lists after every
+built-in command and an extension sub-app after every built-in sub-app. The
+rule above binds extension modules too.
+
+The policy that comes with the seam: a new feature prefers a **new command or
+sub-app** over a new flag on a command that lives in ``cli.py``. A flag on an
+existing ``cli.py`` command is the one case the seam cannot absorb, and a change
+that needs one records the growth (CLAUDE.md, file-size ceiling).
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import typer
 
@@ -30,6 +43,9 @@ from .cli_recall import register as register_recall
 from .cli_search import register as register_search
 from .cli_sensitivity import register_backfill as register_backfill_sensitivity
 from .cli_usage import register as register_usage
+
+#: A function that attaches commands or a sub-app to the root Typer app.
+Registrar = Callable[[typer.Typer], None]
 
 #: Every registrar that attaches to the ROOT app, in the order ``cli.py``
 #: invokes them. ``cli.py`` calls the individual functions directly so each
@@ -47,7 +63,7 @@ from .cli_usage import register as register_usage
 #: root-app surface, not as a registration mechanism — and if you add a
 #: registrar, add it in BOTH places or the next reader inherits the same
 #: half-truth.
-REGISTRARS: tuple[tuple[str, Callable[[typer.Typer], None]], ...] = (
+REGISTRARS: tuple[tuple[str, Registrar], ...] = (
     ("note", register_note),
     ("ingest", register_ingest),
     ("search", register_search),
@@ -56,6 +72,12 @@ REGISTRARS: tuple[tuple[str, Callable[[typer.Typer], None]], ...] = (
     ("list", register_list),
     ("lifecycle", register_lifecycle),
 )
+
+#: Command modules added after RM-06, in the order ``brain --help`` lists them.
+#: Unlike :data:`REGISTRARS`, this tuple IS the registration mechanism: ``cli.py``
+#: runs it through :func:`register_extensions`, so an entry here is all a new
+#: command module needs. Empty until the first such module lands.
+EXTENSION_REGISTRARS: tuple[tuple[str, Registrar], ...] = ()
 
 #: Registrars that attach to a SUB-APP rather than the root ``app``, and so
 #: cannot live in :data:`REGISTRARS` (whose entries are all
@@ -69,9 +91,12 @@ REGISTRARS: tuple[tuple[str, Callable[[typer.Typer], None]], ...] = (
 #: future contributor pass the wrong app with no type error — the command would
 #: silently register at the wrong level of the CLI.
 __all__ = [
+    "EXTENSION_REGISTRARS",
     "REGISTRARS",
+    "Registrar",
     "register_all",
     "register_backfill_sensitivity",
+    "register_extensions",
     "register_ingest",
     "register_lifecycle",
     "register_list",
@@ -92,4 +117,18 @@ def register_all(app: typer.Typer) -> None:
     each command keeps its original position in ``brain --help``.
     """
     for _name, registrar in REGISTRARS:
+        registrar(app)
+
+
+def register_extensions(
+    app: typer.Typer,
+    *,
+    registrars: Sequence[tuple[str, Registrar]] | None = None,
+) -> None:
+    """Attach every extension command module to ``app``, in order.
+
+    ``registrars`` defaults to :data:`EXTENSION_REGISTRARS`, read at call time.
+    ``cli.py`` calls this once, after its last built-in registration.
+    """
+    for _name, registrar in EXTENSION_REGISTRARS if registrars is None else registrars:
         registrar(app)

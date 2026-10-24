@@ -22,6 +22,23 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — registration seams for new CLI commands and MCP tools
+
+New commands and MCP tools can now be added without editing `cli.py` or
+`mcp_server.py`, both of which are over the 800-line ceiling (roadmap ticket
+RM-06; the smallest scope of backlog BL-2, whose full split is RM-48). A new
+command module adds one entry to `cli_registry.EXTENSION_REGISTRARS`, which
+`cli.py` runs once after its last built-in registration. A new MCP tool is a
+module in the new `brain.mcp_tools` package: it receives the server's helpers
+as a `ToolContext` through `register(app, ctx)` instead of importing
+`brain.mcp_server`, and a module refuses to be bound to a second, different
+context. `python -m brain.mcp_server` now serves the imported module, so an
+extension tool reads the state `main()` set. No command or tool is added,
+renamed or changed: the CLI command tree (110 command paths, with their options)
+and the MCP tool list (42 tools, with their schemas) are identical before and
+after. How to add either is in `CONTRIBUTING.md`, "Adding a command or an MCP
+tool".
+
 ### Added — the offline test resolves every CSS `url()` in `brain ui`
 
 A new test module, `tests/test_ui_static_css_urls.py`, checks every `url()` in

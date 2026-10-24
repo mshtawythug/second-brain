@@ -223,6 +223,15 @@ the merged keys and the tool docstring, recorded inline at the call. The tool's
 place saying why; ``_wrap_embed_error`` stays for the other tools. Plan:
 ``docs/plans/2026-10-23-search-fts-fallback.md``.
 
+**And 2026-10-23 (RM-06): the extension seam -- later tools do not grow this
+file.** After the last tool, the ``ToolContext`` of this module's own helpers
+and one :func:`brain.mcp_tools.register_extension_tools` call, under
+``if __name__ != "__main__":``; the ``__main__`` block now serves the IMPORTED
+module (``from brain.mcp_server import main``). A new tool is a module in
+``brain/mcp_tools/``, not a function here. Why the guard and the re-import are
+both needed is inline at each. Plan:
+``docs/plans/2026-10-23-rm-06-registration-seams.md``.
+
 **Hazard this file has already been bitten by.** Every tool is a bare ``def``
 under a lone ``@mcp_app.tool()`` line, so inserting a helper between a decorator
 and the function it was written for silently moves the registration onto the
@@ -321,6 +330,7 @@ from .mcp_limits import (
     saturation_notice,
     strip_content_markers,
 )
+from .mcp_tools import ToolContext, register_extension_tools
 from .queries import (
     fetch_document,
     iter_all_document_ids,
@@ -4987,6 +4997,26 @@ def brain_connect_reject(id: str) -> dict[str, Any]:
     return {"status": "rejected"}
 
 
+# The extension seam (RM-06): later tools do not grow this file; they live in
+# ``brain/mcp_tools/`` and register here. Guarded because ``python -m`` runs this
+# file as ``__main__`` first: that copy's helpers read ITS ``_state``, which
+# ``main()`` never sets, so only the importable module (loaded by the
+# ``__main__`` block below) registers -- exactly once, which the tool modules'
+# refusal to rebind a different context enforces.
+if __name__ != "__main__":
+    register_extension_tools(
+        mcp_app,
+        ToolContext(
+            get_state=_get_state,
+            connection=_mcp_conn,
+            error=_mcp_error,
+            wrap_db_error=_wrap_db_error,
+            wrap_embed_error=_wrap_embed_error,
+            confidential_lens=_confidential_lens,
+        ),
+    )
+
+
 def _configure_logging() -> None:
     """Configure stderr logging from the ``BRAIN_MCP_LOG_LEVEL`` env var.
 
@@ -5068,4 +5098,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised by integration test
-    main()
+    # Serve the importable module, not this ``__main__`` copy (RM-06): the import
+    # registers the extension tools with that module's context, and its
+    # ``main()`` sets the ``_state`` those tools read.
+    from brain.mcp_server import main as _main
+
+    _main()

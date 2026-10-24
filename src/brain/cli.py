@@ -98,6 +98,12 @@ refresh`` so ``brain graphrag --help`` lists it with the admin commands.
 **Eighth growth (class-only logging, PR #58): one import line.** Two WARNINGs
 log ``describe_failure(exc)``; plan ``docs/plans/2026-10-22-watcher-repair-hint-and-yaml-log.md``.
 
+**Ninth growth (RM-06): the extension seam -- later commands do not grow this
+file.** One import and one :func:`brain.cli_registry.register_extensions` call
+after the last registration, with its reason inline. A new command module adds
+an ``EXTENSION_REGISTRARS`` entry in ``cli_registry.py`` instead of a
+``register_*`` call here; plan ``docs/plans/2026-10-23-rm-06-registration-seams.md``.
+
 The long-deferred split into per-domain command modules is unchanged by any of
 this; ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
@@ -223,6 +229,7 @@ from .cli_note import note_rename as note_rename
 from .cli_recall import register as register_recall
 from .cli_registry import (
     register_backfill_sensitivity,
+    register_extensions,  # the RM-06 extension seam
     register_ingest,
     register_lifecycle,
     register_list,
@@ -8814,3 +8821,10 @@ def gaps_push(
     typer.echo(
         f"Pushed {len(pushed)} search-failure gap(s) to the elicitation queue."
     )
+
+
+# The extension seam (RM-06): later commands do not grow this file. Every
+# module in ``cli_registry.EXTENSION_REGISTRARS`` attaches here, after the last
+# built-in registration, so ``brain --help`` lists extension commands after
+# every built-in one.
+register_extensions(app)

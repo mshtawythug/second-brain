@@ -308,6 +308,7 @@ script.
 ```
 src/brain/
   cli.py              — Typer app, every `brain ...` subcommand
+  cli_registry.py     — command-module registrars, including EXTENSION_REGISTRARS (RM-06)
   config.py           — env loading; selects BRAIN_EMBEDDER ∈ {arctic, voyage, qwen3, none}
   db.py               — psycopg connection + migration runner (schema_migrations tracked)
   embeddings.py       — concrete embedders behind a shared Protocol
@@ -336,6 +337,7 @@ src/brain/
   edit_session.py     — JSON-header + body editor flow
   editor.py           — $EDITOR / $VISUAL subprocess wrapper
   mcp_server.py       — FastMCP stdio server (brain_* + brain_graphrag_* tools)
+  mcp_tools/          — MCP extension tool modules, registered through the RM-06 seam
   setup.py            — `brain setup` orchestration (preflight, compose render, init, doctor)
   uninstall.py        — `brain uninstall` (removes launchd plists + runtime state)
   cli_claude.py       — `brain claude install-skill` (installs the Claude Code skill)
@@ -349,6 +351,59 @@ bin/                  — brain-up / brain-down / brain-rebuild / brain-status c
 skills/               — Claude Code skills, one directory per skill (installed by bin/brain-skills-sync)
 tests/                — real-DB pattern, fake embedder fixture, one test module per source module (~290 modules)
 ```
+
+## Adding a command or an MCP tool
+
+`cli.py` and `mcp_server.py` are both over the 800-line ceiling, so new commands
+and tools go in new modules and register through a seam, without editing either
+file.
+
+**A CLI command or sub-app.** Write a `cli_<area>.py` module with a
+`register(app: typer.Typer) -> None` that attaches its commands (`@app.command`)
+or its sub-app (`app.add_typer`). Then, in `src/brain/cli_registry.py`, import
+it and add one entry to `EXTENSION_REGISTRARS`. `cli.py` runs that tuple once,
+after its last built-in registration, so `brain --help` lists the new command
+after every built-in command (Typer lists commands before sub-apps, so a new
+sub-app lists after every built-in sub-app). The module must not import
+`brain.cli` at module scope. Prefer a new command or sub-app to a new flag on a
+command that lives in `cli.py`: a flag there is the one change the seam cannot
+absorb, and it has to be recorded as growth in CLAUDE.md's ceiling table.
+
+**An MCP tool.** Add a module to `src/brain/mcp_tools/` (one per feature area,
+under 400 lines). It gets the server's helpers as a `ToolContext` and must not
+import `brain.mcp_server`: under `python -m brain.mcp_server` that import loads
+a second copy of the server whose state is never initialised. The shape:
+
+```python
+from brain.mcp_compat import MCPServerProtocol
+from brain.mcp_tools import ContextSlot, ToolContext
+
+_CONTEXT = ContextSlot(__name__)
+
+
+def brain_example(query: str, include_confidential: bool = False) -> dict[str, object]:
+    """WHEN TO USE: ... (the docstring is the tool description agents read)."""
+    ctx = _CONTEXT.get()
+    state = ctx.get_state()
+    sensitivity = ctx.confidential_lens(include_confidential)
+    ...
+
+
+def register(app: MCPServerProtocol, ctx: ToolContext) -> None:
+    _CONTEXT.bind(ctx)
+    app.tool()(brain_example)
+```
+
+Every retrieval tool applies `ctx.confidential_lens` in its SQL predicate and
+defaults `include_confidential` to `False`; every failure goes through
+`ctx.error`, `ctx.wrap_db_error` or `ctx.wrap_embed_error`. Register with
+`app.tool()(fn)`, never the decorator. The package discovers the module itself:
+no edit to `mcp_server.py` or to any list. `tests/test_mcp_tool_registration.py`
+fails if a module-level `brain_*` function is not advertised. In tests, register
+a module on a throwaway server with
+`register_extension_tools(make_server("t"), ctx, modules=[module])`, and call
+`brain.mcp_tools._reset_contexts_for_tests([module])` before binding it again;
+`tests/mcp_extension_probe.py` is a working example.
 
 ## Tests
 
