@@ -12,7 +12,7 @@
 
 | File | Change |
 |---|---|
-| `tests/test_ui_static_assets.py` | Two regexes (`_CSS_COMMENT_RE`, `_CSS_URL_RE`), two helpers (`_css_url_targets`, `_css_url_problems`), the test `test_every_css_url_resolves_on_disk`, a parametrized test of the extraction, and synthetic-tree tests for each acceptance criterion. |
+| `tests/test_ui_static_assets.py` | Two regexes (`_CSS_COMMENT_RE`, `_CSS_URL_RE`), three helpers (`_css_url_targets`, `_css_url_problems`, `_unshipped_targets`), the test `test_every_css_url_resolves_on_disk`, a parametrized test of the extraction, and synthetic-tree tests for each acceptance criterion. |
 | `CHANGELOG.md` | An Unreleased entry. |
 | Spec Appendix B, backlog BL-3 | Tracker rows, in a follow-up commit once the PR number exists. |
 
@@ -37,8 +37,10 @@ reinstall follows. No skill or memory file documents the static-asset tests.
 ### Resolution: `_css_url_problems(stylesheet, static_root) -> (files, problems)`
 
 - Skips `data:` targets and pure `#fragment` targets (these fetch no file).
-- An **empty** target is a problem. Joined as a URL it resolves to the stylesheet itself, and
-  joined as a path it resolves to the directory, so neither `exists()` nor `is_file()` catches it.
+- A target with **no path** is a problem: an empty one (`url()`, `url("")`, `url('  ')`) or a
+  query-only one (`url("?v=1")`, `url("?#iefix")`), tested with `urlsplit(target).path`. Joined as
+  a URL it resolves to the stylesheet itself, and joined as a path it resolves to the directory,
+  so neither `exists()` nor `is_file()` catches it.
 - Every other target is joined the way a browser does: `urljoin` against the stylesheet's served
   URL (`<origin>/static/<path>`). A relative target therefore resolves against the stylesheet's
   own directory, as the ticket says. A root-relative `/static/...` target resolves to the same
@@ -47,7 +49,17 @@ reinstall follows. No skill or memory file documents the static-asset tests.
   resolves (through a symlink) outside `static_dir()`. Together these are AC 3.
 - The query and fragment are dropped (`font.woff2?v=1#iefix` fetches `font.woff2`). The path is
   percent-decoded, and the result must pass `is_file()`.
-- Each problem names the stylesheet (relative to `static_dir()`) and the target (AC 2).
+- Each problem names the stylesheet (relative to `static_dir()`) and the target (AC 2), and says
+  which check fired ("outside /static/", "not same-origin", "names no file", …).
+- A `url(` that `_css_url_targets` cannot parse comes back as one problem ("could not parse"),
+  never as an exception and never as nothing.
+
+### Packaging: `_unshipped_targets(name, files, package_root, globs) -> list[str]`
+
+One problem for each resolved file that matches no `package-data` glob, relative to
+`package_root` (`brain/ui`). It is a helper of its own because, on today's tree, it receives no
+files: the only real `url()` is a `data:` SVG. Without a synthetic test it would be dead code that
+no mutation could turn red.
 
 ### The test on the real tree
 
@@ -57,7 +69,7 @@ which pyproject also declares. It asserts:
 
 - At least one stylesheet was found.
 - No problems.
-- Every resolved file matches a declared `package-data` glob.
+- Every resolved file matches a declared `package-data` glob (`_unshipped_targets`).
 
 **The packaged copy.** `static_dir()` reads through `importlib.resources`, so in CI (an editable
 install) it reads `src/`. No wheel is built: `test_every_shipped_asset_matches_a_declared_glob`
@@ -78,12 +90,16 @@ texture. The residue check in step 4 already makes an unparsed `url(` fail. A st
 | 3. A `url()` that escapes `static_dir()` fails | `test_a_css_url_escaping_static_fails` (parametrized: `../../`, `../../../`, root-relative outside `/static/`, other origin, protocol-relative, and both of those with a path that names a real local file), `test_a_css_url_through_a_symlink_out_of_static_fails` |
 | 4. `data:` passes, including a nested `url(%23id)` | `test_data_and_fragment_urls_pass`, and the `nested data URI` case of the extraction test |
 | 5. A comment-only `url()` is ignored | the `comment` cases of the extraction test, and `test_a_commented_out_css_url_is_not_checked` |
-| 6. An empty `url()` fails | `test_an_empty_css_url_fails` (parametrized: `url()`, `url("")`, `url('  ')`) |
+| 6. An empty `url()` fails | `test_an_empty_css_url_fails` (parametrized: `url()`, `url("")`, `url('  ')`, and the query-only `url("?v=1")`, `url("?#iefix")`) |
 
 Extraction, parametrized (`test_css_url_extraction`): double-quoted, single-quoted, bare,
 whitespace inside the parentheses, several on one line, upper-case `URL(`, a comment (one-line and
 multi-line), a nested `data:` URI, an empty target. `test_an_unparseable_css_url_raises` covers
-the residue check. Positive cases are included so that a resolver that rejects everything also
+the residue check, and `test_an_unparseable_css_url_is_a_problem` covers how `_css_url_problems`
+reports it. `test_unshipped_targets_reports_only_files_no_glob_ships` runs `_unshipped_targets`
+against the real `brain.ui` globs: `static/fonts/a.woff2` is reported, and `static/brain-logo.png`
+and `static/css/x.css` are not, so both an accept-all and a reject-all helper fail. Each
+`test_a_css_url_escaping_static_fails` case asserts which check fired. Positive cases are included so that a resolver that rejects everything also
 fails.
 
 Resolution positives: `test_resolvable_css_urls_pass` (sibling, `../` into a sibling directory,
@@ -94,7 +110,7 @@ Mutation proof (DoD 2), in a `git archive` copy with `PYTHONPATH` pinned:
 1. A typo'd `url()` added to a real stylesheet turns the real-tree test red.
 2. Removing the comment strip turns the comment cases red.
 3. Making the pattern stop being quote-aware (bare only) turns the nested `data:` case red.
-4. Removing the empty-target check turns `test_an_empty_css_url_fails` red.
+4. Removing the no-path check turns all five `test_an_empty_css_url_fails` cases red.
 5. `is_file()` swapped for `exists()` turns `test_a_css_url_naming_a_directory_fails` (`./`, `..`) red.
 6. Removing the residue check turns `test_an_unparseable_css_url_raises` red.
 7. Removing the symlink containment check turns the symlink test red.
@@ -102,6 +118,16 @@ Mutation proof (DoD 2), in a `git archive` copy with `PYTHONPATH` pinned:
 9. Removing the origin check turns the `*-static-path` escape cases red. The first run of the
    harness found this mutation surviving, because every other-origin case also had a path
    outside `/static/`. The two cases were added for that reason.
+
+Added in review round 1 (PR #67), each of which survived before its test existed:
+
+10. `_css_url_problems` swallowing the parse error (`return [], []`) turns
+    `test_an_unparseable_css_url_is_a_problem` red.
+11. `_unshipped_targets`'s glob check disabled (`if False:`) turns its synthetic test red.
+12. The same check made to reject everything (`if True:`) turns it red too.
+13. The no-path check narrowed back to `if not target:` turns the two query-only cases red.
+14. Removing the `/static/` prefix check turns the three "outside /static/" escape cases red. The
+    origin check used to catch them by accident; they now assert the reason.
 
 ## Risks
 
