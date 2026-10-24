@@ -3617,7 +3617,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-02 | `brain ask` fallback and clean errors | S | 1 | — | DONE (#64) |
 | RM-03 | `brain ui` search fallback notice | S | 1 | — | DONE (#65) |
 | RM-04 | Ceiling-table CI check | S | 1 | — | DONE (#66) |
-| RM-05 | CSS `url()` offline test | XS | 1 | — | TODO |
+| RM-05 | CSS `url()` offline test | XS | 1 | — | DONE (#67) |
 | RM-06 | CLI and MCP registration seams | S | 2 | — | TODO |
 | RM-07 | Extractor registry, one kind definition, BL-12 | S | 2 | — | TODO |
 | RM-08 | Feature settings leaves | XS | 2 | — | TODO |
