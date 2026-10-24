@@ -27,11 +27,20 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 import brain.settings
 
+pytestmark = pytest.mark.nodb
+
 # A field holding a secret must end in one of these (documented in
-# brain/settings/__init__.py), so this guard can find it by name.
-SECRET_FIELD_PATTERN = re.compile(r"(?:^|_)(?:token|secret|password|api_key|webhook_url)$")
+# brain/settings/__init__.py), so this guard can find it by name. Case-insensitive:
+# ruff enforces no naming rule here, so ``API_KEY`` is as legal a field name as
+# ``api_key``.
+SECRET_FIELD_PATTERN = re.compile(
+    r"(?:^|_)(?:token|secret|password|api_key|secret_key|private_key|webhook_url)$",
+    re.IGNORECASE,
+)
 
 
 def _settings_modules() -> list[ModuleType]:
@@ -46,17 +55,58 @@ def _settings_modules() -> list[ModuleType]:
 # ---------------------------------------------------------------------------
 
 
+# A settings leaf needs nothing from these modules (paths come from pathlib), so
+# importing any of them is refused outright: ``from os import *`` and
+# ``from posix import environ`` reach the environment without an ``os.`` prefix.
+_BANNED_ROOT_MODULES = frozenset({"os", "posix", "nt"})
+_ENV_NAMES = frozenset({"environ", "environb", "getenv", "getenvb"})
+
+
 def environ_reads(source: str) -> list[str]:
-    """Return each ``os.environ`` / ``os.getenv`` / ``environ`` import found in ``source``."""
+    """Return each way ``source`` could reach the process environment.
+
+    Four rules, each catching what the others miss:
+
+    1. any import of ``os``, ``posix`` or ``nt`` (including ``from os import *``);
+    2. attribute access to ``environ`` / ``environb`` / ``getenv`` / ``getenvb``
+       on anything;
+    3. one of those names as a string constant (``getattr(m, "environ")``,
+       ``vars(m)["environ"]``);
+    4. a dynamic import of a banned module (``__import__("os")``,
+       ``importlib.import_module("posix")``).
+    """
     found: list[str] = []
     for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Attribute) and node.attr in {"environ", "getenv", "environb"}:
-            found.append(f"line {node.lineno}: .{node.attr}")
-        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+        if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name in {"environ", "getenv", "environb"}:
-                    found.append(f"line {node.lineno}: from os import {alias.name}")
+                if alias.name.split(".")[0] in _BANNED_ROOT_MODULES:
+                    found.append(f"line {node.lineno}: import {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".")[0]
+            if node.level == 0 and root in _BANNED_ROOT_MODULES:
+                found.append(f"line {node.lineno}: from {node.module} import ...")
+        elif isinstance(node, ast.Attribute) and node.attr in _ENV_NAMES:
+            found.append(f"line {node.lineno}: .{node.attr}")
+        elif isinstance(node, ast.Constant) and node.value in _ENV_NAMES:
+            found.append(f"line {node.lineno}: string {node.value!r}")
+        elif isinstance(node, ast.Call) and _is_dynamic_banned_import(node):
+            found.append(f"line {node.lineno}: dynamic import")
     return found
+
+
+def _is_dynamic_banned_import(call: ast.Call) -> bool:
+    func = call.func
+    is_importer = (isinstance(func, ast.Name) and func.id == "__import__") or (
+        isinstance(func, ast.Attribute) and func.attr == "import_module"
+    )
+    if not (is_importer and call.args):
+        return False
+    first = call.args[0]
+    return (
+        isinstance(first, ast.Constant)
+        and isinstance(first.value, str)
+        and first.value.split(".")[0] in _BANNED_ROOT_MODULES
+    )
 
 
 def test_no_settings_module_reads_the_process_environment() -> None:
@@ -71,18 +121,41 @@ def test_no_settings_module_reads_the_process_environment() -> None:
     )
 
 
-def test_environ_checker_flags_each_way_of_reading_the_environment() -> None:
-    assert environ_reads("import os\nX = os.environ.get('A')\n")
-    assert environ_reads("import os\nX = os.getenv('A')\n")
-    assert environ_reads("from os import environ\n")
-    assert environ_reads("from os import getenv as g\n")
-    assert (
-        environ_reads(
-            "from collections.abc import Mapping\ndef f(env: Mapping[str, str]):\n"
-            "    return env.get('A')\n"
-        )
-        == []
+# Each case is reachable by exactly one rule of ``environ_reads``, so removing
+# a rule turns its cases red. None imports ``os`` unless the case is about that.
+ENVIRONMENT_READS = {
+    "import_os": "import os\n",
+    "import_os_path": "import os.path\n",
+    "from_os_import_environ": "from os import environ\n",
+    "from_os_import_star": "from os import *\nX = environ\n",
+    "from_posix_import_environ": "from posix import environ\n",
+    "import_nt": "import nt\n",
+    "attribute_environ": "X = module.environ.get('A')\n",
+    "attribute_getenv": "X = module.getenv('A')\n",
+    "attribute_getenvb": "X = module.getenvb(b'A')\n",
+    "attribute_environb": "X = module.environb\n",
+    "getattr_string": "X = getattr(module, 'environ')\n",
+    "vars_subscript": "X = vars(module)['environ']\n",
+    "dunder_import": "X = __import__('os')\n",
+    "import_module": "X = importlib.import_module('posix')\n",
+}
+
+
+@pytest.mark.parametrize("case", sorted(ENVIRONMENT_READS))
+def test_environ_checker_flags_each_way_of_reading_the_environment(case: str) -> None:
+    assert environ_reads(ENVIRONMENT_READS[case]), case
+
+
+def test_environ_checker_accepts_a_leaf_that_reads_only_its_env_argument() -> None:
+    source = (
+        "from collections.abc import Mapping\n"
+        "from pathlib import Path\n"
+        "from .os_helpers import thing\n"
+        "def f(env: Mapping[str, str]) -> str | None:\n"
+        "    return env.get('BRAIN_X')\n"
     )
+
+    assert environ_reads(source) == []
 
 
 def test_config_does_not_import_settings() -> None:
@@ -163,6 +236,10 @@ def test_secret_field_pattern_matches_the_documented_suffixes() -> None:
         "webhook_url",
         "slack_webhook_url",
         "token",
+        "API_KEY",
+        "Slack_Webhook_URL",
+        "secret_key",
+        "private_key",
     ):
         assert SECRET_FIELD_PATTERN.search(name), name
     for name in ("rerank_url", "model", "tokenizer", "depth", "secretary", "keyword"):
