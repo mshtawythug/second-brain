@@ -27,9 +27,10 @@ git tag scheme:
 `tests/test_ui_static_assets.py` now checks every `url()` in every shipped
 stylesheet, as it already checked `index.html`'s `href`/`src` (roadmap ticket
 RM-05, backlog BL-3). The test fails, naming the stylesheet and the target, when
-a target does not exist, is empty, names a directory, leaves `static/` (through
-`..`, a root path outside `/static/`, another origin or a symlink), or names a
-file that no `package-data` glob ships. `url()`s inside comments are ignored,
+a target does not exist, is empty or query-only (has no path), names a
+directory, leaves `static/` (through `..`, a root path outside `/static/`,
+another origin or a symlink), or names a file that no `package-data` glob
+ships. `url()`s inside comments are ignored,
 `data:` and `#fragment` targets pass (including a `data:` SVG that nests its own
 `url(%23id)`), and a `url(` the test cannot parse fails instead of going
 unchecked. Test only: no `brain` command changes.

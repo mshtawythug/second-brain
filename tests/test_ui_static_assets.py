@@ -504,6 +504,31 @@ def _unshipped_targets(
     return problems
 
 
+def _stylesheet_problems(static_root: Path, globs: list[str]) -> list[str]:
+    """Every problem with every ``url()`` in every stylesheet under ``static_root``.
+
+    For each ``.css`` file: :func:`_css_url_problems` (does each target load?),
+    then :func:`_unshipped_targets` (would the wheel ship it?). The package root
+    the globs are relative to is ``static_root.parent``. Finding no stylesheet
+    at all is itself a problem, so a walk that matched nothing cannot pass.
+    """
+    stylesheets = sorted(
+        path
+        for path in static_root.rglob("*.css")
+        if path.is_file() and not _IGNORED_PARTS & set(path.parts)
+    )
+    if not stylesheets:
+        return [f"no stylesheet was found under {static_root}, so nothing was checked"]
+
+    problems: list[str] = []
+    for stylesheet in stylesheets:
+        name = stylesheet.relative_to(static_root).as_posix()
+        files, found = _css_url_problems(stylesheet, static_root)
+        problems.extend(found)
+        problems.extend(_unshipped_targets(name, files, static_root.parent, globs))
+    return problems
+
+
 def test_every_css_url_resolves_on_disk() -> None:
     """A typo'd ``url()`` in a stylesheet is a missing font or image; catch it here.
 
@@ -520,17 +545,7 @@ def test_every_css_url_resolves_on_disk() -> None:
     ``url(`` it cannot parse, so a pattern that stopped matching is already a
     failure, and a stylesheet with no ``url(`` has nothing to check.
     """
-    static_root = static_dir()
-    package_root = static_root.parent
-    globs = _package_data_globs("brain.ui")
-    stylesheets = _shipped_by_suffix(".css")
-    assert stylesheets, "no shipped stylesheet was found, so this test checks nothing"
-
-    problems: list[str] = []
-    for name in stylesheets:
-        files, found = _css_url_problems(static_root / name, static_root)
-        problems.extend(found)
-        problems.extend(_unshipped_targets(name, files, package_root, globs))
+    problems = _stylesheet_problems(static_dir(), _package_data_globs("brain.ui"))
     assert not problems, "stylesheet url() targets that would not load:\n" + "\n".join(problems)
 
 
@@ -550,6 +565,7 @@ _NESTED_DATA_URI = (
         pytest.param("a { src: url(fonts/a.woff2); }", ["fonts/a.woff2"], id="bare"),
         pytest.param('a { src: url(  "a.png"\t); }', ["a.png"], id="whitespace-quoted"),
         pytest.param("a { src: url(  a.png  ); }", ["a.png"], id="whitespace-bare"),
+        pytest.param('a { src: url(" a.png "); }', ["a.png"], id="whitespace-inside-quotes"),
         pytest.param(
             "a { src: url(a.woff2) format('woff2'), url('b.woff') format('woff'); }",
             ["a.woff2", "b.woff"],
@@ -557,6 +573,9 @@ _NESTED_DATA_URI = (
         ),
         pytest.param("a { src: URL(a.png); }", ["a.png"], id="upper-case"),
         pytest.param("/* no url(x.png) here */ a { color: red; }", [], id="comment"),
+        # A greedy comment pattern would erase everything from the first /* to
+        # the last */, and every real stylesheet has several comments.
+        pytest.param("/* a */ a { src: url(b.png); } /* c */", ["b.png"], id="between-comments"),
         pytest.param(
             "/*\n * TOKENS ONLY. No url(), nothing external.\n */\na { src: url(b.png); }",
             ["b.png"],
@@ -582,6 +601,7 @@ def test_css_url_extraction(css: str, expected: list[str]) -> None:
         pytest.param('a { src: url("a\\"b.png"); }', id="escaped-quote"),
         pytest.param("a { src: url(a'b.png); }", id="quote-in-bare-target"),
         pytest.param("a { src: url(a\\)b.png); }", id="escaped-paren"),
+        pytest.param("a { src: URL(a'b.png); }", id="upper-case-unparseable"),
     ],
 )
 def test_an_unparseable_css_url_raises(css: str) -> None:
@@ -593,9 +613,10 @@ def test_an_unparseable_css_url_raises(css: str) -> None:
 def _static_tree(root: Path, stylesheet_body: str) -> tuple[Path, Path]:
     """A synthetic ``static/`` with one stylesheet and two real assets.
 
-    Returns ``(static_root, stylesheet)``. ``css/fonts/a.woff2`` and
-    ``img/logo.png`` exist, so a test can tell a resolver that rejects
-    everything from one that resolves.
+    Returns ``(static_root, stylesheet)``. ``css/fonts/a.woff2``,
+    ``css/fonts/a b.woff2``, ``css/data-logo.png`` and ``img/logo.png`` exist,
+    so a test can tell a resolver that rejects everything from one that
+    resolves.
     """
     static_root = root / "static"
     (static_root / "css" / "fonts").mkdir(parents=True)
@@ -603,21 +624,30 @@ def _static_tree(root: Path, stylesheet_body: str) -> tuple[Path, Path]:
     (static_root / "css" / "fonts" / "a b.woff2").write_bytes(b"font")
     (static_root / "css" / "fonts" / "a.woff2").write_bytes(b"font")
     (static_root / "img" / "logo.png").write_bytes(b"png")
+    (static_root / "css" / "data-logo.png").write_bytes(b"png")
     stylesheet = static_root / "css" / "x.css"
     stylesheet.write_text(stylesheet_body, encoding="utf-8")
     return static_root, stylesheet
 
 
-def test_a_missing_css_url_target_is_named(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "target",
+    [
+        pytest.param("missing.woff2", id="missing"),
+        # Not a data: URI, so it must be checked rather than skipped.
+        pytest.param("data-missing.woff2", id="data-prefixed-missing"),
+    ],
+)
+def test_a_missing_css_url_target_is_named(tmp_path: Path, target: str) -> None:
     """AC 2: the failure names the stylesheet and the target."""
-    static_root, stylesheet = _static_tree(tmp_path, 'a { src: url("missing.woff2"); }')
+    static_root, stylesheet = _static_tree(tmp_path, f'a {{ src: url("{target}"); }}')
 
     files, problems = _css_url_problems(stylesheet, static_root)
 
     assert files == []
     assert len(problems) == 1
     assert "css/x.css" in problems[0]
-    assert "missing.woff2" in problems[0]
+    assert target in problems[0]
 
 
 @pytest.mark.parametrize(
@@ -628,6 +658,8 @@ def test_a_missing_css_url_target_is_named(tmp_path: Path) -> None:
         pytest.param("/static/img/logo.png", id="root-relative"),
         pytest.param("fonts/a.woff2?v=1#iefix", id="query-and-fragment"),
         pytest.param("fonts/a%20b.woff2", id="percent-encoded"),
+        # Starts with "data" but is not a data: URI, so it must be resolved.
+        pytest.param("data-logo.png", id="data-prefixed-file-name"),
     ],
 )
 def test_resolvable_css_urls_pass(tmp_path: Path, target: str) -> None:
@@ -720,6 +752,38 @@ def test_unshipped_targets_reports_only_files_no_glob_ships(tmp_path: Path) -> N
     assert len(problems) == 1
     assert "css/x.css" in problems[0]
     assert "static/fonts/a.woff2" in problems[0]
+
+
+def test_stylesheet_problems_include_an_unshipped_target(tmp_path: Path) -> None:
+    """The real-tree test's packaging clause, through the helper it calls.
+
+    A font that loads in the dev tree but sits in a directory no glob ships
+    must come back as a problem, or the wheel ships a page without its font.
+    """
+    static_root = tmp_path / "ui" / "static"
+    (static_root / "css").mkdir(parents=True)
+    (static_root / "fonts").mkdir()
+    (static_root / "fonts" / "a.woff2").write_bytes(b"font")
+    (static_root / "css" / "x.css").write_text(
+        'a { src: url("../fonts/a.woff2"); }', encoding="utf-8"
+    )
+
+    problems = _stylesheet_problems(static_root, _package_data_globs("brain.ui"))
+
+    assert len(problems) == 1
+    assert "css/x.css" in problems[0]
+    assert "matches no package-data glob" in problems[0]
+
+
+def test_stylesheet_problems_report_an_empty_walk(tmp_path: Path) -> None:
+    """No stylesheet found is a failure, never a vacuous pass."""
+    static_root = tmp_path / "ui" / "static"
+    static_root.mkdir(parents=True)
+
+    problems = _stylesheet_problems(static_root, _package_data_globs("brain.ui"))
+
+    assert len(problems) == 1
+    assert "no stylesheet was found" in problems[0]
 
 
 def test_a_css_url_through_a_symlink_out_of_static_fails(tmp_path: Path) -> None:
