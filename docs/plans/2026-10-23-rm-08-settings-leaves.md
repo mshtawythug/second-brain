@@ -92,6 +92,15 @@ At least four, each shown to turn a named test red:
 4. Blank no longer treated as unset → `test_unset_or_blank_yields_default` fails.
 5. `env_choice` without lowercasing → the case-insensitivity test fails.
 6. The secret guard's suffix match removed → its synthetic-failure test fails.
+7. A refusal that quotes the value → `test_refusal_never_echoes_the_value` fails.
+8. The environment checker missing `os.getenv` → its synthetic-failure test fails.
+9. `config._TRUTHY_ENV_VALUES` gains `enabled` → `test_env_bool_refuses_other_values[enabled]`
+   fails, which shows that the leaf follows `config.py`'s set.
+10. `config._GRAPH_ENABLED_FALSY` gains `n` → `test_env_bool_refuses_other_values[n]` fails.
+11. The leaf restates the truthy set as a literal → `test_env_bool_agrees_with_config_on_spellings`
+    fails.
+
+All eleven were killed (coordinator approved the plan and the three deviations on 2026-10-23).
 
 ## Risks
 
