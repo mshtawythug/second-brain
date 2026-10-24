@@ -159,51 +159,35 @@ class TestMcpIngestStdinBoundary:
 
 
 def test_the_kind_set_has_exactly_one_definition_the_others_mirror() -> None:
-    """One canonical set; exactly one module still holds a separate copy.
+    """One canonical set; every other Python name for it is that same object.
 
-    The four names are NOT four peers, and asserting them uniformly with ``==``
-    hid that. ``cli._VALID_SOURCE_KINDS`` and ``ui.schemas.VALID_SOURCE_KINDS``
-    are both re-exports — the same frozenset object — so ``x == x`` there could
-    not fail under any edit, while this test's name promised "a fifth kind
-    cannot be added in one place". Two of its three assertions were coverage
-    theatre.
+    ``cli._VALID_SOURCE_KINDS``, ``ui.schemas.VALID_SOURCE_KINDS`` and, since
+    RM-07, ``vault.links._SOURCE_KINDS`` are all **identity re-exports** of
+    :data:`brain.source_kinds.VALID_SOURCE_KINDS`. So each is asserted with
+    ``is``. Under ``==``, ``x == x`` could not fail for any edit, while this
+    test's name promises "a fifth kind cannot be added in one place". The live
+    failure mode is someone restating the literal in one of the three modules:
+    that yields an equal-but-separate object, so ``==`` stays green and ``is``
+    goes red.
 
-    ``tests/test_ui_schemas.py::test_source_kinds_is_the_canonical_object_not_a_copy``
-    had already made this exact swap for the UI copy and written down why; the
-    enumeration simply stopped one file short. Same treatment here, for both
-    re-exports:
-
-    * **Identity** for the two re-exports. The live failure mode is someone
-      restating the literal, which yields an equal-but-separate object: ``==``
-      stays green, ``is`` goes red.
-    * **Equality** for ``vault.links._SOURCE_KINDS``, which really is an
-      independent literal (``vault/links.py:28``) and so is the one name where
-      ``==`` can fail. Making it ``is`` would be wrong, not stricter — the copy
-      is deliberate and the assertion that binds is that its VALUE agrees.
-
-    (The docstring this replaced also said ``ui.schemas`` "keeps a deliberate
-    copy (it must not import the Typer CLI)". False at HEAD: ``schemas.py:47``
-    re-exports the canonical set from ``brain.source_kinds``, which is not the
-    Typer CLI, so the stated obstacle no longer exists.)
+    (Until RM-07 this test held ``vault.links._SOURCE_KINDS`` to equality only,
+    because it really was an independent literal there. RM-07 made it a
+    re-export, so the equality-only assertion would have let a restated literal
+    through. ``tests/test_source_kinds_identity.py`` pins the same three
+    identities from the RM-07 side.)
     """
     from brain.cli import _VALID_SOURCE_KINDS
     from brain.ui.schemas import VALID_SOURCE_KINDS as UI_KINDS
     from brain.vault.links import _SOURCE_KINDS
 
-    assert _VALID_SOURCE_KINDS is VALID_SOURCE_KINDS, (
-        "brain/cli.py::_VALID_SOURCE_KINDS is no longer the canonical frozenset "
-        "— it is an equal-but-separate object, i.e. a copy that can drift. "
-        "Re-export it (`_VALID_SOURCE_KINDS = VALID_SOURCE_KINDS`) instead of "
-        "restating the literal."
-    )
-    assert UI_KINDS is VALID_SOURCE_KINDS, (
-        "brain/ui/schemas.py::VALID_SOURCE_KINDS is no longer the canonical "
-        "frozenset — it is an equal-but-separate object, i.e. a copy that can "
-        "drift. Re-export it instead of restating the literal."
-    )
-    assert _SOURCE_KINDS == VALID_SOURCE_KINDS, (
-        "brain/vault/links.py::_SOURCE_KINDS is a deliberate independent copy "
-        "and has drifted from the canonical set.\n"
-        f"  vault/links.py  = {sorted(_SOURCE_KINDS)}\n"
-        f"  source_kinds.py = {sorted(VALID_SOURCE_KINDS)}"
-    )
+    for where, name in (
+        ("brain/cli.py::_VALID_SOURCE_KINDS", _VALID_SOURCE_KINDS),
+        ("brain/ui/schemas.py::VALID_SOURCE_KINDS", UI_KINDS),
+        ("brain/vault/links.py::_SOURCE_KINDS", _SOURCE_KINDS),
+    ):
+        assert name is VALID_SOURCE_KINDS, (
+            f"{where} is no longer the canonical frozenset from "
+            "brain/source_kinds.py: it is an equal-but-separate object, i.e. a "
+            "copy that can drift. Re-export it (`= VALID_SOURCE_KINDS`) instead "
+            "of restating the literal."
+        )
