@@ -66,11 +66,6 @@ class ContextSlot:
         _SLOTS[owner] = self
 
     @property
-    def owner(self) -> str:
-        """The name of the module that owns this slot."""
-        return self._owner
-
-    @property
     def current(self) -> ToolContext | None:
         """The bound context, or ``None`` before ``register`` ran."""
         return self._context
