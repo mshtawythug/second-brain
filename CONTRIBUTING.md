@@ -310,6 +310,7 @@ src/brain/
   cli.py              — Typer app, every `brain ...` subcommand
   cli_registry.py     — command-module registrars, including EXTENSION_REGISTRARS (RM-06)
   config.py           — env loading; selects BRAIN_EMBEDDER ∈ {arctic, voyage, qwen3, none}
+  settings/           — feature settings leaves: where new knobs go instead of config.py (RM-08)
   db.py               — psycopg connection + migration runner (schema_migrations tracked)
   embeddings.py       — concrete embedders behind a shared Protocol
   embedding_targets.py — allowlist + identifier-safety helpers for pgvector embedding columns

@@ -592,6 +592,37 @@ A file that *was* found and loaded but lacks the key reports that instead —
 a different fault with a different fix. `brain doctor` checks the same chain
 via `brain.config.dotenv_chain()`, so the two can never disagree.
 
+## Adding a knob: feature settings leaves
+
+New knobs do not go in `brain/config.py`. That file is over the 800-line
+ceiling, and every knob added there needs a growth record. A new knob lives in a
+**feature settings leaf** instead: one module per feature under
+`src/brain/settings/` (for example `settings/rerank.py`), holding a frozen
+dataclass and one loader, `load_<feature>_settings(env)`. Existing knobs stay
+where they are. The policy and an example leaf are in the
+`brain/settings/__init__.py` docstring; the design is §2.3 of
+`docs/specs/2026-10-23-roadmap-completion-design.md`.
+
+**You set these knobs exactly like every other one**: in the same `.env` files,
+resolved in the order above, with the process environment still winning. A leaf
+is read only after `Config.load()` has run, and that call publishes the dotenv
+chain into the process environment, so a leaf sees the same values `Config`
+does.
+
+The parsers in `brain/settings/_env.py` (`env_bool`, `env_choice`, `env_int`,
+`env_float`, `env_str`) all behave the same way:
+
+| Input | Result |
+|---|---|
+| Unset, empty or whitespace only | The knob's default |
+| A valid value | Parsed after stripping surrounding whitespace. Booleans accept `1/true/yes/on` and `0/false/no/off`, as `config.py` does. Choices ignore case. Numbers must lie inside the knob's stated bounds, and `nan` and `inf` are refused. |
+| An invalid value | `brain` refuses to start with a `ConfigError` naming the variable and what it must be, for example `BRAIN_RERANK_DEPTH must be an integer in [2, 50]` |
+
+The error **never quotes the value you set**, unlike the older knobs in
+`config.py`, because a leaf may hold a secret. A secret (an API token, a webhook
+URL) is also hidden from the settings object's `repr`, and `brain doctor` reports
+only whether it is set.
+
 ## Session-end capture hook (`BRAIN_HOOK_*`)
 
 > **These four are real environment variables, not `.env` entries.** Putting
