@@ -397,7 +397,20 @@ def register(app: MCPServerProtocol, ctx: ToolContext) -> None:
 Every retrieval tool applies `ctx.confidential_lens` in its SQL predicate and
 defaults `include_confidential` to `False`; every failure goes through
 `ctx.error`, `ctx.wrap_db_error` or `ctx.wrap_embed_error`. Register with
-`app.tool()(fn)`, never the decorator. The package discovers the module itself:
+`app.tool()(fn)`, never the decorator.
+
+Map errors the way `mcp_server.py`'s own tools do. The codes come from
+`from mcp.types import INTERNAL_ERROR, INVALID_PARAMS`. A bad document-id
+prefix (`queries.resolve_document_prefix` raises `IdPrefixTooShort`,
+`IdPrefixNotHex`, `IdPrefixNotFound` or `IdPrefixAmbiguous`, all subclasses of
+`brain.errors.IdPrefixError`) and a limit over its ceiling
+(`mcp_limits.check_ceiling` raises `PayloadCeilingExceeded`) are caller errors:
+`raise ctx.error(INVALID_PARAMS, str(exc)) from exc`, as `_resolve_id` and
+`_ceiling` do. Reach the database with `with ctx.connection(state) as conn:`
+inside a `try` whose `except psycopg.Error as e:` does
+`raise ctx.wrap_db_error(e) from e`, so the caller sees only the class name.
+Name every tool function `brain_*`: `tests/test_mcp_tool_registration.py`
+builds its roster from that prefix, so a tool named otherwise is not guarded. The package discovers the module itself:
 no edit to `mcp_server.py` or to any list. `tests/test_mcp_tool_registration.py`
 fails if a module-level `brain_*` function is not advertised. In tests, register
 a module on a throwaway server with

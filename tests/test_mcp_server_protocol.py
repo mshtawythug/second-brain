@@ -113,6 +113,18 @@ async def _list_tools_via_stdio(
     return tools
 
 
+#: What ``mcp_server`` must put in each :class:`~brain.mcp_tools.ToolContext` field: its own
+#: helpers, from the importable module (a ``__main__``-built context names ``__main__.*``).
+SERVER_CONTEXT_HELPERS = {
+    "get_state": "brain.mcp_server._get_state",
+    "connection": "brain.mcp_server._mcp_conn",
+    "error": "brain.mcp_server._mcp_error",
+    "wrap_db_error": "brain.mcp_server._wrap_db_error",
+    "wrap_embed_error": "brain.mcp_server._wrap_embed_error",
+    "confidential_lens": "brain.mcp_server._confidential_lens",
+}
+
+
 def _in_process_tool_names() -> set[str]:
     """What this process's importable ``brain.mcp_server`` advertises."""
     return {tool.name for tool in asyncio.run(mcp_server.mcp_app.list_tools())}
@@ -166,7 +178,9 @@ def test_served_module_registers_extensions_once_and_reads_main_state(
     bind the probe first and the import of ``brain.mcp_server`` would be
     refused a second context, so the server would not start. If the context
     held the wrong copy's ``_get_state``, the call would fail: only the served
-    module's ``_state`` was set by ``main()``.
+    module's ``_state`` was set by ``main()``. And the ``context`` map pins each
+    helper ``mcp_server`` passes: a swapped or stubbed field, or a context built
+    by the ``__main__`` copy, names a different function.
     """
     # Arrange
     root = _package_copy_with_probe(tmp_path)
@@ -179,7 +193,10 @@ def test_served_module_registers_extensions_once_and_reads_main_state(
     # Assert
     call_result = tools.pop("__call_result__")
     assert set(tools) == _in_process_tool_names() | {"brain_probe_state"}
-    assert call_result == {"state_type": "_State"}
+    assert call_result == {
+        "state_type": "_State",
+        "context": SERVER_CONTEXT_HELPERS,
+    }
 
 
 @pytest.mark.skipif(

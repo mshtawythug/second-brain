@@ -16,10 +16,10 @@ RM-48).
 
 | File | Change |
 |---|---|
-| `src/brain/cli_registry.py` | `Registrar` alias, `EXTENSION_REGISTRARS = ()`, `register_extensions(app, *, registrars=None)`; docstring states the "new command over a new flag" policy. |
+| `src/brain/cli_registry.py` | `Registrar` alias, `EXTENSION_REGISTRARS = ()`, `register_extensions(app)` (reads the tuple at call time); docstring states the "new command over a new flag" policy. |
 | `src/brain/cli.py` | Import `register_extensions` in the existing `cli_registry` block; one call after the last registration (`gaps push`), with its inline reason; a module-docstring pointer (ninth growth). |
 | `src/brain/mcp_tools/__init__.py` (new) | `register_extension_tools(app, ctx, *, modules=None)`, `discover_tool_modules()`, `_reset_contexts_for_tests(modules=None)`; the docstring lists the helpers every tool must use, the lens first. |
-| `src/brain/mcp_tools/_context.py` (new) | `ToolContext` (frozen dataclass of the six helpers), `ContextSlot` (a module's bound context; refuses a rebind), `ToolContextError`. |
+| `src/brain/mcp_tools/_context.py` (new) | `ToolContext` (frozen dataclass of the six helpers), `ContextSlot` (a module's bound context; refuses a rebind), `ToolRegistrationError`. |
 | `src/brain/mcp_server.py` | Import; after the last tool, the `ToolContext(...)` construction and `register_extension_tools(mcp_app, ctx)` under `if __name__ != "__main__":`; the `__main__` block becomes `from brain.mcp_server import main as _main; _main()`; a module-docstring pointer (eleventh growth). |
 | `tests/test_cli_registry_extensions.py` (new) | AC1. |
 | `tests/test_mcp_tools_seam.py` (new) | AC2, AC3, the discovery/`modules=` filter, the no-`brain.mcp_server`-import rule. |
@@ -39,7 +39,7 @@ RM-48).
 - **One rebind policy, not one per module.** Each tool module holds `_CONTEXT = ContextSlot(__name__)`
   as its module global; `register` calls `_CONTEXT.bind(ctx)`. The refusal and the test-only reset
   live in `ContextSlot`, so a later module cannot get them wrong. A bind with an *equal* context is
-  a no-op (idempotent); a *different* one raises `ToolContextError` unless
+  a no-op (idempotent); a *different* one raises `ToolRegistrationError` unless
   `_reset_contexts_for_tests` ran first.
 - **Discovery** imports every non-underscore module of `brain.mcp_tools` (`pkgutil.iter_modules`), in
   name order, and calls its `register`. A module without `register` raises, rather than being

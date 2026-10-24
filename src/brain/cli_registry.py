@@ -32,7 +32,7 @@ that needs one records the growth (CLAUDE.md, file-size ceiling).
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 
 import typer
 
@@ -120,15 +120,11 @@ def register_all(app: typer.Typer) -> None:
         registrar(app)
 
 
-def register_extensions(
-    app: typer.Typer,
-    *,
-    registrars: Sequence[tuple[str, Registrar]] | None = None,
-) -> None:
-    """Attach every extension command module to ``app``, in order.
+def register_extensions(app: typer.Typer) -> None:
+    """Attach every :data:`EXTENSION_REGISTRARS` module to ``app``, in order.
 
-    ``registrars`` defaults to :data:`EXTENSION_REGISTRARS`, read at call time.
-    ``cli.py`` calls this once, after its last built-in registration.
+    The tuple is read at call time. ``cli.py`` calls this once, after its last
+    built-in registration.
     """
-    for _name, registrar in EXTENSION_REGISTRARS if registrars is None else registrars:
+    for _name, registrar in EXTENSION_REGISTRARS:
         registrar(app)

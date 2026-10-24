@@ -20,7 +20,7 @@ import pytest
 from brain import mcp_server, mcp_tools
 from brain.errors import BrainError
 from brain.mcp_compat import make_server
-from brain.mcp_tools import ToolContext, ToolRegistrationError
+from brain.mcp_tools import ContextSlot, ToolContext, ToolRegistrationError, _context
 from tests import mcp_extension_probe as probe
 
 
@@ -104,7 +104,8 @@ def test_extension_tool_reads_the_state_installed_on_mcp_server(
     result = probe.brain_probe_state()
 
     # Assert
-    assert result == {"state_type": "_Sentinel"}
+    assert result["state_type"] == "_Sentinel"
+    assert result["context"]["get_state"] == "brain.mcp_server._get_state"
 
 
 @pytest.mark.usefixtures("unbound_probe")
@@ -141,9 +142,10 @@ def test_rebinding_a_different_context_raises() -> None:
     probe.register(make_server("rm06-first"), first)
     second_app = make_server("rm06-second")
 
-    # Act / Assert
-    with pytest.raises(ToolRegistrationError, match="different ToolContext"):
+    # Act / Assert: a BrainError, so it reaches an MCP caller as a clean error.
+    with pytest.raises(BrainError, match="different ToolContext") as refused:
         probe.register(second_app, _other_context())
+    assert refused.type is ToolRegistrationError
     assert probe._CONTEXT.current is first
     assert _tool_names(second_app) == set()
 
@@ -182,6 +184,27 @@ def test_an_unregistered_tool_module_fails_loudly() -> None:
     # Act / Assert
     with pytest.raises(ToolRegistrationError, match="not registered"):
         probe.brain_probe_state()
+
+
+_OTHER_SLOT = "tests.rm06_other_slot"
+
+
+@pytest.mark.usefixtures("unbound_probe")
+def test_reset_with_modules_unbinds_only_those_slots(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange: a second slot in the registry. The setitem records that the key was absent,
+    # so teardown removes it; the ContextSlot constructor then replaces the placeholder.
+    monkeypatch.setitem(_context._SLOTS, _OTHER_SLOT, None)
+    other = ContextSlot(_OTHER_SLOT)
+    ctx = _server_context()
+    other.bind(ctx)
+    probe.register(make_server("rm06-first"), ctx)
+
+    # Act
+    mcp_tools._reset_contexts_for_tests([probe])
+
+    # Assert
+    assert probe._CONTEXT.current is None
+    assert other.current is ctx
 
 
 @pytest.mark.usefixtures("unbound_probe")
@@ -224,7 +247,7 @@ def test_every_real_tool_module_is_bound_to_the_importable_server() -> None:
     # Assert
     for name, ctx in contexts.items():
         assert ctx is not None, f"{name} was discovered but never registered"
-        assert ctx.get_state is mcp_server._get_state, name
+        assert ctx == _server_context(), name
 
 
 def _imported_modules(tree: ast.Module, package: str) -> Iterator[str]:
@@ -239,21 +262,51 @@ def _imported_modules(tree: ast.Module, package: str) -> Iterator[str]:
             yield from (f"{base}.{alias.name}" for alias in node.names)
 
 
+def _offenders(package_dir: Path, package: str) -> list[str]:
+    """Files under ``package_dir`` (subpackages included) that import ``brain.mcp_server``.
+
+    Each file's relative imports resolve against that file's OWN package, which is
+    ``package`` plus its subdirectory path: a module in a subpackage that writes
+    ``from ... import mcp_server`` reaches ``brain.mcp_server`` too.
+    """
+    offenders = []
+    for path in sorted(package_dir.rglob("*.py")):
+        relative_dir = path.parent.relative_to(package_dir)
+        own_package = ".".join([package, *relative_dir.parts])
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if "brain.mcp_server" in set(_imported_modules(tree, own_package)):
+            offenders.append(path.relative_to(package_dir).as_posix())
+    return offenders
+
+
 def test_no_tool_module_imports_brain_mcp_server() -> None:
     """A tool module importing ``brain.mcp_server`` gets a second copy under ``python -m``."""
     # Arrange
     package_dir = Path(mcp_tools.__file__).parent
 
     # Act
-    offenders = [
-        path.name
-        for path in sorted(package_dir.glob("*.py"))
-        if "brain.mcp_server"
-        in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), "brain.mcp_tools")
-    ]
+    offenders = _offenders(package_dir, "brain.mcp_tools")
 
     # Assert
     assert not offenders, f"these mcp_tools modules import brain.mcp_server: {offenders}"
+
+
+def test_the_scan_reaches_subpackages_with_their_own_package(tmp_path: Path) -> None:
+    """Discovery imports subpackages too, so the scan must read them, resolved correctly."""
+    # Arrange: a subpackage whose module reaches brain.mcp_server only through ``...``,
+    # and a sibling whose ``..`` names brain.mcp_tools.mcp_server (not the server).
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (tmp_path / "__init__.py").write_text("", encoding="utf-8")
+    (sub / "__init__.py").write_text("", encoding="utf-8")
+    (sub / "leaky.py").write_text("from ... import mcp_server\n", encoding="utf-8")
+    (sub / "fine.py").write_text("from .. import mcp_server\n", encoding="utf-8")
+
+    # Act
+    offenders = _offenders(tmp_path, "brain.mcp_tools")
+
+    # Assert
+    assert offenders == ["sub/leaky.py"]
 
 
 def test_the_import_scan_sees_every_spelling() -> None:

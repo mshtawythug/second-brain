@@ -95,17 +95,6 @@ def test_extension_command_lists_after_every_builtin_command(
     assert names == ["mmm-first", "ooo-last", "aaa-ext", "nnn-group", "aaa-ext-group"]
 
 
-def test_explicit_registrars_override_the_tuple() -> None:
-    # Arrange
-    app = _builtin_app()
-
-    # Act
-    cli_registry.register_extensions(app, registrars=(("probe", _extension),))
-
-    # Assert
-    assert "aaa-ext" in _help_command_names(app)
-
-
 def test_shipped_extension_tuple_registers_nothing_today() -> None:
     """No command has moved behind the seam yet; RM-06 changes no command."""
     # Arrange
