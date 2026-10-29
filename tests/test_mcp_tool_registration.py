@@ -88,9 +88,10 @@ def test_every_brain_tool_function_is_registered() -> None:
 def test_the_guard_flags_an_extension_tool_that_was_not_registered() -> None:
     """The extension half of the roster is only a guard if it can fail.
 
-    No extension tool ships yet (RM-12 adds the first), so this drives the same
-    helper with the test-only probe on a throwaway server whose ``register`` was
-    never called.
+    It drives the same helper with the test-only probe on a throwaway server
+    whose ``register`` was never called, so the proof does not depend on
+    unregistering a real tool module (``brain.mcp_tools.related``, RM-12)
+    from the shared server.
     """
     # Arrange
     app = make_server("rm06-unregistered")

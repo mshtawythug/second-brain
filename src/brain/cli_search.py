@@ -36,6 +36,7 @@ from .facets import SearchFacets, compute_facets
 from .format import console, emit_json, explain_table, search_table
 from .format_search import (
     NO_FACETS_MESSAGE,
+    explanation_json,
     facets_renderable,
     search_envelope_json,
     search_meta_line,
@@ -680,33 +681,12 @@ def explain(
 
     if json_output:
         # The seven public keys come from the one shared projection; ``explain``
-        # adds an eighth on top. Key ORDER is preserved (``**base`` first), so
-        # the emitted payload is byte-identical to the previous inline literal.
+        # adds an eighth on top, from the projection MCP ``brain_explain`` shares
+        # (RM-12). Key ORDER is preserved (``**base`` first), so the emitted
+        # payload is byte-identical to the previous inline literal.
         emit_json(
             [
-                {
-                    **base,
-                    "explain": (
-                        {
-                            "fts_rank": r.explain.fts_rank,
-                            "fts_score": r.explain.fts_score,
-                            "fts_rrf_contribution": r.explain.fts_rrf_contribution,
-                            "vector_rank": r.explain.vector_rank,
-                            "vector_cosine": r.explain.vector_cosine,
-                            "vector_rrf_contribution": r.explain.vector_rrf_contribution,
-                            "rrf_score": r.explain.rrf_score,
-                            "recency_age_days": r.explain.recency_age_days,
-                            "recency_boost": r.explain.recency_boost,
-                            "final_score": r.explain.final_score,
-                            "best_chunk_id": r.explain.best_chunk_id,
-                            "best_chunk_index": r.explain.best_chunk_index,
-                            "matched_filters": r.explain.matched_filters,
-                            "reranker_score": r.explain.reranker_score,
-                        }
-                        if r.explain is not None
-                        else None
-                    ),
-                }
+                {**base, "explain": explanation_json(r.explain)}
                 for r, base in zip(results, search_results_json(results), strict=True)
             ]
         )

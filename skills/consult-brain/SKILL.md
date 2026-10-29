@@ -219,6 +219,12 @@ boost, best-chunk index, and matched filters. Two things to look for:
 - **`matched_filters` doesn't include a filter you passed** — your filter
   silently didn't apply (typo, unresolved person name, etc.).
 
+Over MCP the same diagnostics come from `brain_explain` (no snippets). To
+widen from one document you already have to its neighbours, call MCP
+`brain_related` with its id: the list `brain ui` shows beside a note. Both
+leave confidential documents out unless you pass `include_confidential=true`;
+ask the user before you do.
+
 ## When NOT to reach for the brain
 
 - The user asks about something obviously NOT in the brain (generic coding

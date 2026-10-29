@@ -8,6 +8,10 @@ RM-06 adds two checks of the extension seam over the same transport: the
 advertised list equals the in-process ``mcp_app.list_tools()``, and a copy of
 the package with one extension tool planted in ``brain/mcp_tools`` serves that
 tool exactly once, from the module ``main()`` initialised.
+
+RM-12 ships the first real extension module (``brain.mcp_tools.related``): the
+list comparison asserts its two tools are served, and ``brain_related`` is
+CALLED over stdio against a seeded test database (RM-06 criterion 5).
 """
 import asyncio
 import json
@@ -18,17 +22,22 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import psycopg
 import pytest
 from mcp import ClientSession, StdioServerParameters, stdio_client
 
 import brain
 from brain import mcp_server
 from tests import mcp_extension_probe
+from tests.test_ui_routes_related import _seed as _seed_related_corpus
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
     "postgresql://brain:brain@localhost:5434/second_brain_test",
 )
+
+#: The tools of ``brain.mcp_tools.related`` (RM-12), the first real extension module.
+EXTENSION_TOOLS = {"brain_related", "brain_explain"}
 
 EXPECTED_TOOLS = {
     "brain_search",
@@ -46,13 +55,15 @@ async def _list_tools_via_stdio(
     *,
     package_root: Path | None = None,
     call: str | None = None,
+    arguments: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, object]]:
     """Spawn brain-mcp and return ``{tool_name: tool_dict}`` from tools/list.
 
     ``package_root`` runs the server from a copy of the ``brain`` package
     instead of the installed one (first on ``PYTHONPATH``, and the cwd, which
-    ``-m`` puts at ``sys.path[0]``). ``call`` names a no-argument tool to call
-    after listing; its JSON result is stored under ``"__call_result__"``.
+    ``-m`` puts at ``sys.path[0]``). ``call`` names a tool to call after
+    listing, with ``arguments`` (none by default); its JSON result is stored
+    under ``"__call_result__"``.
     """
     env = {
         # Use `python -m brain.mcp_server` so the test isn't dependent on the
@@ -91,7 +102,7 @@ async def _list_tools_via_stdio(
             await session.initialize()
             result = await session.list_tools()
             if call is not None:
-                called = await session.call_tool(call, {})
+                called = await session.call_tool(call, arguments or {})
                 # `isError` is `is_error` on mcp 2.x; the alias dump reads both.
                 dumped = called.model_dump(by_alias=True)
                 assert not dumped["isError"], dumped
@@ -159,8 +170,36 @@ def test_stdio_tool_list_equals_in_process_list() -> None:
     # Act
     served = set(anyio.run(_list_tools_via_stdio))
 
-    # Assert
+    # Assert: the extension tools are named, so a seam that registered no
+    # extension in either place cannot pass as two equal lists.
+    assert served >= EXTENSION_TOOLS
     assert served == _in_process_tool_names()
+
+
+@pytest.mark.skipif(
+    shutil.which(sys.executable) is None,
+    reason="python interpreter not on PATH",
+)
+def test_brain_related_is_called_over_stdio(test_db: psycopg.Connection[Any]) -> None:
+    """RM-12 AC7: the first extension tool CALLED through ``python -m brain.mcp_server``.
+
+    The seed is committed (``test_db`` is autocommit) before the server starts,
+    so the server's own connection reads it; the fixture truncates afterwards.
+    """
+    # Arrange
+    ids = _seed_related_corpus(test_db)
+
+    # Act
+    tools = anyio.run(
+        lambda: _list_tools_via_stdio(
+            call="brain_related", arguments={"id": ids["A"][:8]}
+        )
+    )
+
+    # Assert
+    payload = tools["__call_result__"]
+    assert payload["id"] == ids["A"]
+    assert [row["id"] for row in payload["related"]] == [ids["B"], ids["C"]]
 
 
 @pytest.mark.skipif(
