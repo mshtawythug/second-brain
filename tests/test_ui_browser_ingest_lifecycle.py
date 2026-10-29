@@ -216,3 +216,60 @@ def test_an_unreachable_server_is_reported_and_polling_recovers(harness: Harness
     assert failed, "the failing poll was never sent"
     assert row.locator(".job-outcome").inner_text() == "Added"
     assert row.locator(".job-note", has_text="Cannot reach the server").count() == 0
+
+
+# --------------------------------------------- review round 2 (rev-74) ------
+
+
+def test_a_second_cancel_while_the_first_is_in_flight_sends_nothing(harness: Harness) -> None:
+    page = harness.page
+    harness.open_tab()
+    harness.paste("hold")
+    cancel = harness.row().locator("button.job-cancel")
+    cancel.wait_for(timeout=SETTLE_MS)
+    held = harness.hold("POST")
+
+    cancel.click()
+    harness.wait_until(lambda: held, "the cancel request")
+    cancel.click(force=True)  # aria-disabled: Playwright would refuse a plain click
+    cancel.focus()
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(500)  # an absence: a second POST would have been sent by now
+
+    assert cancel.get_attribute("aria-disabled") == "true"
+    assert len(held) == 1
+    assert harness.jobs.cancels == []
+    held[0].fallback()  # release the one request to the fake
+    row = harness.settled()
+
+    assert row.locator(".job-outcome").inner_text() == "Cancelled. Nothing was written."
+    assert len(harness.jobs.cancels) == 1
+
+
+def test_a_resume_that_first_fails_to_reach_the_server_announces_nothing(
+    harness: Harness,
+) -> None:
+    page = harness.page
+    harness.open_tab()
+    harness.paste("added")
+    harness.settled()
+    page.reload()
+    page.wait_for_selector("#tab-notes")
+    failed: list[str] = []
+
+    def one_failure(route: Any) -> None:
+        if route.request.method == "GET" and not failed:
+            failed.append(route.request.url)
+            _json(route, 503, {"error": {"code": "unavailable", "message": "try later"}})
+            return
+        route.fallback()
+
+    page.route("**/api/jobs/**", one_failure)
+    harness.open_tab()
+    harness.row().locator(".job-note", has_text="Cannot reach the server").wait_for(
+        timeout=SETTLE_MS)
+    row = harness.settled()
+
+    assert failed
+    assert row.locator(".job-outcome").inner_text() == "Added"
+    assert harness.announced() == []

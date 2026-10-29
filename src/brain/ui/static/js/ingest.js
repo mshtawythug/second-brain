@@ -178,7 +178,8 @@ function apply(id, change) {
     ...fields,
     /* Sticky for the same reason: a poll sent before the cancel still says false. */
     cancelRequested: before.cancelRequested || Boolean(fields.cancelRequested),
-    quiet: false,
+    /* Only a real snapshot restores the row; an "unreachable" note does not. */
+    quiet: before.quiet && !("state" in fields),
     events: [...before.events, ...newEvents.filter((e) => !seen.has(e.seq))],
   };
   entry.record = record;

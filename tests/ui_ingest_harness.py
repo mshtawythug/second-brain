@@ -107,7 +107,8 @@ def _running(done: int, total: int) -> Frame:
     return Frame("running", [("embedding", done, total, None)])
 
 
-#: Scenario, chosen by the pasted title: the frames each poll walks through.
+#: Scenario, chosen by the ``scenario:<name>`` marker in the pasted BODY (never the
+#: title): the frames each poll walks through.
 SCRIPTS: dict[str, list[Frame]] = {
     "added": [_running(1, 2), Frame("succeeded", [("finishing", None, None, None)],
                                     _result(), cancellable=False)],
