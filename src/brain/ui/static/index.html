@@ -51,6 +51,7 @@
 <link rel="stylesheet" href="/static/css/explorer.css">
 <link rel="stylesheet" href="/static/css/discovery.css">
 <link rel="stylesheet" href="/static/css/thread.css">
+<link rel="stylesheet" href="/static/css/ingest.css">
 <script src="/static/theme.js"></script>
 <script type="module" src="/static/js/main.js"></script>
 <!-- A SECOND module entry point, and the reason is ownership rather than
@@ -161,16 +162,68 @@
 
 </main>
 
-<section class="shell deferred-tab" id="tab-ingest" hidden>
-  <div class="deferred">
-    <h2>Ingest</h2>
-    <p>Deferred to a later release. Ingest chunks, embeds and enriches each
-       document, which takes tens of seconds to minutes — it needs a
-       background-job subsystem this UI does not have yet, and a progress bar
-       that lied about untracked work would be worse than none.</p>
-    <p>Use the CLI today:</p>
-    <pre><code>brain ingest &lt;file&gt;
-brain ingest-dir &lt;directory&gt;</code></pre>
+<!-- THE INGEST TAB (RM-11, Ingest spec §8). js/ingest.js wires it, and loads
+     /api/ingest/config the first time the tab is shown: the fieldset ships
+     DISABLED and is enabled only by a config that says ingest is allowed, so a
+     read-only or LAN-bound server never offers a form that can only fail.
+     NOT `class="shell"`: this pane is one scrolling column, not the three-pane
+     grid, and owning no `display` rule is what lets the bare `hidden` attribute
+     hide it (see `.shell[hidden]` in css/layout.css for the trap that avoids).
+     The job list is NOT a live region: progress changes on every poll, and a
+     live list would re-announce each one. #ingest-announce gets one sentence
+     per state change instead. -->
+<section class="ingest-pane" id="tab-ingest" aria-labelledby="ingest-heading" hidden>
+  <div class="ingest-layout">
+    <header class="ingest-head">
+      <h2 id="ingest-heading">Ingest</h2>
+      <p class="ingest-help">Paste text or markdown to add it to your brain. It is
+         chunked, embedded and summarized, saved under <code>_ingested/manual/</code>,
+         and found by search. Pasting the same text again changes nothing. For a
+         note you will keep editing, use <strong>+ New</strong> in Notes.</p>
+    </header>
+    <p class="ingest-unavailable" id="ingest-unavailable" role="status" hidden></p>
+    <form class="ingest-form" id="ingest-form" novalidate>
+      <fieldset class="ingest-fieldset" id="ingest-fieldset" disabled>
+        <legend>Paste</legend>
+        <div class="ingest-field">
+          <label for="ingest-title">Title</label>
+          <input type="text" id="ingest-title" maxlength="200" autocomplete="off" required>
+        </div>
+        <div class="ingest-field">
+          <label for="ingest-body">Text or markdown</label>
+          <textarea id="ingest-body" rows="12" spellcheck="false" required
+                    aria-describedby="ingest-body-hint"></textarea>
+          <p class="ingest-hint" id="ingest-body-hint"></p>
+        </div>
+        <div class="ingest-row">
+          <div class="ingest-field">
+            <label for="ingest-tags">Tags (comma separated)</label>
+            <input type="text" id="ingest-tags" autocomplete="off">
+          </div>
+          <div class="ingest-field">
+            <label for="ingest-content-type">Type</label>
+            <select id="ingest-content-type"></select>
+          </div>
+        </div>
+        <fieldset class="ingest-choice" id="ingest-sensitivity">
+          <legend>Sensitivity</legend>
+        </fieldset>
+        <div class="ingest-check">
+          <input type="checkbox" id="ingest-no-enrich">
+          <label for="ingest-no-enrich">Skip the summary (faster)</label>
+        </div>
+        <p class="ingest-error" id="ingest-error" role="alert" hidden></p>
+        <div class="ingest-actions">
+          <button class="accent-btn" id="ingest-submit" type="submit">Ingest</button>
+        </div>
+      </fieldset>
+    </form>
+    <section class="ingest-jobs" aria-labelledby="ingest-jobs-heading">
+      <h3 id="ingest-jobs-heading">Jobs</h3>
+      <p class="ingest-empty" id="ingest-jobs-empty">Nothing ingested from this tab yet.</p>
+      <ol class="job-list" id="ingest-jobs"></ol>
+    </section>
+    <p class="ingest-announce" id="ingest-announce" role="status" aria-live="polite"></p>
   </div>
 </section>
 

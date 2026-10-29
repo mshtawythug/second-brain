@@ -61,3 +61,31 @@ def test_every_wired_name_has_a_section_and_every_button_a_pane() -> None:
 def test_no_docstring_still_describes_the_publish_tab() -> None:
     assert "Publish" not in (brain.ui.__doc__ or "")
     assert "Publish tab" not in (notes_service.set_draft.__doc__ or "")
+
+
+def _section(html: str, name: str) -> str:
+    """The opening tag and body of ``<section id="tab-<name>">``."""
+    (body,) = re.findall(rf'(<section[^>]*\bid="tab-{name}"[^>]*>.*?</section>)', html, re.S)
+    return body
+
+
+def test_the_ingest_pane_is_a_real_tab_not_a_deferred_one() -> None:
+    """RM-11: ``#tab-ingest`` stops being the "Deferred" placeholder."""
+    ingest = _section(_INDEX, "ingest")
+    opening = ingest.split(">", 1)[0]
+
+    assert "deferred-tab" not in opening
+    assert "Deferred to a later release" not in ingest
+    assert '<form class="ingest-form" id="ingest-form"' in ingest
+    # Labels on every control: each id the form submits has a <label for=...>.
+    for control in ("ingest-title", "ingest-body", "ingest-tags", "ingest-content-type",
+                    "ingest-no-enrich"):
+        assert f'id="{control}"' in ingest
+        assert f'for="{control}"' in ingest, f"{control} has no <label for>"
+
+
+def test_the_agent_pane_is_still_deferred() -> None:
+    agent = _section(_INDEX, "agent")
+
+    assert 'class="shell deferred-tab"' in agent.split(">", 1)[0]
+    assert "Deferred to a later release" in agent
