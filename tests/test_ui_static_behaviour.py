@@ -211,7 +211,7 @@ JS_ORDER = (
     "inspector.js", "tree.js", "results.js", "keys.js",
     "palette.js", "note_fetch.js", "marginalia.js", "graph.js", "related.js",
     "discovery.js", "thread.js", "watcher_status.js", "watcher.js",
-    "jobs.js", "ingest_view.js", "ingest.js", "main.js",
+    "jobs.js", "ingest_view.js", "upload.js", "ingest_file.js", "ingest.js", "main.js",
 )
 JS = {name: (STATIC / "js" / name).read_text(encoding="utf-8") for name in JS_ORDER}
 JS_ALL = "\n".join(JS[name] for name in JS_ORDER)
@@ -1247,6 +1247,21 @@ def _simple_parts(selector: str) -> frozenset[str] | None:
     return frozenset(tokens)
 
 
+def _subject_parts(selector: str) -> frozenset[str] | None:
+    """The simple selectors of a selector's SUBJECT: its rightmost compound.
+
+    ``.ingest-pane .ingest-group`` -> ``{.ingest-group}``. Used only where the
+    question is "could this rule's ``display`` reach the element?", and there it
+    over-approximates on purpose: it assumes the ancestor part matches, so a rule
+    that MIGHT apply is treated as applying, which can only make the
+    ``[hidden]`` guard stricter. Without it every rule in a feature sheet whose
+    selectors are scoped to a pane (``ingest.css``) was invisible to that guard,
+    which RM-13 found when its two new ``[hidden]`` rules could be deleted
+    without a red test. ``None`` when the subject itself is not a compound.
+    """
+    return _simple_parts(re.split(r"\s*[ >+~]\s*", selector.strip())[-1])
+
+
 _MAX_WIDTH = re.compile(r"^@media \((?:max|min)-width: \d+px\)$")
 _FEATURE = re.compile(r"^@media \(([a-z-]+): ([a-z-]+)\)$")
 
@@ -1467,7 +1482,7 @@ def _winning_display(keys: frozenset[str], declarations: list[_Decl]) -> _Decl |
     matching = [
         decl for decl in declarations
         if decl.prop == "display"
-        and (parts := _simple_parts(decl.selector)) is not None
+        and (parts := _subject_parts(decl.selector)) is not None
         and parts <= (keys | {"[hidden]"})
     ]
     return max(matching, key=_cascade_rank) if matching else None
@@ -1478,9 +1493,10 @@ def check_hidden_toggles_survive_the_cascade(bundle: str) -> None:
 
     Written after running it. The scan resolves every ``.hidden =`` site (the
     count lives in the ``hidden-toggle-scan-finds-nothing`` entry below, not
-    here). Four of the resolved elements have a competing author ``display`` and
+    here). Six of the resolved elements have a competing author ``display`` and
     are saved by an explicit ``[hidden]`` rule (``.shell``, ``#discovery``,
-    ``.field``, ``.pager``). Five have none and are left to the UA sheet
+    ``.field``, ``.pager``, and RM-13's ``.ingest-group`` and ``.ingest-staged``).
+    Five have none and are left to the UA sheet
     (``#mode-badge``, ``#new-note``, and RM-11's ``#ingest-unavailable``,
     ``#ingest-error`` and ``#ingest-jobs-empty``). Three carry a defensive
     ``[hidden]`` rule with nothing to compete against (``.toast``,
@@ -2074,7 +2090,7 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
     # guard is green while looking at an empty list. Renaming the property at
     # all eleven sites is the shape that produces that.
     ("hidden-toggle-scan-finds-nothing", check_hidden_toggles_survive_the_cascade,
-     "static/*", ".hidden =", ".hiddenFlag =", 16),
+     "static/*", ".hidden =", ".hiddenFlag =", 19),
     # The DISCOVERY clause. `toast()`'s element stops being resolvable, the site
     # count is unchanged so the first assertion stays green, and only
     # "cannot tell what this hides" can fire. A guard that skipped the site
@@ -2090,6 +2106,14 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
     ("hidden-rule-deleted-leaves-the-pager-visible",
      check_hidden_toggles_survive_the_cascade, "static/*",
      ".pager[hidden] { display: none; }", "", 1),
+    # RM-13's two: without them the Paste / File switch would show both modes'
+    # fields at once, and a removed staged file would leave its row on screen.
+    ("hidden-rule-deleted-leaves-both-ingest-modes-visible",
+     check_hidden_toggles_survive_the_cascade, "static/*",
+     ".ingest-pane .ingest-group[hidden] { display: none; }", "", 1),
+    ("hidden-rule-deleted-leaves-the-staged-file-visible",
+     check_hidden_toggles_survive_the_cascade, "static/*",
+     ".ingest-pane .ingest-staged[hidden] { display: none; }", "", 1),
     # ---------------------------------------------- the cross-sheet class --
     # A NEW duplicate: explorer.css starts declaring a property components.css
     # already declares for `.rail-head`, so which padding the header gets

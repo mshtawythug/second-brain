@@ -1,4 +1,8 @@
-/* The fetch wrapper: token header, JSON content type, error normalization. */
+/* The fetch wrapper: token header, JSON content type, error normalization.
+ *
+ * The token stays in THIS module: `getToken()` hands it to upload.js, the one
+ * request that cannot go through `api()` (its body is raw bytes, not JSON), so
+ * the fragment is still read, held and stripped in exactly one place. */
 
 /* The token arrives in the URL FRAGMENT, which is never sent to the server,
    never written to an access log, and never leaked in a Referer. We read it,
@@ -15,6 +19,10 @@ if (location.hash.startsWith("#t=")) {
   history.replaceState(null, "", location.pathname + location.search);
 }
 
+export function getToken() {
+  return token;
+}
+
 export async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (token) headers["X-Brain-UI-Token"] = token;
@@ -26,6 +34,11 @@ export async function api(path, options = {}) {
     credentials: "same-origin",
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
+  return readResponse(response);
+}
+
+/* A response's JSON payload, or the normalized error. Shared with upload.js. */
+export async function readResponse(response) {
 
   /* TWO PARSE FAILURES, TWO ANSWERS — and conflating them was a real defect.
      On an ERROR response, a body that is not JSON is expected and tolerated: a

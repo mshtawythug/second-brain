@@ -1,8 +1,9 @@
 """The shared harness for the Ingest tab's browser suites (RM-11, Ingest spec §9.4).
 
-Used by ``tests/test_ui_browser_ingest.py`` (the flows) and
-``tests/test_ui_browser_ingest_lifecycle.py`` (races, resumption, announcements),
-split in two so neither crosses the 800-line test-file precedent. Same shape as
+Used by ``tests/test_ui_browser_ingest.py`` (the flows),
+``tests/test_ui_browser_ingest_lifecycle.py`` (races, resumption, announcements)
+and ``tests/test_ui_browser_ingest_upload.py`` (RM-13's file mode), split so none
+crosses the 800-line test-file precedent. Same shape as
 ``tests/ui_graph_harness.py``: the fixtures are registered under their public
 names and imported by each module. Not a test module, and it carries no marker.
 
@@ -56,11 +57,18 @@ _BOOT: dict[str, Any] = {
     "/api/facets": {"sources": [], "content_types": [], "tags": []},
 }
 
+_TEXT_CAP = 5 * 1024 * 1024
+_BINARY_CAP = 25 * 1024 * 1024
 ENABLED_CONFIG: dict[str, Any] = {
     "enabled": True,
     "reason": None,
-    "extensions": [],
-    "limits": {"paste_body_bytes": 2 * 1024 * 1024, "max_queued_jobs": 4},
+    "extensions": [".txt", ".md", ".markdown", ".pdf", ".docx"],
+    "limits": {
+        "paste_body_bytes": 2 * 1024 * 1024, "max_queued_jobs": 4,
+        "upload_bytes": {".txt": _TEXT_CAP, ".md": _TEXT_CAP, ".markdown": _TEXT_CAP,
+                         ".pdf": _BINARY_CAP, ".docx": _BINARY_CAP},
+        "staged_bytes": 64 * 1024 * 1024,
+    },
     "content_types": ["note", "transcript"],
     "default_content_type": "note",
     "sensitivity_levels": ["confidential", "normal"],
@@ -79,6 +87,7 @@ def _result(**overrides: Any) -> dict[str, Any]:
         "document_id": DOC_ID,
         "title": "Quarkle digest",
         "vault_path": "_ingested/manual/2026-03-01-quarkle-digest.md",
+        "original_filename": None,
         "chunk_count": 2,
         "sensitivity": "normal",
         "summary_status": "written",
@@ -140,6 +149,10 @@ SCRIPTS: dict[str, list[Frame]] = {
     "race": [_running(1, 4)],
     "too-late": [Frame("succeeded", [("finishing", None, None, "cancel_too_late")],
                        _result(), cancellable=False)],
+    # RM-13: an uploaded file, extracting then done.
+    "file": [Frame("running", [("extracting", None, None, None)]),
+             Frame("succeeded", [("finishing", None, None, None)],
+                   _result(original_filename="quarkle-notes.md"), cancellable=False)],
     "fails": [Frame("failed", [], None, {
         "code": "embedder_busy",
         "message": "The embedding model did not answer. Nothing was written; retry.",
@@ -151,6 +164,7 @@ SCRIPTS: dict[str, list[Frame]] = {
 class FakeJob:
     id: str
     script: list[Frame]
+    kind: str = "ingest.paste"
     polls: int = 0
     seq: int = 1
     events: list[dict[str, Any]] = field(default_factory=list)
@@ -168,11 +182,19 @@ class FakeJobs:
         self.pastes: list[dict[str, Any]] = []
         self.cancels: list[tuple[str, Any]] = []
         self.gone: set[str] = set()
+        # RM-13: what reached the upload routes, and what they answer next.
+        self.uploads: list[dict[str, Any]] = []
+        self.discards: list[tuple[str, Any]] = []
+        self.files: list[dict[str, Any]] = []
+        self.upload_error: tuple[int, str, str] | None = None
+        self.file_error: tuple[int, str, str] | None = None
+        self.hold_uploads: list[Any] = []
+        self.holding = False
 
     def snapshot(self, job: FakeJob, after: int = 0) -> dict[str, Any]:
         frame = job.frame
         return {
-            "id": job.id, "kind": "ingest.paste", "state": frame.state,
+            "id": job.id, "kind": job.kind, "state": frame.state,
             "cancellable": frame.cancellable and frame.state in ("queued", "running"),
             "cancel_requested": job.cancelled and frame.state == "running",
             "created_at": STAMP, "started_at": None, "finished_at": None,
@@ -212,6 +234,8 @@ class FakeJobs:
             self.jobs[job.id] = job
             _json(route, 202, self.snapshot(job))
             return True
+        if path.startswith("/api/ingest/uploads") or path == "/api/ingest/file":
+            return self._upload_routes(route, path)
         match = re.fullmatch(r"/api/jobs/([0-9a-f]+)(/cancel)?", path)
         if not match:
             return False
@@ -241,6 +265,54 @@ class FakeJobs:
         after = int(parse_qs(split.query).get("after", ["0"])[0])
         _json(route, 200, self.snapshot(job, after))
         return True
+
+
+    def _upload_routes(self, route: Any, path: str) -> bool:
+        request = route.request
+        if path == "/api/ingest/uploads" and request.method == "POST":
+            if self.holding:
+                self.hold_uploads.append(route)
+                return True
+            self.answer_upload(route)
+            return True
+        found = re.fullmatch(r"/api/ingest/uploads/([0-9a-f]+)", path)
+        if found and request.method == "DELETE":
+            self.discards.append((found.group(1), json.loads(request.post_data or "null")))
+            _json(route, 200, {"upload_id": found.group(1), "deleted": True})
+            return True
+        if path == "/api/ingest/file" and request.method == "POST":
+            body = json.loads(request.post_data or "{}")
+            self.files.append(body)
+            if self.file_error is not None:
+                status, code, message = self.file_error
+                _json(route, status, {"error": {"code": code, "message": message}})
+                return True
+            job = FakeJob(id=f"{len(self.jobs) + 1:032x}", script=SCRIPTS["file"],
+                          kind="ingest.file")
+            job.events.append({"seq": 1, "at": STAMP, "phase": "queued",
+                               "done": None, "total": None, "code": None})
+            self.jobs[job.id] = job
+            _json(route, 202, self.snapshot(job))
+            return True
+        return False
+
+    def answer_upload(self, route: Any) -> None:
+        """Answer one upload request now (also used to release a held one)."""
+        request = route.request
+        headers = request.headers
+        data = request.post_data_buffer or b""
+        self.uploads.append({
+            "content_type": headers.get("content-type"),
+            "filename": headers.get("x-brain-filename"),
+            "token": headers.get("x-brain-ui-token"),
+            "size": len(data),
+        })
+        if self.upload_error is not None:
+            status, code, message = self.upload_error
+            _json(route, status, {"error": {"code": code, "message": message}})
+            return
+        _json(route, 201, {"upload_id": f"{len(self.uploads):032x}", "size": len(data),
+                           "kind": "text"})
 
 
 def _json(route: Any, status: int, body: Any) -> None:

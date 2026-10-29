@@ -1,5 +1,5 @@
-/* ingest.css — the Ingest tab: the paste form and the job panel (js/ingest.js,
- * js/ingest_view.js).
+/* ingest.css — the Ingest tab: the form (paste and file modes) and the job panel
+ * (js/ingest.js, js/ingest_file.js, js/ingest_view.js).
  *
  * A FEATURE SHEET, loaded last, layered on the shared component tier like the
  * others. index.html's <link> block and `CSS_ORDER` in
@@ -122,10 +122,65 @@
   font-size: var(--t-meta);
   color: var(--ink-muted);
 }
-.ingest-pane .ingest-row {
-  display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
-  gap: var(--s-3);
+/* One mode's fields (paste or file). js/ hides the other with `hidden`, so the
+   grid needs its own [hidden] rule to lose (check_hidden_toggles_survive_…). */
+.ingest-pane .ingest-group { display: grid; gap: var(--s-4); min-width: 0; }
+.ingest-pane .ingest-group[hidden] { display: none; }
+
+/* ------------------------------------------------------------- file mode --- */
+
+/* The input keeps its <label> for assistive technology but is never drawn and
+   never a tab stop: the drop zone below is its keyboard path. */
+.ingest-pane .ingest-file-input {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+.ingest-pane .ingest-drop {
+  display: block;
+  width: 100%;
+  padding: var(--s-6) var(--s-4);
+  border: 1px dashed var(--ink-muted);
+  border-radius: var(--radius);
+  background: var(--paper-sunk);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t-ui);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
+}
+.ingest-pane .ingest-drop:hover { border-color: var(--accent); }
+.ingest-pane .ingest-drop:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ingest-pane .ingest-drop[data-dragging="true"] {
+  border-style: solid;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.ingest-pane .ingest-drop:disabled { cursor: not-allowed; opacity: 0.6; }
+
+/* The staged file: a ledger row of one, machine face for its state. */
+.ingest-pane .ingest-staged {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-2) var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border: var(--hair);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--paper);
+}
+.ingest-pane .ingest-staged[hidden] { display: none; }
+.ingest-pane .ingest-staged-name { font-weight: 600; overflow-wrap: anywhere; }
+.ingest-pane .ingest-staged-state {
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+}
+.ingest-pane .ingest-staged .ghost-btn { margin-left: auto; font-size: var(--t-meta); }
+.ingest-pane .ingest-staged .ghost-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 .ingest-pane .ingest-choice {
   margin: 0;
@@ -238,6 +293,7 @@
 .ingest-pane .job-title { font-size: var(--t-title); }
 .ingest-pane .job-open { color: var(--accent); }
 .ingest-pane .job-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ingest-pane .job-file { color: var(--ink-muted); overflow-wrap: anywhere; }
 .ingest-pane .job-path {
   display: block;
   margin-top: var(--s-1);
@@ -277,13 +333,13 @@
   }
 }
 @media (max-width: 780px) {
-  .ingest-pane .ingest-row { grid-template-columns: minmax(0, 1fr); }
   .ingest-pane .ingest-fieldset { padding: var(--s-4); }
 }
 
 /* Motion is opt-in elsewhere; here the only motion is the user agent's own
    indeterminate-progress animation, so reduced motion gets a still bar. */
 @media (prefers-reduced-motion: reduce) {
+  .ingest-pane .ingest-drop { transition: none; }
   .ingest-pane .job-progress:indeterminate {
     appearance: none;
     border: 0;
