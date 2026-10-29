@@ -131,13 +131,37 @@ The upload rows, the octet-stream middleware exception and the browser tier are 
 
 ## Mutation proofs (in `git archive` copies only)
 
-- M1: drop the `hosted_egress` forward → the hosted+confidential test goes red.
-- M2: drop the `produces_embeddings` forward → its test goes red.
-- M3: make `enter_commit` close without checking → cancel cases (b) and (c) go red.
-- M4: remove the loopback check in the paste route → the non-loopback security test goes red.
-- M5: remove `check_cancelled` before each slice → cancel case (a) goes red.
-- M6: drop the `cancellable=False` on terminal states → the terminal-snapshot test goes red.
-- M7: remove the wire-cap counter → the absent-`Content-Length` test goes red.
+Each mutation runs on a fresh `git archive HEAD` copy, never on the worktree. The harness:
+
+- applies one exact-string replacement that must match exactly once;
+- proves it applied (the re-read file equals the mutated text and differs from the original);
+- sets `PYTHONDONTWRITEBYTECODE=1`, purges `__pycache__`, and pins `PYTHONPATH` to the copy's `src`;
+- checks by realpath that `brain` imports from the copy;
+- runs the named tests against the sibling DB `second_brain_test_rm10_mut`.
+
+A baseline run on an unmutated copy passed first. Run at `58d50e3`: **12 of 12 killed.**
+
+| # | Mutation | Killed by |
+|---|---|---|
+| M1 | `hosted_egress` forward hard-coded `False` | `test_hosted_egress_is_forwarded`; `test_a_confidential_paste_under_a_hosted_embedder_is_never_embedded` |
+| M2 | `produces_embeddings` forward hard-coded `True` | `test_produces_embeddings_is_forwarded`; `test_a_backend_without_vectors_stores_null_embeddings` |
+| M3 | `enter_commit` closes without checking the flag | `test_a_mid_embed_cancel_writes_nothing` (cases b, c); `test_enter_commit_after_a_requested_cancel_raises` |
+| M4 | loopback check removed from `require_ingest` | `test_non_loopback_refuses_every_ingest_mutation_even_with_a_token` |
+| M5 | no `check_cancelled()` before each slice | `test_a_mid_embed_cancel_writes_nothing` (case a); `test_a_cancel_before_a_batch_stops_before_that_batch` |
+| M6 | terminal states keep `cancellable` | `test_cancellable_is_false_in_every_terminal_snapshot` |
+| M7 | stream counter removed | `test_the_stream_counter_stops_reading_at_the_cap` |
+| M8 | the job list carries results | `test_every_unprompted_surface_hides_it_or_none_of_them_do`; `test_the_job_list_carries_no_results_or_events` |
+| M9 | no `cancel_too_late` event | `test_an_unobserved_cancel_ends_succeeded_with_cancel_too_late`; `test_a_cancel_on_a_no_embed_path_is_reported_too_late` |
+| M10 | `enter_commit()` called before `ingest_document` | `test_a_mid_embed_cancel_writes_nothing` |
+| M11 | `Content-Length` precheck removed | `test_an_honest_content_length_over_the_cap_is_refused_without_reading` |
+| M12 | runner passes tags un-normalized | `test_a_paste_becomes_an_ingested_document_with_a_mirror` |
+
+**M7 survived the first run, and that is recorded here rather than dropped.** The original stream
+test sent a chunked oversize paste through `TestClient`. Without the counter, the decoded 2 MiB cap
+still answered 413 after the whole body had been buffered, so that test could not see the counter.
+The counter is now pinned at the ASGI level (`58d50e3`): reading must stop at the first piece that
+crosses the cap. The first run's applied-check also misreported M10, an insertion whose new text
+contains the old text. The check now compares the whole file. That mutation's tests had gone red.
 
 ## Risks
 
