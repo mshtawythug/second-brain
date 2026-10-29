@@ -92,6 +92,17 @@ check"). No migration.
     - `/api/jobs/{job_id}` is no longer in `_PROMPTED`, whose size pin is back to 2;
     - the gate test calls `/api/jobs/{job_id}` with a fixed seeded job id whose result names the
       sealed document.
+
+    **Round 2 (rev-73) widened the lens in two ways.**
+    - `document_id` is withheld too, because `GET /api/notes/<id>` opens the note, body included.
+      rev-73 reproduced that hop over HTTP.
+    - The lens fails closed: when titles are off, any result that names a document and does not say
+      `sensitivity: "normal"` is withheld, including one with no `sensitivity` key. Ingest results
+      always carry the stored level, so their behaviour is unchanged.
+
+    **The cost:** while `serve_confidential_titles` is off, RM-11's job panel has no "open in Notes"
+    link for a confidential paste. That matches the tree and the recent rail, which also hide such
+    documents unless the flag is on.
 13. **`JobHandle.job_id`** is added to the spec's Protocol, so a runner's INFO line can carry the job id
     (§7.5: the id, kind, outcome and document id, never the title).
 14. **Phases.** The registry logs `queued`; the paste runner logs `preparing`; the progress embedder
@@ -194,6 +205,13 @@ Review round 1 (rev-73), run at `605848c`: **7 of 7 killed.**
 | M17 | lone surrogates pass the schema | `test_a_lone_surrogate_is_a_400_not_a_failed_job`; `test_a_lone_surrogate_tag_is_a_400` |
 | M18 | a shallow freeze | `test_the_result_is_deep_frozen_and_not_shared` |
 | M19 | a `Content-Length` past the int limit is converted | `test_a_content_length_past_the_int_limit_is_413_without_converting` |
+
+Review round 2 (rev-73), run at `62c424d`: **2 of 2 killed.**
+
+| # | Mutation | Killed by |
+|---|---|---|
+| M20 | the lens keeps `document_id` | `test_no_job_route_hands_out_an_id_that_opens_a_withheld_note`; `test_a_confidential_paste_result_is_lensed_by_the_titles_flag`; `test_a_skip_onto_an_existing_confidential_document_is_lensed` |
+| M21 | the lens fails open when `sensitivity` is missing | `test_the_lens_fails_closed` |
 
 **M7 survived the first run, and that is recorded here rather than dropped.** The original stream
 test sent a chunked oversize paste through `TestClient`. Without the counter, the decoded 2 MiB cap
