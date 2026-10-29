@@ -94,6 +94,8 @@ Claude Desktop's tools indicator (gear / plug icon) should show the `brain_*` to
 |---|---|
 | `brain_search` | Hybrid (FTS + vector) search across the brain. Filters: `source`, `tag`, `since_days`, `fts_only`. |
 | `brain_show` | Full document body by id-prefix. |
+| `brain_related` | Documents related to one document, best first (the `brain ui` related-notes panel). `limit` up to 20. |
+| `brain_explain` | Per-result ranking diagnostics for a query (the `brain explain --json` payload, without snippets). |
 | `brain_list` | Browse documents. Filters: `source`, `tag`. |
 | `brain_status` | Counts + last-ingest timestamp + by-kind breakdown. |
 | `brain_ingest_stdin` | Save a snippet. Auto-tags `source-mcp`. Dedupes by `(source, external_id)`. |

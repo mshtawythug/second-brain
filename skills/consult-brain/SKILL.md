@@ -204,7 +204,8 @@ overview → `brain-ask`.
 
 ## Debugging weird results — `brain explain`
 
-If a query returns docs that look wrong, use `brain explain` to see the
+If a query returns docs that look wrong, use `brain explain` (over MCP,
+`brain_explain`; a document's neighbours are MCP `brain_related`) to see the
 ranking math:
 
 ```bash
