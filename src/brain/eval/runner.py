@@ -335,8 +335,9 @@ def _apply_stages(
 def skipped_stage_results(report: EvalReport) -> list[EvalResult]:
     """The rows of *report* in which a ranking stage skipped, in result order (RM-14a).
 
-    The single definition the baseline refusal and the diff exclusion read.
-    Kept apart from :func:`degraded_results`, whose callers say a degraded row
+    The rows the baseline refusal reads (``save_baseline``); ``diff_reports``
+    checks each shared row's ``stages_skipped`` itself, because it compares two
+    reports row by row. Kept apart from :func:`degraded_results`, whose callers say a degraded row
     "counted as 0.0": a skipped row is scored, in hybrid order.
     """
     return [r for r in report.results if r.stages_skipped]
