@@ -163,6 +163,30 @@ def test_the_passage_is_title_newline_snippet_cut_to_max_chars() -> None:
     assert reranker.calls[0]["timeout"] == 2.5
 
 
+class _NoQueryConn:
+    """A connection that fails the test if anything is executed on it."""
+
+    def __init__(self) -> None:
+        self.executed = 0
+
+    def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+        self.executed += 1
+        raise AssertionError("no database round trip was expected")
+
+
+def test_a_hosted_reranker_with_no_rows_makes_no_round_trip() -> None:
+    conn = _NoQueryConn()
+    reranker = FakeReranker(lambda _p: 0.0, hosted_egress=True)
+    results: list[SearchResult] = []
+
+    outcome = _apply(_stage(reranker), results, conn=conn)
+
+    assert conn.executed == 0
+    assert reranker.calls == []
+    assert outcome.report.applied is True
+    assert outcome.results == []
+
+
 def test_no_rows_means_no_call() -> None:
     reranker = FakeReranker(lambda _p: 0.0)
     outcome = _apply(_stage(reranker), [])

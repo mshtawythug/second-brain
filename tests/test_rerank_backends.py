@@ -242,6 +242,21 @@ def test_voyage_wraps_a_voyage_error() -> None:
     assert describe_failure(info.value) == "RerankError from Timeout"
 
 
+class _NoResults:
+    """A Voyage reply with no ``results`` attribute at all."""
+
+
+@pytest.mark.parametrize("reply", [FakeVoyageReply([]), _NoResults()], ids=["none", "missing"])
+def test_voyage_refuses_a_reply_without_a_results_list(reply: Any) -> None:
+    if isinstance(reply, FakeVoyageReply):
+        reply.results = None  # type: ignore[assignment]
+    reranker = VoyageReranker(
+        api_key="pa-synthetic", model="rerank-3", client=FakeVoyageClient(reply)
+    )
+    with pytest.raises(RerankError, match="no results list"):
+        reranker.score("q", PASSAGES, timeout=1.0)
+
+
 def test_voyage_refuses_a_partial_reply() -> None:
     client = FakeVoyageClient(FakeVoyageReply([_Result(0, PASSAGES[0], 0.5)]))
     reranker = VoyageReranker(api_key="pa-synthetic", model="rerank-3", client=client)

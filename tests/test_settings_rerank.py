@@ -109,6 +109,8 @@ def test_loopback_urls_are_accepted(url: str) -> None:
         "file:///tmp/socket",
         "127.0.0.1:8081",
         "http://user:pw@127.0.0.1:8081",
+        "http://127.0.0.1:notaport",
+        "http://127.0.0.1:99999",
     ],
 )
 def test_a_non_loopback_url_is_a_config_error(url: str) -> None:

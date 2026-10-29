@@ -31,7 +31,7 @@ re-recorded. Installing the runtime is RM-14b; measuring and adopting is RM-14c.
 | Tests (new) | `tests/test_settings_rerank.py`, `tests/test_rerank_stage.py`, `tests/test_rerank_backends.py`, `tests/test_rerank_surfaces.py`, `tests/test_eval_runner_stages.py`, `tests/rerank_fakes.py`. |
 | Tests (changed) | `tests/test_eval_runner.py`, `tests/test_eval_harness_live.py`, `tests/test_search_fallback_eval_untouched.py`: every `run_eval` call passes `stages=()` (AC8). `tests/test_search_pipeline.py`: `build_stages` is no longer empty for a configured backend. |
 | `docs/configuration.md`, `docs/cli-reference.md`, `CHANGELOG.md`, `skills/consult-brain/SKILL.md` (only if under its line ceiling) | Knobs, flags, Unreleased entry. |
-| `docs/plans/2026-10-23-backlog-reconciliation.md` | Item 5 / BL-5 / rank 7: stage built, off (RM-14a, PR #N); runtime RM-14b; measurement RM-14c. Not SHIPPED: RM-14c decides. |
+| `docs/plans/2026-10-23-backlog-reconciliation.md` | Item 5 / BL-5 / rank 7: stage built, off (RM-14a, PR #76); runtime RM-14b; measurement RM-14c. Not SHIPPED: RM-14c decides. |
 | Spec Appendix B | Follow-up commit once the PR number is known: RM-14a → `DONE (#PR)`. |
 
 No over-ceiling file is touched (`search.py`, `cli.py`, `mcp_server.py`, `config.py` unchanged), so
@@ -89,6 +89,20 @@ left alone on purpose: editing it would cost a ceiling hop for a comment, and wi
 2. `stage_ms` is not serialized into baselines (above). The ticket says each `EvalResult` gains it;
    it does, in memory and in `brain eval --json`.
 3. `--rerank` with `BRAIN_RERANKER=none` refuses rather than guessing a backend.
+4. **The footer's and `brain ui`'s total include each stage's time; the `--json --meta` envelope's
+   `timing_ms.total` does not.** `SearchDiagnostics.total_ms` is `hybrid_search`'s own clock, and a
+   stage runs after it, so the end-to-end run printed `rerank 32ms · total 8ms`. The two places a
+   person reads a headline total (the footer, the Notes tab's seconds) add the stages' `ms`
+   (`format_search.search_meta_line`, `timing_with_stages`). The envelope and MCP keep
+   `timing_ms.total` as the search's own time, because `search_meta_json` is shared with MCP and
+   changing it would move a machine-read field; their `stages[].ms` already carries the stage's
+   time, so nothing is lost.
+5. **`skills/consult-brain/SKILL.md` is unchanged** (DoD 13 names "the relevant skill"). The stage
+   ships off, adds no MCP tool or parameter (D2), and the skill is at the house 300-line ceiling
+   (`tests/test_skill_frontmatter.py`); RM-14c, if it adopts, is where agents need to hear of it.
+6. **The backlog rows read "IN PROGRESS: built, off", not SHIPPED** (DoD 12 closes the row in the
+   ticket that finishes it). The reranker is not on until RM-14c's measurement decides, so closing
+   BL-5 here would claim a ranking change nobody has measured.
 
 ## Tests (TDD: each lands red first)
 
