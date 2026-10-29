@@ -35,6 +35,8 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 
     from ..config import Config
     from ..ingest import Embedder
+    from .ingest_service import IngestRuntime
+    from .jobs import JobRegistry
 
 #: The hostnames a browser may legitimately use to reach a loopback bind.
 #: ``TrustedHostMiddleware`` matches the Host header against this set, which is
@@ -159,6 +161,19 @@ class UiContext:
     #: running. One probe per app, so its TTL cache is shared by every tab.
     #: Injected so a test can fix the answer instead of forking ``ps``.
     watcher_probe: WatcherProbe = field(default_factory=WatcherProbe)
+    #: The job registry behind the Ingest tab (Ingest spec §4.1). A reference to
+    #: a mutable object, the same shape as ``watcher_probe``. ``None`` (every test
+    #: fixture that does not care) makes the ingest routes answer 503
+    #: ``jobs_unavailable``. Built by ``server.build_context``; the app lifespan
+    #: starts and stops its worker.
+    jobs: JobRegistry | None = None
+    #: The job's own embedder and enricher factories (§5.3). ``None`` is treated
+    #: like a missing registry.
+    ingest_runtime: IngestRuntime | None = None
+    #: Whether this bind may ingest at all (D8): loopback-bound and writable.
+    #: Fail-closed default, like ``serve_confidential_titles``; set by
+    #: ``server.build_context`` as ``loopback and not read_only``.
+    ingest_enabled: bool = False
 
     def connect(self) -> AbstractContextManager[psycopg.Connection[Any]]:
         """Open a per-request connection. Always used as a ``with`` block."""

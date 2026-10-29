@@ -17,6 +17,7 @@ import webbrowser
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -32,6 +33,9 @@ from .context import (
     host_allowlist,
     literal_addresses,
 )
+from .ingest_limits import MAX_QUEUED_JOBS, RETAIN_FOR, RETAIN_JOBS
+from .ingest_service import IngestRuntime
+from .jobs import JobRegistry
 from .security import is_loopback
 from .telemetry import ui_source_supported
 
@@ -419,6 +423,19 @@ def build_context(
         # session may READ confidential material it opens"; neither says "paint
         # confidential titles in a rail nobody asked for". Default False.
         serve_confidential_titles=cfg.ui_serve_confidential_titles,
+        # The Ingest tab (Ingest spec §4.1, D8). The registry always exists; it
+        # is the BIND that decides whether ingest is offered: loopback and
+        # writable only, because ingest is the largest cost surface the server
+        # has (disk, memory, minutes of Ollama time) and a LAN token is the
+        # only guard off loopback.
+        jobs=JobRegistry(
+            clock=lambda: datetime.now(UTC),
+            max_queued=MAX_QUEUED_JOBS,
+            retain=RETAIN_JOBS,
+            retain_for=RETAIN_FOR,
+        ),
+        ingest_runtime=IngestRuntime.from_config(cfg),
+        ingest_enabled=loopback and not read_only,
     )
 
 

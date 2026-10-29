@@ -9,6 +9,7 @@ from starlette.responses import JSONResponse
 from ..queries import summary_counts
 from . import queries as ui_queries
 from ._http import context_of, db_guard, ok
+from .ingest_service import unavailable_reason
 from .schemas import SOURCE_NONE, VALID_SOURCE_KINDS
 
 
@@ -46,6 +47,9 @@ async def health(request: Request) -> JSONResponse:
             # Not a disclosure: this is the operator's own address, returned to
             # the operator, on a surface that already reports the vault path.
             "user_email": ctx.cfg.user_email,
+            # The shell greys the Ingest tab from this without a second request;
+            # `GET /api/ingest/config` carries the reason.
+            "ingest_enabled": unavailable_reason(ctx) is None,
             "notices": list(ctx.notices),
         }
     )

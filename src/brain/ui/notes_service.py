@@ -1,4 +1,4 @@
-"""The **only** module in this package permitted to mutate anything.
+"""One of the **only two** ``brain.ui`` mutators; the other is ``ingest_service.py``.
 
 Every operation here delegates to a function the CLI, the MCP server, or F8's
 ``vault/`` seams already own. Nothing is reimplemented, and nothing shells out

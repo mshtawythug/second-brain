@@ -47,6 +47,7 @@ from .ingest import Embedder, IngestResult, ingest_document
 from .ingest import gmail as gmail_ingest
 from .ingest.dispatch import extract_path, supported_extensions
 from .ingest.gmail import GmailError
+from .ingest.outcome import IngestOutcome, classify
 from .ingest.stdin import make_doc as _stdin_make_doc
 from .queries import (
     count_chunks_missing_embedding,
@@ -201,38 +202,20 @@ def _ingest_outcome_verb(
 ) -> str:
     """Map an :class:`IngestResult` to a human status verb.
 
-    A doc that produced no chunks (whitespace-only file, image-only PDF) comes
-    back as ``document_id=None, created=False`` — that is an *empty* document,
-    not an unchanged re-ingest, so it gets its own verb (Task 2.12(b)). ``force``
-    (single-file / stdin ingest) reports an in-place rewrite as "updated" even
-    when the body hash is unchanged. ``already_verb`` lets ``ingest-dir`` keep
-    its historical bare "skipped" wording while ``ingest`` / ``ingest-stdin``
-    spell out "skipped (already ingested)".
-
-    ``result.mirror_repaired`` (#23) reports that the run gave an existing row
-    its missing vault file back. It never *replaces* a louder verb — a created
-    or updated document is still reported as such — it only overrides the
-    "nothing happened" wording, and annotates "updated" so a repair is never
-    silently absorbed by a body change that happened in the same run.
+    The classification lives in :func:`brain.ingest.outcome.classify`, shared with
+    the ``brain ui`` job runner (RM-10); this keeps only the CLI's wording.
+    ``already_verb`` lets ``ingest-dir`` keep its historical bare "skipped" while
+    ``ingest`` / ``ingest-stdin`` spell out "skipped (already ingested)".
     """
-    if result.document_id is None:
-        return "skipped (empty document)"
-    if result.created:
-        return "ingested"
-    if result.body_changed or force:
-        # A repair alongside a real body change: report BOTH. "updated" alone
-        # is true but swallows the mirror fix, and the mirror fix is the part
-        # the user is waiting to hear about.
-        return "updated (mirror repaired)" if result.mirror_repaired else "updated"
-    if result.mirror_repaired:
-        # The case this branch exists for. The body was unchanged, so every
-        # other rule here says "skipped" — but the run just gave an orphaned
-        # document its vault file back, which is precisely the work the user
-        # re-ran the command to get. Reporting "skipped" would teach them the
-        # opposite of what happened, and it is the same class of failure as
-        # the silent success the repair path was added to fix.
-        return "repaired mirror"
-    return already_verb
+    outcome, repaired = classify(result, force=force)
+    if outcome is IngestOutcome.UPDATED:
+        return "updated (mirror repaired)" if repaired else "updated"
+    return {
+        IngestOutcome.EMPTY: "skipped (empty document)",
+        IngestOutcome.INGESTED: "ingested",
+        IngestOutcome.MIRROR_REPAIRED: "repaired mirror",
+        IngestOutcome.SKIPPED: already_verb,
+    }[outcome]
 
 
 def ingest(

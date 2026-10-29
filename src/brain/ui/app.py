@@ -8,8 +8,11 @@ without anyone having to remember it.
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib.resources import files
 from pathlib import Path
+from typing import Any
 
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
@@ -22,6 +25,8 @@ from ..errors import VaultPathEscape
 from . import (
     routes_discovery,
     routes_graph,
+    routes_ingest,
+    routes_jobs,
     routes_links,
     routes_meta,
     routes_notes,
@@ -31,6 +36,7 @@ from . import (
 )
 from .context import UiContext
 from .errors import UiError, UiNotFound
+from .ingest_limits import STOP_TIMEOUT_S
 from .security import build_middleware
 
 logger = logging.getLogger(__name__)
@@ -132,6 +138,35 @@ async def index(request: Request) -> FileResponse:
     return FileResponse(shell)
 
 
+def _lifespan(context: UiContext) -> Any:
+    """Start the job worker with the app, and stop it on shutdown (Ingest spec §4.6).
+
+    Shutdown refuses new submits, cancels the queue, asks the running job to stop
+    and joins it for :data:`STOP_TIMEOUT_S`. A job still inside extraction or its
+    post-commit summary can outlast that; its id is named, and the daemon thread
+    dies with the process, rolling back any transaction in flight.
+    """
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
+        jobs = context.jobs
+        if jobs is not None:
+            jobs.start()
+        try:
+            yield
+        finally:
+            if jobs is not None:
+                for job_id in jobs.stop(timeout=STOP_TIMEOUT_S):
+                    logger.warning(
+                        "brain ui: job %s was still running at shutdown; its outcome "
+                        "is unknown. Re-submit to be sure; identical content is a "
+                        "no-op.",
+                        job_id,
+                    )
+
+    return lifespan
+
+
 def create_app(context: UiContext) -> Starlette:
     """Build the application for ``context``."""
     routes = [
@@ -178,6 +213,11 @@ def create_app(context: UiContext) -> Starlette:
             methods=["DELETE"],
             name="delete_note",
         ),
+        Route("/api/ingest/config", routes_ingest.ingest_config, methods=["GET"]),
+        Route("/api/ingest/paste", routes_ingest.paste, methods=["POST"]),
+        Route("/api/jobs", routes_jobs.list_jobs, methods=["GET"]),
+        Route("/api/jobs/{job_id}", routes_jobs.get_job, methods=["GET"]),
+        Route("/api/jobs/{job_id}/cancel", routes_jobs.cancel_job, methods=["POST"]),
         Mount(
             "/static",
             app=StaticFiles(directory=static_dir(), check_dir=False),
@@ -194,6 +234,7 @@ def create_app(context: UiContext) -> Starlette:
             HTTPException: _http_error_handler,
             Exception: _unhandled_error_handler,
         },
+        lifespan=_lifespan(context),
     )
     app.state.ui = context
     return app

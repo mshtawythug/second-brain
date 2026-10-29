@@ -89,6 +89,24 @@ class UiUnsupportedMedia(UiError):
     default_code = "unsupported_media_type"
 
 
+class UiPayloadTooLarge(UiError):
+    """413 — the request body is over a cap (Ingest spec §7.3).
+
+    Raised before the body is read when ``Content-Length`` already says so, and
+    by the stream counter when the body turns out longer than it claimed.
+    """
+
+    status = 413
+    default_code = "payload_too_large"
+
+
+class UiTooManyRequests(UiError):
+    """429 — the job queue is full; retry once a queued job has run."""
+
+    status = 429
+    default_code = "too_many_requests"
+
+
 class UiUnavailable(UiError):
     """503 — a dependency the request needed is down (Postgres)."""
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,7 @@ from brain.config import Config, ConfigError
 from brain.sensitivity import CONFIDENTIAL
 from brain.ui.app import create_app
 from brain.ui.context import UiContext
+from brain.ui.jobs import JobRegistry
 from brain.ui.server import build_context
 
 from .conftest import TEST_DATABASE_URL
@@ -169,8 +170,41 @@ def _client(
         allowed_origin=ORIGIN,
         logging_enabled=False,
         serve_confidential_titles=serve_confidential_titles,
+        jobs=_SEALED_JOBS,
     )
     return TestClient(create_app(context), base_url=ORIGIN)
+
+
+def _finished_paste_of_the_sealed_document() -> tuple[JobRegistry, str]:
+    """A registry holding one finished ingest whose result names the sealed doc.
+
+    So both job routes are asked about a job that CAN name it (RM-10): an empty
+    registry would make their half of every assertion here vacuous. A job id is
+    not a capability (``/api/jobs`` lists every retained id), so
+    ``/api/jobs/{job_id}`` is an unprompted surface like any other, and the
+    routes' lens must withhold the title. Built once, so its id is fixed.
+    """
+    registry = JobRegistry(
+        clock=lambda: datetime.now(UTC),
+        max_queued=4,
+        retain=50,
+        retain_for=timedelta(hours=1),
+    )
+    job = registry.submit(
+        "ingest.paste",
+        lambda handle: {
+            "outcome": "skipped",
+            "title": SEALED_TITLE,
+            "document_id": "0f0e0d0c-0b0a-4908-8706-050403020100",
+            "vault_path": "_ingested/manual/severance-terms.md",
+            "sensitivity": CONFIDENTIAL,
+        },
+    )
+    assert registry.run_next()
+    return registry, job.id
+
+
+_SEALED_JOBS, _SEALED_JOB_ID = _finished_paste_of_the_sealed_document()
 
 
 #: How to *call* each GET route — path-parameter values only, plus a query
@@ -179,7 +213,7 @@ def _client(
 #: route is allowed to leak. A route added without an entry here raises
 #: :class:`_UncoveredRoute` rather than being skipped, so the failure mode of
 #: forgetting is a red test naming the route, not a silent gap.
-_PATH_ARGS_FIXED = {"tag": SEALED_TAG}
+_PATH_ARGS_FIXED = {"tag": SEALED_TAG, "job_id": _SEALED_JOB_ID}
 _QUERY_STRINGS = {"/api/search": "q=severance"}
 
 #: Routes that may name a confidential document, with the ruling for each.

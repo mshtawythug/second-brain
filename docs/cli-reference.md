@@ -836,6 +836,25 @@ goes between two requests, one page can be text-only-ranked and the next
 hybrid-ranked, and a note can repeat or be skipped across the two. Each page's
 own notice says which ranking it shows.
 
+**Ingesting from the browser (backend; the panel ships with RM-11).** On a
+loopback, writable server, `POST /api/ingest/paste` ingests pasted text as an
+ordinary ingested document from source `manual`, through the same pipeline as
+`brain ingest*`. The request carries `title`, `body` (at most 2 MiB), and the
+optional `tags`, `content_type` (`note` or `transcript`), `sensitivity` (`normal`
+or `confidential`) and `enrich` (default true). It answers 202 with a job, which
+a client polls with `GET /api/jobs/{id}?after=<seq>` and can cancel with
+`POST /api/jobs/{id}/cancel` (body `{}`) until writing starts; after that cancel
+answers 409 `not_cancellable`. Pasting the same body again is a no-op that names
+the existing document. A result whose document is confidential (or whose level is
+unknown) has its title, vault path and document id withheld
+(`title_withheld: true`) unless `BRAIN_UI_SERVE_CONFIDENTIAL_TITLES` is on, as in
+the tree. Jobs run one at a time, at most four wait (a fifth gets
+429), and they live in memory only, so after a restart re-submitting is the
+recovery. `GET /api/ingest/config` reports whether ingest is available and why
+not (`read_only`, `requires_loopback` or `jobs_unavailable`). Ingest is never
+offered over `--host` / `--lan`: from another device, use `+ New` or
+`brain ingest`.
+
 ## brain people
 
 ```bash
