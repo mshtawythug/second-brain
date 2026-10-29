@@ -460,6 +460,25 @@ def test_snapshots_are_frozen_copies() -> None:
         result["k"] = "mutated"  # type: ignore[index]
 
 
+def test_the_result_is_deep_frozen_and_not_shared() -> None:
+    reg = _registry()
+    original: dict[str, Any] = {"findings": [{"kind": "aws"}], "nested": {"k": [1, 2]}}
+
+    job = reg.submit("k", lambda handle: original)
+    reg.run_next()
+    original["findings"].append({"kind": "late"})
+    original["nested"]["k"].append(3)
+
+    result = reg.get(job.id).result
+    assert result is not None
+    assert result["findings"] == ({"kind": "aws"},)
+    assert result["nested"]["k"] == (1, 2)
+    with pytest.raises(TypeError):
+        result["findings"][0]["kind"] = "mutated"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        result["nested"]["new"] = 1  # type: ignore[index]
+
+
 # --------------------------------------------------------------- event cap --
 
 
@@ -525,6 +544,23 @@ def test_after_across_a_gap_returns_every_surviving_later_event() -> None:
     assert reg.get(job.id, after=gap_after).events == tuple(
         e for e in full if e.seq > gap_after
     )
+
+
+def test_a_log_of_protected_events_exceeds_the_cap_rather_than_drop_one() -> None:
+    """Every event notable: nothing is safe to lose, so the log grows past the cap."""
+    reg = _registry(max_events=3)
+
+    def runner(handle: JobHandle) -> Mapping[str, Any]:
+        for i in range(4):
+            handle.note(f"notable_{i}")
+        return {}
+
+    job = reg.submit("k", runner)
+    reg.run_next()
+
+    events = reg.get(job.id).events
+    assert [e.code for e in events] == [None, "notable_0", "notable_1", "notable_2", "notable_3"]
+    assert len(events) == 5 > 3
 
 
 def test_the_default_cap_is_two_hundred() -> None:
@@ -744,20 +780,18 @@ def test_a_finished_job_releases_its_runner(path: str) -> None:
     assert ref() is None
 
 
-def test_the_result_is_deep_frozen_and_not_shared() -> None:
+
+def test_check_cancelled_without_a_cancel_lets_the_runner_continue() -> None:
     reg = _registry()
-    original: dict[str, Any] = {"findings": [{"kind": "aws"}], "nested": {"k": [1, 2]}}
+    reached: list[str] = []
 
-    job = reg.submit("k", lambda handle: original)
+    def runner(handle: JobHandle) -> Mapping[str, Any]:
+        handle.check_cancelled()
+        reached.append("past the check")
+        return {}
+
+    job = reg.submit("k", runner)
     reg.run_next()
-    original["findings"].append({"kind": "late"})
-    original["nested"]["k"].append(3)
 
-    result = reg.get(job.id).result
-    assert result is not None
-    assert result["findings"] == ({"kind": "aws"},)
-    assert result["nested"]["k"] == (1, 2)
-    with pytest.raises(TypeError):
-        result["findings"][0]["kind"] = "mutated"  # type: ignore[index]
-    with pytest.raises(TypeError):
-        result["nested"]["new"] = 1  # type: ignore[index]
+    assert reached == ["past the check"]
+    assert reg.get(job.id).state == "succeeded"

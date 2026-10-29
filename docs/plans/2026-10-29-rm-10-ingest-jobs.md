@@ -106,6 +106,19 @@ check"). No migration.
     (`jobs.freeze`) and thawed for JSON. **`?after=` and `Content-Length`** accept ASCII digits only,
     with a length bound, so neither can reach a 500. **A lone surrogate** in a title, body or tag is a
     400 at submit (rev-73 round 1).
+18. **`GET /api/ingest/config` deviates from §6's key list in three ways** (recorded per aud-73):
+    - `extensions` is `[]` until upload ships (RM-13), so the config advertises no file type the server
+      cannot yet accept;
+    - it adds `default_content_type` (`note`);
+    - it adds `default_sensitivity` (`normal`).
+    The two extra keys come from `ingest_limits.DEFAULT_PASTE_CONTENT_TYPE` and
+    `sensitivity.DEFAULT_SENSITIVITY`, so the tab can preselect its controls without hard-coding a
+    default (§6: "The tab renders from this, and hard-codes no limits").
+19. **The §1.3 amendment in `notes_service.py` is net-zero** (aud-73; spec §2.2 budgets that file at
+    +0). The rule is folded into the docstring's first line, reworded in place, and the file stays at
+    711 lines. The full wording ("exactly two mutators; a route module that writes, or a third
+    mutator, is a review rejection") lives in `ingest_service.py`'s docstring and in the two amended
+    specs.
 
 ## Tests (TDD: red first)
 
