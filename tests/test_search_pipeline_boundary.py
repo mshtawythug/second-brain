@@ -3,9 +3,10 @@
 Every user-facing surface goes through :func:`brain.search_pipeline.run_search`,
 so a stage wired in ``build_stages`` reaches all of them. This guard walks the
 AST of every module under ``src/brain`` and fails on any call of
-``hybrid_search(…)`` or ``search_with_fts_fallback(…)``, as a bare name or an
-attribute, outside the allowlist. Guarding the fallback too is what stops a
-seventh surface from getting the fallback while silently skipping the stages.
+``hybrid_search(…)`` or ``search_with_fts_fallback(…)``, as a bare name, an
+attribute, or a name a ``from … import … as`` alias binds, outside the
+allowlist. Guarding the fallback too is what stops a seventh surface from
+getting the fallback while silently skipping the stages.
 
 Importing or PASSING ``hybrid_search`` (the patch points in ``cli.py``,
 ``cli_search.py``, ``ui/server.py``, ``mcp_server.py``, ``recall.py`` and
@@ -45,6 +46,20 @@ ALLOWED_MODULES = frozenset(
 ALLOWED_FUNCTIONS = frozenset({("cli_search.py", "hybrid_search")})
 
 
+def _aliases(tree: ast.Module) -> frozenset[str]:
+    """Local names a module binds to a guarded function: ``from … import hybrid_search as hs``.
+
+    A self-alias (``hybrid_search as hybrid_search``) is the name itself, already guarded.
+    """
+    return frozenset(
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name in GUARDED and alias.asname is not None
+    )
+
+
 def _called_name(node: ast.Call) -> str | None:
     func = node.func
     if isinstance(func, ast.Name):
@@ -62,11 +77,13 @@ def violations(root: Path) -> list[str]:
         if rel in ALLOWED_MODULES:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        found.extend(_violations_in(tree, rel, enclosing=None))
+        found.extend(_violations_in(tree, rel, GUARDED | _aliases(tree), enclosing=None))
     return found
 
 
-def _violations_in(node: ast.AST, rel: str, *, enclosing: str | None) -> list[str]:
+def _violations_in(
+    node: ast.AST, rel: str, guarded: frozenset[str], *, enclosing: str | None
+) -> list[str]:
     found: list[str] = []
     for child in ast.iter_child_nodes(node):
         scope = enclosing
@@ -74,11 +91,11 @@ def _violations_in(node: ast.AST, rel: str, *, enclosing: str | None) -> list[st
             scope = child.name if enclosing is None else enclosing
         if (
             isinstance(child, ast.Call)
-            and _called_name(child) in GUARDED
+            and _called_name(child) in guarded
             and (rel, scope) not in ALLOWED_FUNCTIONS
         ):
             found.append(f"{rel}:{child.lineno}")
-        found.extend(_violations_in(child, rel, enclosing=scope))
+        found.extend(_violations_in(child, rel, guarded, enclosing=scope))
     return found
 
 
@@ -114,8 +131,12 @@ def _write(root: Path, rel: str, source: str) -> None:
         "from brain.search_fallback import search_with_fts_fallback\n"
         "def f(fn, conn):\n    return search_with_fts_fallback(fn, conn, query='q')\n",
         "from brain import search\nRESULTS = search.hybrid_search(None)\n",
+        "from brain.search import hybrid_search as hs\n"
+        "def f(conn):\n    return hs(conn, query='q')\n",
+        "from brain.search_fallback import search_with_fts_fallback as fb\n"
+        "def f(fn, conn):\n    return fb(fn, conn, query='q')\n",
     ],
-    ids=["bare-name", "attribute", "fallback", "module-level"],
+    ids=["bare-name", "attribute", "fallback", "module-level", "alias", "fallback-alias"],
 )
 def test_a_direct_call_is_caught(tmp_path: Path, source: str) -> None:
     # Arrange
@@ -127,6 +148,21 @@ def test_a_direct_call_is_caught(tmp_path: Path, source: str) -> None:
     # Assert
     assert len(found) == 1
     assert found[0].startswith("new_surface.py:")
+
+
+def test_a_self_alias_is_just_an_import(tmp_path: Path) -> None:
+    """``import X as X`` (the re-export idiom ``cli.py`` uses) is not a call."""
+    # Arrange
+    _write(
+        tmp_path,
+        "new_surface.py",
+        "from brain.search import hybrid_search as hybrid_search\n"
+        "from brain.search import build_tsquery as hs\n"
+        "def f(conn):\n    return hs(conn, 'q')\n",
+    )
+
+    # Act / Assert: an alias of an UNguarded name is not guarded either.
+    assert violations(tmp_path) == []
 
 
 def test_importing_or_passing_is_allowed(tmp_path: Path) -> None:

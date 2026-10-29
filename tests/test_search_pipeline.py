@@ -27,6 +27,7 @@ from tests.search_stages import (
     DeclinedStage,
     RaisingStage,
     ReverseStage,
+    UnsizedStage,
 )
 
 pytestmark = pytest.mark.nodb
@@ -140,6 +141,48 @@ def test_candidate_limit_never_shrinks_the_fetch_below_limit() -> None:
 
     # Assert
     assert search.calls[0]["limit"] == 6
+
+
+def test_a_stage_whose_candidate_limit_raises_is_skipped_not_fatal() -> None:
+    """It contributes ``limit`` to the fetch, is never applied, and is reported."""
+    # Arrange
+    search = FakeSearch()
+    unsized = UnsizedStage()
+    after = ReverseStage("after", depth=4)
+
+    # Act
+    out = run_search(
+        search,
+        _CONN,
+        embedder=_Embedder(),
+        query="q",
+        limit=3,
+        stages=(unsized, after),
+    )
+
+    # Assert
+    assert search.calls[0]["limit"] == 4
+    assert unsized.calls == []
+    assert _ids(out.results) == ["doc-3", "doc-2", "doc-1"]
+    assert [(r.name, r.applied, r.skipped_reason) for r in out.stages] == [
+        ("unsized", False, "StageBackendDown"),
+        ("after", True, None),
+    ]
+    assert STAGE_SECRET not in repr(out.stages)
+
+
+def test_only_unsized_stages_fetch_exactly_limit() -> None:
+    # Arrange
+    search = FakeSearch()
+
+    # Act
+    out = run_search(
+        search, _CONN, embedder=_Embedder(), query="q", limit=5, stages=(UnsizedStage(),)
+    )
+
+    # Assert
+    assert search.calls[0]["limit"] == 5
+    assert _ids(out.results) == [f"doc-{n}" for n in range(5)]
 
 
 def test_session_id_and_query_reach_the_stage() -> None:

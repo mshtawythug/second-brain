@@ -54,8 +54,13 @@ of scope and keep calling `hybrid_search` directly.
   a second, unformatted notice).
 - `stage_reports_json(reports)` returns `{"stages": [{name, applied, skipped_reason, ms}, …]}`,
   always present, so it is splatted like `fallback_json`.
-- Session ids: MCP and the UI pass the session id they already mint; the CLI, `recall` and `ask`
-  have none and pass `None`.
+- Session ids: MCP, the UI and `ask` pass the session id they already mint (`ask_no_loop` and
+  `ask` thread theirs through `_retrieve` and `_retrieve_hybrid`, review round 1); the CLI and
+  `recall` have none and pass `None`.
+- A stage whose `candidate_limit` raises contributes `limit` to the fetch, is **not applied** (a
+  stage that cannot say how many rows it needs is not run on a guess), and is reported as skipped
+  with its class, in its position, through the same `apply_stages` path as a stage whose `apply`
+  raises (review round 1).
 - `pipeline_json(result)` is `{**fallback_json(result.fallback), **stage_reports_json(result.stages)}`.
   MCP `brain_search` returns it in place of `fallback_json`, which is what keeps `mcp_server.py`'s
   import and return lines changing in place (net zero).
@@ -106,9 +111,10 @@ key, so the Notes tab says on each page which ranking it shows. The line is in
    route hands `search_fn` exactly one `limit`, equal to `fetch_limit`; the `stages` key is `[]` in
    the envelope and MCP and absent from the bare list and the UI response.
 3. `test_search_pipeline_boundary.py`: the real tree passes; a synthetic module calling
-   `hybrid_search(…)`, `brain.search.hybrid_search(…)` or `search_with_fts_fallback(…)` fails; one
-   that only imports or passes it passes; the `cli_search.hybrid_search` shim is the one
-   function-level exemption.
+   `hybrid_search(…)`, `brain.search.hybrid_search(…)`, `search_with_fts_fallback(…)` or either
+   through a `from … import … as` alias fails; one that only imports or passes it passes, and so
+   does a self-alias (`hybrid_search as hybrid_search`, as `cli.py` re-exports it); the
+   `cli_search.hybrid_search` shim is the one function-level exemption.
 
 ## Mutation proofs (in a `git archive` copy only)
 

@@ -116,6 +116,62 @@ def build_stages(env: Mapping[str, str]) -> tuple[SearchStage, ...]:
     return ()
 
 
+@dataclass  # not frozen: ``SearchStage.name`` is a plain (settable) attribute
+class _UnsizedStage:
+    """Stands in for a stage whose ``candidate_limit`` raised: never applied.
+
+    It passes its input on and reports the failure, so the stage still shows in
+    ``stages`` (skipped, class-only) and in the same position.
+    """
+
+    name: str
+    reason: str
+
+    def candidate_limit(self, limit: int) -> int:
+        return limit
+
+    def signature(self) -> dict[str, Any]:
+        return {}
+
+    def apply(
+        self,
+        conn: psycopg.Connection[Any],
+        *,
+        query: str,
+        session_id: str | None,
+        results: list[SearchResult],
+    ) -> StageOutcome:
+        report = StageReport(
+            name=self.name, applied=False, skipped_reason=self.reason, ms=0.0
+        )
+        return StageOutcome(results=results, report=report)
+
+
+def _sized(
+    stages: Sequence[SearchStage], limit: int
+) -> tuple[tuple[SearchStage, ...], int]:
+    """Ask each stage how deep it needs to see; return the stages and the fetch size.
+
+    A stage whose ``candidate_limit`` raises contributes ``limit`` and is
+    replaced by an :class:`_UnsizedStage`: a stage that cannot say how many rows
+    it needs is not applied to a guess, and must not cost the search either.
+    """
+    sized: list[SearchStage] = []
+    fetch = limit
+    for stage in stages:
+        try:
+            depth = stage.candidate_limit(limit)
+        # Broad for the reason ``apply_stages`` gives: a stage never costs the search.
+        except Exception as exc:  # noqa: BLE001
+            reason = describe_failure(exc)
+            logger.info("search stage %s skipped: %s", stage.name, reason)
+            sized.append(_UnsizedStage(name=stage.name, reason=reason))
+            continue
+        sized.append(stage)
+        fetch = max(fetch, depth)
+    return tuple(sized), fetch
+
+
 def apply_stages(
     conn: psycopg.Connection[Any],
     *,
@@ -189,10 +245,12 @@ def run_search(
     ``stages=None`` means :func:`build_stages` of ``os.environ``, so a surface
     that passes nothing gets every configured stage rather than silently none;
     ``stages=()`` runs none. With no stages the rows are exactly ``search_fn``'s.
+
+    Never raises from a stage. A stage whose ``candidate_limit`` raises
+    contributes ``limit`` to the fetch, is NOT applied, and is reported as
+    skipped (class-only), like a stage whose ``apply`` raises (:func:`_sized`).
     """
-    if stages is None:
-        stages = build_stages(os.environ)
-    fetch = max([limit, *(stage.candidate_limit(limit) for stage in stages)])
+    stages, fetch = _sized(build_stages(os.environ) if stages is None else stages, limit)
     if fallback:
         searched = search_with_fts_fallback(
             search_fn, conn, embedder=embedder, query=query, limit=fetch, **kwargs

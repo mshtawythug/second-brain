@@ -111,3 +111,16 @@ class DeclinedStage(_RecordingStage):
                 name=self.name, applied=False, skipped_reason="disabled", ms=0.0
             ),
         )
+
+
+class UnsizedStage(ReverseStage):
+    """Raises from ``candidate_limit``: it cannot say how deep it needs to see.
+
+    ``apply`` would reverse the rows; the pipeline must never call it.
+    """
+
+    def __init__(self, name: str = "unsized") -> None:
+        super().__init__(name)
+
+    def candidate_limit(self, limit: int) -> int:
+        raise StageBackendDown(f"depth probe failed: {STAGE_SECRET}")

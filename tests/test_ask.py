@@ -284,9 +284,15 @@ def test_retrieve_graph_merges_docs(monkeypatch: pytest.MonkeyPatch) -> None:
     # Hybrid leg returns doc-1; graph leg returns doc-1 (dup) + doc-2 (new).
     monkeypatch.setattr(
         "brain.ask._retrieve_hybrid",
-        lambda conn, cfg, *, embedder, query, limit, exclude_confidential=False, fallback=True: (
-            FallbackSearch(results=[_doc("doc-1")], fallback=None)
-        ),
+        lambda conn,
+        cfg,
+        *,
+        embedder,
+        query,
+        limit,
+        exclude_confidential=False,
+        fallback=True,
+        session_id=None: (FallbackSearch(results=[_doc("doc-1")], fallback=None)),
     )
     graph_ctx = GraphContext(
         session_id="s",
@@ -356,6 +362,7 @@ def _patch_retrieve(
         backend: Any,
         exclude_confidential: bool = False,
         fallback: bool = True,
+        session_id: str | None = None,
     ) -> tuple[list[SearchResult], str, None]:
         seen_queries.append(query)
         batch = queue.pop(0) if queue else batches[-1]

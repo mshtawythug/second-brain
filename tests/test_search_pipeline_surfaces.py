@@ -25,7 +25,7 @@ from starlette.testclient import TestClient
 from typer.testing import CliRunner
 
 from brain import mcp_server, search_pipeline
-from brain.ask import _retrieve_hybrid
+from brain.ask import _retrieve_hybrid, ask, ask_no_loop
 from brain.cli import app
 from brain.config import Config
 from brain.ingest import ExtractedDoc, ingest_document
@@ -250,6 +250,18 @@ def test_recall_applies_the_configured_stage(
     assert staged == list(reversed(plain))
 
 
+class _Chat:
+    """Fake ``ChatJson``: plans one sub-query, says coverage is sufficient, cites [1]."""
+
+    def __call__(self, prompt: str, *, schema: dict[str, Any], **_: Any) -> dict[str, Any]:
+        if "sub_queries" in schema:
+            return {"sub_queries": [TERM]}
+        if "sufficient" in schema:
+            return {"sufficient": True, "follow_up_queries": []}
+        return {"answer": "The inventory counted wicks [1]."}
+
+
+@pytest.mark.parametrize("entry", [ask_no_loop, ask], ids=["ask_no_loop", "ask"])
 @pytest.mark.parametrize("fallback", [True, False])
 @pytest.mark.usefixtures("seeded")
 def test_ask_retrieval_applies_the_configured_stage(
@@ -257,14 +269,20 @@ def test_ask_retrieval_applies_the_configured_stage(
     test_db: psycopg.Connection[Any],
     fake_embedder: Any,
     fallback: bool,
+    entry: Any,
 ) -> None:
-    """``fallback=False`` (``brain eval --answer``) gets the stages too."""
+    """``fallback=False`` (``brain eval --answer``) gets the stages too.
+
+    The stage sees the ask's own ``session_id``, from both entry points.
+    """
 
     # Arrange
+    cfg = Config(database_url=TEST_DATABASE_URL)
+
     def _ask_ids() -> list[str]:
         searched = _retrieve_hybrid(
             test_db,
-            Config(database_url=TEST_DATABASE_URL),
+            cfg,
             embedder=fake_embedder,
             query=TERM,
             limit=10,
@@ -273,14 +291,26 @@ def test_ask_retrieval_applies_the_configured_stage(
         return [r.document_id for r in searched.results]
 
     plain = _ask_ids()
-    _install(monkeypatch, ReverseStage())
+    stage = ReverseStage()
+    _install(monkeypatch, stage)
 
     # Act
     staged = _ask_ids()
+    stage.calls.clear()
+    result = entry(
+        test_db,
+        cfg,
+        embedder=fake_embedder,
+        chat=_Chat(),
+        question=TERM,
+        fallback=fallback,
+    )
 
     # Assert
     assert len(plain) == SEEDED
     assert staged == list(reversed(plain))
+    assert stage.calls, "the ask entry point never reached the stage"
+    assert {call["session_id"] for call in stage.calls} == {result.session_id}
 
 
 # --- criterion 3, end to end ---------------------------------------------
