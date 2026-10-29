@@ -130,6 +130,20 @@ staged file, which is not corpus data". The corpus and the vault are still mutat
 - **A third static module, `ingest_file.js`,** beside the spec's `upload.js` and `ingest.js`: file mode in
   `ingest.js` would take it past ~450 lines and give it two reasons to change.
 - **A third route module, `routes_upload.py`,** beside `routes_ingest.py`, for the same reason.
+- **The staging root is created lazily and swept from the app lifespan,** not in `build_context`:
+  `UiContext` is frozen, and sweeping or creating directories while a context is merely built would
+  touch the real temp directory from every test that builds one. A server nobody uploads to leaves
+  nothing in the temp directory.
+- **`tests/test_ui_static_behaviour.py`'s `[hidden]` cascade guard was blind to scoped selectors.**
+  It declined every complex selector, so all of `ingest.css` (`.ingest-pane .x`) was invisible to it:
+  the two new `[hidden]` rules could be deleted with the guard still green. It now judges a complex
+  selector by its subject compound, assuming the ancestor matches (an over-approximation, which only
+  makes it stricter). No existing rule became a false positive, and two mutation entries now pin the
+  new rules. The `hidden-toggle-scan-finds-nothing` site count is 19 (was 16: RM-13 adds three).
+- **RM-11's keyboard-order browser test changed:** the mode switch is now the first tab stop, and the
+  type select (paste only) moved into the paste fields, before the tags.
+- **The client ignores a configured extension without a cap** (`ingest_file.offered`), so a config
+  from an older server, or a test fixture that overrides `limits`, cannot make the page throw.
 
 ## Tests (TDD: red first)
 
@@ -154,6 +168,53 @@ removed from the upload route; the stream counter removed; the sanitizer's last-
 docx ratio check removed; `on_settled` not called for a queued cancel; `original_filename` dropped from
 `_NAMING_KEYS`. Each must turn its test red.
 
+## Results
+
+**Full suite of record** (once, serially, fresh Python 3.11 `.venv` by uv, `GITHUB_ACTIONS=true CI=true`,
+sibling DB `second_brain_test_rm13` on 5434, at `9064fef`): **9892 passed, 3 skipped, 312 deselected**
+in 23:46; total coverage **95.90%**. New and touched modules: `ingest_service.py`, `jobs.py`,
+`routes_ingest.py`, `routes_upload.py`, `security.py` 100%; `upload_checks.py` 98%;
+`upload_staging.py` 95%. `ruff check` clean, `mypy src/` clean (246 files),
+`scripts/check_ceiling_table.py` agrees (16 files, one row each), and
+`grep -c '^| .*no commit through' CLAUDE.md` is still 1. One test was added after the run
+(`test_the_sweep_never_removes_its_own_root`, `dabe501`, found by the mutation harness below) and
+was run on its own (30 passed in its file).
+
+**Browser:** `tests/test_ui_browser_ingest.py`, `..._lifecycle.py` and `..._upload.py` together,
+59 passed (under the shared lock).
+
+**Mutation proofs:** 21 of 21 killed, each in its own `git archive` copy of `HEAD`
+(`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` purged, `PYTHONPATH` pinned and `brain` resolved by
+realpath into the copy, the anchor found exactly once and the file shown changed, exit 1 required and
+exit 0/5 refused, `-m browser` for the browser rows, the copy deleted after each):
+
+| Mutation | Killed by |
+|---|---|
+| Content-Type exception widened to the `/api/ingest/` prefix | `test_octet_stream_is_415_on_every_route_but_the_upload` |
+| Exception's method check dropped | `test_the_exception_is_post_only` |
+| Loopback gate removed from the upload route | `test_non_loopback_refuses_every_ingest_mutation_even_with_a_token` |
+| Stream counter removed | `test_a_chunked_body_over_the_cap_is_413_mid_stream` |
+| `Content-Length` precheck removed | `test_an_honest_length_over_the_cap_is_refused_before_anything_is_written` |
+| Budget counter removed | `test_the_budget_is_rechecked_by_the_counter` |
+| Sniff skipped | `test_a_sniff_mismatch_is_415_and_leaves_nothing` |
+| Sanitizer keeps the whole path | `test_the_sanitizer_table` |
+| Sanitizer keeps control characters | `test_the_sanitizer_table` |
+| docx ratio check removed | `test_a_docx_whose_member_ratio_exceeds_the_bound_is_refused` |
+| docx expanded-total check removed | `test_a_docx_whose_expanded_total_exceeds_the_bound_is_refused` |
+| Allow-list replaced by the registry | `test_a_registered_extension_outside_the_allow_list_is_not_uploadable` |
+| `on_settled` not run on a queued cancel | `test_on_settled_runs_when_a_queued_job_is_cancelled_and_never_runs` |
+| File job's cleanup hook dropped | `test_an_unreadable_file_fails_with_a_fixed_message_and_is_deleted` |
+| `unclaim` on a full queue dropped | `test_a_full_queue_is_429_and_the_upload_survives_for_a_retry` |
+| `original_filename` out of `_NAMING_KEYS` | `test_a_confidential_upload_withholds_its_filename_from_the_wire` |
+| `source_path=None` dropped | `test_each_extension_round_trips_and_the_staged_file_is_deleted` |
+| Sweep's own-pid check dropped | `test_the_sweep_never_removes_its_own_root` (**survived** until that test was added) |
+| A stale upload answer not discarded (JS) | `test_an_upload_removed_while_in_flight_is_deleted_when_it_lands` |
+| Drop-zone button not wired to the input (JS) | `test_the_whole_upload_works_from_the_keyboard` |
+| `upload.js` sends JSON (JS) | `test_a_picked_file_is_staged_raw_then_ingested_as_a_file_job` |
+
+Plus the two static-guard entries in `tests/test_ui_static_behaviour.py` (the `.ingest-group` and
+`.ingest-staged` `[hidden]` rules deleted), which `test_every_guard_can_fail` runs on every suite.
+
 ## End-to-end
 
 A real `brain ui` against a scratch DB on 5434 (`second_brain_test_rm13_e2e`), a scratch `BRAIN_HOME` and a
@@ -166,3 +227,36 @@ then a traversal filename and an oversize file; the transcript goes in the PR.
   terminal transition and by the shutdown `close()`; the startup sweep is the backstop.
 - **pdfplumber memory on a 25 MiB PDF** (spec R6). One running job; the cap is a constant.
 - **R9, the precedent of a non-JSON route.** The parametrized test makes the exception one reviewed line.
+
+### Transcript (real `brain ui`, scratch DB `second_brain_test_rm13_e2e` on 5434, scratch `BRAIN_HOME`, vault and `TMPDIR`, `BRAIN_EMBEDDER=none`, synthetic files)
+
+```
+== config
+ enabled True ['.txt', '.md', '.markdown', '.pdf', '.docx'] {'.txt': 5242880, '.md': 5242880, '.markdown': 5242880, '.pdf': 26214400, '.docx': 26214400}
+== upload flonk-notes.md
+ {"upload_id":"2205…d69c","size":61,"kind":"markdown"} [HTTP 201]
+  staged: -rw------- … 61 … flonk-notes.md
+  job ingest.file succeeded ingested title='Flonk notes' file='flonk-notes.md' chunks=1 None
+  staged dir removed
+== upload zibbit.txt            → 201 text;  job succeeded ingested title='zibbit';   staged dir removed
+== upload quarkle-paper.pdf     → 201 pdf;   job succeeded ingested title='quarkle-paper'; staged dir removed
+== upload zibbit-memo.docx      → 201 docx;  job succeeded ingested title='Sample Heading'; staged dir removed
+== same .md again (dedup)       → job succeeded skipped title='Flonk notes'
+== traversal filename ..%2F..%2F..%2F..%2Ftmp%2Fescape.txt
+ → 201; landed at <TMPDIR>/brain-ui-ingest-<pid>-…/<upload_id>/escape.txt; nothing written to /tmp/escape.txt
+== DELETE that staged upload    → 200 {"upload_id":"…","deleted":true}
+== absolute-path filename %2Fetc%2Fpasswd.txt → 201 (stored as passwd.txt inside the root)
+== oversize .txt (5 MiB + 1, honest length) → 413 upload_too_large
+== oversize .txt, chunked (no Content-Length) → 413 upload_too_large
+== fake.pdf (sniff)             → 415 unsupported_file "the file is not a PDF"
+== .exe                         → 415 unsupported_file
+== JSON body to the upload route → 415 unsupported_media_type
+== octet-stream to paste        → 415 unsupported_media_type
+== cross-origin upload          → 403 origin_mismatch
+== documents: 4 rows, every one source_path NULL, metadata ingested_via=ui and original_filename set
+== vault mirrors: 4 files under _ingested/manual/
+== after shutdown (SIGTERM): no staging root left in TMPDIR (only tiktoken's own cache)
+== server log lines naming any filename: 0
+```
+
+The scratch DBs (`_rm13_e2e`, `_rm13_mut`) were dropped and the scratch directories deleted afterwards.
