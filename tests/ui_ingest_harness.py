@@ -133,8 +133,8 @@ SCRIPTS: dict[str, list[Frame]] = {
     "hold": [_running(1, 4)],
     # Never picked up: a queued job, cancelled with a 200.
     "queue": [Frame("queued")],
-    # Running with no total yet: the indeterminate progress bar.
-    "prep": [Frame("running", [("preparing", None, None, None)])],
+    # Embedding, then writing: the bar has had a value and must become indeterminate.
+    "writing": [_running(1, 2), Frame("running", [("finishing", None, None, None)])],
     # Cancellable when polled, refused when cancelled: enter_commit() closed in between.
     "race": [_running(1, 4)],
     "too-late": [Frame("succeeded", [("finishing", None, None, "cancel_too_late")],

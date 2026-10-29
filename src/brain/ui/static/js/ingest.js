@@ -266,16 +266,20 @@ async function onSubmit(event) {
   }
 }
 
+/* aria-disabled, NOT `disabled`, while the request is in flight: a disabled
+   button drops keyboard focus to <body>, and focus must stay on the button so
+   that, once the button goes away, ingest_view.js can hand it to the row. */
 async function onCancel(row, button) {
   const id = row.dataset.jobId;
-  button.disabled = true;
+  if (button.getAttribute("aria-disabled") === "true") return;
+  button.setAttribute("aria-disabled", "true");
   try {
     apply(id, fromSnapshot(await cancelJob(id)));
   } catch (error) {
     if (error.status === 409) {
       apply(id, { cancellable: false, cancelNote: error.message });
     } else {
-      button.disabled = false;
+      button.removeAttribute("aria-disabled");
       toast(error.message, "error");
     }
   }

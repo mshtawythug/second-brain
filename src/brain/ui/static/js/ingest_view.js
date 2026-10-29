@@ -49,7 +49,7 @@ const GRAPH = {
 const GONE = "This job's outcome is unknown: the server no longer has it, perhaps "
   + "because it restarted. Re-submitting is safe; identical content is a no-op.";
 
-export function kindLabel(kind) {
+function kindLabel(kind) {
   return KIND_LABELS[kind] || kind;
 }
 
@@ -59,7 +59,7 @@ export function isSettled(record) {
 }
 
 /* The row's one-line headline once settled, or "" while it runs. */
-export function headline(record) {
+function headline(record) {
   if (record.gone) return "Outcome unknown";
   if (record.state === "cancelled") return "Cancelled. Nothing was written.";
   if (record.state === "failed") return "Failed";

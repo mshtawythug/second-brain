@@ -57,7 +57,7 @@ export function rememberedJobs() {
   return readIds(STORE_KEY);
 }
 
-export function remember(id) {
+function remember(id) {
   const ids = [id, ...rememberedJobs().filter((other) => other !== id)];
   storeIds(STORE_KEY, ids.slice(0, MAX_REMEMBERED));
 }

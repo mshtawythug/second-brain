@@ -110,6 +110,39 @@ test-file precedent (PR #67). The fake, the fixtures and the recorders moved to
 `tests/test_ui_browser_ingest.py`, and the round-1 tests are in
 `tests/test_ui_browser_ingest_lifecycle.py`, which joins the `ci.yml` roster.
 
+### The audit's gaps (aud-74, at `4d6ffc8`), folded into the same round
+
+Each gap below is a mutation aud-74 actually ran, and each SURVIVED.
+
+- **G1, the unreachable path.** A poll that answers 503 must show "Cannot reach the server; still
+  trying.", keep polling, and let the row settle. New test.
+- **G2, the indeterminate bar.** A new `writing` scenario embeds first and then writes, so the bar has
+  had a value and must drop it. The new test asserts `:indeterminate` and the "Writing" phase. The
+  reduced-motion test (rev-74 #4, which also closes G3) reuses this scenario.
+- **G4, focus.** Focus must return to the row when Cancel goes away. While a cancel is in flight, the
+  button is now `aria-disabled` rather than `disabled`, because a `disabled` button drops keyboard focus
+  to `<body>` before it is removed. A second click is ignored while `aria-disabled` is set, and
+  `ingest.css` styles that state. The cancel test focuses Cancel, presses Enter, and asserts that the
+  `li.job` holds focus once the row settles.
+- **G5.** `jobs_unavailable` joins the disabled-tab parametrize. A config that answers 500 shows "Could
+  not load the ingest settings", and the form stays disabled.
+- **G6.** The cancel test asserts the "Ingesting: search may be slower" line while the job runs. A
+  non-409 cancel failure raises an error toast and offers Cancel again.
+- **G7.** `test_poll_delay_backs_off` reads `POLL_FAST_MS`, `POLL_SLOW_MS` and `SLOW_AFTER_MS` from
+  `jobs.js` instead of restating them. `remember`, `kindLabel` and `headline` are no longer exported.
+- **G8.** The manual pass deviation is recorded under "Deviations" below.
+
+## Deviations
+
+1. **The CI browser tier is hermetic** (`page.route`), as the ticket text asks. The Ingest spec's §9.4
+   real-worker-thread cancel is covered by the manual end-to-end pass (step 4 below), not by CI.
+2. **The manual pass ran on the test DB (port 5434), not the `brain demo` sandbox (55433)** that the
+   Ingest spec's §9.5 and the roadmap's §2.1 item 3 name. The real-thread cancel needed a scratch
+   `BRAIN_HOME`, so that `brain ui` would read a `.env` pointing at a throwaway database and vault, and
+   a gated 400-chunk paste. The test DB is just as synthetic, starts empty, and is off 55432. The
+   database (`second_brain_test_rm11_e2e`) and vault were created for the pass and hold only synthetic
+   text. Ruling by the coordinator: record it, and do not re-run on the demo.
+
 ## Tests (TDD: red first)
 
 - `tests/test_ui_tabs_static.py`: the Ingest pane is not `deferred-tab` and carries a form; the Agent pane

@@ -139,18 +139,44 @@ def test_a_withheld_result_has_no_link_and_never_the_typed_title(harness: Harnes
 
 
 def test_cancel_a_running_job(harness: Harness) -> None:
+    page = harness.page
     harness.open_tab()
     harness.paste("hold")
-    cancel = harness.row().locator("button.job-cancel")
-    cancel.wait_for(timeout=SETTLE_MS)
+    page.wait_for_selector("#ingest-jobs .job-phase:text('Embedding 1 of 4 chunks')",
+                           timeout=SETTLE_MS)
+    row = harness.row()
+    cancel = row.locator("button.job-cancel")
     assert cancel.get_attribute("aria-describedby")
+    assert row.locator(".job-hint").inner_text() == (
+        "Ingesting: search may be slower until this finishes.")
 
-    cancel.click()
+    cancel.focus()
+    page.keyboard.press("Enter")
     row = harness.settled()
 
     assert row.locator(".job-outcome").inner_text() == "Cancelled. Nothing was written."
     assert harness.jobs.cancels == [(next(iter(harness.jobs.jobs)), {})]
     assert row.locator("button.job-cancel").count() == 0
+    assert row.locator(".job-hint").count() == 0
+    # The button that held focus is gone; focus went to its row, not to <body>.
+    assert page.evaluate(
+        "() => document.activeElement.matches('#ingest-jobs > li.job')") is True
+
+
+def test_a_failed_cancel_request_says_so_and_offers_cancel_again(harness: Harness) -> None:
+    page = harness.page
+    harness.open_tab()
+    harness.paste("hold")
+    cancel = harness.row().locator("button.job-cancel")
+    cancel.wait_for(timeout=SETTLE_MS)
+    page.route("**/api/jobs/*/cancel", lambda route: _json(route, 500, {"error": {
+        "code": "internal", "message": "the cancel could not be sent"}}))
+
+    cancel.click()
+
+    page.wait_for_selector("#toast:text('the cancel could not be sent')")
+    assert page.locator("#toast").get_attribute("data-kind") == "error"
+    assert cancel.get_attribute("aria-disabled") is None
 
 
 def test_a_refused_cancel_shows_the_servers_reason(harness: Harness) -> None:
@@ -205,6 +231,7 @@ def test_a_job_the_server_lost_says_the_outcome_is_unknown(harness: Harness) -> 
 @pytest.mark.parametrize(("reason", "sentence"), [
     ("read_only", "This server is read-only."),
     ("requires_loopback", "only when brain ui is bound to this machine"),
+    ("jobs_unavailable", "job runner is not available"),
 ])
 def test_a_server_that_cannot_ingest_renders_the_tab_disabled(
     harness: Harness, reason: str, sentence: str
@@ -218,6 +245,19 @@ def test_a_server_that_cannot_ingest_renders_the_tab_disabled(
     # The fieldset disables every control inside it; check the ones a user uses.
     for control in ("#ingest-title", "#ingest-body", "#ingest-submit"):
         assert harness.page.locator(control).is_disabled(), control
+
+
+def test_a_config_that_will_not_load_leaves_the_form_disabled(harness: Harness) -> None:
+    page = harness.page
+    page.route("**/api/ingest/config", lambda route: _json(route, 500, {"error": {
+        "code": "internal", "message": "boom"}}))
+    page.click('.tab[data-tab="ingest"]')
+    notice = page.locator("#ingest-unavailable")
+    notice.wait_for(timeout=SETTLE_MS)
+
+    assert notice.inner_text() == "Could not load the ingest settings. Reload the page to retry."
+    for control in ("#ingest-title", "#ingest-body", "#ingest-submit"):
+        assert page.locator(control).is_disabled(), control
 
 
 def test_an_oversize_body_is_refused_before_any_request(harness: Harness) -> None:
@@ -240,7 +280,7 @@ def test_a_server_refusal_keeps_the_form(harness: Harness) -> None:
 
     harness.page.locator("#ingest-error").wait_for()
     assert "at most 4 jobs may wait" in harness.page.locator("#ingest-error").inner_text()
-    assert harness.page.input_value("#ingest-body") == "quarkle zibbit flonk"
+    assert harness.page.input_value("#ingest-body") == "scenario:added quarkle zibbit flonk"
 
 
 def test_the_whole_paste_works_from_the_keyboard(harness: Harness) -> None:
@@ -286,11 +326,14 @@ def test_the_panel_renders_in_both_themes(harness: Harness, theme: str) -> None:
 
 
 def test_poll_delay_backs_off(harness: Harness) -> None:
-    delays = harness.page.evaluate(
+    got = harness.page.evaluate(
         "async () => { const m = await import('/static/js/jobs.js');"
-        " return [m.pollDelay(0, false), m.pollDelay(31000, false), m.pollDelay(0, true)]; }")
+        " return {fast: m.POLL_FAST_MS, slow: m.POLL_SLOW_MS, after: m.SLOW_AFTER_MS,"
+        " delays: [m.pollDelay(0, false), m.pollDelay(m.SLOW_AFTER_MS + 1, false),"
+        " m.pollDelay(m.SLOW_AFTER_MS, false), m.pollDelay(0, true)]}; }")
 
-    assert delays == [1000, 3000, 3000]
+    assert got["fast"] < got["slow"]
+    assert got["delays"] == [got["fast"], got["slow"], got["fast"], got["slow"]]
 
 
 def test_opening_the_tab_twice_loads_the_config_once(harness: Harness) -> None:

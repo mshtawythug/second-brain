@@ -217,6 +217,8 @@
 .ingest-pane .job-state[data-state="unknown"]   { color: var(--flag-draft); border-color: var(--flag-draft); }
 .ingest-pane .job-cancel { margin-left: auto; font-family: var(--font-ui); font-size: var(--t-meta); }
 .ingest-pane .job-cancel:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* A cancel in flight: aria-disabled (not `disabled`, which would drop focus). */
+.ingest-pane .job-cancel[aria-disabled="true"] { opacity: 0.5; cursor: progress; }
 .ingest-pane .job-phase {
   margin: var(--s-1) 0 0;
   color: var(--ink-muted);

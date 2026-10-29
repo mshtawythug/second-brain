@@ -10,6 +10,7 @@ No PII: nonsense titles and synthetic ids.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -141,20 +142,21 @@ def test_identical_announcements_are_cleared_and_re_set(harness: Harness) -> Non
         "() => window.__announced.filter((t) => t === 'Paste job: Already in your brain')"
         ".length === 2", timeout=SETTLE_MS)
 
+    # The region starts empty, so the first sentence has nothing to clear; every
+    # later one must be preceded by a clear.
     raw = harness.announced(raw=True)
-    for index, text in enumerate(raw):
+    assert raw[0] != ""
+    for index, text in enumerate(raw[1:], start=1):
         if text:
-            assert index > 0 and raw[index - 1] == "", raw
+            assert raw[index - 1] == "", raw
 
 
 def test_reduced_motion_stills_the_indeterminate_bar(harness: Harness) -> None:
     page = harness.page
     page.emulate_media(reduced_motion="reduce")
     harness.open_tab()
-    harness.paste("prep")
-    page.wait_for_function(
-        "() => { const p = document.querySelector('#ingest-jobs progress.job-progress');"
-        " return p && !p.hasAttribute('value'); }", timeout=SETTLE_MS)
+    harness.paste("writing")
+    page.wait_for_selector("#ingest-jobs .job-phase:text('Writing')", timeout=SETTLE_MS)
     appearance = (
         "() => getComputedStyle(document.querySelector("
         "'#ingest-jobs progress.job-progress')).appearance"
@@ -177,3 +179,40 @@ def test_a_server_title_refusal_reaches_the_form(harness: Harness) -> None:
     page.locator("#ingest-error").wait_for()
     assert page.input_value("#ingest-title") == long_title
     assert page.locator("#ingest-error").inner_text() == "title must be at most 200 characters"
+
+
+def test_the_writing_phase_shows_an_indeterminate_bar(harness: Harness) -> None:
+    """After embedding, "Writing" has no total: the bar drops the value it had."""
+    page = harness.page
+    harness.open_tab()
+    harness.paste("writing")
+    page.wait_for_function(
+        "() => { const p = document.querySelector('#ingest-jobs progress');"
+        " return p && p.value === 1 && p.max === 2; }", timeout=SETTLE_MS)
+    page.wait_for_selector("#ingest-jobs .job-phase:text('Writing')", timeout=SETTLE_MS)
+
+    assert page.evaluate(
+        "() => document.querySelector('#ingest-jobs progress').matches(':indeterminate')") is True
+
+
+def test_an_unreachable_server_is_reported_and_polling_recovers(harness: Harness) -> None:
+    page = harness.page
+    harness.open_tab()
+    failed: list[str] = []
+
+    def one_failure(route: Any) -> None:
+        if route.request.method == "GET" and not failed:
+            failed.append(route.request.url)
+            _json(route, 503, {"error": {"code": "unavailable", "message": "try later"}})
+            return
+        route.fallback()
+
+    page.route("**/api/jobs/**", one_failure)
+    harness.paste("added")
+    note = harness.row().locator(".job-note", has_text="Cannot reach the server; still trying.")
+    note.wait_for(timeout=SETTLE_MS)
+    row = harness.settled()
+
+    assert failed, "the failing poll was never sent"
+    assert row.locator(".job-outcome").inner_text() == "Added"
+    assert row.locator(".job-note", has_text="Cannot reach the server").count() == 0
