@@ -224,6 +224,27 @@ Run at `fea9c3d`: **15 of 15 killed**, and the baseline (the withheld test and a
 | G3 | the whole reduced-motion `@media` block is deleted | `test_reduced_motion_stills_the_indeterminate_bar` |
 | G4 | focus is not handed to the row | `test_cancel_a_running_job` |
 
+### Review round 2 (rev-74, at `d70a3b6`)
+
+Three LOW findings:
+
+1. **The double-activation guard in `onCancel` was untested.** A new test holds the cancel POST, clicks
+   Cancel again (forced, since the button is `aria-disabled`) and presses Enter on it. It asserts the
+   button is `aria-disabled="true"` and that exactly one cancel POST was sent. It then releases the request
+   and asserts the row settles "Cancelled".
+2. **`apply()` cleared `quiet` on every change**, including `onUnreachable`'s `{unreachable: true}`. A
+   reload while the server was down therefore announced the first real snapshot. `quiet` now clears only
+   on a change that carries a `state`. The test resumes a job whose first poll answers 503 and whose next
+   poll answers normally, and asserts nothing was announced.
+3. The harness comment now says that the scenario comes from the body's `scenario:<name>` marker.
+
+Mutations, run at `a41b21b`: **2 of 2 killed**, and the baseline (both new tests) passed.
+
+| # | Mutation | Killed by |
+|---|---|---|
+| R1 | the `aria-disabled === "true"` return is removed from `onCancel` | `test_a_second_cancel_while_the_first_is_in_flight_sends_nothing` |
+| R2 | `quiet: false` is set on every apply | `test_a_resume_that_first_fails_to_reach_the_server_announces_nothing` |
+
 ## End-to-end (real server, test DB)
 
 `brain ui --port 8797 --no-open` with a scratch `BRAIN_HOME` whose `.env` points at
