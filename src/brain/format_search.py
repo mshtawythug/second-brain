@@ -170,7 +170,10 @@ def search_meta_line(
 
     Each ranking stage that ran adds its own segment before ``total``
     (``rerank 412ms``, RM-14a), applied or skipped, because it cost the time
-    either way. With no stage the line is what it always was.
+    either way, and its time is added to ``total``: ``diag.total_ms`` is
+    ``hybrid_search``'s own clock, and a stage runs after it, so a footer
+    reading ``rerank 412ms · total 8ms`` would be a lie. With no stage the line
+    is what it always was.
     """
     total = "?" if diag.total_documents is None else str(diag.total_documents)
     parts = [f"{total} matched", f"{returned} shown"]
@@ -183,7 +186,8 @@ def search_meta_line(
         parts.append(f"facets {round(diag.facets_ms)}ms")
     parts.extend(f"{report.name} {round(report.ms)}ms" for report in stages)
     if diag.total_ms is not None:
-        parts.append(f"total {round(diag.total_ms)}ms")
+        total_ms = diag.total_ms + sum(report.ms for report in stages)
+        parts.append(f"total {round(total_ms)}ms")
     return " · ".join(parts)
 
 
@@ -292,12 +296,18 @@ def timing_with_stages(
 
     For ``brain ui``'s ``GET /api/search``, whose response carries no ``stages``
     key and whose meta line shows ``rerank`` beside ``embed`` and ``rank``
-    (RM-14a). A new dict: ``meta`` is not changed. With no stage it is equal
-    to ``meta``, so the response is byte-identical while every stage is off.
+    (RM-14a). ``total`` grows by the stages' time, which the meta line's
+    headline seconds read: the search's own total does not include a stage
+    that ran after it. A new dict: ``meta`` is not changed. With no stage it is
+    equal to ``meta``, so the response is byte-identical while every stage is
+    off.
     """
     if not stages:
         return meta
-    timing = {**meta["timing_ms"], **{r.name: _round_ms(r.ms) for r in stages}}
+    timing = dict(meta["timing_ms"])
+    if timing.get("total") is not None:
+        timing["total"] = _round_ms(timing["total"] + sum(r.ms for r in stages))
+    timing.update({r.name: _round_ms(r.ms) for r in stages})
     return {**meta, "timing_ms": timing}
 
 

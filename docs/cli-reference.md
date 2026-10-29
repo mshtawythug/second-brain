@@ -148,7 +148,8 @@ brain search "platform migration" --rerank      # needs BRAIN_RERANKER set; else
   out of order by `score`. `brain explain --json` shows the reranker's own score
   as `explain.reranker_score` (`null` for rows it did not score).
 - The footer gains a `rerank …ms` segment, and `brain ui`'s meta line a `rerank`
-  one.
+  one; both totals include it. (`--json --meta`'s `timing_ms.total` is the
+  search's own time; the stage's is in `stages[].ms`.)
 - If the reranker times out or is not running, the results are in hybrid order,
   the exit code is 0, and one line says so on stderr: `reranker unavailable;
   results are in hybrid order`. `--json --meta` and MCP report the stage with
