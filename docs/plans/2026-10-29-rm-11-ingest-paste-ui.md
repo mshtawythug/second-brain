@@ -103,9 +103,55 @@ No Python under `src/` changes, so no file in the CLAUDE.md ceiling table is tou
 
 ## Mutation proofs (in `git archive` copies only)
 
-Planned: drop the `ingest.css` roster entry; unwire `wireIngest()`; make the withheld branch render a link;
-show the typed title in a withheld result; never stop polling at a terminal state; drop the cancel button's
-handler; skip the client-side size check; drop `ingest_browser` from `ci.yml`.
+Each mutation ran in a fresh `git archive HEAD` copy, never the worktree. The harness applies one
+exact-string replacement that must match exactly once, proves it applied (the re-read file equals the
+mutated text and differs from the original), sets `PYTHONDONTWRITEBYTECODE=1`, purges `__pycache__`, pins
+`PYTHONPATH` to the copy's `src`, and checks by realpath that `brain.ui.app.static_dir()` resolves inside
+the copy. It refuses any pytest exit code other than 0 or 1, and an unmutated baseline must pass first.
+
+**The first run proved nothing, and that is recorded rather than dropped.** `addopts` deselects the
+`browser` marker, so every named browser test was deselected (exit code 5) and every mutation read as
+"killed" while the baseline read as red. The harness now passes `-m browser` and refuses exit code 5.
+
+Run at `bd7e552`: **13 of 13 killed**, baseline passed.
+
+| # | Mutation | Killed by |
+|---|---|---|
+| M1 | `wireIngest()` not called from `boot()` | `test_a_paste_shows_progress_then_added_and_opens_the_note` (and the static `ingest-wired-in-boot` guard) |
+| M2 | the withheld branch skipped | `test_a_withheld_result_has_no_link_and_never_the_typed_title` |
+| M3 | a withheld result shows a title | `test_a_withheld_result_has_no_link_and_never_the_typed_title` |
+| M4 | polling never stops at a terminal state | `test_polling_stops_at_a_terminal_state` |
+| M5 | the Cancel click ignored | `test_cancel_a_running_job` |
+| M6 | no client-side size check | `test_an_oversize_body_is_refused_before_any_request` |
+| M7 | the browser roster entry dropped from `ci.yml` | `tests/test_ci_workflow.py` (2 tests) |
+| M8 | a 404 is not treated as "gone" | `test_a_job_the_server_lost_says_the_outcome_is_unknown` |
+| M9 | the progress bar's `max` never set | `test_a_paste_shows_progress_then_added_and_opens_the_note` |
+| M10 | no live-region announcement | `test_the_live_region_announces_the_outcome` |
+| M11 | the form enabled on a server that refuses ingest | `test_a_server_that_cannot_ingest_renders_the_tab_disabled` (both reasons) |
+| M12 | a 409's reason dropped | `test_a_refused_cancel_shows_the_servers_reason` |
+| M13 | "Open in Notes" follows the link instead of switching tabs | `test_a_paste_shows_progress_then_added_and_opens_the_note` |
+
+The two static guards added to `tests/test_ui_static_behaviour.py` (`ingest-module-imported`,
+`ingest-wired-in-boot`) are mutation-proven by that file's own registry on every run.
+
+## End-to-end (real server, test DB)
+
+`brain ui --port 8797 --no-open` with a scratch `BRAIN_HOME` whose `.env` points at
+`second_brain_test_rm11_e2e` on 5434, a scratch vault, `BRAIN_EMBEDDER=arctic`, and the graph off. A
+Playwright script drove the real page with synthetic text:
+
+1. A three-chunk paste (summary skipped) → **Added**, with the title, an *Open in Notes* link and
+   `_ingested/manual/synthetic-quarkle-digest.md`.
+2. The same body again → **Already in your brain**, same link.
+3. A confidential paste (`serve_confidential_titles` off) → **Added**, "Saved. Its title is withheld on
+   this server", and no link.
+4. A 400-chunk transcript, cancelled from the page while "Embedding 0 of 400 chunks" on the **real
+   worker thread** (the spec's §9.4 real-thread cancel) → **Cancelled. Nothing was written.**
+5. *Open in Notes* on job 1 → the Notes tab, the note open, `?id=<uuid>` in the address bar.
+6. A reload in the dark theme → all four rows come back with their outcomes. No page errors.
+
+Afterwards the DB held exactly two documents (3 + 2 chunks, `metadata = {"ingested_via": "ui"}`) and the
+vault exactly two mirrors: the cancelled transcript wrote nothing.
 
 ## Risks
 
