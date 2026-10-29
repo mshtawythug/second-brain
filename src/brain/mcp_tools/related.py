@@ -84,7 +84,9 @@ def brain_related(
 
     Returns ``{id, related: [{id, title, vault_path, source, score, snippet}],
     vector_sim_floor}``. ``snippet`` is a passage of the related document, at most 240
-    characters. An empty ``related`` list is a normal answer: the document has no neighbours.
+    characters. An empty ``related`` list is a normal answer: no candidate cleared the ranking
+    floors. On a brain of under about 40 documents that often happens even when similar
+    documents exist, because the full-text leg then treats every term as common.
 
     ``limit`` defaults to 10 and may not exceed 20 (``INVALID_PARAMS`` above that, or below 1).
 
@@ -156,8 +158,9 @@ def brain_explain(
     every ``vector_rank`` is ``null``.
 
     Filters: ``source`` (a source kind: ``manual``, ``krisp``, ``gmail``, ``slack``; anything
-    else is ``INVALID_PARAMS``), ``tag``, ``since_days``. ``limit`` defaults to 10 and may not
-    exceed ``BRAIN_SEARCH_MAX_LIMIT`` (``INVALID_PARAMS`` above that, or below 1).
+    else is ``INVALID_PARAMS``), ``tag``, ``since_days`` (at least 1, else ``INVALID_PARAMS``).
+    ``limit`` defaults to 10 and may not exceed ``BRAIN_SEARCH_MAX_LIMIT`` (``INVALID_PARAMS``
+    above that, or below 1).
 
     F6: confidential documents are excluded from the match set unless
     ``include_confidential=true``. A database failure is ``INTERNAL_ERROR`` naming only its
@@ -167,6 +170,10 @@ def brain_explain(
     state = ctx.get_state()
     cfg = state.cfg
     _check_limit(ctx, limit, ceiling=cfg.search_max_limit)
+    # 0 would search with no window while ``matched_filters`` echoed ``since_days: 0``, and a
+    # negative value matches nothing; both are the caller's to fix, so refuse them up front.
+    if since_days is not None and since_days < 1:
+        raise ctx.error(INVALID_PARAMS, "since_days must be >= 1")
     if source is not None:
         try:
             validate_source_kind(source)

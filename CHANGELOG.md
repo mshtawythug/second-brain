@@ -31,13 +31,16 @@ show a person (roadmap ticket RM-12).
   related to one document, best first: the same ranking, in the same order, as
   `brain ui`'s related-notes panel. Each row is `{id, title, vault_path, source,
   score, snippet}`, and the cosine floor used is echoed as `vector_sim_floor`.
-  `limit` may not exceed 20.
+  `limit` may not exceed 20. An empty list means no candidate cleared the
+  ranking floors; on a brain of under about 40 documents that often happens
+  even when similar documents exist (backlog BL-16).
 - `brain_explain(query, limit=10, source, tag, since_days,
   include_confidential=false)` returns, for each result, the same `explain`
   object `brain explain --json` prints (FTS and vector ranks, each leg's RRF
   contribution, the recency boost, the best chunk, the filters applied), without
   snippets. It carries the `fallback*` and `stages` keys `brain_search` does.
-  `limit` may not exceed `BRAIN_SEARCH_MAX_LIMIT`.
+  `limit` may not exceed `BRAIN_SEARCH_MAX_LIMIT`, and `since_days` must be at
+  least 1.
 - Both leave confidential documents out unless `include_confidential` is true,
   like every MCP retrieval tool. `brain_related` also refuses (`INVALID_PARAMS`)
   to list the neighbours of a confidential document without that opt-in, because

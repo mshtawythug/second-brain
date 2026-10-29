@@ -80,6 +80,11 @@ unchanged, so no ceiling-table row moves.
 - **RM-12.D4, `brain_explain`'s `source`.** Validated against `source_kinds`, as the CLI's
   `--source` is. `brain_search`'s `none` bucket is not offered: the CLI twin does not offer it,
   and the ticket's parity target is the CLI.
+- **RM-12.D6 (review round 1, rev-75): `brain_explain` refuses `since_days < 1`** with
+  `INVALID_PARAMS` before searching: `0` searched with no window while `matched_filters` echoed it,
+  and a negative value matched nothing. `brain_search`'s identical gap is left alone by ruling and
+  recorded as backlog BL-17. The small-corpus empty `related` list is recorded as BL-16 (no ranking
+  change here).
 - **RM-12.D5, the error for a confidential root** is `INVALID_PARAMS` (the ticket's wording), not
   a new code: the caller can fix it by passing `include_confidential=true`.
 

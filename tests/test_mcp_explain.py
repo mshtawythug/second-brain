@@ -306,6 +306,31 @@ def test_a_non_positive_limit_is_invalid_params(
     assert _error_code(excinfo) == INVALID_PARAMS
 
 
+@pytest.mark.parametrize("bad_since_days", [0, -1])
+def test_a_non_positive_since_days_is_invalid_params_before_searching(
+    mcp_state: mcp_server._State, monkeypatch: pytest.MonkeyPatch, bad_since_days: int
+) -> None:
+    """REGRESSION: ``0`` meant "no window" while ``matched_filters`` echoed it; ``-1`` matched
+    nothing. Both are now refused before the search runs."""
+    # Arrange
+    calls: list[dict[str, Any]] = []
+
+    def spy(*args: Any, **kwargs: Any) -> list[Any]:
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(related_tool, "hybrid_search", spy)
+
+    # Act
+    with pytest.raises(MCPError) as excinfo:
+        related_tool.brain_explain(query="moraine", since_days=bad_since_days)
+
+    # Assert
+    assert _error_code(excinfo) == INVALID_PARAMS
+    assert "since_days" in str(excinfo.value)
+    assert calls == []
+
+
 def test_the_default_limit_is_the_clis(
     mcp_state: mcp_server._State, monkeypatch: pytest.MonkeyPatch
 ) -> None:
