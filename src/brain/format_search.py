@@ -18,7 +18,7 @@ from typing import Any
 from rich.table import Table
 
 from .facets import SearchFacets
-from .search import SearchDiagnostics, SearchResult
+from .search import SearchDiagnostics, SearchExplanation, SearchResult
 from .search_fallback import SearchFallback, fallback_json
 from .search_pipeline import StageReport, stage_reports_json
 from .token_budget import TokenCost
@@ -48,6 +48,35 @@ def search_results_json(results: list[SearchResult]) -> list[dict[str, Any]]:
         }
         for r in results
     ]
+
+
+def explanation_json(explain: SearchExplanation | None) -> dict[str, Any] | None:
+    """Project one result's ranking diagnostic, or ``None`` when there is none.
+
+    The single construction site for the ``explain`` object: ``brain explain
+    --json`` adds it to each row as an eighth key, and MCP ``brain_explain``
+    returns it per result (RM-12), so the two surfaces cannot describe a ranking
+    differently. Keys follow the dataclass's field order, which is the order the
+    CLI has always printed.
+    """
+    if explain is None:
+        return None
+    return {
+        "fts_rank": explain.fts_rank,
+        "fts_score": explain.fts_score,
+        "fts_rrf_contribution": explain.fts_rrf_contribution,
+        "vector_rank": explain.vector_rank,
+        "vector_cosine": explain.vector_cosine,
+        "vector_rrf_contribution": explain.vector_rrf_contribution,
+        "rrf_score": explain.rrf_score,
+        "recency_age_days": explain.recency_age_days,
+        "recency_boost": explain.recency_boost,
+        "final_score": explain.final_score,
+        "best_chunk_id": explain.best_chunk_id,
+        "best_chunk_index": explain.best_chunk_index,
+        "matched_filters": explain.matched_filters,
+        "reranker_score": explain.reranker_score,
+    }
 
 
 def search_results_brief_json(

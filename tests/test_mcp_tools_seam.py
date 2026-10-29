@@ -68,6 +68,12 @@ def unbound_probe() -> Iterator[None]:
     mcp_tools._reset_contexts_for_tests([probe])
 
 
+#: A real tool module that must be discovered and bound (RM-12 shipped the first). The tests
+#: that iterate the real modules assert it is among them, so none can pass on an empty list
+#: (they did, vacuously, from RM-06 until RM-12: aud-68's carry-forward).
+REAL_TOOL_MODULE = "brain.mcp_tools.related"
+
+
 def _real_contexts() -> dict[str, ToolContext | None]:
     return {
         module.__name__: module._CONTEXT.current
@@ -112,6 +118,7 @@ def test_extension_tool_reads_the_state_installed_on_mcp_server(
 def test_modules_filter_leaves_real_tool_modules_untouched() -> None:
     # Arrange
     before = _real_contexts()
+    assert before[REAL_TOOL_MODULE] == _server_context(), "the real module must start bound"
     app = make_server("rm06-throwaway")
 
     # Act
@@ -245,6 +252,7 @@ def test_every_real_tool_module_is_bound_to_the_importable_server() -> None:
     contexts = _real_contexts()
 
     # Assert
+    assert REAL_TOOL_MODULE in contexts, sorted(contexts)
     for name, ctx in contexts.items():
         assert ctx is not None, f"{name} was discovered but never registered"
         assert ctx == _server_context(), name

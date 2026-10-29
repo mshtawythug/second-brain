@@ -138,6 +138,13 @@ recency boost — so you can see *why* a result surfaced and in what order. Add
 `--verbose` to show which filters were active, or `--json` for the full
 `SearchExplanation` payload. It accepts the same filter flags as `search`
 (`--source`, `--tag`, `--since`, `--person`, `--after`/`--before`, `--kind`, …).
+Its MCP twin is `brain_explain` (`query`, `limit`, `source`, `tag`, `since_days`,
+`include_confidential`): per result, the same `explain` object `--json` prints,
+without the snippet. Unlike the CLI, it leaves confidential documents out of the
+match set unless `include_confidential` is true. `brain ui`'s related-notes
+panel has an MCP twin too, `brain_related` (`id`, `limit` up to 20,
+`include_confidential`), which also refuses a confidential document's own
+related list without that opt-in.
 
 `--person` resolves the name or email you pass against the directory and
 matches docs recorded under **any** known variant of that person — space-form
