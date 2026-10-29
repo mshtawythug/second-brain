@@ -155,7 +155,9 @@ def _is_fts_only(diag: SearchDiagnostics) -> bool:
     return diag.embed_ms is None
 
 
-def search_meta_line(diag: SearchDiagnostics, *, returned: int) -> str:
+def search_meta_line(
+    diag: SearchDiagnostics, *, returned: int, stages: Sequence[StageReport] = ()
+) -> str:
     """One-line human footer: match counts and the latency phase split.
 
     Rendered as ``544 matched · 3 shown · embed 5820ms · sql 214ms · total
@@ -165,6 +167,10 @@ def search_meta_line(diag: SearchDiagnostics, *, returned: int) -> str:
     rather than printed as ``embed 0ms``, which would falsely imply a free
     embed. A warm LRU hit is marked ``(cached)`` so the user is not left
     thinking a 40x speedup is reproducible from a fresh shell.
+
+    Each ranking stage that ran adds its own segment before ``total``
+    (``rerank 412ms``, RM-14a), applied or skipped, because it cost the time
+    either way. With no stage the line is what it always was.
     """
     total = "?" if diag.total_documents is None else str(diag.total_documents)
     parts = [f"{total} matched", f"{returned} shown"]
@@ -175,6 +181,7 @@ def search_meta_line(diag: SearchDiagnostics, *, returned: int) -> str:
         parts.append(f"sql {round(diag.sql_ms)}ms")
     if diag.facets_ms is not None:
         parts.append(f"facets {round(diag.facets_ms)}ms")
+    parts.extend(f"{report.name} {round(report.ms)}ms" for report in stages)
     if diag.total_ms is not None:
         parts.append(f"total {round(diag.total_ms)}ms")
     return " · ".join(parts)
@@ -276,6 +283,22 @@ def search_meta_json(
         "fts_only": _is_fts_only(diag),
         "facets": None if facets is None else facets_json(facets),
     }
+
+
+def timing_with_stages(
+    meta: dict[str, Any], stages: Sequence[StageReport]
+) -> dict[str, Any]:
+    """``meta`` with each stage's time added to its ``timing_ms`` (``"rerank": 412.0``).
+
+    For ``brain ui``'s ``GET /api/search``, whose response carries no ``stages``
+    key and whose meta line shows ``rerank`` beside ``embed`` and ``rank``
+    (RM-14a). A new dict: ``meta`` is not changed. With no stage it is equal
+    to ``meta``, so the response is byte-identical while every stage is off.
+    """
+    if not stages:
+        return meta
+    timing = {**meta["timing_ms"], **{r.name: _round_ms(r.ms) for r in stages}}
+    return {**meta, "timing_ms": timing}
 
 
 def search_envelope_json(

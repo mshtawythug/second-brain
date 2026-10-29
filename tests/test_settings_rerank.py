@@ -137,3 +137,11 @@ def test_the_voyage_key_is_never_in_the_repr() -> None:
 def test_the_key_is_not_read_for_a_local_backend() -> None:
     settings = load_rerank_settings({"BRAIN_RERANKER": "llamacpp", "VOYAGE_API_KEY": FAKE_KEY})
     assert settings.voyage_api_key is None
+
+
+def test_the_depth_ceiling_is_the_search_candidate_limit() -> None:
+    """A deeper rerank could only rescore the same rows: each leg stops at CANDIDATE_LIMIT."""
+    from brain.search import CANDIDATE_LIMIT
+    from brain.settings.rerank import MAX_DEPTH
+
+    assert MAX_DEPTH == CANDIDATE_LIMIT

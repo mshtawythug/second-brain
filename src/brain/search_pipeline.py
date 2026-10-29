@@ -149,6 +149,15 @@ def build_stages(
     )
 
 
+def override_stages(rerank: bool | None) -> tuple[SearchStage, ...] | None:
+    """A CLI run's stages for ``--rerank/--no-rerank``: ``None`` follows the setting.
+
+    ``None`` is passed through so ``run_search`` builds the configured stages
+    itself, exactly as when the flag is absent.
+    """
+    return None if rerank is None else build_stages(os.environ, rerank=rerank)
+
+
 @dataclass(frozen=True)
 class _UnsizedStage:
     """Stands in for a stage whose ``candidate_limit`` raised: never applied.

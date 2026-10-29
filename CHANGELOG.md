@@ -22,6 +22,30 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — a cross-encoder reranker stage, off by default (RM-14a)
+
+- **`BRAIN_RERANKER`** (`none` by default, `llamacpp` or `voyage`) adds a
+  reranking stage to the search pipeline, so `brain search`, `brain explain`,
+  MCP `brain_search` and `brain_explain`, `brain ui`, `brain recall` and `brain
+  ask` reorder their top `BRAIN_RERANK_DEPTH` (20) results by a cross-encoder's
+  score. With the default nothing changes. Knobs: `BRAIN_RERANK_DEPTH`,
+  `BRAIN_RERANK_TIMEOUT_S`, `BRAIN_RERANK_URL` (loopback only),
+  `BRAIN_RERANK_MODEL`, `BRAIN_RERANK_MAX_CHARS` (`docs/configuration.md`).
+- **`llamacpp`** talks to a local `llama-server` over loopback HTTP; **`voyage`**
+  uses the hosted `rerank-3` and never receives a confidential document.
+- **`brain search --rerank/--no-rerank`** and **`brain explain --rerank/--no-rerank`**
+  override the setting for one run.
+- **Never fails a search.** A timeout or an unreachable backend leaves the
+  results in hybrid order, exit 0, with one stderr line: `reranker unavailable;
+  results are in hybrid order`.
+- `score` is not overwritten; `brain explain --json` shows
+  `explain.reranker_score`. The footer and `brain ui`'s meta line show the
+  `rerank` time.
+- **`brain eval`** applies the configured stages itself (it still never falls
+  back), adds the reranker's backend, model and depth to `config_signature` only
+  while it is on, and records each row's `stage_ms` in `brain eval --json`. The
+  committed `ci.json` is unchanged.
+
 ### Added — MCP `brain_related` and `brain_explain`
 
 Two read-only MCP tools give an agent what `brain ui` and `brain explain` already

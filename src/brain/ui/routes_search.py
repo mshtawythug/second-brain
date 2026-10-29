@@ -20,7 +20,8 @@ class-only ``fallback_note`` above the ledger (``static/js/results.js``).
 **Since RM-09 the route searches through** :func:`brain.search_pipeline.run_search`,
 like every other user-facing surface, so a configured ranking stage applies
 here too. The response carries no ``stages`` key (only the ``brain search
---json --meta`` envelope and MCP do).
+--json --meta`` envelope and MCP do); a stage's time is added to ``timing_ms``
+instead (``"rerank"``, RM-14a), which the Notes tab's meta line shows.
 
 **Paging with a flapping embedder.** Every request tries the query embed afresh
 (RM-03.D1), so if the embedder comes and goes between two requests, page 1 can
@@ -42,7 +43,7 @@ from starlette.responses import JSONResponse
 
 from ..errors import PersonAmbiguous, PersonNotFound
 from ..facets import compute_facets
-from ..format_search import search_meta_json
+from ..format_search import search_meta_json, timing_with_stages
 from ..search import SearchDiagnostics, build_tsquery
 from ..search_fallback import fallback_json
 from ..search_pipeline import run_search
@@ -137,7 +138,11 @@ async def search(request: Request) -> JSONResponse:
     except psycopg.Error as exc:
         raise db_guard(exc) from exc
 
-    meta = search_meta_json(diagnostics, returned=len(page), facets=facets)
+    # A stage's time joins ``timing_ms`` (the meta line's ``rerank``, RM-14a);
+    # with no stage configured the response is exactly what it was.
+    meta = timing_with_stages(
+        search_meta_json(diagnostics, returned=len(page), facets=facets), searched.stages
+    )
     return ok(
         {
             "session_id": str(session_id),

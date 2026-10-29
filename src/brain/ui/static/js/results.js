@@ -61,6 +61,9 @@ export function renderResults() {
   const parts = [];
   if (timing.embed != null) parts.push(`embed ${(timing.embed / 1000).toFixed(1)}`);
   if (timing.sql != null) parts.push(`rank ${(timing.sql / 1000).toFixed(1)}`);
+  /* Present only when the reranker stage ran (RM-14a); applied or skipped, it
+     cost the time. */
+  if (timing.rerank != null) parts.push(`rerank ${(timing.rerank / 1000).toFixed(1)}`);
   if (meta.fts_only) parts.push("fts-only");
   $("meta-sub").textContent = parts.join(" · ");
 

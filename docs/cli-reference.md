@@ -124,13 +124,36 @@ text-only ranking.
 **One search pipeline.** `brain search`, `brain explain`, MCP `brain_search`,
 `brain ui`'s search, `brain recall` and the retrieval of `brain ask` all search
 through `brain.search_pipeline.run_search`: the search, the text-only fallback,
-then any configured ranking stages (a reranker, for example), in that order.
-No stage ships yet, so results are unchanged. `--json --meta` and MCP
+then any configured ranking stages, in that order. The one stage so far is the
+cross-encoder reranker, which is **off** unless `BRAIN_RERANKER` names a backend
+(see below), so by default results are unchanged. `--json --meta` and MCP
 `brain_search` carry a fifth always-present key after the four `fallback*` keys,
 `stages`: one `{name, applied, skipped_reason, ms}` object per stage, `[]` when
 none is configured. A stage that fails is reported with `applied: false` and the
 failure's class in `skipped_reason`, and the results are the ones it was given.
 The bare `--json` list and `brain explain --json` are unchanged.
+
+**The reranker (off by default).** With `BRAIN_RERANKER=llamacpp` (a local
+`llama-server`) or `voyage` (hosted), every surface above reorders the first
+`BRAIN_RERANK_DEPTH` results (default 20) by a cross-encoder's score; the rest
+keep their order after them. Knobs and the local runtime:
+[configuration](configuration.md#brain_reranker--the-cross-encoder-reranker-off-by-default).
+
+```bash
+brain search "platform migration" --no-rerank   # hybrid order for this run
+brain search "platform migration" --rerank      # needs BRAIN_RERANKER set; else exit 2
+```
+
+- `score` stays the hybrid (RRF plus recency) score, so a reranked list can be
+  out of order by `score`. `brain explain --json` shows the reranker's own score
+  as `explain.reranker_score` (`null` for rows it did not score).
+- The footer gains a `rerank …ms` segment, and `brain ui`'s meta line a `rerank`
+  one.
+- If the reranker times out or is not running, the results are in hybrid order,
+  the exit code is 0, and one line says so on stderr: `reranker unavailable;
+  results are in hybrid order`. `--json --meta` and MCP report the stage with
+  `applied: false` and the failure's class.
+- MCP and `brain ui` follow the setting; they have no per-call switch.
 
 `brain explain` runs the same query as `brain search` but prints per-result
 ranking diagnostics — FTS rank, vector cosine, RRF contributions, and the
