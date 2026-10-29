@@ -3624,7 +3624,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-09 | One search pipeline | S | 2 | RM-01, RM-02, RM-03 | DONE (#72) |
 | RM-10 | Ingest tab phase 1: jobs + paste backend | M | 3 | — | DONE (#73) |
 | RM-11 | Ingest tab phase 2: paste front end | M | 3 | RM-10 | TODO |
-| RM-12 | MCP `brain_related` + `brain_explain` | S | 3 | RM-06, RM-09 | TODO |
+| RM-12 | MCP `brain_related` + `brain_explain` | S | 3 | RM-06, RM-09 | DONE (#75) |
 | RM-13 | Ingest tab phase 3: file upload | M | 3 | RM-11, RM-07 | TODO |
 | RM-14a | Reranker stage, backends, eval wiring (off) | M | 4 | RM-08, RM-09 | TODO |
 | RM-14b | Local reranker runtime | S | 4 | RM-14a | TODO |
