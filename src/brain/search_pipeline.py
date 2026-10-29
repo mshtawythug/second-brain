@@ -16,8 +16,8 @@ stage that needs chunk text reads the snippet, which already carries
 
 Out of scope, each with its recorded reason for calling ``hybrid_search``
 directly: ``brain eval`` (:mod:`brain.eval.runner`), which measures the real
-pipeline and never falls back (spec §2.7) and so will apply stages itself with
-:func:`apply_stages` (RM-14a); :mod:`brain.graph_rag.fuse`; and
+pipeline and never falls back (spec §2.7) and so applies stages itself with
+:func:`size_stages` and :func:`apply_stages` (RM-14a); :mod:`brain.graph_rag.fuse`; and
 :func:`brain.demo.query_demo`. ``tests/test_search_pipeline_boundary.py`` fails
 on any other module that calls ``hybrid_search`` or ``search_with_fts_fallback``.
 
@@ -69,7 +69,12 @@ class StageOutcome:
 class SearchStage(Protocol):
     """One ranking stage, applied after the search to its ``SearchResult`` rows."""
 
-    name: str
+    # A read-only property, so a frozen dataclass stage conforms (RM-14a's
+    # ``RerankStage``); a plain attribute satisfies it too.
+    @property
+    def name(self) -> str:
+        """The stage's name in its ``StageReport`` and the ``stages`` key."""
+        ...
 
     def candidate_limit(self, limit: int) -> int:
         """How many rows the stage needs to see to return ``limit`` good ones."""
@@ -104,19 +109,47 @@ class PipelineResult:
     stages: tuple[StageReport, ...]
 
 
-def build_stages(env: Mapping[str, str]) -> tuple[SearchStage, ...]:
+def build_stages(
+    env: Mapping[str, str], *, rerank: bool | None = None
+) -> tuple[SearchStage, ...]:
     """The stages every surface applies, read from the settings leaves.
 
     ``env`` is ``os.environ`` after the surface's ``Config.load()`` has
-    published the dotenv chain into it (spec §2.3). No stage has shipped yet,
-    so this is empty; RM-14a adds the reranker here, which is what puts it on
-    every surface at once.
+    published the dotenv chain into it (spec §2.3). The reranker (RM-14a) is
+    added when ``BRAIN_RERANKER`` names a backend; it ships ``none``, so by
+    default this is empty and every surface is unchanged.
+
+    ``rerank`` is a one-run override (``brain search --rerank/--no-rerank``):
+    ``False`` drops the stage, ``True`` requires a configured backend (a
+    ``ConfigError`` otherwise: picking one would choose between a local and a
+    hosted service for the user), and ``None`` follows the setting. A bad
+    rerank knob is a ``ConfigError`` here even while the stage is off.
     """
-    del env  # read by the first stage that ships (RM-14a)
-    return ()
+    # Imported here: ``brain.rerank`` imports this module's ``StageOutcome``
+    # and ``StageReport``, so a top-level import would be a cycle.
+    from . import rerank_backends
+    from .config import ConfigError
+    from .rerank import RerankStage
+    from .settings.rerank import load_rerank_settings
+
+    settings = load_rerank_settings(env)
+    if rerank is True and not settings.enabled:
+        raise ConfigError(
+            "--rerank needs BRAIN_RERANKER set to llamacpp or voyage (it is none)"
+        )
+    if not settings.enabled or rerank is False:
+        return ()
+    return (
+        RerankStage(
+            reranker=rerank_backends.make_reranker(settings),
+            depth=settings.depth,
+            max_chars=settings.max_chars,
+            timeout=settings.timeout_s,
+        ),
+    )
 
 
-@dataclass  # not frozen: ``SearchStage.name`` is a plain (settable) attribute
+@dataclass(frozen=True)
 class _UnsizedStage:
     """Stands in for a stage whose ``candidate_limit`` raised: never applied.
 
@@ -147,7 +180,7 @@ class _UnsizedStage:
         return StageOutcome(results=results, report=report)
 
 
-def _sized(
+def size_stages(
     stages: Sequence[SearchStage], limit: int
 ) -> tuple[tuple[SearchStage, ...], int]:
     """Ask each stage how deep it needs to see; return the stages and the fetch size.
@@ -155,6 +188,7 @@ def _sized(
     A stage whose ``candidate_limit`` raises contributes ``limit`` and is
     replaced by an :class:`_UnsizedStage`: a stage that cannot say how many rows
     it needs is not applied to a guess, and must not cost the search either.
+    Public because ``brain eval`` sizes its own fetch with it (RM-14a).
     """
     sized: list[SearchStage] = []
     fetch = limit
@@ -248,9 +282,11 @@ def run_search(
 
     Never raises from a stage. A stage whose ``candidate_limit`` raises
     contributes ``limit`` to the fetch, is NOT applied, and is reported as
-    skipped (class-only), like a stage whose ``apply`` raises (:func:`_sized`).
+    skipped (class-only), like a stage whose ``apply`` raises (:func:`size_stages`).
     """
-    stages, fetch = _sized(build_stages(os.environ) if stages is None else stages, limit)
+    stages, fetch = size_stages(
+        build_stages(os.environ) if stages is None else stages, limit
+    )
     if fallback:
         searched = search_with_fts_fallback(
             search_fn, conn, embedder=embedder, query=query, limit=fetch, **kwargs

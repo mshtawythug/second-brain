@@ -73,7 +73,8 @@ def save_baseline(report: EvalReport, *, path: Path) -> None:
     file at *path* is left exactly as it was. The per-row ``degraded`` flag is
     not serialized: a saved baseline cannot contain a degraded row, so the
     field would be a constant, and leaving it out keeps the file format (and
-    ``ci.json``'s byte layout) unchanged.
+    ``ci.json``'s byte layout) unchanged. ``stage_ms`` is left out too, for the
+    reason given where it is deleted.
 
     Args:
         report: The eval report to persist.
@@ -95,6 +96,9 @@ def save_baseline(report: EvalReport, *, path: Path) -> None:
     raw: dict[str, Any] = dataclasses.asdict(report)
     for result in raw["results"]:
         del result["degraded"]
+        # Latency is a property of the machine, not of the corpus: written into
+        # a baseline it would change the file on every re-record (RM-14a).
+        del result["stage_ms"]
     raw = _round_floats(raw)
     # datetime → ISO-8601 with Z suffix for UTC.
     raw["generated_at"] = report.generated_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
