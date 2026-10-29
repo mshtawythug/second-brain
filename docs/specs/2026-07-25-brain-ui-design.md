@@ -1131,6 +1131,11 @@ the CLI, MCP, or F8 already owns. Where behavior is worth sharing it is *extract
 adds SQL to a route module instead of `ui/queries.py`, or writes a vault file outside
 `notes_service.py`.
 
+> **Amended 2026-10-29 (RM-10, Ingest tab spec §1.3).** Exactly two modules in `brain.ui` may
+> mutate: `notes_service.py` (authored notes) and `ingest_service.py` (ingest jobs). Both delegate
+> to functions the CLI already owns. The review rule now reads: reject any change that writes a
+> vault file outside those two modules, or adds a third mutator.
+
 ---
 
 ## 10. Implementation sequence

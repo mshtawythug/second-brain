@@ -22,6 +22,34 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — the Ingest tab's backend: background jobs and paste ingest
+
+`brain ui` can now ingest pasted text over HTTP (roadmap ticket RM-10, phase 1 of
+the Ingest tab design). The browser panel is the next ticket, RM-11.
+
+- `POST /api/ingest/paste` takes a title, a body, tags, a content type (`note` or
+  `transcript`), a sensitivity (`normal` or `confidential`) and `enrich`. It
+  answers 202 with a job. The document is an ordinary ingested-tier document from
+  source `manual`, written through the same pipeline as `brain ingest*`. It is
+  deduplicated by content: pasting the same body again reports "skipped" with the
+  existing document's id. It never syncs the graph; the vault watcher does that.
+- `GET /api/jobs`, `GET /api/jobs/{id}?after=<seq>` and
+  `POST /api/jobs/{id}/cancel` let a client poll a job's progress and cancel it.
+  A cancel accepted before writing starts always writes nothing. Once writing
+  has started, cancel answers 409. The job list never carries a job's result,
+  because a result names its document.
+- `GET /api/ingest/config` says whether this server may ingest and why not, and
+  `GET /api/health` gains `ingest_enabled`. Ingest is offered only on a loopback,
+  writable server: `--read-only` refuses it, and so does any `--host` / `--lan`
+  bind (403 `ingest_requires_loopback`).
+- Jobs run one at a time on a background thread, with at most four waiting.
+  They are kept in memory only: after a restart, re-submitting is always safe,
+  because identical content is a no-op. Paste bodies are capped at 2 MiB, and
+  the cap is enforced while the request streams in.
+- `brain.ingest.outcome.classify` is now the one place that turns an ingest
+  result into "ingested / updated / skipped / empty / mirror repaired". The
+  CLI's wording is unchanged.
+
 ### Added — one search pipeline for every search surface
 
 `brain search`, `brain explain`, MCP `brain_search`, `brain ui`'s search,

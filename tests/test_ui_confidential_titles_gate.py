@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,7 @@ from brain.config import Config, ConfigError
 from brain.sensitivity import CONFIDENTIAL
 from brain.ui.app import create_app
 from brain.ui.context import UiContext
+from brain.ui.jobs import JobRegistry
 from brain.ui.server import build_context
 
 from .conftest import TEST_DATABASE_URL
@@ -169,8 +170,29 @@ def _client(
         allowed_origin=ORIGIN,
         logging_enabled=False,
         serve_confidential_titles=serve_confidential_titles,
+        jobs=_finished_paste_of_the_sealed_document(),
     )
     return TestClient(create_app(context), base_url=ORIGIN)
+
+
+def _finished_paste_of_the_sealed_document() -> JobRegistry:
+    """A job registry holding one finished ingest whose result names the sealed doc.
+
+    So ``/api/jobs`` is asked about a job that COULD name it (RM-10). An empty
+    registry would make that route's half of every assertion here vacuous.
+    """
+    registry = JobRegistry(
+        clock=lambda: datetime.now(UTC),
+        max_queued=4,
+        retain=50,
+        retain_for=timedelta(hours=1),
+    )
+    registry.submit(
+        "ingest.paste",
+        lambda handle: {"title": SEALED_TITLE, "tags": [SEALED_TAG]},
+    )
+    assert registry.run_next()
+    return registry
 
 
 #: How to *call* each GET route — path-parameter values only, plus a query
@@ -195,7 +217,12 @@ _QUERY_STRINGS = {"/api/search": "q=severance"}
 #:   ones they did not.
 #: - ``/api/notes/{id_prefix}`` — PROMPTED, and it is the document itself. A
 #:   reader who opened a note by id is not being *told* it exists.
-_PROMPTED = frozenset({"/api/search", "/api/notes/{id_prefix}"})
+#: - ``/api/jobs/{job_id}`` — PROMPTED (RM-10). The caller names a job by an
+#:   unguessable uuid4 id that only the submit response returned, so it is
+#:   reading the outcome of an ingest it started, with the title it typed. The
+#:   job LIST, which a caller did not ask about by name, is not exempt: it
+#:   carries no result at all, and is checked below like every listing surface.
+_PROMPTED = frozenset({"/api/search", "/api/notes/{id_prefix}", "/api/jobs/{job_id}"})
 
 #: The surfaces this module was written to cover. NOT the roster — the roster is
 #: discovered below — but a floor under it: if a refactor stops one of these
@@ -386,7 +413,7 @@ def test_the_route_table_is_fully_covered(
     # entered _KNOWN_GATED can be, by adding it straight here. That is a ruling,
     # so it is made loud: bump this number in the same edit and write the reason
     # into _PROMPTED's docstring above.
-    assert len(_PROMPTED) == 2, (
+    assert len(_PROMPTED) == 3, (
         f"the prompted-exemption list changed size. Each entry silences a route "
         f"for every assertion in this module, so each needs a written ruling: "
         f"{sorted(_PROMPTED)}"

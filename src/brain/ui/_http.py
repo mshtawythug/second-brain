@@ -12,7 +12,7 @@ import psycopg
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .errors import UiBadRequest, wrap_db_error
+from .errors import UiBadRequest, UiPayloadTooLarge, wrap_db_error
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
     from .context import UiContext
@@ -36,7 +36,11 @@ async def json_body(request: Request) -> dict[str, Any]:
     unparseable bytes means a malformed body rather than a wrong media type —
     hence 400 rather than 415.
     """
-    raw = await request.body()
+    return parse_json_object(await request.body())
+
+
+def parse_json_object(raw: bytes) -> dict[str, Any]:
+    """Parse already-read bytes as a JSON object; empty bytes mean ``{}``."""
     if not raw:
         return {}
     try:
@@ -46,6 +50,29 @@ async def json_body(request: Request) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise UiBadRequest("body must be a JSON object", code="invalid_body")
     return parsed
+
+
+async def read_body_capped(request: Request, limit: int) -> bytes:
+    """Read the body, refusing (413) anything over ``limit`` bytes.
+
+    The cap is enforced on the stream, never after buffering (Ingest spec §7.3,
+    C7): an honest ``Content-Length`` over the cap is refused before a byte is
+    read, and a lying or absent one (chunked transfer) is refused by the counter
+    the moment the running total passes the cap.
+    """
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise UiPayloadTooLarge(
+            f"request body must be at most {limit} bytes", code="body_too_large"
+        )
+    received = bytearray()
+    async for piece in request.stream():
+        received.extend(piece)
+        if len(received) > limit:
+            raise UiPayloadTooLarge(
+                f"request body must be at most {limit} bytes", code="body_too_large"
+            )
+    return bytes(received)
 
 
 def db_guard(exc: psycopg.Error) -> Exception:

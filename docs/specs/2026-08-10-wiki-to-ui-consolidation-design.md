@@ -206,6 +206,11 @@ be tempted to break:
 > exactly one document — is the only sync this module may call.
 > — `notes_service.py:26-30`
 
+> **Amended 2026-10-29 (RM-10, Ingest tab spec §1.3).** The rule is now "exactly two modules":
+> `notes_service.py` (authored notes) and `ingest_service.py` (ingest jobs), both delegating to
+> functions the CLI already owns. A route module that writes, or a third mutator, is a review
+> rejection. `ingest_service.py` calls `ingest_document`, never a sync.
+
 **Binding.** Verified still true: `sync_one_file` is the only sync entrypoint imported into
 `ui/`. A graph panel that triggers `graphrag build`, or a related-docs panel that triggers a
 corpus-wide embedding pass, is forbidden.
