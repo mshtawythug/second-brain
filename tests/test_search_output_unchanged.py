@@ -31,6 +31,7 @@ from brain.cli import app
 from brain.config import Config
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.search import SearchDiagnostics
+from brain.search_pipeline import PipelineResult
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -204,11 +205,14 @@ def test_mcp_brain_search_envelope_has_exactly_the_expected_keys(
         mcp_server.search_meta_json(SearchDiagnostics(), returned=0, facets=None)
     )
     # 2026-10-23 — the text-only fallback keys (plan
-    # docs/plans/2026-10-23-search-fts-fallback.md), derived from their helper
-    # for the same reason as ``meta_keys``.
-    fallback_keys = set(mcp_server.fallback_json(None))
+    # docs/plans/2026-10-23-search-fts-fallback.md), and since RM-09 the
+    # ``stages`` key (plan docs/plans/2026-10-29-rm-09-search-pipeline.md),
+    # derived from their helper for the same reason as ``meta_keys``.
+    pipeline_keys = set(
+        mcp_server.pipeline_json(PipelineResult(results=[], fallback=None, stages=()))
+    )
     assert set(payload.keys()) == (
-        {"session_id", "results"} | meta_keys | fallback_keys
+        {"session_id", "results"} | meta_keys | pipeline_keys
     )
 
 

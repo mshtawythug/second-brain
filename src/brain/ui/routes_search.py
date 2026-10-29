@@ -16,6 +16,19 @@ through :func:`brain.search_fallback.search_with_fts_fallback`, the helper
 ``503 embedding_unavailable`` and show nothing; it now returns the text-only
 results with the four ``fallback*`` keys, and the Notes tab shows the
 class-only ``fallback_note`` above the ledger (``static/js/results.js``).
+
+**Since RM-09 the route searches through** :func:`brain.search_pipeline.run_search`,
+like every other user-facing surface, so a configured ranking stage applies
+here too. The response carries no ``stages`` key (only the ``brain search
+--json --meta`` envelope and MCP do).
+
+**Paging with a flapping embedder.** Every request tries the query embed afresh
+(RM-03.D1), so if the embedder comes and goes between two requests, page 1 can
+be text-only-ranked and page 2 hybrid-ranked, and a row can repeat or be skipped
+across the two pages. This is documented rather than prevented: each request
+mints its own ``session_id``, so there is no session to keep a fallback sticky
+across, and every page carries its own ``fallback`` key, which the Notes tab
+shows, so each page says which ranking it is.
 """
 from __future__ import annotations
 
@@ -31,7 +44,8 @@ from ..errors import PersonAmbiguous, PersonNotFound
 from ..facets import compute_facets
 from ..format_search import search_meta_json
 from ..search import SearchDiagnostics, build_tsquery
-from ..search_fallback import fallback_json, search_with_fts_fallback
+from ..search_fallback import fallback_json
+from ..search_pipeline import run_search
 from ..search_predicate import build_predicate
 from ..sensitivity import DEFAULT_SENSITIVITY
 from . import telemetry
@@ -73,16 +87,18 @@ async def search(request: Request) -> JSONResponse:
             # passed by keyword: the helper names ``query`` itself, so leaving
             # it in the splat would pass it twice. ``limit`` is ``fetch_limit``
             # on both attempts, so a fallback neither changes the page size nor
-            # over-fetches twice (RM-03 criterion 5).
+            # over-fetches twice (RM-03 criterion 5); ``run_search`` deepens it
+            # only for a stage that asks to see more, and truncates back (RM-09).
             filters = spec.filter_kwargs()
             query = filters.pop("query")
             fetch_limit = filters.pop("limit")
-            searched = search_with_fts_fallback(
+            searched = run_search(
                 ctx.search_fn,
                 conn,
                 embedder=ctx.embedder,
                 query=query,
                 limit=fetch_limit,
+                session_id=str(session_id),
                 diagnostics=diagnostics,
                 total_count=True,
                 sensitivity=sensitivity_filter,
@@ -113,7 +129,7 @@ async def search(request: Request) -> JSONResponse:
                 fts_count=diagnostics.fts_count,
                 duration_ms=int((perf_counter() - started) * 1000),
             )
-    # No ``except EmbedError``: ``search_with_fts_fallback`` catches it and
+    # No ``except EmbedError``: ``run_search``'s fallback catches it and
     # retries text-only, so the old ``503 embedding_unavailable`` branch here
     # could no longer be reached and was deleted (RM-03).
     except (PersonNotFound, PersonAmbiguous) as exc:

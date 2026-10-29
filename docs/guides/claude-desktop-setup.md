@@ -120,6 +120,10 @@ Claude Desktop's tools indicator (gear / plug icon) should show the `brain_*` to
 - For `voyage`, check the key and rate limits.
 - The server log (Claude Desktop's MCP log) records each fallback at INFO, by class only.
 
+**`brain_search` results carry a `stages` list**
+- Each entry is a ranking stage applied after the search (`name`, `applied`, `skipped_reason`, `ms`). It is `[]` until a stage is configured. `applied: false` with a class name in `skipped_reason` means that stage failed and the results are the ones it was given.
+- The server log records each skipped stage at INFO too, by class only.
+
 **Postgres connection error**
 - `docker compose ps` — is the container up?
 - Was it stopped/restarted recently? `brain doctor` in the terminal will report the same problem and confirm.

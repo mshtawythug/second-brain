@@ -186,7 +186,15 @@ def test_brain_ask_limit_defaults_to_config(
     real_retrieve = ask_mod._retrieve_hybrid
 
     def _spy_retrieve(  # type: ignore[no-untyped-def]
-        conn, cfg, *, embedder, query, limit, exclude_confidential=False, fallback=True
+        conn,
+        cfg,
+        *,
+        embedder,
+        query,
+        limit,
+        exclude_confidential=False,
+        fallback=True,
+        session_id=None,
     ):
         captured["limit"] = limit
         # FORWARDS ``exclude_confidential`` rather than merely accepting it.
@@ -201,6 +209,7 @@ def test_brain_ask_limit_defaults_to_config(
             limit=limit,
             exclude_confidential=exclude_confidential,
             fallback=fallback,
+            session_id=session_id,
         )
 
     monkeypatch.setattr(ask_mod, "_retrieve_hybrid", _spy_retrieve)

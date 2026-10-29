@@ -23,12 +23,8 @@ import psycopg
 
 from .chat import coerce_bool
 from .search import SearchResult, hybrid_search
-from .search_fallback import (
-    FallbackSearch,
-    SearchFallback,
-    fallback_json,
-    search_with_fts_fallback,
-)
+from .search_fallback import SearchFallback, fallback_json
+from .search_pipeline import PipelineResult, run_search
 
 if TYPE_CHECKING:
     from .config import Config
@@ -383,12 +379,15 @@ def _retrieve_hybrid(
     limit: int,
     exclude_confidential: bool = False,
     fallback: bool = True,
-) -> FallbackSearch:
+    session_id: str | None = None,
+) -> PipelineResult:
     """Single hybrid-search pass for one sub-query (config-driven knobs).
 
-    A failed query embed retries text-only (:mod:`brain.search_fallback`), so
-    an unreachable embedder costs semantic ranking, not the answer (RM-02).
+    Through :func:`brain.search_pipeline.run_search` (RM-09), so the configured
+    ranking stages apply. A failed query embed retries text-only, so an
+    unreachable embedder costs semantic ranking, not the answer (RM-02).
     ``fallback=False`` lets it propagate: ``brain eval --answer`` (spec §2.7).
+    ``session_id`` is the ask's own (``AskResult.session_id``), handed to stages.
 
     ``exclude_confidential`` maps onto ``hybrid_search``'s own F6 lens. ``ask``
     is the highest-consequence retrieval surface here: its citations carry
@@ -397,19 +396,20 @@ def _retrieve_hybrid(
     twice, once verbatim and once paraphrased into prose that no marker-based
     check downstream could recognise as derived from it.
     """
-    kwargs: dict[str, Any] = {
-        "embedder": embedder,
-        "query": query,
-        "limit": limit,
-        "vector_sim_floor": cfg.vector_sim_floor,
-        "recency_halflife_days": cfg.recency_halflife_days,
-        "snippet_context_tokens": cfg.snippet_context_tokens,
-        "snippet_max_chars": cfg.snippet_max_chars,
-        "sensitivity": "normal" if exclude_confidential else None,
-    }
-    if not fallback:
-        return FallbackSearch(results=hybrid_search(conn, **kwargs), fallback=None)
-    return search_with_fts_fallback(hybrid_search, conn, **kwargs)
+    return run_search(
+        hybrid_search,
+        conn,
+        embedder=embedder,
+        query=query,
+        limit=limit,
+        fallback=fallback,
+        session_id=session_id,
+        vector_sim_floor=cfg.vector_sim_floor,
+        recency_halflife_days=cfg.recency_halflife_days,
+        snippet_context_tokens=cfg.snippet_context_tokens,
+        snippet_max_chars=cfg.snippet_max_chars,
+        sensitivity="normal" if exclude_confidential else None,
+    )
 
 
 def _retrieve(
@@ -423,6 +423,7 @@ def _retrieve(
     backend: GraphBackend | None,
     exclude_confidential: bool = False,
     fallback: bool = True,
+    session_id: str | None = None,
 ) -> tuple[list[SearchResult], str, SearchFallback | None]:
     """Retrieve documents for one sub-query: (results, graph_summary, fallback).
 
@@ -435,9 +436,7 @@ def _retrieve(
     # Validate the graph precondition BEFORE the (DB-touching) hybrid leg so a
     # missing backend fails fast as a clean caller error.
     if mode != HYBRID_MODE and backend is None:
-        raise ValueError(
-            f"mode={mode!r} requires a graph backend; pass backend=AgeBackend()"
-        )
+        raise ValueError(f"mode={mode!r} requires a graph backend; pass backend=AgeBackend()")
 
     hybrid = _retrieve_hybrid(
         conn,
@@ -447,6 +446,7 @@ def _retrieve(
         limit=limit,
         exclude_confidential=exclude_confidential,
         fallback=fallback,
+        session_id=session_id,
     )
     if mode == HYBRID_MODE:
         return hybrid.results, "", hybrid.fallback
@@ -532,6 +532,7 @@ def ask_no_loop(
         backend=backend,
         exclude_confidential=exclude_confidential,
         fallback=fallback,
+        session_id=session_id,
     )
     raw_answer = _call_synthesize_step(chat, cfg, question, docs, graph_summary)
     answer = _sanitize_answer(raw_answer, len(docs))
@@ -577,9 +578,7 @@ def ask(
     """
     _validate_mode(mode)
     if max_iterations < 1:
-        raise ValueError(
-            f"max_iterations must be >= 1 (got {max_iterations})"
-        )
+        raise ValueError(f"max_iterations must be >= 1 (got {max_iterations})")
     if no_loop:
         return ask_no_loop(
             conn,
@@ -625,6 +624,7 @@ def ask(
                 backend=backend,
                 exclude_confidential=exclude_confidential,
                 fallback=fallback,
+                session_id=session_id,
             )
             if graph_summary:
                 graph_summaries.append(graph_summary)

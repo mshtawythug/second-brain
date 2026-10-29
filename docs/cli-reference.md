@@ -121,6 +121,17 @@ carries the same four keys. `brain eval` never falls back: a failed embed there
 is still a degraded row or an aborted run, so a baseline is never scored on a
 text-only ranking.
 
+**One search pipeline.** `brain search`, `brain explain`, MCP `brain_search`,
+`brain ui`'s search, `brain recall` and the retrieval of `brain ask` all search
+through `brain.search_pipeline.run_search`: the search, the text-only fallback,
+then any configured ranking stages (a reranker, for example), in that order.
+No stage ships yet, so results are unchanged. `--json --meta` and MCP
+`brain_search` carry a fifth always-present key after the four `fallback*` keys,
+`stages`: one `{name, applied, skipped_reason, ms}` object per stage, `[]` when
+none is configured. A stage that fails is reported with `applied: false` and the
+failure's class in `skipped_reason`, and the results are the ones it was given.
+The bare `--json` list and `brain explain --json` are unchanged.
+
 `brain explain` runs the same query as `brain search` but prints per-result
 ranking diagnostics — FTS rank, vector cosine, RRF contributions, and the
 recency boost — so you can see *why* a result surfaced and in what order. Add
@@ -819,6 +830,11 @@ reads `fts-only`, and the next search tries the embedder again. The response
 carries the same four `fallback*` keys as `brain search --json --meta` (all
 `null` on a normal search). It used to answer `503 embedding_unavailable` and
 show nothing.
+
+Each page request tries the embedder afresh, so with an embedder that comes and
+goes between two requests, one page can be text-only-ranked and the next
+hybrid-ranked, and a note can repeat or be skipped across the two. Each page's
+own notice says which ranking it shows.
 
 ## brain people
 

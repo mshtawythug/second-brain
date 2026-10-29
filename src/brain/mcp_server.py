@@ -342,7 +342,7 @@ from .queries import (
 from .recall import recall
 from .resurface import resurface_docs
 from .search import SearchDiagnostics, build_tsquery, hybrid_search
-from .search_fallback import fallback_json, search_with_fts_fallback
+from .search_pipeline import pipeline_json, run_search
 from .search_predicate import build_predicate
 from .sensitivity import is_confidential
 from .source_kinds import InvalidSourceKind, validate_source_kind
@@ -755,7 +755,8 @@ def brain_search(
     retry will not fix it, either a configuration problem or a query longer
     than the embed window) and ``fallback_note`` (one line to relay to the
     user). ``fts_only`` is ``true`` too. Tell the user the results are
-    text-only when ``fallback`` is set.
+    text-only when ``fallback`` is set. ``stages`` (always present, RM-09) lists
+    each ranking stage applied, with its timing; ``[]`` when none is configured.
 
     ``limit`` is capped at ``BRAIN_SEARCH_MAX_LIMIT`` (default 50, == the
     candidate-chunk limit): a larger value cannot surface more documents, and
@@ -822,15 +823,15 @@ def brain_search(
             # the rows beside it is the exact defect the ``none`` bucket exists
             # to fix.
             source_kind, source_missing = _split_source_filter(source)
-            # Tenth growth (2026-10-23): an embed failure falls back to
-            # text-only instead of INTERNAL_ERROR, and the response says so.
-            # Policy in brain.search_fallback; plan
-            # docs/plans/2026-10-23-search-fts-fallback.md.
-            outcome = search_with_fts_fallback(
+            # Tenth growth (2026-10-23): an embed failure falls back to text-only
+            # instead of INTERNAL_ERROR, and says so (brain.search_fallback, plan
+            # docs/plans/2026-10-23-search-fts-fallback.md). RM-09: via run_search.
+            outcome = run_search(
                 hybrid_search,
                 conn,
                 embedder=state.embedder,
                 query=query,
+                session_id=session_id,
                 limit=limit,
                 source_kind=source_kind,
                 source_missing=source_missing,
@@ -938,9 +939,8 @@ def brain_search(
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    # No ``except EmbedError`` here, deliberately: the query embed is this
-    # tool's only embed call, and ``search_with_fts_fallback`` absorbs its
-    # failure (the retry is ``fts_only`` and never embeds).
+    # No ``except EmbedError``, deliberately: the query embed is this tool's only
+    # embed, and ``run_search``'s fallback absorbs it (the retry never embeds).
     # The two original keys come FIRST and are built exactly as before; the F5
     # metadata is merged in as additional named keys. The projection above is
     # the shared one the CLI uses — ``search_results_json`` at ``brief=false``
@@ -955,7 +955,7 @@ def brain_search(
         **search_meta_json(
             diagnostics, returned=len(results), facets=facet_data
         ),
-        **fallback_json(outcome.fallback),
+        **pipeline_json(outcome),
     }
 
 
