@@ -1279,6 +1279,36 @@ def fake_enricher() -> Any:
     return build_fake_enricher()
 
 
+#: The reranker's knobs (``brain.settings.rerank``, RM-14a).
+_RERANK_KNOBS = (
+    "BRAIN_RERANK_DEPTH",
+    "BRAIN_RERANK_TIMEOUT_S",
+    "BRAIN_RERANK_URL",
+    "BRAIN_RERANK_MODEL",
+    "BRAIN_RERANK_MAX_CHARS",
+)
+
+
+@pytest.fixture(autouse=True)
+def _reranker_off(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Every test starts with the reranker OFF, whatever the shell or a ``.env`` says.
+
+    ``run_search(stages=None)`` and ``run_eval(stages=None, env=None)`` read
+    ``os.environ``, so a ``BRAIN_RERANKER`` exported in the developer's shell, or
+    one a ``.env`` publishes, would otherwise turn the reranker on for every
+    surface test (rev-76 reproduced three failures that way). ``BRAIN_RERANKER``
+    is SET to ``none`` rather than deleted: ``Config.load()`` publishes the dotenv
+    chain with ``os.environ.setdefault``, which re-injects a deleted key and
+    skips a present one. The other knobs are deleted. A test that needs the
+    reranker sets it with ``monkeypatch.setenv`` and wins; ``monkeypatch``
+    undoes both per test. Proven by ``tests/test_rerank_isolation.py``.
+    """
+    monkeypatch.setenv("BRAIN_RERANKER", "none")
+    for knob in _RERANK_KNOBS:
+        monkeypatch.delenv(knob, raising=False)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _stub_llm_backends(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
