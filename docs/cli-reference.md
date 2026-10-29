@@ -857,7 +857,20 @@ they ended; if the server restarted in between, it says the outcome is unknown
 and that re-submitting is safe. A confidential document's title is shown only
 when `BRAIN_UI_SERVE_CONFIDENTIAL_TITLES` is on; otherwise the panel says the
 title is withheld and offers no link. On a `--read-only` or `--host` / `--lan`
-server the tab is disabled and says why. File upload comes with RM-13.
+server the tab is disabled and says why.
+
+**Uploading a file.** Switch the tab to **Upload a file**, then choose a file or
+drop one on the zone (the zone is a button, so the keyboard works too). One
+`.md`, `.markdown`, `.txt`, `.pdf` or `.docx` file per job: text and markdown up
+to 5 MiB, PDF and Word up to 25 MiB. The file is uploaded as soon as you choose
+it, so a wrong type, an oversize file or a file whose contents do not match its
+extension is refused at once; **Remove** discards it. Add tags, a sensitivity and
+an optional title (otherwise the document is titled as the extractor titles it,
+from the file's name for a PDF or a text file), then **Ingest**. The job runs on
+the same panel as a paste, and an identical file uploaded again is **Already in
+your brain**. A file ingested once with `brain ingest <path>` and once by upload
+becomes two documents: the upload has no path to dedup on. An uploaded file you
+never submit is deleted after 15 minutes; a submitted one when its job ends.
 
 The tab sits on these routes. On a
 loopback, writable server, `POST /api/ingest/paste` ingests pasted text as an
@@ -874,9 +887,23 @@ unknown) has its title, vault path and document id withheld
 the tree. Jobs run one at a time, at most four wait (a fifth gets
 429), and they live in memory only, so after a restart re-submitting is the
 recovery. `GET /api/ingest/config` reports whether ingest is available and why
-not (`read_only`, `requires_loopback` or `jobs_unavailable`). Ingest is never
+not (`read_only`, `requires_loopback` or `jobs_unavailable`), the uploadable
+`extensions` and their per-type caps (`limits.upload_bytes`). Ingest is never
 offered over `--host` / `--lan`: from another device, use `+ New` or
 `brain ingest`.
+
+An upload is two requests. `POST /api/ingest/uploads` takes the file's raw bytes
+as `application/octet-stream`, the one route whose body is not JSON, with its
+name percent-encoded in `X-Brain-Filename`; the server keeps only the name's last
+component and extension, streams the body to a private staging file (at most
+25 MiB for `.pdf` / `.docx`, 5 MiB for text, 64 MiB staged in total), checks the
+bytes match the extension, and answers 201 `{upload_id, size, kind}`. Refusals:
+400 `bad_filename`, 413 `upload_too_large`, 415 `unsupported_file`, 429
+`staging_full`. `POST /api/ingest/file` with JSON `{upload_id, tags?, sensitivity?,
+enrich?, title?}` queues the job (202), or answers 404 `upload_unknown` for an
+unknown or expired upload. `DELETE /api/ingest/uploads/{upload_id}` (body `{}`)
+discards an unsubmitted file. An upload's result also carries
+`original_filename`, withheld with the title.
 
 ## brain people
 

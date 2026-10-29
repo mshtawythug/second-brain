@@ -178,9 +178,14 @@ refused to ship (§1.1 there). Rejected in §4.1.
    list, and a sensitivity of `normal` or `confidential`. It is ingested as an **ingested-tier**
    document from source `manual`, through `ingest_document`, the pipeline every `brain ingest*`
    uses. **The call shape is new** and is not `brain ingest-stdin` (§5.1).
-2. **File upload.** One file per job: `.md`, `.markdown`, `.txt`, `.pdf` or `.docx`, which is exactly
-   `ingest.dispatch.supported_extensions()` (the extractor registry, `ingest/dispatch.py`, since
-   RM-07). Upload by picker or drag and drop.
+2. **File upload.** One file per job, of a type in the upload allow-list:
+   `ui/ingest_limits.UPLOAD_EXTENSIONS`, intersected at runtime with
+   `ingest.dispatch.supported_extensions()` (`ui/upload_checks.uploadable_extensions`). At RM-13
+   that is `.md`, `.markdown`, `.txt`, `.pdf` and `.docx`. The allow-list is deliberately not the
+   registry itself: an extractor added later (RM-33's images, RM-38's audio) makes its type
+   ingestible from the CLI, not uploadable, until a ticket adds it to the constant on purpose.
+   `GET /api/ingest/config`'s `extensions` reports the live list. Upload by picker or drag and drop.
+   *(Amended by RM-13; this sentence used to name the registry as the allow-list.)*
 3. **A job panel.** Live state, phase, chunk progress, elapsed time and cancel. The outcome links to
    the new document and opens it in the Notes tab.
 4. **The job subsystem** (§4), built to be reused by the Agent tab.
@@ -813,8 +818,9 @@ A missing `Content-Length` (chunked transfer) is allowed. The stream counter alo
   sweep safe (Lifetime, below).
 - **Filename.** `X-Brain-Filename` is percent-decoded, reduced to its final component (anything up to
   the last `/` or `\` is dropped), stripped of control characters and leading dots, and capped at 120
-  characters. Its extension must be in `ingest.supported_extensions()`. An empty or dot-only result is
-  400 `bad_filename`. The stored name is `<sanitized-stem><ext>` **inside** the per-upload directory.
+  characters. Its extension must be in the upload allow-list (§3.1: `UPLOAD_EXTENSIONS` ∩
+  `ingest.dispatch.supported_extensions()`), else 415 `unsupported_file`. An empty or dot-only result is
+  400 `bad_filename`. *(Amended by RM-13, which made the allow-list an explicit constant.)* The stored name is `<sanitized-stem><ext>` **inside** the per-upload directory.
   A test asserts `../../x.pdf`, `..\\x.pdf`, `/etc/passwd.txt`, a NUL byte and a 300-character name
   each land inside the staging root or are refused, and that nothing is written outside it.
 - **Sniffing.** The client's declared type is never trusted. The first bytes must match the
@@ -909,7 +915,7 @@ to port 55432**, including for reads (the memory note on audits).
 |---|---|
 | `tests/test_ui_jobs.py` | State machine; `run_next` ordering (FIFO); `queue_full` at 5; cancel in each state (§4.4 table); `enter_commit` makes cancel return `not_cancellable`; **`enter_commit` after a requested cancel raises `JobCancelled`**, and the job ends `cancelled`. A runner that calls `registry.cancel(job_id)` and then `handle.enter_commit()` must never reach the line after it. **`cancellable` is false in every terminal snapshot**, including a runner that never called `enter_commit`; **`cancel_too_late`**: a runner that calls `registry.cancel(job_id)` on itself (202) and then returns without another `check_cancelled()` ends `succeeded` with exactly one `cancel_too_late` event; the event-cap policy of §4.2 (notable events and each phase's first event survive, `seq` is never reused, `after=` across a gap returns every surviving later event); `after=` slicing; the 200-event cap; retention by count and by age using an injected clock; snapshots are frozen and are copies (mutating a returned tuple is impossible, and a later event does not appear in an old snapshot); `stop()` with a runner blocked on a `threading.Event` returns its id after the timeout. The last case is the only one that starts a thread, and it waits on the event, never on a sleep. |
 | `tests/test_ingest_outcome.py` | `classify` over every `IngestResult` shape `_ingest_outcome_verb` handles today, and the CLI's verbs re-derived from it. The existing CLI ingest tests stay green, unmodified, which proves the extraction changed nothing. |
-| `tests/test_ui_upload_names.py` | The filename sanitizer table from §7.4, plus the extension allowlist read from `supported_extensions()`, not restated. |
+| `tests/test_ui_upload_names.py` | The filename sanitizer table from §7.4, plus the extension allow-list: `UPLOAD_EXTENSIONS` asserted to be a **subset** of `ingest.dispatch.supported_extensions()`, and a registered extension outside it shown not to be uploadable (amended by RM-13). |
 
 ### 9.2 Integration tier (real DB, ≥ 90%)
 
