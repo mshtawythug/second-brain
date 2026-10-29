@@ -340,3 +340,14 @@ def test_pid_alive() -> None:
     assert pid_alive(os.getpid())
     assert pid_alive(os.getppid())
     assert not pid_alive(2**22 + 12345)  # above macOS and Linux pid_max defaults
+
+
+def test_the_sweep_never_removes_its_own_root(tmp_path: Path) -> None:
+    """Even when every pid reads as dead, this process's own root is kept."""
+    mine = tmp_path / f"{ROOT_PREFIX}{os.getpid()}-own"
+    mine.mkdir()
+
+    removed = sweep_stale_roots(tmp_path, own_pid=os.getpid(), is_alive=lambda pid: False)
+
+    assert removed == []
+    assert mine.exists()
