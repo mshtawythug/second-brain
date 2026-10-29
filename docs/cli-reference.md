@@ -843,7 +843,23 @@ goes between two requests, one page can be text-only-ranked and the next
 hybrid-ranked, and a note can repeat or be skipped across the two. Each page's
 own notice says which ranking it shows.
 
-**Ingesting from the browser (backend; the panel ships with RM-11).** On a
+**Ingesting from the browser.** The **Ingest** tab pastes text or markdown into
+the brain. Give it a title, paste the body, and optionally add tags, pick the
+type (`note` or `transcript`) and the sensitivity, or skip the summary. The job
+panel beside the form shows the job queued, then embedding (`Embedding 3 of 20
+chunks`, with a progress bar), then the outcome: **Added** with an *Open in
+Notes* link, **Already in your brain** for a body you pasted before, or the
+reason it failed. It also shows the summary and graph status, any credential-like
+strings the secret guard found (masked), and a note when a confidential paste
+was kept off a hosted embedder. **Cancel** works until writing starts. The panel
+remembers the jobs this browser tab submitted, so after a reload it shows how
+they ended; if the server restarted in between, it says the outcome is unknown
+and that re-submitting is safe. A confidential document's title is shown only
+when `BRAIN_UI_SERVE_CONFIDENTIAL_TITLES` is on; otherwise the panel says the
+title is withheld and offers no link. On a `--read-only` or `--host` / `--lan`
+server the tab is disabled and says why. File upload comes with RM-13.
+
+The tab sits on these routes. On a
 loopback, writable server, `POST /api/ingest/paste` ingests pasted text as an
 ordinary ingested document from source `manual`, through the same pipeline as
 `brain ingest*`. The request carries `title`, `body` (at most 2 MiB), and the

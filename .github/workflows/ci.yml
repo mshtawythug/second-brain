@@ -371,6 +371,8 @@ jobs:
           tests/test_ui_browser_graph_layout.py
           tests/test_ui_browser_graph_refit.py
           tests/test_ui_browser_history.py
+          tests/test_ui_browser_ingest.py
+          tests/test_ui_browser_ingest_lifecycle.py
           tests/test_ui_browser_inspector_blocks.py
           tests/test_ui_browser_lede.py
           tests/test_ui_browser_nav.py

@@ -48,6 +48,10 @@ import { wireGraph } from "/static/js/graph.js";
    boot(). */
 import { wireRelated } from "/static/js/related.js";
 import { wireThread } from "/static/js/thread.js";
+/* The Ingest tab (RM-11). Order-free like wirePalette(): it owns #tab-ingest,
+   which no renderer touches, and subscribes to nothing. It loads its config the
+   first time the tab is shown, so boot makes no extra request. */
+import { wireIngest } from "/static/js/ingest.js";
 
 /* The filter controls, as [element id, state.filters key] pairs. Declared once
    because boot() seeds them from the URL and wireControls() binds them, and two
@@ -231,6 +235,7 @@ async function boot() {
   wireGraph();
   wireRelated();
   wireWatcherStatus();
+  wireIngest();
 
   seedControls();
 

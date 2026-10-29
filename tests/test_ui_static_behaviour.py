@@ -165,7 +165,7 @@ INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
 CSS_ORDER = (
     "tokens.css", "base.css", "layout.css", "components.css",
     "palette.css", "marginalia.css", "graph.css", "related.css", "reading.css", "explorer.css",
-    "discovery.css", "thread.css",
+    "discovery.css", "thread.css", "ingest.css",
 )
 CSS = {name: (STATIC / "css" / name).read_text(encoding="utf-8") for name in CSS_ORDER}
 ALL_CSS = "\n".join(CSS[name] for name in CSS_ORDER)
@@ -210,7 +210,8 @@ JS_ORDER = (
     "dom.js", "api.js", "store.js", "ledger_status.js", "pager.js",
     "inspector.js", "tree.js", "results.js", "keys.js",
     "palette.js", "note_fetch.js", "marginalia.js", "graph.js", "related.js",
-    "discovery.js", "thread.js", "watcher_status.js", "watcher.js", "main.js",
+    "discovery.js", "thread.js", "watcher_status.js", "watcher.js",
+    "jobs.js", "ingest_view.js", "ingest.js", "main.js",
 )
 JS = {name: (STATIC / "js" / name).read_text(encoding="utf-8") for name in JS_ORDER}
 JS_ALL = "\n".join(JS[name] for name in JS_ORDER)
@@ -416,6 +417,29 @@ def check_the_ingested_toggle_is_wired_into_boot(js: str) -> None:
         "counts still work — they ride renderTree — so the vault silently hides "
         "every ingested document with no way for the user to reveal them, and "
         "T16's own tests all pass because they mount the module themselves."
+    )
+
+
+def check_the_ingest_tab_is_wired_into_boot(js: str) -> None:
+    """RM-11: the Ingest tab is MOUNTED, not merely shipped.
+
+    The palette's lesson again. ``tests/test_ui_browser_ingest.py`` boots the
+    real ``index.html``, so it would see an unwired tab, but only under the
+    ``browser`` marker that the default ``pytest`` deselects. This pins the two
+    halves from source: the import, without which ``ingest.js`` never
+    evaluates, and the call in ``boot()``, without which the tab's listener
+    is never attached and the pane stays an empty form.
+
+    NO ORDERING PIN, for the reason ``check_the_ingested_toggle_is_wired_into_boot``
+    gives: ``wireIngest()`` owns ``#tab-ingest`` and subscribes to nothing.
+    """
+    assert 'import { wireIngest } from "/static/js/ingest.js";' in js, (
+        "js/main.js does not import the ingest module, so ingest.js never "
+        "evaluates and the Ingest tab is a form nothing submits."
+    )
+    assert "wireIngest();" in _boot_body(js), (
+        "boot() does not call wireIngest(), so the Ingest tab never loads its "
+        "config and its form is never wired."
     )
 
 
@@ -1452,17 +1476,18 @@ def _winning_display(keys: frozenset[str], declarations: list[_Decl]) -> _Decl |
 def check_hidden_toggles_survive_the_cascade(bundle: str) -> None:
     """Anything the JS hides must actually be hidden by the stylesheet.
 
-    Written after running it. The scan finds eleven ``.hidden =`` sites across
-    six modules and resolves every one; four of the resolved elements have a
-    competing author ``display`` and are saved by an explicit ``[hidden]`` rule
-    (``.shell``, ``#discovery``, ``.field``, ``.pager``), two have none and are
-    left to the UA sheet (``#mode-badge``, ``#new-note``), and three carry a
-    defensive ``[hidden]`` rule with nothing to compete against
-    (``.toast``, ``.thread-message``, and RM-03's ``.search-fallback``). The
-    guard does not demand the last three —
-    requiring a rule that changes no pixel would be the roster habit in a new
-    costume — it demands only that the winner is ``none`` wherever a winner
-    exists at all.
+    Written after running it. The scan resolves every ``.hidden =`` site (the
+    count lives in the ``hidden-toggle-scan-finds-nothing`` entry below, not
+    here). Four of the resolved elements have a competing author ``display`` and
+    are saved by an explicit ``[hidden]`` rule (``.shell``, ``#discovery``,
+    ``.field``, ``.pager``). Five have none and are left to the UA sheet
+    (``#mode-badge``, ``#new-note``, and RM-11's ``#ingest-unavailable``,
+    ``#ingest-error`` and ``#ingest-jobs-empty``). Three carry a defensive
+    ``[hidden]`` rule with nothing to compete against (``.toast``,
+    ``.thread-message`` and RM-03's ``.search-fallback``). The guard does not
+    demand a rule on those three defensive ones — requiring a rule that changes
+    no pixel would be the roster habit in a new costume — it demands only that
+    the winner is ``none`` wherever a winner exists at all.
     """
     parts = _parts(bundle)
     sites = _hidden_toggle_sites(parts)
@@ -1729,6 +1754,12 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
     # T18's thread mode. Its handover said ordering was not sensitive; a browser
     # probe measured otherwise (see the guard docstring), so the position is
     # pinned exactly as the marginalia's is.
+    # RM-11. The import goes; the call survives, so only the first assertion fires.
+    ("ingest-module-imported", check_the_ingest_tab_is_wired_into_boot, "js/main.js",
+     'import { wireIngest } from "/static/js/ingest.js";\n', "", 1),
+    # The import survives; only the boot() call assertion can fire.
+    ("ingest-wired-in-boot", check_the_ingest_tab_is_wired_into_boot, "js/main.js",
+     "\n  wireIngest();\n", "\n", 1),
     ("thread-wired-in-boot", check_the_thread_is_wired_after_the_inspector,
      "js/main.js", " wireThread();", "", 1),
     # RELOCATES rather than deletes, so the count stays 1 and only the position
@@ -2043,7 +2074,7 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
     # guard is green while looking at an empty list. Renaming the property at
     # all eleven sites is the shape that produces that.
     ("hidden-toggle-scan-finds-nothing", check_hidden_toggles_survive_the_cascade,
-     "static/*", ".hidden =", ".hiddenFlag =", 11),
+     "static/*", ".hidden =", ".hiddenFlag =", 16),
     # The DISCOVERY clause. `toast()`'s element stops being resolvable, the site
     # count is unchanged so the first assertion stays green, and only
     # "cannot tell what this hides" can fire. A guard that skipped the site
@@ -2082,7 +2113,7 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
 ]
 
 #: ``check_*`` functions deliberately absent from :data:`GUARDS`, each with the
-#: reason. Empty today, and that is the correct state — all seventeen are
+#: reason. Empty today, and that is the correct state — every guard is
 #: rostered. It is declared anyway, because the entire lesson of the roster gaps
 #: is that omission must cost something: the first author who wants a guard
 #: outside the harness has to write down why, rather than discovering that
@@ -2827,8 +2858,8 @@ def test_every_check_function_is_in_the_guards_table() -> None:
     eventually noticed, because the page looks wrong; an unrostered module
     eventually throws. **An unrostered guard is indistinguishable from a working
     one, forever** — it is a function that reads plausibly, is referenced
-    nowhere, and fails nothing. Three of the seventeen guards here are reachable
-    ONLY through this table.
+    nowhere, and fails nothing. Several of the guards here are reachable
+    ONLY through this table (count them rather than trust a digit here).
 
     It is the same shape as the ``links == list(CSS_ORDER)`` finding — total
     strictness about a RELATIONSHIP, no oracle at all on the SCOPE — turned on
