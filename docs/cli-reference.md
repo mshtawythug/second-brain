@@ -845,7 +845,9 @@ or `confidential`) and `enrich` (default true). It answers 202 with a job, which
 a client polls with `GET /api/jobs/{id}?after=<seq>` and can cancel with
 `POST /api/jobs/{id}/cancel` (body `{}`) until writing starts; after that cancel
 answers 409 `not_cancellable`. Pasting the same body again is a no-op that names
-the existing document. Jobs run one at a time, at most four wait (a fifth gets
+the existing document. A result whose document is confidential has its title and
+vault path withheld (`title_withheld: true`) unless
+`BRAIN_UI_SERVE_CONFIDENTIAL_TITLES` is on, as in the tree. Jobs run one at a time, at most four wait (a fifth gets
 429), and they live in memory only, so after a restart re-submitting is the
 recovery. `GET /api/ingest/config` reports whether ingest is available and why
 not (`read_only`, `requires_loopback` or `jobs_unavailable`). Ingest is never

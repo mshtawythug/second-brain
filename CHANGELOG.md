@@ -36,8 +36,11 @@ the Ingest tab design). The browser panel is the next ticket, RM-11.
 - `GET /api/jobs`, `GET /api/jobs/{id}?after=<seq>` and
   `POST /api/jobs/{id}/cancel` let a client poll a job's progress and cancel it.
   A cancel accepted before writing starts always writes nothing. Once writing
-  has started, cancel answers 409. The job list never carries a job's result,
-  because a result names its document.
+  has started, cancel answers 409. A result whose document is confidential has
+  its title and vault path withheld unless `BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`
+  is on, the same rule the tree follows. That covers a paste that lands, as a
+  duplicate, on an existing confidential document. The job list carries no
+  results at all.
 - `GET /api/ingest/config` says whether this server may ingest and why not, and
   `GET /api/health` gains `ingest_enabled`. Ingest is offered only on a loopback,
   writable server: `--read-only` refuses it, and so does any `--host` / `--lan`

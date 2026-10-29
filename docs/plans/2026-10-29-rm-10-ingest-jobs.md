@@ -78,13 +78,20 @@ check"). No migration.
     enricher's own `count_tokens`); otherwise `pending`.
 11. **Graph state:** `disabled` when `cfg.graph_enabled` is false; otherwise `queued` when
     `watcher_probe.state() == "running"`, else `not_synced`.
-12. **The job list carries no `result`** (and no events). A result names its document (title, vault
-    path), so the unprompted list is a listing surface like the tree. A client reads a result by
-    the id it submitted. `tests/test_ui_confidential_titles_gate.py` discovers every GET route, so
-    it rules on the new ones: `/api/jobs` is checked like every listing surface (seeded with a
-    finished job that names the sealed document), and `/api/jobs/{job_id}` joins `_PROMPTED` with a
-    written ruling (the caller names an unguessable id only the submit response returned).
-    `_PROMPTED`'s size pin moves from 2 to 3 in the same edit, as that test requires.
+12. **The confidential-titles lens on job results** (rev-73 round 1, which replaced this item's
+    first version). The first version exempted `/api/jobs/{job_id}` as PROMPTED on the premise that a
+    job id is a capability. **That premise was false.** `GET /api/jobs` lists every retained id. A
+    cancel on a terminal job returns the full snapshot. And a dedup skip can land on an existing
+    confidential document the paste never named. So now:
+    - the result carries the document's STORED `sensitivity`, read back from the row;
+    - `routes_jobs.lensed_result` withholds `title` and `vault_path` (set to `None`, with
+      `title_withheld: true`) unless `serve_confidential_titles` is on, the gate the tree and the
+      recent rail use;
+    - the lens runs on every path that returns a snapshot (get, cancel, paste, and the listing, which
+      also drops results and events);
+    - `/api/jobs/{job_id}` is no longer in `_PROMPTED`, whose size pin is back to 2;
+    - the gate test calls `/api/jobs/{job_id}` with a fixed seeded job id whose result names the
+      sealed document.
 13. **`JobHandle.job_id`** is added to the spec's Protocol, so a runner's INFO line can carry the job id
     (§7.5: the id, kind, outcome and document id, never the title).
 14. **Phases.** The registry logs `queued`; the paste runner logs `preparing`; the progress embedder
@@ -94,6 +101,11 @@ check"). No migration.
 16. **Two extra test files**, `tests/test_ui_ingest_security.py` and `tests/test_ui_ingest_wiring.py`,
     hold the §9.3 paste rows and the `build_context` / lifespan tests. `tests/test_ui_security.py` is
     at 704 lines and would cross the 800-line test-file split precedent (PR #67).
+17. **A finished job drops its runner** (`_finish_locked`, on every terminal path), because a paste
+    runner's closure holds the whole body for the retention window. **Results are deep-frozen**
+    (`jobs.freeze`) and thawed for JSON. **`?after=` and `Content-Length`** accept ASCII digits only,
+    with a length bound, so neither can reach a 500. **A lone surrogate** in a title, body or tag is a
+    400 at submit (rev-73 round 1).
 
 ## Tests (TDD: red first)
 
@@ -119,13 +131,15 @@ check"). No migration.
 - `tests/test_ui_ingest_routes.py`: the §6 contract for config, paste and the jobs routes; status codes;
   envelopes; `config` in each mode; `health.ingest_enabled`; the wire cap (honest `Content-Length` and
   absent `Content-Length`); the decoded cap; validation; 429; 503.
-- `tests/test_ui_security.py` additions (paste rows of §9.3): cross-origin, missing-Origin and
+- `tests/test_ui_ingest_security.py` (paste rows of §9.3; a sibling of `test_ui_security.py`, item 16): cross-origin, missing-Origin and
   `Sec-Fetch-Site: cross-site` on paste and cancel get 403; `--read-only` gets 403 on every ingest/jobs
   mutation while GETs are allowed; non-loopback gets 403 `ingest_requires_loopback` on every ingest
   mutation route **enumerated from `app.routes`**, while `config` and the job GETs answer; the
   GET-cannot-mutate table extended.
-- `tests/test_ui_app_wiring.py`: reachability for the five new routes.
-- `tests/test_ui_server_*`: `build_context` sets `ingest_enabled` per bind and read-only mode.
+- Reachability for the five new routes is in `tests/test_ui_ingest_routes.py`, which drives the
+  unmodified `create_app`.
+- `tests/test_ui_ingest_wiring.py`: `build_context` sets `ingest_enabled` per bind and read-only mode;
+  the lifespan starts and stops the worker and names a job still running at the timeout.
 
 The upload rows, the octet-stream middleware exception and the browser tier are RM-13 and RM-11.
 
@@ -155,6 +169,18 @@ A baseline run on an unmutated copy passed first. Run at `58d50e3`: **12 of 12 k
 | M10 | `enter_commit()` called before `ingest_document` | `test_a_mid_embed_cancel_writes_nothing` |
 | M11 | `Content-Length` precheck removed | `test_an_honest_content_length_over_the_cap_is_refused_without_reading` |
 | M12 | runner passes tags un-normalized | `test_a_paste_becomes_an_ingested_document_with_a_mirror` |
+
+Review round 1 (rev-73), run at `605848c`: **7 of 7 killed.**
+
+| # | Mutation | Killed by |
+|---|---|---|
+| M13 | the lens never withholds | the gate test's strict half; `test_a_confidential_paste_result_is_lensed_by_the_titles_flag`; `test_a_skip_onto_an_existing_confidential_document_is_lensed` |
+| M14 | the result carries the request's sensitivity, not the stored one | `test_a_skip_onto_an_existing_confidential_document_is_lensed` |
+| M15 | a finished job keeps its runner | `test_a_finished_job_releases_its_runner` |
+| M16 | `?after=` accepts any `isdigit()` | `test_an_after_int_cannot_parse_is_a_400_not_a_500` |
+| M17 | lone surrogates pass the schema | `test_a_lone_surrogate_is_a_400_not_a_failed_job`; `test_a_lone_surrogate_tag_is_a_400` |
+| M18 | a shallow freeze | `test_the_result_is_deep_frozen_and_not_shared` |
+| M19 | a `Content-Length` past the int limit is converted | `test_a_content_length_past_the_int_limit_is_413_without_converting` |
 
 **M7 survived the first run, and that is recorded here rather than dropped.** The original stream
 test sent a chunked oversize paste through `TestClient`. Without the counter, the decoded 2 MiB cap
