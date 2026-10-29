@@ -206,12 +206,17 @@ Review round 1 (rev-73), run at `605848c`: **7 of 7 killed.**
 | M18 | a shallow freeze | `test_the_result_is_deep_frozen_and_not_shared` |
 | M19 | a `Content-Length` past the int limit is converted | `test_a_content_length_past_the_int_limit_is_413_without_converting` |
 
-Review round 2 (rev-73), run at `62c424d`: **2 of 2 killed.**
+Review round 2 (rev-73 + aud-73), M20–M21 run at `62c424d`, M22 at the test commit that follows it: **3 of 3 killed.**
 
 | # | Mutation | Killed by |
 |---|---|---|
 | M20 | the lens keeps `document_id` | `test_no_job_route_hands_out_an_id_that_opens_a_withheld_note`; `test_a_confidential_paste_result_is_lensed_by_the_titles_flag`; `test_a_skip_onto_an_existing_confidential_document_is_lensed` |
 | M21 | the lens fails open when `sensitivity` is missing | `test_the_lens_fails_closed` |
+| M22 | the lens invents absent naming keys (aud-73's re-audit) | `test_the_lens_withholds_only_the_naming_keys_a_result_has` |
+
+aud-73's re-audit (C): `lensed_result`'s `if key in payload` false arm had never been taken. A
+partial confidential result (`{sensitivity, title}`) now has its title withheld, with no absent
+`vault_path` or `document_id` key invented. `routes_jobs.py` is at 100% line and branch coverage.
 
 **M7 survived the first run, and that is recorded here rather than dropped.** The original stream
 test sent a chunked oversize paste through `TestClient`. Without the counter, the decoded 2 MiB cap
