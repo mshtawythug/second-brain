@@ -19,7 +19,7 @@ in MCP `brain_search`.
 
 | File | Change |
 |---|---|
-| `src/brain/search_pipeline.py` (new) | `SearchStage` Protocol, `StageReport`, `StageOutcome`, `PipelineResult`, `apply_stages`, `run_search`, `build_stages` (returns `()`), `stage_reports_json`. |
+| `src/brain/search_pipeline.py` (new) | `SearchStage` Protocol, `StageReport`, `StageOutcome`, `PipelineResult`, `apply_stages`, `run_search`, `build_stages` (returns `()`), `stage_reports_json`, and `pipeline_json` (the four `fallback*` keys then `stages`, which MCP splats). |
 | `src/brain/cli_search.py` | `search` and `explain` call `run_search` in place of `search_with_fts_fallback`; the envelope gets the stage reports. Net zero. |
 | `src/brain/format_search.py` | `search_envelope_json` gains a keyword-only `stages` (default `()`) and emits `**stage_reports_json(stages)` after the four `fallback*` keys. |
 | `src/brain/mcp_server.py` | `brain_search` swaps `search_with_fts_fallback` for `run_search` (passing its minted `session_id`) and returns the `stages` key. Net zero, recorded in the ceiling table. |
@@ -56,6 +56,9 @@ of scope and keep calling `hybrid_search` directly.
   always present, so it is splatted like `fallback_json`.
 - Session ids: MCP and the UI pass the session id they already mint; the CLI, `recall` and `ask`
   have none and pass `None`.
+- `pipeline_json(result)` is `{**fallback_json(result.fallback), **stage_reports_json(result.stages)}`.
+  MCP `brain_search` returns it in place of `fallback_json`, which is what keeps `mcp_server.py`'s
+  import and return lines changing in place (net zero).
 
 ## Deviations from the ticket
 
@@ -109,11 +112,30 @@ key, so the Notes tab says on each page which ranking it shows. The line is in
 
 ## Mutation proofs (in a `git archive` copy only)
 
-- Remove `apply_stages` from `run_search` → the per-surface tests go red.
-- Remove the `except` in `apply_stages` → the raising-stage tests go red.
-- Re-add a direct `hybrid_search(conn, …)` call in `ask.py` → the boundary guard goes red.
-- Widen the guard's allowlist to every module → the synthetic-violation test goes red.
-- Drop the truncation to `limit` → the candidate-limit test goes red.
+Run on a `git archive 8017f0b` copy in a scratch directory outside the repo, against its own
+sibling database (`second_brain_test_rm09m`), with `PYTHONDONTWRITEBYTECODE=1`, `__pycache__`
+purged before and after each run, `PYTHONPATH` pinned to the copy's `src`, and the import checked
+by realpath to resolve inside the copy. Each mutation was proven applied (the file's SHA changed and
+its text equals the exact replacement), run against the named test files, then restored and
+checked byte-identical. The restored copy ran green (59 passed).
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `run_search` skips `apply_stages` | RED, 15 failed |
+| M2 | `apply_stages` catches only `ZeroDivisionError` (a stage may raise) | RED, 3 failed |
+| M3 | a declined stage's rows are used | RED, 1 failed |
+| M4 | no truncation to `limit` | RED, 2 failed |
+| M5 | `candidate_limit` ignored | RED, 2 failed |
+| M6 | `stages=None` does not read `build_stages` | RED, 10 failed |
+| M7 | `ask.py` calls `hybrid_search` directly again | RED, 1 failed (the boundary guard) |
+| M8 | the guard skips every module | RED, 5 failed |
+| M9 | the guard misses attribute calls | RED, 2 failed |
+| M10 | the shim exemption covers the whole of `cli_search.py` | RED, 1 failed |
+| M11 | MCP `brain_search` drops `session_id` | RED, 1 failed |
+| M12 | the UI route passes `stages=()` | RED, 2 failed |
+| M13 | the envelope drops `stages` | RED, 3 failed |
+| M14 | `recall` passes `stages=()` | RED, 1 failed |
+| M15 | a skipped reason carries the exception's message | RED, 3 failed |
 
 ## Risks
 
