@@ -511,7 +511,8 @@ def test_a_confidential_paste_result_is_lensed_by_the_titles_flag(
         assert (result["title"] == "Sealed Synthetic") is titles
         assert (result["vault_path"] is None) is (not titles)
         assert "Sealed Synthetic" not in response.text or titles
-        assert result["document_id"]  # an id is not a title
+        # The id opens the note at /api/notes/<id>, so it is withheld too.
+        assert (result["document_id"] is None) is (not titles)
 
 
 def test_a_skip_onto_an_existing_confidential_document_is_lensed(
@@ -532,6 +533,7 @@ def test_a_skip_onto_an_existing_confidential_document_is_lensed(
     assert result["outcome"] == "skipped"
     assert result["sensitivity"] == "confidential"
     assert result["title"] is None and result["vault_path"] is None
+    assert result["document_id"] is None
     assert result["title_withheld"] is True
     assert "Sealed Original" not in response.text
 
@@ -620,3 +622,53 @@ def test_a_content_length_past_the_int_limit_is_413_without_converting() -> None
 
     with pytest.raises(UiPayloadTooLarge):
         _read([(b"content-length", b"9" * 5000)], b"", 35)
+
+
+
+def test_no_job_route_hands_out_an_id_that_opens_a_withheld_note(
+    test_db: psycopg.Connection[Any], vault: Path, registry: JobRegistry
+) -> None:
+    """The hop: list the jobs, read one, then try every id it gave at /api/notes."""
+    import re
+
+    client = _confidential_client(test_db, vault, registry, titles=False)
+    sealed = {**_PASTE, "title": "Sealed Hop Target", "sensitivity": "confidential"}
+    _paste(client, sealed)
+    registry.run_next()
+    (row,) = test_db.execute("SELECT id::text FROM documents").fetchall()
+
+    listing = client.get("/api/jobs")
+    job_id = listing.json()["jobs"][0]["id"]
+    texts = [
+        listing.text,
+        client.get(f"/api/jobs/{job_id}").text,
+        client.post(f"/api/jobs/{job_id}/cancel", json={}, headers=WRITE_HEADERS).text,
+    ]
+
+    assert all(row[0] not in text and row[0].replace("-", "") not in text for text in texts)
+    found = {m for text in texts for m in re.findall(r"[0-9a-f-]{6,}", text)}
+    assert job_id in found  # anti-vacuity: the scan sees the ids the routes return
+    for candidate in found:
+        assert client.get(f"/api/notes/{candidate}").status_code != 200, candidate
+
+
+@pytest.mark.parametrize(
+    ("result", "titles", "withheld"),
+    [
+        ({"title": "T", "document_id": "d"}, False, True),  # no sensitivity: fail closed
+        ({"title": "T", "document_id": "d"}, True, False),
+        ({"title": "T", "sensitivity": "normal"}, False, False),
+        ({"title": "T", "sensitivity": "confidential"}, False, True),
+        ({"outcome": "empty", "title": None, "document_id": None}, False, False),
+        ({}, False, False),
+    ],
+)
+def test_the_lens_fails_closed(result: dict[str, Any], titles: bool, withheld: bool) -> None:
+    from brain.ui.routes_jobs import lensed_result
+
+    lensed = lensed_result(result, serve_confidential_titles=titles)
+
+    assert lensed is not None
+    assert lensed["title_withheld"] is withheld
+    if withheld:
+        assert all(lensed.get(k) is None for k in ("title", "vault_path", "document_id"))

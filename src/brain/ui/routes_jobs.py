@@ -23,8 +23,9 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
 
-#: The result keys that name a document, withheld by the lens below.
-_NAMING_KEYS = ("title", "vault_path")
+#: The result keys that name a document, withheld by the lens below. The id is
+#: one of them: ``GET /api/notes/<id>`` opens the note, title and body included.
+_NAMING_KEYS = ("title", "vault_path", "document_id")
 
 
 def _thaw(value: Any) -> Any:
@@ -43,15 +44,24 @@ def lensed_result(
 
     A job id is NOT a capability: ``GET /api/jobs`` lists every retained id, and
     a dedup skip can land on an existing confidential document the paste did not
-    name. So a result whose document is ``sensitivity='confidential'`` has its
-    ``title`` and ``vault_path`` withheld (``None``, with ``title_withheld:
-    true``) unless ``serve_confidential_titles`` is on, the same gate the tree and
-    the recent rail use. Applied on every path that returns a snapshot.
+    name. So unless ``serve_confidential_titles`` is on (the gate the tree and the
+    recent rail use), a result that names a document has its ``title``,
+    ``vault_path`` and ``document_id`` withheld (``None``, with
+    ``title_withheld: true``) unless it says the document is ``normal``. That is
+    fail-closed: a result naming a document with no ``sensitivity`` at all is
+    withheld too. Applied on every path that returns a snapshot. The cost: a
+    confidential paste gets no "open in Notes" link while the flag is off, the
+    same as the tree.
     """
     if result is None:
         return None
     payload: dict[str, Any] = _thaw(result)
-    withhold = payload.get("sensitivity") == "confidential" and not serve_confidential_titles
+    names_a_document = any(payload.get(key) is not None for key in _NAMING_KEYS)
+    withhold = (
+        not serve_confidential_titles
+        and names_a_document
+        and payload.get("sensitivity") != "normal"
+    )
     if withhold:
         for key in _NAMING_KEYS:
             if key in payload:

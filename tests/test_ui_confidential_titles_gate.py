@@ -195,6 +195,7 @@ def _finished_paste_of_the_sealed_document() -> tuple[JobRegistry, str]:
         lambda handle: {
             "outcome": "skipped",
             "title": SEALED_TITLE,
+            "document_id": "0f0e0d0c-0b0a-4908-8706-050403020100",
             "vault_path": "_ingested/manual/severance-terms.md",
             "sensitivity": CONFIDENTIAL,
         },
