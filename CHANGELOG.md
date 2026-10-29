@@ -46,6 +46,35 @@ git tag scheme:
   while it is on, and records each row's `stage_ms` in `brain eval --json`. The
   committed `ci.json` is unchanged.
 
+### Added — the Ingest tab: paste from the browser
+
+`brain ui`'s **Ingest** tab is no longer a "deferred" placeholder (roadmap ticket
+RM-11, phase 2 of the Ingest tab design). It pastes text or markdown into the
+brain through the RM-10 backend below.
+
+- A form with a title, the body, tags, the type (`note` or `transcript`), the
+  sensitivity (`normal` or `confidential`) and "skip the summary". The size limit
+  and the choices come from the server, and an over-size body is refused before
+  anything is sent.
+- A job panel: queued, then embedding with a progress bar, then the outcome.
+  **Added** links to the new document in the Notes tab; a body pasted before says
+  **Already in your brain**. It shows the summary and graph status, masked secret
+  findings, and the note when a confidential paste stays off a hosted embedder.
+  Cancel works until writing starts, and a refused or too-late cancel says so.
+- The panel remembers this browser tab's jobs across a reload, without
+  re-announcing them. A job the server no longer knows is reported as "outcome
+  unknown, re-submitting is safe" only if this tab never saw it finish; a finished
+  job the server later evicted (after an hour, or past fifty jobs) just drops off.
+- A finished row stays finished: a poll or a cancel answer that was already in
+  flight cannot put it back to running or offer Cancel again.
+- A confidential document's title is never shown unless
+  `BRAIN_UI_SERVE_CONFIDENTIAL_TITLES` is on: the panel says the title is withheld
+  and offers no link. It never puts back the title you typed.
+- On a `--read-only`, `--host` or `--lan` server the tab is disabled and names the
+  reason. Keyboard-only use, both themes and reduced motion (a still progress
+  bar) are covered by two new browser suites, `tests/test_ui_browser_ingest.py`
+  and `tests/test_ui_browser_ingest_lifecycle.py`.
+
 ### Added — MCP `brain_related` and `brain_explain`
 
 Two read-only MCP tools give an agent what `brain ui` and `brain explain` already
