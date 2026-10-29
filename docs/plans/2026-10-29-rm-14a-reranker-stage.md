@@ -117,15 +117,21 @@ left alone on purpose: editing it would cost a ceiling hop for a comment, and wi
    embed OR a skipped stage). The skip-specific variant is used where the cause is known
    (`save_baseline`). `degraded_results` keeps meaning "the embed call failed", because the
    CLI's ad-hoc warning says those rows "counted as 0.0", which a skipped row is not; skipped
-   rows have their own `skipped_stage_results`.
+   rows have their own `skipped_stage_results`. **Known gap:** a plain `brain eval` or `--diff`
+   run whose only unusable rows are skips prints no count line on stderr (`cli.py`'s two warnings
+   read `degraded_results`); the per-query WARNING log and `stages_skipped` in `--json` still show
+   them. Closing it needs an `eval_cmd` edit, out of scope here; RM-14c, the ticket that runs the
+   reranker under `brain eval`, is where to close it.
 8. **Test isolation** (rev-76). `run_search(stages=None)` and `run_eval(stages=None, env=None)`
    read `os.environ`, so a shell-exported or `.env` `BRAIN_RERANKER` reached surface tests. A
-   function-scoped autouse fixture in `tests/conftest.py`, `_reranker_off`, sets
-   `BRAIN_RERANKER=none` (set rather than deleted, because `Config.load()`'s `setdefault` would
-   re-inject a `.env` value) and deletes the five other knobs. `tests/test_rerank_isolation.py`
-   runs a `nodb` probe in a child pytest that exports all six variables. `conftest.py` was
-   already over 800 lines and grows by 29; the fixture belongs beside the other autouse
-   isolation fixtures.
+   function-scoped autouse fixture, `_reranker_off`, sets `BRAIN_RERANKER=none` (set rather than
+   deleted, because `Config.load()`'s `setdefault` would re-inject a `.env` value) and deletes the
+   five other knobs. It lives in the plugin module `tests/rerank_isolation_plugin.py`, registered
+   in `tests/conftest.py`'s `pytest_plugins` (the `tests/env_isolation.py` precedent), because
+   conftest is over the 800-line ceiling: conftest grows by 3 lines, the entry, its one-line
+   comment and its module-docstring growth record. `tests/test_rerank_isolation.py` runs a
+   `nodb` probe in a child pytest that exports all six variables, and asserts the fixture is
+   active in the suite (a dropped registration fails by name).
 
 ## Tests (TDD: each lands red first)
 

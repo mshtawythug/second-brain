@@ -1,6 +1,7 @@
 """A ``BRAIN_RERANKER`` exported in the shell never reaches a test (RM-14a, rev-76).
 
-``tests/conftest.py``'s autouse ``_reranker_off`` sets ``BRAIN_RERANKER=none``
+``tests/rerank_isolation_plugin.py``'s autouse ``_reranker_off`` (registered in
+``tests/conftest.py``) sets ``BRAIN_RERANKER=none``
 and clears the other rerank knobs for every test. The probe below checks that
 from inside a test, through the real ``run_search(stages=None)`` path. The
 regression test runs the probe in a CHILD pytest whose environment exports a
@@ -85,3 +86,12 @@ def test_an_exported_reranker_does_not_reach_a_test() -> None:
     )
     assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
     assert "1 passed" in result.stdout
+
+
+def test_every_test_runs_inside_the_reranker_guard(request: pytest.FixtureRequest) -> None:
+    """The plugin is wired into THIS suite through ``tests/conftest.py``'s ``pytest_plugins``.
+
+    The child-process test above exercises the plugin through that same
+    registration; this one names the fixture so a dropped entry fails by name.
+    """
+    assert "_reranker_off" in request.fixturenames

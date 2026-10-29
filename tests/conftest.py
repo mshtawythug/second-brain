@@ -17,7 +17,9 @@ tests/test_launchctl_isolation.py. Its growth on test/dotenv-isolation-leak is a
 second ``pytest_plugins`` entry, tests/env_isolation.py (the session-wide
 ``os.environ`` restore), with the comment giving its reason, and the
 ``brain_home_root`` keyword on :func:`isolate_config_dotenv` that let the
-copy-pasted dotenv blocks migrate onto it. No line count is given here: it
+copy-pasted dotenv blocks migrate onto it. Its growth on feat/rm-14a-reranker-stage
+is a third ``pytest_plugins`` entry, tests/rerank_isolation_plugin.py (the reranker
+forced off for every test), with its one-line comment. No line count is given here: it
 would be stale as soon as written (``wc -l tests/conftest.py``).
 """
 
@@ -46,7 +48,8 @@ from tests.db_lock import concurrent_suite_message, try_acquire_suite_lock
 # tests.env_isolation restores os.environ after every test. Config.load publishes
 # a test's .env keys into the process env, and monkeypatch cannot undo names it
 # was never given. tests/test_env_isolation.py checks that it is registered here.
-pytest_plugins = ("tests.browser_timeout", "tests.env_isolation")
+# tests.rerank_isolation_plugin forces the reranker off per test (RM-14a, that module).
+pytest_plugins = ("tests.browser_timeout", "tests.env_isolation", "tests.rerank_isolation_plugin")
 
 load_dotenv()
 
@@ -1277,36 +1280,6 @@ class FakeEntityExtractor:
 def fake_enricher() -> Any:
     """Explicit handle on the same double ``_stub_llm_backends`` installs."""
     return build_fake_enricher()
-
-
-#: The reranker's knobs (``brain.settings.rerank``, RM-14a).
-_RERANK_KNOBS = (
-    "BRAIN_RERANK_DEPTH",
-    "BRAIN_RERANK_TIMEOUT_S",
-    "BRAIN_RERANK_URL",
-    "BRAIN_RERANK_MODEL",
-    "BRAIN_RERANK_MAX_CHARS",
-)
-
-
-@pytest.fixture(autouse=True)
-def _reranker_off(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Every test starts with the reranker OFF, whatever the shell or a ``.env`` says.
-
-    ``run_search(stages=None)`` and ``run_eval(stages=None, env=None)`` read
-    ``os.environ``, so a ``BRAIN_RERANKER`` exported in the developer's shell, or
-    one a ``.env`` publishes, would otherwise turn the reranker on for every
-    surface test (rev-76 reproduced three failures that way). ``BRAIN_RERANKER``
-    is SET to ``none`` rather than deleted: ``Config.load()`` publishes the dotenv
-    chain with ``os.environ.setdefault``, which re-injects a deleted key and
-    skips a present one. The other knobs are deleted. A test that needs the
-    reranker sets it with ``monkeypatch.setenv`` and wins; ``monkeypatch``
-    undoes both per test. Proven by ``tests/test_rerank_isolation.py``.
-    """
-    monkeypatch.setenv("BRAIN_RERANKER", "none")
-    for knob in _RERANK_KNOBS:
-        monkeypatch.delenv(knob, raising=False)
-    yield
 
 
 @pytest.fixture(autouse=True)
