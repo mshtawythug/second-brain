@@ -12,6 +12,11 @@
  * REMEMBERED IDS live in sessionStorage, so a reload (or a server restart behind
  * it) can still say what became of a job. Read and written inside `try`: a
  * private window or blocked storage just means the panel starts empty.
+ *
+ * SETTLED IDS are remembered too, separately. The server evicts a finished job
+ * after an hour or past fifty, and a 404 for a job this tab already SAW finish is
+ * that ordinary eviction, not a lost outcome: the caller drops it silently. Only
+ * a 404 for a job never seen settled means "the server restarted under it".
  */
 
 import { api } from "/static/js/api.js";
@@ -23,6 +28,7 @@ export const SLOW_AFTER_MS = 30000;
 export const MAX_REMEMBERED = 20;
 
 const STORE_KEY = "brain-ui-jobs";
+const SETTLED_KEY = "brain-ui-jobs-settled";
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
 export function isTerminal(state) {
@@ -34,26 +40,41 @@ export function pollDelay(elapsedMs, hidden) {
   return hidden || elapsedMs > SLOW_AFTER_MS ? POLL_SLOW_MS : POLL_FAST_MS;
 }
 
-export function rememberedJobs() {
+function readIds(key) {
   try {
-    const parsed = JSON.parse(sessionStorage.getItem(STORE_KEY) || "[]");
+    const parsed = JSON.parse(sessionStorage.getItem(key) || "[]");
     return Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : [];
   } catch (e) {
     return [];
   }
 }
 
-function storeIds(ids) {
-  try { sessionStorage.setItem(STORE_KEY, JSON.stringify(ids)); } catch (e) { /* ignore */ }
+function storeIds(key, ids) {
+  try { sessionStorage.setItem(key, JSON.stringify(ids)); } catch (e) { /* ignore */ }
+}
+
+export function rememberedJobs() {
+  return readIds(STORE_KEY);
 }
 
 export function remember(id) {
   const ids = [id, ...rememberedJobs().filter((other) => other !== id)];
-  storeIds(ids.slice(0, MAX_REMEMBERED));
+  storeIds(STORE_KEY, ids.slice(0, MAX_REMEMBERED));
 }
 
 export function forget(id) {
-  storeIds(rememberedJobs().filter((other) => other !== id));
+  storeIds(STORE_KEY, rememberedJobs().filter((other) => other !== id));
+  storeIds(SETTLED_KEY, readIds(SETTLED_KEY).filter((other) => other !== id));
+}
+
+/* Record that this tab saw job `id` reach a terminal state. */
+export function markSettled(id) {
+  const ids = readIds(SETTLED_KEY);
+  if (!ids.includes(id)) storeIds(SETTLED_KEY, [id, ...ids].slice(0, MAX_REMEMBERED));
+}
+
+export function wasSettled(id) {
+  return readIds(SETTLED_KEY).includes(id);
 }
 
 /* POST a job and remember its id. Resolves to the server's snapshot. */

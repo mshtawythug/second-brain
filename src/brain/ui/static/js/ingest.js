@@ -18,7 +18,8 @@ import { $, el, toast } from "/static/js/dom.js";
 import { api } from "/static/js/api.js";
 import { openNote } from "/static/js/inspector.js";
 import {
-  MAX_REMEMBERED, cancelJob, forget, pollJob, rememberedJobs, submitJob,
+  MAX_REMEMBERED, cancelJob, forget, markSettled, pollJob, rememberedJobs, submitJob,
+  wasSettled,
 } from "/static/js/jobs.js";
 import {
   announcement, createJobRow, isSettled, updateJobRow,
@@ -44,8 +45,13 @@ function formatBytes(n) {
   return n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(1)} MiB` : `${n} bytes`;
 }
 
+/* Clear, then set on the next frame: a screen reader may not re-read a live
+   region whose new text equals its old text ("Paste job: Added" twice). */
 function announce(text) {
-  if (text) $("ingest-announce").textContent = text;
+  if (!text) return;
+  const region = $("ingest-announce");
+  region.textContent = "";
+  requestAnimationFrame(() => { region.textContent = text; });
 }
 
 function showError(message) {
@@ -118,8 +124,16 @@ function track(record, { immediate }) {
       immediate,
       onUpdate: (snapshot) => apply(record.id, fromSnapshot(snapshot)),
       onGone: () => {
+        /* Seen finished before: an ordinary eviction (1 h, or past 50 jobs), so
+           there is nothing to report. Never seen finished: the outcome is lost. */
+        const evicted = wasSettled(record.id);
         forget(record.id);
-        apply(record.id, { gone: true });
+        if (evicted) {
+          drop(record.id);
+          syncEmpty();
+        } else {
+          apply(record.id, { gone: true });
+        }
       },
       onUnreachable: () => apply(record.id, { unreachable: true }),
     });
@@ -153,17 +167,30 @@ function apply(id, change) {
   const entry = jobs.get(id);
   if (!entry) return;
   const before = entry.record;
+  /* A SETTLED ROW IS FINAL. A poll or a cancel answer that was already in flight
+     when the row settled is older than what the row shows; letting it through
+     would put a finished job back to "running" and offer Cancel again. */
+  if (isSettled(before)) return;
   const { newEvents = [], ...fields } = change;
   const seen = new Set(before.events.map((e) => e.seq));
   const record = {
     ...before,
     ...fields,
+    /* Sticky for the same reason: a poll sent before the cancel still says false. */
+    cancelRequested: before.cancelRequested || Boolean(fields.cancelRequested),
+    quiet: false,
     events: [...before.events, ...newEvents.filter((e) => !seen.has(e.seq))],
   };
   entry.record = record;
   updateJobRow(entry.row, record);
+  if (isSettled(record)) {
+    entry.stop();
+    if (!record.gone) markSettled(id);
+  }
+  /* A job resumed after a reload is not news: its first answer only restores
+     the row, so it is drawn and not announced. */
   const moved = before.state !== record.state || before.gone !== record.gone;
-  if (moved) announce(announcement(record));
+  if (moved && !before.quiet) announce(announcement(record));
 }
 
 function newRecord(snapshot) {
@@ -185,7 +212,7 @@ function newRecord(snapshot) {
 
 function pendingRecord(id) {
   return { ...newRecord({ id, kind: "ingest.paste", state: "queued", events: [] }),
-           cancellable: false };
+           cancellable: false, quiet: true };
 }
 
 function resumeRemembered() {

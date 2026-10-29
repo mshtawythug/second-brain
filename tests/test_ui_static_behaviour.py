@@ -1476,20 +1476,18 @@ def _winning_display(keys: frozenset[str], declarations: list[_Decl]) -> _Decl |
 def check_hidden_toggles_survive_the_cascade(bundle: str) -> None:
     """Anything the JS hides must actually be hidden by the stylesheet.
 
-    Written after running it. The scan finds eleven ``.hidden =`` sites across
-    six modules and resolves every one; four of the resolved elements have a
-    competing author ``display`` and are saved by an explicit ``[hidden]`` rule
-    (``.shell``, ``#discovery``, ``.field``, ``.pager``), two have none and are
-    left to the UA sheet (``#mode-badge``, ``#new-note``), and three carry a
-    defensive ``[hidden]`` rule with nothing to compete against
-    (``.toast``, ``.thread-message``, and RM-03's ``.search-fallback``).
-    RM-11's ``ingest.js`` adds five more sites on three elements
-    (``#ingest-unavailable``, ``#ingest-error``, ``#ingest-jobs-empty``); none
-    has a competing ``display``, so the UA sheet hides them. The
-    guard does not demand the last three —
-    requiring a rule that changes no pixel would be the roster habit in a new
-    costume — it demands only that the winner is ``none`` wherever a winner
-    exists at all.
+    Written after running it. The scan resolves every ``.hidden =`` site (the
+    count lives in the ``hidden-toggle-scan-finds-nothing`` entry below, not
+    here). Four of the resolved elements have a competing author ``display`` and
+    are saved by an explicit ``[hidden]`` rule (``.shell``, ``#discovery``,
+    ``.field``, ``.pager``). Five have none and are left to the UA sheet
+    (``#mode-badge``, ``#new-note``, and RM-11's ``#ingest-unavailable``,
+    ``#ingest-error`` and ``#ingest-jobs-empty``). Three carry a defensive
+    ``[hidden]`` rule with nothing to compete against (``.toast``,
+    ``.thread-message`` and RM-03's ``.search-fallback``). The guard does not
+    demand a rule on those three defensive ones — requiring a rule that changes
+    no pixel would be the roster habit in a new costume — it demands only that
+    the winner is ``none`` wherever a winner exists at all.
     """
     parts = _parts(bundle)
     sites = _hidden_toggle_sites(parts)
