@@ -568,3 +568,29 @@ def test_opening_the_tab_twice_loads_the_config_once(harness: Harness) -> None:
     harness.page.click('.tab[data-tab="ingest"]')
 
     assert harness.requests.count("GET /api/ingest/config") == 1
+
+
+def test_polling_stops_at_a_terminal_state(harness: Harness) -> None:
+    harness.open_tab()
+    harness.paste("added")
+    harness.settled()
+    polls = [r for r in harness.requests if r.startswith("GET /api/jobs/")]
+
+    # An ABSENCE, so it needs a bounded wait: three poll intervals at the fast rate.
+    harness.page.wait_for_timeout(3000)
+
+    assert [r for r in harness.requests if r.startswith("GET /api/jobs/")] == polls
+
+
+def test_the_live_region_announces_the_outcome(harness: Harness) -> None:
+    harness.open_tab()
+    harness.paste("added")
+    harness.settled()
+
+    harness.page.wait_for_function(
+        "() => document.getElementById('ingest-announce').textContent"
+        " === 'Paste job: Added'", timeout=SETTLE_MS)
+    region = harness.page.locator("#ingest-announce")
+    assert region.get_attribute("aria-live") == "polite"
+    # The job list itself is not live: progress would re-announce on every poll.
+    assert harness.page.locator("#ingest-jobs").get_attribute("aria-live") is None
