@@ -68,7 +68,7 @@ def three(test_db: psycopg.Connection[Any], fake_embedder: Any) -> dict[str, str
 
 
 def _query(expected: str) -> EvalQuery:
-    return EvalQuery(query=TERM, expected_doc_ids=[expected], category="keyword")
+    return EvalQuery(query=TERM, expected_doc_ids=[expected], category="semantic")
 
 
 def _stage(reranker: Any, depth: int = 20) -> RerankStage:
@@ -132,12 +132,18 @@ def test_the_fetch_is_deep_enough_for_the_stage_and_truncated_to_the_limit(
     assert len(report.results[0].actual_doc_ids) == 2
 
 
-def test_a_skipped_stage_scores_hybrid_order_and_is_logged_class_only(
+def test_a_skipped_stage_is_marked_on_its_row_and_logged_class_only(
     test_db: psycopg.Connection[Any],
     fake_embedder: Any,
     three: dict[str, str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """A skip is not silent: the row names it, and it is kept out of ``stage_ms``.
+
+    The row is scored in hybrid order (the stage did not run), so it measured a
+    different pipeline from the one ``config_signature`` names; the baseline
+    and ``--fail-below`` paths refuse it (``tests/test_eval_stage_skips.py``).
+    """
     baseline = run_eval(
         test_db, embedder=fake_embedder, queries=[_query(three["Brindle note 0"])], stages=()
     )
@@ -150,7 +156,12 @@ def test_a_skipped_stage_scores_hybrid_order_and_is_logged_class_only(
             stages=[_stage(RaisingReranker())],
         )
 
-    assert report.results[0].actual_doc_ids == baseline.results[0].actual_doc_ids
+    (row,) = report.results
+    assert row.actual_doc_ids == baseline.results[0].actual_doc_ids
+    assert row.stages_skipped == ("rerank",)
+    assert row.stage_ms == {}
+    assert row.degraded is False
+    assert baseline.results[0].stages_skipped == ()
     messages = [r.getMessage() for r in caplog.records]
     assert any("rerank" in m and "RerankError" in m for m in messages)
     assert not any(TERM in m for m in messages)
@@ -166,7 +177,7 @@ def test_a_transient_embed_failure_is_still_a_degraded_row(
     query = EvalQuery(
         query=f"{TERM} degraded-row probe",
         expected_doc_ids=[three["Brindle note 0"]],
-        category="keyword",
+        category="semantic",
     )
 
     with unittest.mock.patch.object(fake_embedder, "embed", side_effect=timeout):

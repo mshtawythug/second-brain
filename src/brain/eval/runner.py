@@ -63,7 +63,14 @@ class EvalResult:
     # (``{"rerank": 412.0}``); ``{}`` with no stage, or on a degraded row. RM-14c
     # reads its latency from here. In ``brain eval --json``; never in a baseline
     # file, because latency is a property of the machine, not of the corpus.
+    # Only APPLIED stages are timed here: a skipped one is in ``stages_skipped``.
     stage_ms: dict[str, float] = field(default_factory=dict)
+    # Names of the stages that SKIPPED for this query (a reranker that timed
+    # out). The row was then scored in hybrid order while ``config_signature``
+    # names the stage, so, like a degraded row, it is refused by
+    # ``save_baseline`` and kept out of ``diff_reports``' deltas. In ``brain
+    # eval --json``; never in a baseline file, which cannot contain one.
+    stages_skipped: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -194,6 +201,7 @@ def run_eval(
     for q in queries:
         degraded = False
         stage_ms: dict[str, float] = {}
+        skipped: tuple[str, ...] = ()
         try:
             search_results = hybrid_search(
                 conn,
@@ -209,7 +217,9 @@ def run_eval(
                 recency_halflife_days=recency_halflife_days,
                 snippet_context_tokens=snippet_context_tokens,
             )
-            search_results, stage_ms = _apply_stages(conn, q.query, search_results, stages)
+            search_results, stage_ms, skipped = _apply_stages(
+                conn, q.query, search_results, stages
+            )
             actual_ids = [r.document_id for r in search_results[:limit_per_query]]
         except EmbedError as exc:
             if not exc.transient:
@@ -244,6 +254,7 @@ def run_eval(
                 recall_at_20=recall,
                 degraded=degraded,
                 stage_ms=stage_ms,
+                stages_skipped=skipped,
             )
         )
 
@@ -294,27 +305,41 @@ def _apply_stages(
     query: str,
     results: list[Any],
     stages: Sequence[SearchStage],
-) -> tuple[list[Any], dict[str, float]]:
-    """Run ``stages`` over one query's rows; return the rows and each stage's time.
+) -> tuple[list[Any], dict[str, float], tuple[str, ...]]:
+    """Run ``stages`` over one query's rows.
 
-    A skipped stage leaves the rows in hybrid order, so that row measures the
-    pipeline without it: logged at WARNING, by stage name and failure class
-    only (never the query, which is personal), so a run of record shows it.
+    Returns the rows, each APPLIED stage's time, and the names of the stages
+    that skipped. A skipped stage leaves the row in hybrid order, so it measured
+    a pipeline without that stage: the row is marked (``stages_skipped``) and
+    refused like a degraded one, and the skip is logged at WARNING by stage name
+    and failure class only (never the query, which is personal).
     """
     if not stages:
-        return results, {}
+        return results, {}, ()
     staged, reports = apply_stages(
         conn, query=query, session_id=None, results=results, stages=stages
     )
     for report in reports:
         if not report.applied:
             _logger.warning(
-                "eval: stage %s skipped for one query (%s); that row is scored "
-                "without it",
+                "eval: stage %s skipped for one query (%s); that row cannot be "
+                "recorded or judged",
                 report.name,
                 report.skipped_reason,
             )
-    return staged, {report.name: report.ms for report in reports}
+    applied = {report.name: report.ms for report in reports if report.applied}
+    skipped = tuple(report.name for report in reports if not report.applied)
+    return staged, applied, skipped
+
+
+def skipped_stage_results(report: EvalReport) -> list[EvalResult]:
+    """The rows of *report* in which a ranking stage skipped, in result order (RM-14a).
+
+    The single definition the baseline refusal and the diff exclusion read.
+    Kept apart from :func:`degraded_results`, whose callers say a degraded row
+    "counted as 0.0": a skipped row is scored, in hybrid order.
+    """
+    return [r for r in report.results if r.stages_skipped]
 
 
 def degraded_results(report: EvalReport) -> list[EvalResult]:
