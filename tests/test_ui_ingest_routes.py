@@ -663,6 +663,7 @@ def test_no_job_route_hands_out_an_id_that_opens_a_withheld_note(
         ({}, False, False),
     ],
 )
+@pytest.mark.nodb
 def test_the_lens_fails_closed(result: dict[str, Any], titles: bool, withheld: bool) -> None:
     from brain.ui.routes_jobs import lensed_result
 
@@ -672,3 +673,16 @@ def test_the_lens_fails_closed(result: dict[str, Any], titles: bool, withheld: b
     assert lensed["title_withheld"] is withheld
     if withheld:
         assert all(lensed.get(k) is None for k in ("title", "vault_path", "document_id"))
+
+
+@pytest.mark.nodb
+def test_the_lens_withholds_only_the_naming_keys_a_result_has() -> None:
+    """A partial result: the present key is withheld and no absent key is invented."""
+    from brain.ui.routes_jobs import lensed_result
+
+    lensed = lensed_result(
+        {"sensitivity": "confidential", "title": "x"}, serve_confidential_titles=False
+    )
+
+    assert lensed == {"sensitivity": "confidential", "title": None, "title_withheld": True}
+    assert "vault_path" not in lensed and "document_id" not in lensed
