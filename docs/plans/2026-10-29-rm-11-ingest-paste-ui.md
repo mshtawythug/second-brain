@@ -76,6 +76,40 @@ No Python under `src/` changes, so no file in the CLAUDE.md ceiling table is tou
 8. **Remembered jobs**: at most 20 ids are kept (spec R7: the client renders the 20 most recent); a
    terminal job stays remembered so a reload shows its outcome until the server evicts it (404).
 
+## Review round 1 (rev-74, at `4d6ffc8`)
+
+Seven findings, all fixed in new commits:
+
+1. **The withheld-title test could not see the typed title come back.** It typed "withheld", a word
+   inside the withheld sentence. The fake now picks its scenario from a `scenario:<name>` marker in the
+   BODY, never the title. The test types "Zorblax Quillfeather" and asserts it is absent from
+   `#ingest-jobs`, from every text the live region held, and from `sessionStorage`. A control checks
+   that it was sent. rev-74's two-site mutation is M14 below.
+2. **A stale answer could un-settle a finished row.** `apply` now ignores everything once a row is
+   settled. `cancelRequested` is sticky: it never goes from true to false. The poller is stopped the
+   moment the merged record settles. There are three tests, one per defence, each holding a request with
+   `page.route`: a stale poll after a 200 cancel (the stop), a stale 202 after the job finished (the
+   guard), and a stale poll after a 202 (the sticky flag, counted by a MutationObserver of Cancel buttons).
+3. **An ordinary eviction read as a lost outcome.** `jobs.js` now remembers which ids this tab saw
+   settle (`markSettled` / `wasSettled`, the `brain-ui-jobs-settled` key; `forget` clears both). A 404
+   for a settled id is eviction: the id is forgotten and the row dropped silently. The §4.6 sentence is
+   kept for ids never seen settled.
+4. **Reduced motion is now tested.** Under `reduced_motion="reduce"`, the indeterminate bar's computed
+   `appearance` is `none` (the CSS rule's value), and under `no-preference` it is not (the control).
+5. **Announcements.** A resumed job's first answer is drawn but not announced (`quiet` on the pending
+   record). `announce()` clears the region and sets the sentence on the next animation frame, so two
+   identical sentences are both read. Both are tested through a recorder of every text the region holds.
+6. **`maxlength="200"` dropped** from `#ingest-title`. The server's 400 `invalid_title` reaches
+   `#ingest-error`, and a test types 201 characters and checks both.
+7. **Docstring rot** in `check_hidden_toggles_survive_the_cascade`: the digit is gone (the count lives in
+   the registry entry), and the three defensive elements are named.
+
+**The browser module was split**, because these tests took it to 822 lines, past the 800-line
+test-file precedent (PR #67). The fake, the fixtures and the recorders moved to
+`tests/ui_ingest_harness.py`, following the shape of `tests/ui_graph_harness.py`. The flows stay in
+`tests/test_ui_browser_ingest.py`, and the round-1 tests are in
+`tests/test_ui_browser_ingest_lifecycle.py`, which joins the `ci.yml` roster.
+
 ## Tests (TDD: red first)
 
 - `tests/test_ui_tabs_static.py`: the Ingest pane is not `deferred-tab` and carries a form; the Agent pane
