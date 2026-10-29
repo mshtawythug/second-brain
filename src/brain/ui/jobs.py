@@ -9,7 +9,11 @@ queue, and clients poll an append-only event log.
 **Starlette-free and psycopg-free** on purpose, so the whole state machine is
 testable without a server or a database. **Kind-agnostic**: ``kind`` is a free
 string, and a job's failure mapping arrives with it (``submit(..., on_error=)``),
-so the Agent tab (RM-18a) registers ``"ask"`` without editing this module.
+so the Agent tab (RM-18a) registers ``"ask"`` without editing this module. So does
+its cleanup (``submit(..., on_settled=)``, RM-13): called exactly once, outside the
+lock, on EVERY terminal transition, including a queued job that is cancelled or
+dropped by :meth:`JobRegistry.stop` and so never runs. A runner's own ``finally``
+cannot cover those, and an uploaded file's staged copy would outlive its job.
 
 Invariants:
 
@@ -140,6 +144,7 @@ class JobHandle(Protocol):
 
 Runner = Callable[[JobHandle], Mapping[str, Any]]
 ErrorMapper = Callable[[Exception], JobError]
+SettledHook = Callable[[], None]
 
 
 def freeze(value: Any) -> Any:
@@ -173,6 +178,8 @@ class _Job:
     runner: Runner | None
     on_error: ErrorMapper
     created_at: datetime
+    # Popped by ``_finish_locked``, so it can only ever run once.
+    on_settled: SettledHook | None = None
     state: JobState = "queued"
     cancellable: bool = True
     cancel_requested: bool = False
@@ -248,13 +255,24 @@ class JobRegistry:
         self._queue: deque[_Job] = deque()
         self._stopping = False
         self._thread: threading.Thread | None = None
+        # Hooks of jobs that settled under the lock, run by _run_settled() after it.
+        self._settled: list[tuple[_Job, SettledHook]] = []
 
     # ------------------------------------------------------------ public --
 
     def submit(
-        self, kind: str, runner: Runner, *, on_error: ErrorMapper | None = None
+        self,
+        kind: str,
+        runner: Runner,
+        *,
+        on_error: ErrorMapper | None = None,
+        on_settled: SettledHook | None = None,
     ) -> JobSnapshot:
-        """Queue ``runner``. Raises :class:`QueueFull` or :class:`ShuttingDown`."""
+        """Queue ``runner``. Raises :class:`QueueFull` or :class:`ShuttingDown`.
+
+        ``on_settled`` runs once when the job reaches any terminal state; it is not
+        called when ``submit`` itself raises.
+        """
         with self._lock:
             if self._stopping:
                 raise ShuttingDown("the server is shutting down")
@@ -267,6 +285,7 @@ class JobRegistry:
                 runner=runner,
                 on_error=on_error or generic_failure,
                 created_at=self._clock(),
+                on_settled=on_settled,
             )
             self._append_locked(job, "queued", None, None, None)
             self._jobs[job.id] = job
@@ -297,7 +316,9 @@ class JobRegistry:
                 if not job.cancellable:
                     raise NotCancellable("writing has started; the job will finish")
                 job.cancel_requested = True
-            return self._snapshot_locked(job)
+            snapshot = self._snapshot_locked(job)
+        self._run_settled()
+        return snapshot
 
     def run_next(self) -> bool:
         """Run ONE queued job on the calling thread. False when none is queued."""
@@ -338,6 +359,7 @@ class JobRegistry:
                     job.cancel_requested = True
             self._wake.notify_all()
             thread = self._thread
+        self._run_settled()
         if thread is not None:
             thread.join(timeout)
         with self._lock:
@@ -361,6 +383,7 @@ class JobRegistry:
         except JobCancelled:
             with self._lock:
                 self._finish_locked(job, "cancelled")
+            self._run_settled()
             return
         except Exception as exc:
             logger.warning("ui %s job %s failed: %s", job.kind, job.id, describe_failure(exc))
@@ -373,6 +396,7 @@ class JobRegistry:
                 )
             job.result = freeze(result)
             self._finish_locked(job, "succeeded")
+        self._run_settled()
 
     def _fail(self, job: _Job, error: JobError) -> None:
         # Outside the `except` block on purpose: an attribute write through `job`
@@ -381,6 +405,7 @@ class JobRegistry:
         with self._lock:
             job.error = error
             self._finish_locked(job, "failed")
+        self._run_settled()
 
     @staticmethod
     def _map_error(job: _Job, exc: Exception) -> JobError:
@@ -398,6 +423,26 @@ class JobRegistry:
         job.cancellable = False
         job.finished_at = self._clock()
         job.runner = None
+        if job.on_settled is not None:
+            self._settled.append((job, job.on_settled))
+            job.on_settled = None
+
+    def _run_settled(self) -> None:
+        """Run the hooks of jobs that settled, OUTSIDE the lock.
+
+        A hook (deleting a staged file) can take time and may call back into the
+        registry, so it never runs under the lock. A raising hook is logged by
+        class and never reaches the worker loop.
+        """
+        with self._lock:
+            pending, self._settled = self._settled, []
+        for job, hook in pending:
+            try:
+                hook()
+            except Exception as exc:
+                logger.warning(
+                    "ui %s job %s: cleanup failed: %s", job.kind, job.id, describe_failure(exc)
+                )
 
     def _require_locked(self, job_id: str) -> _Job:
         job = self._jobs.get(job_id)

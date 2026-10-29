@@ -33,6 +33,7 @@ from . import (
     routes_related,
     routes_search,
     routes_tree,
+    routes_upload,
 )
 from .context import UiContext
 from .errors import UiError, UiNotFound
@@ -145,11 +146,18 @@ def _lifespan(context: UiContext) -> Any:
     and joins it for :data:`STOP_TIMEOUT_S`. A job still inside extraction or its
     post-commit summary can outlast that; its id is named, and the daemon thread
     dies with the process, rolling back any transaction in flight.
+
+    The upload staging area (RM-13, §7.4) is swept of dead processes' roots at
+    startup, and its own root is removed AFTER the jobs stop, so a job that
+    finished in the join window still found its file.
     """
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         jobs = context.jobs
+        uploads = context.uploads
+        if uploads is not None:
+            uploads.sweep()
         if jobs is not None:
             jobs.start()
         try:
@@ -163,6 +171,8 @@ def _lifespan(context: UiContext) -> Any:
                         "no-op.",
                         job_id,
                     )
+            if uploads is not None:
+                uploads.close()
 
     return lifespan
 
@@ -215,6 +225,14 @@ def create_app(context: UiContext) -> Starlette:
         ),
         Route("/api/ingest/config", routes_ingest.ingest_config, methods=["GET"]),
         Route("/api/ingest/paste", routes_ingest.paste, methods=["POST"]),
+        # The ONE non-JSON route (security.UPLOAD_ROUTE, Ingest spec §7.2).
+        Route("/api/ingest/uploads", routes_upload.stage_upload, methods=["POST"]),
+        Route(
+            "/api/ingest/uploads/{upload_id}",
+            routes_upload.discard_upload,
+            methods=["DELETE"],
+        ),
+        Route("/api/ingest/file", routes_upload.submit_upload, methods=["POST"]),
         Route("/api/jobs", routes_jobs.list_jobs, methods=["GET"]),
         Route("/api/jobs/{job_id}", routes_jobs.get_job, methods=["GET"]),
         Route("/api/jobs/{job_id}/cancel", routes_jobs.cancel_job, methods=["POST"]),

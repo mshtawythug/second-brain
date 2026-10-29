@@ -37,6 +37,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
     from ..ingest import Embedder
     from .ingest_service import IngestRuntime
     from .jobs import JobRegistry
+    from .upload_staging import UploadStaging
 
 #: The hostnames a browser may legitimately use to reach a loopback bind.
 #: ``TrustedHostMiddleware`` matches the Host header against this set, which is
@@ -174,6 +175,11 @@ class UiContext:
     #: Fail-closed default, like ``serve_confidential_titles``; set by
     #: ``server.build_context`` as ``loopback and not read_only``.
     ingest_enabled: bool = False
+    #: Where an upload waits for its job (RM-13, Ingest spec §7.4). ``None`` makes
+    #: the upload routes answer 503 ``jobs_unavailable`` and the config offer no
+    #: extension. Built by ``server.build_context`` on a bind that may ingest; the
+    #: app lifespan sweeps dead roots at startup and removes its own at shutdown.
+    uploads: UploadStaging | None = None
 
     def connect(self) -> AbstractContextManager[psycopg.Connection[Any]]:
         """Open a per-request connection. Always used as a ``with`` block."""

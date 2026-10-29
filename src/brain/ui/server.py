@@ -38,6 +38,7 @@ from .ingest_service import IngestRuntime
 from .jobs import JobRegistry
 from .security import is_loopback
 from .telemetry import ui_source_supported
+from .upload_staging import UploadStaging
 
 logger = logging.getLogger(__name__)
 
@@ -436,6 +437,12 @@ def build_context(
         ),
         ingest_runtime=IngestRuntime.from_config(cfg),
         ingest_enabled=loopback and not read_only,
+        # Lazy: no directory exists until the first upload (upload_staging).
+        uploads=(
+            UploadStaging(clock=lambda: datetime.now(UTC))
+            if loopback and not read_only
+            else None
+        ),
     )
 
 

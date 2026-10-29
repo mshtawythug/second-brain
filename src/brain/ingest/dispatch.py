@@ -206,3 +206,8 @@ def extract_path(path: Path) -> ExtractedDoc:
 def supported_extensions(*, directory_walk: bool = False) -> list[str]:
     """Return the file extensions that :func:`extract_path` can handle."""
     return _DEFAULT_REGISTRY.supported_extensions(directory_walk=directory_walk)
+
+
+def spec_for(path: Path) -> ExtractorSpec | None:
+    """The spec registered for ``path``'s extension, or ``None``."""
+    return _DEFAULT_REGISTRY.spec_for(path)

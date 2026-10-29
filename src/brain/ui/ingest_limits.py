@@ -37,3 +37,39 @@ DEFAULT_PASTE_CONTENT_TYPE = "note"
 
 #: How long shutdown waits for the running job before naming it as unknown.
 STOP_TIMEOUT_S = 10.0
+
+# --- File upload (RM-13, Ingest spec §7.3, §7.4) --------------------------------
+
+#: The extensions a browser may upload. An EXPLICIT constant, not
+#: ``ingest.dispatch.supported_extensions()``: once RM-33 registers image
+#: extractors, the registry would admit images. A test asserts this is a subset
+#: of the registry, and ``upload_checks.uploadable_extensions`` intersects at
+#: runtime too. Adding a type here is a deliberate, reviewed act.
+UPLOAD_EXTENSIONS: frozenset[str] = frozenset({".md", ".markdown", ".txt", ".pdf", ".docx"})
+
+#: Per-file caps on the wire: a binary document, and a text or markdown file.
+MAX_BINARY_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_TEXT_UPLOAD_BYTES = 5 * 1024 * 1024
+BINARY_UPLOAD_EXTENSIONS: frozenset[str] = frozenset({".pdf", ".docx"})
+
+#: Bytes staged on disk across every upload not yet finished (unsubmitted, or
+#: claimed by a job that has not settled). Over it: 429 ``staging_full``.
+MAX_STAGED_BYTES = 64 * 1024 * 1024
+
+#: ``POST /api/ingest/file`` carries a few short fields; its JSON is capped on the
+#: wire like the paste's.
+MAX_FILE_SUBMIT_WIRE_BYTES = 16 * 1024
+
+#: An upload nobody submits is deleted after this long.
+UPLOAD_TTL = timedelta(minutes=15)
+
+#: The sanitized basename (stem plus extension) is at most this long.
+MAX_FILENAME_CHARS = 120
+
+#: A ``.docx`` is a zip. Checked from the central directory before extraction:
+#: the members' declared total, the worst member's expansion ratio, and the
+#: member count (a central directory of millions of entries is itself a bomb).
+DOCX_MAX_EXPANDED_BYTES = 200 * 1024 * 1024
+DOCX_MAX_RATIO = 100
+DOCX_MAX_MEMBERS = 10_000
+
