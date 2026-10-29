@@ -43,8 +43,11 @@ git tag scheme:
   `rerank` time.
 - **`brain eval`** applies the configured stages itself (it still never falls
   back), adds the reranker's backend, model and depth to `config_signature` only
-  while it is on, and records each row's `stage_ms` in `brain eval --json`. The
-  committed `ci.json` is unchanged.
+  while it is on, and records each row's `stage_ms` in `brain eval --json`. A
+  query for which the reranker skipped (it timed out) is marked `stages_skipped`
+  and treated like a degraded row: `--record-baseline` refuses the run (exit 1),
+  and `--fail-below` refuses to judge it (exit 1). The committed `ci.json` is
+  unchanged.
 
 ### Added — the Ingest tab: paste from the browser
 

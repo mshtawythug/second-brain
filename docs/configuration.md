@@ -423,7 +423,11 @@ A bad value in any of these is a `ConfigError` the first time a search runs,
 even while `BRAIN_RERANKER=none`, as with every other knob. `brain eval` records
 the backend, model and depth in its `config_signature` only while the reranker is
 on, so a baseline recorded with it off stays valid, and each row of `brain eval
---json` carries the stage's time in `stage_ms` (not written into baselines).
+--json` carries the stage's time in `stage_ms` (not written into baselines). If
+the reranker skips for a query during `brain eval` (a timeout, or it is not
+running), that row names it in `stages_skipped`, and the run is refused like one
+with a failed embed: `--record-baseline` writes nothing and `--fail-below` exits
+1. Start the reranker and run it again.
 
 ## Search and retrieval trust boundaries
 
