@@ -143,6 +143,20 @@ checked byte-identical. The restored copy ran green (59 passed).
 | M14 | `recall` passes `stages=()` | RED, 1 failed |
 | M15 | a skipped reason carries the exception's message | RED, 3 failed |
 
+Review round 1, on a `git archive b98ab81` copy, same method (sibling database recreated for the
+run and dropped after; restored copy green, 66 passed):
+
+| # | Mutation | Result |
+|---|---|---|
+| R1 | `_sized` lets a stage's `candidate_limit` raise | RED, 2 failed |
+| R2 | a stage whose `candidate_limit` raised is applied anyway | RED, 2 failed |
+| R3 | that stage's skipped reason carries the exception's message | RED, 1 failed |
+| R4 | the guard ignores `from … import … as` aliases | RED, 2 failed |
+| R5 | the guard treats every alias as guarded, whatever it names | RED, 2 failed |
+| R6 | `ask_no_loop` drops its `session_id` | RED, 2 failed |
+| R7 | `ask`'s loop drops its `session_id` | RED, 2 failed |
+| R8 | `_retrieve` drops `session_id` on the way to `_retrieve_hybrid` | RED, 4 failed |
+
 ## Risks
 
 - **An output-shape drift on a frozen contract.** The bare `--json` list, `explain --json` and the
