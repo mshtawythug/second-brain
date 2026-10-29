@@ -204,7 +204,8 @@ overview → `brain-ask`.
 
 ## Debugging weird results — `brain explain`
 
-If a query returns docs that look wrong, use `brain explain` to see the
+If a query returns docs that look wrong, use `brain explain` (over MCP,
+`brain_explain`; a document's neighbours are MCP `brain_related`) to see the
 ranking math:
 
 ```bash
@@ -218,12 +219,6 @@ boost, best-chunk index, and matched filters. Two things to look for:
   `--fts-only` for the actual query.
 - **`matched_filters` doesn't include a filter you passed** — your filter
   silently didn't apply (typo, unresolved person name, etc.).
-
-Over MCP the same diagnostics come from `brain_explain` (no snippets). To
-widen from one document you already have to its neighbours, call MCP
-`brain_related` with its id: the list `brain ui` shows beside a note. Both
-leave confidential documents out unless you pass `include_confidential=true`;
-ask the user before you do.
 
 ## When NOT to reach for the brain
 

@@ -30,7 +30,7 @@ Both tools are the first real module behind RM-06's seam (`src/brain/mcp_tools/`
 | `docs/guides/claude-desktop-setup.md` | MCP tool table: two rows. |
 | `docs/cli-reference.md` | One line under `brain explain`: its MCP twin. |
 | `CHANGELOG.md` | Unreleased entry. |
-| `skills/consult-brain/SKILL.md` | Its `brain explain` section names the two MCP twins and the opt-in. |
+| `skills/consult-brain/SKILL.md` | Its `brain explain` section names the two MCP twins, in one added line: the skill is at the 300-line house ceiling (`tests/test_skill_frontmatter.py`). |
 | `docs/plans/2026-10-23-backlog-reconciliation.md` | Rows 1.2, 6.1, Q1-B D13, BL-6, rank 5 → SHIPPED (#PR). |
 | Spec Appendix B | Follow-up commit once the PR number is known: RM-12 → `DONE (#PR)`. |
 
