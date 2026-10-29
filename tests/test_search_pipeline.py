@@ -16,6 +16,7 @@ from brain.search import SearchResult
 from brain.search_pipeline import (
     PipelineResult,
     StageReport,
+    _UnsizedStage,
     apply_stages,
     build_stages,
     pipeline_json,
@@ -457,3 +458,25 @@ def test_pipeline_json_is_the_fallback_keys_then_stages() -> None:
         "stages",
     ]
     assert payload["stages"] == []
+
+
+def test_the_unsized_stand_in_is_inert_and_reports_its_reason() -> None:
+    """``_UnsizedStage`` asks for no extra depth, signs nothing, and passes its input on.
+
+    RM-14a merges every stage's ``signature()`` into eval's ``config_signature``,
+    so a skipped stage must contribute nothing there.
+    """
+    # Arrange
+    stage = _UnsizedStage(name="u", reason="StageBackendDown")
+    rows = [_result(n) for n in range(2)]
+
+    # Act
+    outcome = stage.apply(_CONN, query="q", session_id=None, results=rows)
+
+    # Assert
+    assert stage.candidate_limit(7) == 7
+    assert stage.signature() == {}
+    assert outcome.results == rows
+    assert outcome.report == StageReport(
+        name="u", applied=False, skipped_reason="StageBackendDown", ms=0.0
+    )
