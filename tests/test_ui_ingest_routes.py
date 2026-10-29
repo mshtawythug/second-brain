@@ -429,3 +429,51 @@ def test_an_honest_content_length_over_the_cap_is_refused_without_reading() -> N
 
     with pytest.raises(UiPayloadTooLarge):
         asyncio.run(read_body_capped(Request(scope, receive), MAX_PASTE_WIRE_BYTES))
+
+
+@pytest.mark.nodb
+def test_the_stream_counter_stops_reading_at_the_cap() -> None:
+    """No ``Content-Length`` (chunked): the counter alone refuses, mid-stream (§7.3).
+
+    Through ``TestClient`` an oversize paste is also refused later by the decoded
+    2 MiB cap, so the counter is pinned here directly: the body is streamed in
+    pieces, and reading must stop at the first piece that crosses the limit.
+    """
+    import asyncio
+
+    from starlette.requests import Request
+
+    from brain.ui._http import read_body_capped
+    from brain.ui.errors import UiPayloadTooLarge
+
+    pieces = [b"x" * 10] * 10
+    served: list[int] = []
+
+    async def receive() -> dict[str, Any]:
+        served.append(1)
+        return {"type": "http.request", "body": pieces[len(served) - 1], "more_body": True}
+
+    scope = {"type": "http", "method": "POST", "path": "/api/ingest/paste", "headers": []}
+
+    with pytest.raises(UiPayloadTooLarge):
+        asyncio.run(read_body_capped(Request(scope, receive), 35))
+    assert len(served) == 4
+
+
+@pytest.mark.nodb
+def test_a_body_at_the_cap_is_read_whole() -> None:
+    import asyncio
+
+    from starlette.requests import Request
+
+    from brain.ui._http import read_body_capped
+
+    chunks = iter([b"a" * 20, b"b" * 15])
+
+    async def receive() -> dict[str, Any]:
+        body = next(chunks)
+        return {"type": "http.request", "body": body, "more_body": body.startswith(b"a")}
+
+    scope = {"type": "http", "method": "POST", "path": "/api/ingest/paste", "headers": []}
+
+    assert asyncio.run(read_body_capped(Request(scope, receive), 35)) == b"a" * 20 + b"b" * 15
