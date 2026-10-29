@@ -477,3 +477,146 @@ def test_a_body_at_the_cap_is_read_whole() -> None:
     scope = {"type": "http", "method": "POST", "path": "/api/ingest/paste", "headers": []}
 
     assert asyncio.run(read_body_capped(Request(scope, receive), 35)) == b"a" * 20 + b"b" * 15
+
+
+# ------------------------------------------------ the confidential-titles lens --
+
+
+def _confidential_client(
+    conn: psycopg.Connection[Any], vault: Path, registry: JobRegistry, *, titles: bool
+) -> TestClient:
+    ctx = make_context(
+        conn, vault, embedder=FakeEmbedder(), jobs=registry, serve_confidential_titles=titles
+    )
+    return TestClient(create_app(ctx), base_url=ORIGIN)
+
+
+@pytest.mark.parametrize("titles", [False, True])
+def test_a_confidential_paste_result_is_lensed_by_the_titles_flag(
+    test_db: psycopg.Connection[Any], vault: Path, registry: JobRegistry, titles: bool
+) -> None:
+    client = _confidential_client(test_db, vault, registry, titles=titles)
+    sealed = {**_PASTE, "title": "Sealed Synthetic", "sensitivity": "confidential"}
+    job_id = _paste(client, sealed).json()["id"]
+    registry.run_next()
+
+    for response in (
+        client.get(f"/api/jobs/{job_id}"),
+        # Door (a): cancel on a terminal job returns the full snapshot.
+        client.post(f"/api/jobs/{job_id}/cancel", json={}, headers=WRITE_HEADERS),
+    ):
+        result = response.json()["result"]
+        assert result["sensitivity"] == "confidential"
+        assert result["title_withheld"] is (not titles)
+        assert (result["title"] == "Sealed Synthetic") is titles
+        assert (result["vault_path"] is None) is (not titles)
+        assert "Sealed Synthetic" not in response.text or titles
+        assert result["document_id"]  # an id is not a title
+
+
+def test_a_skip_onto_an_existing_confidential_document_is_lensed(
+    test_db: psycopg.Connection[Any], vault: Path, registry: JobRegistry
+) -> None:
+    """Door (b): a NORMAL paste that dedups onto a confidential row names that row."""
+    client = _confidential_client(test_db, vault, registry, titles=False)
+    sealed = {**_PASTE, "title": "Sealed Original", "sensitivity": "confidential"}
+    _paste(client, sealed)
+    registry.run_next()
+
+    retitled = {**_PASTE, "title": "Innocent Retitle", "sensitivity": "normal"}
+    job_id = _paste(client, retitled).json()["id"]
+    registry.run_next()
+    response = client.get(f"/api/jobs/{job_id}")
+
+    result = response.json()["result"]
+    assert result["outcome"] == "skipped"
+    assert result["sensitivity"] == "confidential"
+    assert result["title"] is None and result["vault_path"] is None
+    assert result["title_withheld"] is True
+    assert "Sealed Original" not in response.text
+
+
+def test_a_normal_result_is_never_withheld(client: TestClient, registry: JobRegistry) -> None:
+    job_id = _paste(client).json()["id"]
+    registry.run_next()
+
+    result = client.get(f"/api/jobs/{job_id}").json()["result"]
+
+    assert result["title"] == "Synthetic Paste"
+    assert result["title_withheld"] is False
+
+
+# ------------------------------------------------------- hostile parameters --
+
+
+@pytest.mark.parametrize("after", ["²", "9" * 4301])
+def test_an_after_int_cannot_parse_is_a_400_not_a_500(client: TestClient, after: str) -> None:
+    job_id = _paste(client).json()["id"]
+
+    response = client.get(f"/api/jobs/{job_id}", params={"after": after})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_after"
+
+
+@pytest.mark.parametrize(
+    ("field", "code"), [("body", "invalid_body"), ("title", "invalid_title")]
+)
+def test_a_lone_surrogate_is_a_400_not_a_failed_job(
+    client: TestClient, registry: JobRegistry, field: str, code: str
+) -> None:
+    payload = json.dumps({**_PASTE, field: "ok \\ud800 text"}).replace("\\\\ud800", "\\ud800")
+
+    response = client.post(
+        "/api/ingest/paste",
+        content=payload.encode(),
+        headers={**WRITE_HEADERS, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == code
+    assert registry.list_recent() == ()
+
+
+def test_a_lone_surrogate_tag_is_a_400(client: TestClient) -> None:
+    payload = json.dumps({**_PASTE, "tags": ["ok \\ud800"]}).replace("\\\\ud800", "\\ud800")
+
+    response = client.post(
+        "/api/ingest/paste",
+        content=payload.encode(),
+        headers={**WRITE_HEADERS, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_tags"
+
+
+def _read(headers: list[tuple[bytes, bytes]], body: bytes, limit: int) -> bytes:
+    import asyncio
+
+    from starlette.requests import Request
+
+    from brain.ui._http import read_body_capped
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    scope = {"type": "http", "method": "POST", "path": "/api/ingest/paste", "headers": headers}
+    return asyncio.run(read_body_capped(Request(scope, receive), limit))
+
+
+@pytest.mark.nodb
+@pytest.mark.parametrize("declared", ["²", "0005", "١٢"])
+def test_an_odd_content_length_never_500s(declared: str) -> None:
+    """Non-ASCII digits are ignored (the counter decides); leading zeros are honest."""
+    headers = [(b"content-length", declared.encode())]
+
+    assert _read(headers, b"12345", 35) == b"12345"
+
+
+@pytest.mark.nodb
+def test_a_content_length_past_the_int_limit_is_413_without_converting() -> None:
+    from brain.ui.errors import UiPayloadTooLarge
+
+    with pytest.raises(UiPayloadTooLarge):
+        _read([(b"content-length", b"9" * 5000)], b"", 35)

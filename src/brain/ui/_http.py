@@ -61,7 +61,13 @@ async def read_body_capped(request: Request, limit: int) -> bytes:
     the moment the running total passes the cap.
     """
     declared = request.headers.get("content-length", "")
-    if declared.isdigit() and int(declared) > limit:
+    # isascii(): "²".isdigit() is true and int() rejects it. A declared length
+    # longer than any real cap's digits is over the cap without converting it
+    # (CPython refuses int() past 4300 digits).
+    digits = declared.lstrip("0") or "0"
+    if declared.isascii() and declared.isdigit() and (
+        len(digits) > len(str(limit)) or int(digits) > limit
+    ):
         raise UiPayloadTooLarge(
             f"request body must be at most {limit} bytes", code="body_too_large"
         )

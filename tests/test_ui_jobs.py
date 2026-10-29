@@ -700,3 +700,64 @@ def test_the_handle_exposes_its_job_id() -> None:
     job = reg.submit("k", runner)
     reg.run_next()
     assert seen == [job.id]
+
+
+# ------------------------------------------- what a retained job holds on to --
+
+
+class _HeavyRunner:
+    """A runner object standing in for a paste closure that holds a whole body."""
+
+    def __init__(self, behaviour: str) -> None:
+        self.behaviour = behaviour
+        self.body = "x" * 1024
+
+    def __call__(self, handle: JobHandle) -> Mapping[str, Any]:
+        if self.behaviour == "fail":
+            raise RuntimeError("boom")
+        if self.behaviour == "cancel":
+            raise JobCancelled("stop")
+        return {}
+
+
+@pytest.mark.parametrize("path", ["succeed", "fail", "cancel", "cancel_queued", "stop_queued"])
+def test_a_finished_job_releases_its_runner(path: str) -> None:
+    """A retained job must not keep a paste body alive for the retention window."""
+    import gc
+    import weakref
+
+    reg = _registry()
+    runner = _HeavyRunner("succeed" if path.endswith("queued") else path)
+    ref = weakref.ref(runner)
+    job = reg.submit("k", runner)
+    del runner
+
+    if path == "cancel_queued":
+        reg.cancel(job.id)
+    elif path == "stop_queued":
+        reg.stop(timeout=1.0)
+    else:
+        reg.run_next()
+    gc.collect()
+
+    assert reg.get(job.id).state in {"succeeded", "failed", "cancelled"}
+    assert ref() is None
+
+
+def test_the_result_is_deep_frozen_and_not_shared() -> None:
+    reg = _registry()
+    original: dict[str, Any] = {"findings": [{"kind": "aws"}], "nested": {"k": [1, 2]}}
+
+    job = reg.submit("k", lambda handle: original)
+    reg.run_next()
+    original["findings"].append({"kind": "late"})
+    original["nested"]["k"].append(3)
+
+    result = reg.get(job.id).result
+    assert result is not None
+    assert result["findings"] == ({"kind": "aws"},)
+    assert result["nested"]["k"] == (1, 2)
+    with pytest.raises(TypeError):
+        result["findings"][0]["kind"] = "mutated"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        result["nested"]["new"] = 1  # type: ignore[index]

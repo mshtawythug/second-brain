@@ -142,6 +142,20 @@ Runner = Callable[[JobHandle], Mapping[str, Any]]
 ErrorMapper = Callable[[Exception], JobError]
 
 
+def freeze(value: Any) -> Any:
+    """A deep, immutable copy of a JSON-shaped value.
+
+    Mappings become read-only ``MappingProxyType`` views over fresh dicts, and
+    lists and tuples become tuples, all the way down, so no snapshot shares a
+    mutable object with the runner that built it or with another snapshot.
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze(item) for item in value)
+    return value
+
+
 def generic_failure(exc: Exception) -> JobError:
     """The fallback mapping: the class name only, never the message."""
     return JobError("internal_error", f"Internal error ({type(exc).__name__}).")
@@ -153,7 +167,10 @@ class _Job:
 
     id: str
     kind: str
-    runner: Runner
+    # Dropped on every terminal transition (``_finish_locked``): a paste runner's
+    # closure holds the whole body, and a retained job must not keep it alive for
+    # the retention window.
+    runner: Runner | None
     on_error: ErrorMapper
     created_at: datetime
     state: JobState = "queued"
@@ -290,7 +307,9 @@ class JobRegistry:
             job = self._queue.popleft()
             job.state = "running"
             job.started_at = self._clock()
-        self._execute(job)
+            runner = job.runner
+        assert runner is not None  # only a terminal job has released its runner
+        self._execute(job, runner)
         return True
 
     def start(self) -> None:
@@ -335,10 +354,10 @@ class JobRegistry:
                     return
             self.run_next()
 
-    def _execute(self, job: _Job) -> None:
+    def _execute(self, job: _Job, runner: Runner) -> None:
         handle = _Handle(self, job)
         try:
-            result = job.runner(handle)
+            result = runner(handle)
         except JobCancelled:
             with self._lock:
                 self._finish_locked(job, "cancelled")
@@ -352,7 +371,7 @@ class JobRegistry:
                 self._append_locked(
                     job, self._phase_locked(job), None, None, CANCEL_TOO_LATE
                 )
-            job.result = MappingProxyType(dict(result))
+            job.result = freeze(result)
             self._finish_locked(job, "succeeded")
 
     def _fail(self, job: _Job, error: JobError) -> None:
@@ -378,6 +397,7 @@ class JobRegistry:
         job.state = state
         job.cancellable = False
         job.finished_at = self._clock()
+        job.runner = None
 
     def _require_locked(self, job_id: str) -> _Job:
         job = self._jobs.get(job_id)

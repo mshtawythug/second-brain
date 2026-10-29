@@ -203,18 +203,21 @@ class _StoredDoc:
     vault_path: str | None
     summary: str | None
     chunk_count: int
+    sensitivity: str
 
 
 def _read_back(conn: psycopg.Connection[Any], document_id: str) -> _StoredDoc | None:
     row = conn.execute(
         "SELECT d.title, d.vault_path, d.summary,"
-        " (SELECT count(*) FROM chunks c WHERE c.document_id = d.id)"
+        " (SELECT count(*) FROM chunks c WHERE c.document_id = d.id), d.sensitivity"
         " FROM documents d WHERE d.id = %s",
         (document_id,),
     ).fetchone()
     if row is None:
         return None
-    return _StoredDoc(title=row[0], vault_path=row[1], summary=row[2], chunk_count=row[3])
+    return _StoredDoc(
+        title=row[0], vault_path=row[1], summary=row[2], chunk_count=row[3], sensitivity=row[4]
+    )
 
 
 def _result_payload(
@@ -234,6 +237,10 @@ def _result_payload(
         "title": stored.title if stored else spec.title,
         "vault_path": stored.vault_path if stored else None,
         "chunk_count": stored.chunk_count if stored else 0,
+        # The STORED level, read back: a dedup skip can land on an existing
+        # confidential document whatever this paste asked for. The routes' lens
+        # (routes_jobs.lensed_result) withholds title and vault_path on it.
+        "sensitivity": stored.sensitivity if stored else spec.sensitivity,
         "summary_status": _summary_status(ctx, spec, outcome, stored, enricher),
         "secret_guard": ctx.cfg.secret_guard,
         "secret_findings": [

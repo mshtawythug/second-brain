@@ -170,16 +170,19 @@ def _client(
         allowed_origin=ORIGIN,
         logging_enabled=False,
         serve_confidential_titles=serve_confidential_titles,
-        jobs=_finished_paste_of_the_sealed_document(),
+        jobs=_SEALED_JOBS,
     )
     return TestClient(create_app(context), base_url=ORIGIN)
 
 
-def _finished_paste_of_the_sealed_document() -> JobRegistry:
-    """A job registry holding one finished ingest whose result names the sealed doc.
+def _finished_paste_of_the_sealed_document() -> tuple[JobRegistry, str]:
+    """A registry holding one finished ingest whose result names the sealed doc.
 
-    So ``/api/jobs`` is asked about a job that COULD name it (RM-10). An empty
-    registry would make that route's half of every assertion here vacuous.
+    So both job routes are asked about a job that CAN name it (RM-10): an empty
+    registry would make their half of every assertion here vacuous. A job id is
+    not a capability (``/api/jobs`` lists every retained id), so
+    ``/api/jobs/{job_id}`` is an unprompted surface like any other, and the
+    routes' lens must withhold the title. Built once, so its id is fixed.
     """
     registry = JobRegistry(
         clock=lambda: datetime.now(UTC),
@@ -187,12 +190,20 @@ def _finished_paste_of_the_sealed_document() -> JobRegistry:
         retain=50,
         retain_for=timedelta(hours=1),
     )
-    registry.submit(
+    job = registry.submit(
         "ingest.paste",
-        lambda handle: {"title": SEALED_TITLE, "tags": [SEALED_TAG]},
+        lambda handle: {
+            "outcome": "skipped",
+            "title": SEALED_TITLE,
+            "vault_path": "_ingested/manual/severance-terms.md",
+            "sensitivity": CONFIDENTIAL,
+        },
     )
     assert registry.run_next()
-    return registry
+    return registry, job.id
+
+
+_SEALED_JOBS, _SEALED_JOB_ID = _finished_paste_of_the_sealed_document()
 
 
 #: How to *call* each GET route — path-parameter values only, plus a query
@@ -201,7 +212,7 @@ def _finished_paste_of_the_sealed_document() -> JobRegistry:
 #: route is allowed to leak. A route added without an entry here raises
 #: :class:`_UncoveredRoute` rather than being skipped, so the failure mode of
 #: forgetting is a red test naming the route, not a silent gap.
-_PATH_ARGS_FIXED = {"tag": SEALED_TAG}
+_PATH_ARGS_FIXED = {"tag": SEALED_TAG, "job_id": _SEALED_JOB_ID}
 _QUERY_STRINGS = {"/api/search": "q=severance"}
 
 #: Routes that may name a confidential document, with the ruling for each.
@@ -217,12 +228,7 @@ _QUERY_STRINGS = {"/api/search": "q=severance"}
 #:   ones they did not.
 #: - ``/api/notes/{id_prefix}`` — PROMPTED, and it is the document itself. A
 #:   reader who opened a note by id is not being *told* it exists.
-#: - ``/api/jobs/{job_id}`` — PROMPTED (RM-10). The caller names a job by an
-#:   unguessable uuid4 id that only the submit response returned, so it is
-#:   reading the outcome of an ingest it started, with the title it typed. The
-#:   job LIST, which a caller did not ask about by name, is not exempt: it
-#:   carries no result at all, and is checked below like every listing surface.
-_PROMPTED = frozenset({"/api/search", "/api/notes/{id_prefix}", "/api/jobs/{job_id}"})
+_PROMPTED = frozenset({"/api/search", "/api/notes/{id_prefix}"})
 
 #: The surfaces this module was written to cover. NOT the roster — the roster is
 #: discovered below — but a floor under it: if a refactor stops one of these
@@ -413,7 +419,7 @@ def test_the_route_table_is_fully_covered(
     # entered _KNOWN_GATED can be, by adding it straight here. That is a ruling,
     # so it is made loud: bump this number in the same edit and write the reason
     # into _PROMPTED's docstring above.
-    assert len(_PROMPTED) == 3, (
+    assert len(_PROMPTED) == 2, (
         f"the prompted-exemption list changed size. Each entry silences a route "
         f"for every assertion in this module, so each needs a written ruling: "
         f"{sorted(_PROMPTED)}"

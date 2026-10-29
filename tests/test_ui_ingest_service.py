@@ -130,7 +130,7 @@ def test_a_paste_becomes_an_ingested_document_with_a_mirror(
     result = dict(snap.result or {})
     assert result["outcome"] == "ingested"
     assert result["mirror_repaired"] is False
-    assert result["possible_duplicates"] == []
+    assert result["possible_duplicates"] == ()  # deep-frozen in the snapshot
     assert result["chunk_count"] >= 1
     assert result["vault_path"].startswith("_ingested/manual/")
     assert (vault / result["vault_path"]).is_file()

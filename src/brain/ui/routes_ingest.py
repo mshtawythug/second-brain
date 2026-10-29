@@ -60,4 +60,7 @@ async def paste(request: Request) -> JSONResponse:
         ) from exc
     except ShuttingDown as exc:
         raise UiUnavailable("the server is shutting down", code="shutting_down") from exc
-    return ok(snapshot_payload(snap), status=202)
+    return ok(
+        snapshot_payload(snap, serve_confidential_titles=ctx.serve_confidential_titles),
+        status=202,
+    )

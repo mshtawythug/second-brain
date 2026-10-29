@@ -53,9 +53,22 @@ def parse_paste(payload: Mapping[str, Any]) -> PasteSpec:
     )
 
 
+def _encodes(value: str) -> bool:
+    """Strict UTF-8: a lone surrogate (valid JSON, ``"\\ud800"``) is refused here.
+
+    Accepted, it would fail inside the job at the database and report the
+    "may already have been saved" message for a document that never was.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _title(value: Any) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise UiBadRequest("title is required", code="invalid_title")
+    if not isinstance(value, str) or not value.strip() or not _encodes(value):
+        raise UiBadRequest("title must be non-empty UTF-8 text", code="invalid_title")
     title = value.strip()
     if len(title) > MAX_TITLE_CHARS:
         raise UiBadRequest(
@@ -65,9 +78,9 @@ def _title(value: Any) -> str:
 
 
 def _body(value: Any) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise UiBadRequest("body must be non-empty text", code="invalid_body")
-    if len(value.encode("utf-8", "surrogatepass")) > MAX_PASTE_BODY_BYTES:
+    if not isinstance(value, str) or not value.strip() or not _encodes(value):
+        raise UiBadRequest("body must be non-empty UTF-8 text", code="invalid_body")
+    if len(value.encode("utf-8")) > MAX_PASTE_BODY_BYTES:
         raise UiPayloadTooLarge(
             f"body must be at most {MAX_PASTE_BODY_BYTES} bytes", code="body_too_large"
         )
@@ -75,7 +88,7 @@ def _body(value: Any) -> str:
 
 
 def _tags(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, list) or not all(isinstance(t, str) for t in value):
+    if not isinstance(value, list) or not all(isinstance(t, str) and _encodes(t) for t in value):
         raise UiBadRequest("tags must be a list of strings", code="invalid_tags")
     return tuple(normalize_tags(value))
 
