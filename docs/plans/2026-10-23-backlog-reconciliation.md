@@ -170,7 +170,7 @@ The four conditional items, each with the condition that would make it worth doi
 
 | Tab | Status | Evidence |
 |---|---|---|
-| **Ingest** (v2) | **IN PROGRESS.** Designed by `docs/specs/2026-10-23-brain-ui-ingest-tab-design.md` (this PR). Phase 1, the job registry and the paste backend, is **SHIPPED (#73, RM-10)**. The paste front end is RM-11, and upload is RM-13. | `docs/specs/2026-07-25-brain-ui-design.md` §1.1. Non-goal of the consolidation spec (§1.2). Today `index.html` renders a static "Deferred to a later release" panel (`#tab-ingest`) that names `brain ingest`. |
+| **Ingest** (v2) | **IN PROGRESS.** Designed by `docs/specs/2026-10-23-brain-ui-ingest-tab-design.md` (this PR). Phase 1, the job registry and the paste backend, is **SHIPPED (#73, RM-10)**. Phase 2, the paste front end, is **SHIPPED (#PR, RM-11)**. Upload is RM-13. | `docs/specs/2026-07-25-brain-ui-design.md` §1.1. Non-goal of the consolidation spec (§1.2). Until RM-11, `index.html` rendered a static "Deferred to a later release" panel (`#tab-ingest`) that named `brain ingest`; it is now the paste form and job panel. |
 | **Agent** (v3) | **NOT STARTED.** It should reuse the Ingest tab's job subsystem (spec §4.7). | Same two sources. `#tab-agent` names `brain ask`. |
 | **Publish** | **SUPERSEDED, and gone from the UI.** | The consolidation spec, Q10 ("Delete it"), plus phase 8/9. The tab bar now has exactly three tabs, and `tests/test_ui_tabs_static.py:42-44` pins `["notes", "ingest", "agent"]` for the buttons, the sections and `main.js`'s wiring. There is no Publish button or panel left to correct. |
 
@@ -237,7 +237,7 @@ eval only now that the eval has just been re-judged.
 | 1a | **BL-14, BL-15, then BL-13: embedder-down handling in `brain recall`, `brain ask` and `brain ui` search** | S each | Right after PR #61, while the fallback's shape is fresh. BL-14 and BL-15 turn tracebacks into clean errors; BL-13 is the UI half of the same decision, and needs a browser test. |
 | 2 | **BL-1: ceiling-table CI check** | S | Without it there has been one unrecorded crossing and one caught only by hand (BL-1). A day of work removes a whole class of review misses. |
 | 3 | **BL-3: CSS `url()` in the offline test** | XS | A few lines. It closes the same blank-page failure class as the wheel-packaging bug. Do it before anyone adds fonts or images in CSS. |
-| 4 | **Ingest tab, phases 1–2: paste ingest** (spec §10) | M | The first deferred UI tab, fully designed. It also delivers the job subsystem the Agent tab needs. Phase 1 (jobs + paste backend) is SHIPPED (#73, RM-10); phase 2 (the paste front end) is RM-11. |
+| 4 | **Ingest tab, phases 1–2: paste ingest** (spec §10) | M | The first deferred UI tab, fully designed. It also delivers the job subsystem the Agent tab needs. Phase 1 (jobs + paste backend) is SHIPPED (#73, RM-10); phase 2 (the paste front end) is **SHIPPED (#PR, RM-11)**. |
 | 5 | **BL-6: `brain_related` + `brain_explain` MCP tools** | S | Pure parity, since both cores exist. Agents currently cannot see related documents, which the UI shows by default. |
 | 6 | **Ingest tab, phase 3: file upload** | M | It needs the narrowly scoped Content-Type exception (spec §7.2), so it ships separately, with its own security review. |
 | 7 | **5 / BL-5: cross-encoder reranker** | L | The highest-leverage ranking change left. It is now measurable, because all 31 golden rows are fresh (PR #50). It must clear `--fail-below` locally. |

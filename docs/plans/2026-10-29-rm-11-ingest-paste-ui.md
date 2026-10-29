@@ -1,0 +1,115 @@
+# RM-11 — Ingest tab, phase 2: the paste front end
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use team-driven-development to implement this plan task-by-task.
+
+**Ticket:** RM-11 in `docs/specs/2026-10-23-roadmap-completion-design.md` (wave 3).
+**Design:** `docs/specs/2026-10-23-brain-ui-ingest-tab-design.md` (the "Ingest spec"): §8, §3.4 items 1, 2,
+4, 5 and 6 for paste, §7.5, the §9.4 paste rows, and the paste half of the §10 "After" row.
+**Builds on:** RM-10 (PR #73, merged at `a873074`): `GET /api/ingest/config`, `POST /api/ingest/paste`,
+`GET /api/jobs`, `GET /api/jobs/{id}?after=`, `POST /api/jobs/{id}/cancel`, `health.ingest_enabled`.
+**Branch:** `feat/rm-11-ingest-paste-ui`, from `second-brain/master` at `a873074`.
+
+## Goal
+
+Paste ingest is usable from the browser, with live progress, cancel and a link to the new document.
+
+## Files
+
+New (each well under 400 lines):
+
+| File | Responsibility |
+|---|---|
+| `src/brain/ui/static/js/jobs.js` | Kind-agnostic job client, reused by the Agent tab (RM-18b): `submitJob`, `pollJob` (backoff and visibility), `cancelJob`, `pollDelay` (pure), and the `sessionStorage` list of the ids this tab submitted, read and written inside `try`. |
+| `src/brain/ui/static/js/ingest.js` | The tab: loads `/api/ingest/config` the first time the tab is shown, renders the disabled reason or the paste form, validates the body size client-side, submits, and draws the job panel. |
+| `src/brain/ui/static/js/ingest_view.js` | Pure DOM builders for one job row (state, phase, `<progress>`, outcome, notices, cancel). Split out of `ingest.js` so each module has one reason to change and stays small; RM-13's file mode reuses it. |
+| `src/brain/ui/static/css/ingest.css` | The tab's styles, built only on the existing tokens; every selector scoped under `.ingest-pane`. |
+| `tests/test_ui_browser_ingest.py` | The §9.4 paste rows, hermetic (`page.route`). |
+
+Touched:
+
+- `static/index.html`: `#tab-ingest` stops being `class="shell deferred-tab"`; it holds the semantic form,
+  a `<fieldset>`, a `<label>` on every control, the help line that separates paste from `+ New` (§3.3),
+  the disabled-reason notice, the job list and a polite live region. The `ingest.css` link joins the
+  roster.
+- `static/js/main.js`: imports and calls `wireIngest()` (order-free: it owns `#tab-ingest`, subscribes to
+  nothing).
+- `tests/test_ui_static_behaviour.py`: `ingest.css` joins `CSS_ORDER`; `jobs.js`, `ingest_view.js` and
+  `ingest.js` join `JS_ORDER`; a boot-wiring check for `wireIngest()` with its mutation entries.
+- `tests/test_ui_tabs_static.py`: the Ingest pane is no longer a deferred pane; Agent still is.
+- `.github/workflows/ci.yml`: `tests/test_ui_browser_ingest.py` in the byte-ordered browser roster.
+- Docs: `docs/cli-reference.md` (the `brain ui` section), `README.md`,
+  `docs/guides/brain-ui-on-your-phone.md` (ingest is unavailable over `--lan`), `CHANGELOG.md`
+  (Unreleased), the backlog doc row, and Appendix B's RM-11 row (follow-up commit, the only spec edit).
+- Memory: `types.md` (`JobSnapshot`, `JobRegistry`, `IngestOutcome`, `ProgressEmbedder`; the ticket's
+  scope line) and `cli.md` (the tab), marked "PR #N, verify merged".
+
+No Python under `src/` changes, so no file in the CLAUDE.md ceiling table is touched.
+
+## Design choices the ticket leaves open (resolved here)
+
+1. **A withheld result shows no title and no link.** RM-10's lens nulls `title`, `vault_path` and
+   `document_id` and sets `title_withheld: true` while `serve_confidential_titles` is off. The panel then
+   says "Saved. Its title is withheld on this server (confidential)." with no "Open in Notes" link.
+   §7.5 says the panel **may** show confidential titles; it does not oblige the client to put back what
+   the server withheld. The panel never fills a title from the form's input: a dedup skip can land on a
+   different, existing confidential document, so the typed title could also misname it. **Job rows are
+   labelled by kind and submit time only, never by the typed title**, for the same reason and because
+   `sessionStorage` holds ids only.
+2. **One announcer, not a live job list.** Spec §8 asks for an `aria-live="polite"` job list *and* for
+   each state change to be announced once, not on every poll. A live list re-announces every progress
+   update. So the job list is a plain `<ol>`, and a separate `role="status"` region receives one sentence
+   per state change (queued, running, the outcome, failure, cancel). That meets the stated intent.
+3. **Config loads lazily, on the first show of the tab**, together with the resumption of remembered
+   jobs. Boot is unchanged for the Notes tab, and the existing hermetic browser suites (which stub no
+   ingest route) keep their request sets.
+4. **Polling** (§4.3): 1 s while running, 3 s once the job is older than 30 s or when
+   `document.visibilityState === "hidden"`; stops at a terminal state. A network failure keeps polling at
+   3 s and shows "cannot reach the server; still trying". A 404 `job_unknown` ends the row with the §4.6
+   sentence ("outcome unknown … re-submitting is safe") and forgets the id.
+5. **"Open in Notes"** is a real link, `/?id=<uuid>` (the URL state `store.js` reads), so middle-click and
+   copy work. A plain click switches to the Notes tab and calls `openNote(id)`.
+6. **Client-side size check.** The body's UTF-8 length (`TextEncoder`) is checked against
+   `config.limits.paste_body_bytes` before submitting; the server's 413 stays the authority.
+7. **Browser tier is hermetic**, per the ticket ("stubbed with `page.route`"). The spec's §9.4 sentence
+   about one cancel test on the real worker thread is covered by the manual end-to-end pass against the
+   test DB (a gated paste cancelled from the real page), not by CI. Deviation recorded here and in the PR.
+8. **Remembered jobs**: at most 20 ids are kept (spec R7: the client renders the 20 most recent); a
+   terminal job stays remembered so a reload shows its outcome until the server evicts it (404).
+
+## Tests (TDD: red first)
+
+- `tests/test_ui_tabs_static.py`: the Ingest pane is not `deferred-tab` and carries a form; the Agent pane
+  still is deferred.
+- `tests/test_ui_static_behaviour.py`: roster additions (the existing guards then cover the new files:
+  single `innerHTML`, `--ink-faint`, `var()` definitions, the `[hidden]` cascade, cross-sheet overlaps);
+  `check_the_ingest_tab_is_wired_into_boot`, mutation-proven by its registry entries.
+- `tests/test_ui_browser_ingest.py`:
+  - paste → progress (`<progress>` with `value`/`max`) → "Added" → the link opens the note in Notes;
+  - paste again → "Already in your brain" with a link;
+  - `mirror_repaired`, `empty` and the secret-findings / egress / summary / graph notices render as text;
+  - a withheld result → no link, the withheld sentence, and the typed title nowhere in the panel;
+  - cancel a running job → "Cancelled. Nothing was written."; a 409 → the server's message;
+    `cancel_too_late` → its sentence;
+  - a failed job → the server's fixed message;
+  - a reload with a remembered id that is now 404 → the "outcome unknown" sentence;
+  - read-only and non-loopback configs → the form is disabled and the reason is shown;
+  - an oversize body is refused client-side with no request;
+  - keyboard only: Tab reaches every control, Enter on the submit button submits;
+  - both themes: the panel renders and the page raises nothing;
+  - markup-looking server strings are drawn as text;
+  - `pollDelay` executed in the page.
+- `tests/test_ci_workflow.py` needs no edit: it discovers the browser roster by marker, so the new module
+  is red until `ci.yml` lists it.
+
+## Mutation proofs (in `git archive` copies only)
+
+Planned: drop the `ingest.css` roster entry; unwire `wireIngest()`; make the withheld branch render a link;
+show the typed title in a withheld result; never stop polling at a terminal state; drop the cancel button's
+handler; skip the client-side size check; drop `ingest_browser` from `ci.yml`.
+
+## Risks
+
+- The hermetic stubs could drift from RM-10's wire shape. Mitigation: the stub payloads are built from the
+  same keys `routes_jobs.snapshot_payload` and `ingest_service._result_payload` emit, and the manual pass
+  runs the real server.
+- `static/js/` module count grows by three; each is added to `JS_ORDER` in the same change.

@@ -22,6 +22,31 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — the Ingest tab: paste from the browser
+
+`brain ui`'s **Ingest** tab is no longer a "deferred" placeholder (roadmap ticket
+RM-11, phase 2 of the Ingest tab design). It pastes text or markdown into the
+brain through the RM-10 backend below.
+
+- A form with a title, the body, tags, the type (`note` or `transcript`), the
+  sensitivity (`normal` or `confidential`) and "skip the summary". The size limit
+  and the choices come from the server, and an over-size body is refused before
+  anything is sent.
+- A job panel: queued, then embedding with a progress bar, then the outcome.
+  **Added** links to the new document in the Notes tab; a body pasted before says
+  **Already in your brain**. It shows the summary and graph status, masked secret
+  findings, and the note when a confidential paste stays off a hosted embedder.
+  Cancel works until writing starts, and a refused or too-late cancel says so.
+- The panel remembers this browser tab's jobs across a reload; a job the server
+  no longer knows (after a restart) is reported as "outcome unknown, re-submitting
+  is safe".
+- A confidential document's title is never shown unless
+  `BRAIN_UI_SERVE_CONFIDENTIAL_TITLES` is on: the panel says the title is withheld
+  and offers no link. It never puts back the title you typed.
+- On a `--read-only`, `--host` or `--lan` server the tab is disabled and names the
+  reason. Keyboard-only use, both themes and reduced motion are covered by a new
+  browser suite, `tests/test_ui_browser_ingest.py`.
+
 ### Added — the Ingest tab's backend: background jobs and paste ingest
 
 `brain ui` can now ingest pasted text over HTTP (roadmap ticket RM-10, phase 1 of
