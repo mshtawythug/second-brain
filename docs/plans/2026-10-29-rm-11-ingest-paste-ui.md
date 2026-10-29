@@ -201,6 +201,29 @@ Run at `bd7e552`: **13 of 13 killed**, baseline passed.
 The two static guards added to `tests/test_ui_static_behaviour.py` (`ingest-module-imported`,
 `ingest-wired-in-boot`) are mutation-proven by that file's own registry on every run.
 
+### Review round 1 (rev-74 + aud-74)
+
+The same harness was used, with multi-site mutations allowed: every edit must match exactly once and be
+proven applied. It was run under the shared lock, one copy at a time, with each copy deleted after use.
+Run at `fea9c3d`: **15 of 15 killed**, and the baseline (the withheld test and a stale-poll test) passed.
+
+| # | Mutation | Killed by |
+|---|---|---|
+| M14 | rev-74's two-site mutation: the typed title is tracked on the record and shown in the withheld sentence | `test_a_withheld_result_has_no_link_and_never_the_typed_title` |
+| M15 | no settled guard in `apply()` | `test_a_stale_cancel_answer_cannot_unsettle_a_finished_row` |
+| M16 | the poller is not stopped when the row settles | `test_a_stale_poll_cannot_unsettle_a_cancelled_row` |
+| M17 | `cancelRequested` is not sticky | `test_a_requested_cancel_stays_requested` |
+| M18 | eviction is never recognised (`wasSettled` → false) | `test_an_evicted_finished_job_is_dropped_silently` |
+| M19 | settled ids are never recorded (`markSettled` removed) | `test_an_evicted_finished_job_is_dropped_silently` |
+| M20 | resumed jobs are announced | `test_resumed_jobs_are_not_announced` |
+| M21 | `announce()` does not clear first | `test_identical_announcements_are_cleared_and_re_set` |
+| M22 | the reduced-motion rule loses `appearance: none` | `test_reduced_motion_stills_the_indeterminate_bar` |
+| M23 | `maxlength="200"` is back on the title | `test_a_server_title_refusal_reaches_the_form` |
+| G1 | the unreachable callback does nothing | `test_an_unreachable_server_is_reported_and_polling_recovers` |
+| G2 | the bar keeps its value while writing | `test_the_writing_phase_shows_an_indeterminate_bar` |
+| G3 | the whole reduced-motion `@media` block is deleted | `test_reduced_motion_stills_the_indeterminate_bar` |
+| G4 | focus is not handed to the row | `test_cancel_a_running_job` |
+
 ## End-to-end (real server, test DB)
 
 `brain ui --port 8797 --no-open` with a scratch `BRAIN_HOME` whose `.env` points at
