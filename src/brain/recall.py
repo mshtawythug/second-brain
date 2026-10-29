@@ -32,9 +32,11 @@ recall work under ``BRAIN_EMBEDDER=none``, and
 **When the embedder is down, recall falls back to text-only matching** (RM-01,
 ``docs/specs/2026-10-23-roadmap-completion-design.md``). The search goes through
 :func:`brain.search_fallback.search_with_fts_fallback`, the policy ``brain
-search`` uses, and the outcome rides on :attr:`RecallResult.fallback`. The
-context block's header then ends ``, text-only``: the block is the artifact an
-agent pastes, so the marker has to be inside it, not only on stderr.
+search`` uses (since RM-09 through :func:`brain.search_pipeline.run_search`,
+which also applies the configured ranking stages), and the outcome rides on
+:attr:`RecallResult.fallback`. The context block's header then ends
+``, text-only``: the block is the artifact an agent pastes, so the marker has to
+be inside it, not only on stderr.
 """
 from __future__ import annotations
 
@@ -48,7 +50,8 @@ import psycopg
 from .config import Config
 from .ingest import Embedder
 from .search import SearchDiagnostics, SearchResult, hybrid_search
-from .search_fallback import SearchFallback, fallback_json, search_with_fts_fallback
+from .search_fallback import SearchFallback, fallback_json
+from .search_pipeline import run_search
 from .token_budget import TokenCost, pack_greedy, truncate_to_token_budget
 
 #: Tokens held back from the caller's budget for the ``# recall:`` header, so
@@ -332,7 +335,8 @@ def recall(
     that its withheld body matched the query.
     """
     diagnostics = SearchDiagnostics()
-    outcome = search_with_fts_fallback(
+    # Through the pipeline (RM-09): the fallback, then the configured stages.
+    outcome = run_search(
         hybrid_search,
         conn,
         embedder=embedder,

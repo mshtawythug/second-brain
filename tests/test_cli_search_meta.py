@@ -183,6 +183,10 @@ def test_json_meta_envelope_shape(
         "fallback_reason",
         "fallback_transient",
         "fallback_note",
+        # RM-09 — the ranking stages applied (plan
+        # docs/plans/2026-10-29-rm-09-search-pipeline.md). Always present,
+        # ``[]`` until a stage is configured.
+        "stages",
         "results",
     }
     assert payload["query"] == "quarterly"

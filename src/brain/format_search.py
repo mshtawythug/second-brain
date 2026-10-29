@@ -12,6 +12,7 @@ reachable only by parsing a human string.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from rich.table import Table
@@ -19,6 +20,7 @@ from rich.table import Table
 from .facets import SearchFacets
 from .search import SearchDiagnostics, SearchResult
 from .search_fallback import SearchFallback, fallback_json
+from .search_pipeline import StageReport, stage_reports_json
 from .token_budget import TokenCost
 
 #: Printed instead of the facet panel when nothing matched.
@@ -256,6 +258,7 @@ def search_envelope_json(
     brief: bool = False,
     cost: TokenCost = len,
     fallback: SearchFallback | None = None,
+    stages: Sequence[StageReport] = (),
 ) -> dict[str, Any]:
     """Build the opt-in ``brain search --json --meta`` envelope.
 
@@ -283,11 +286,16 @@ def search_envelope_json(
     ``results`` and are deliberately NOT in :func:`search_meta_json`: ``brain
     ui`` shares that projection and does not fall back (plan
     ``docs/plans/2026-10-23-search-fts-fallback.md``).
+
+    ``stages`` adds the always-present ``stages`` key right after them, from
+    :func:`brain.search_pipeline.stage_reports_json` (``[]`` when no ranking
+    stage is configured; RM-09). MCP ``brain_search`` carries the same key.
     """
     return {
         "query": query,
         **search_meta_json(diag, returned=len(results), facets=facets),
         **fallback_json(fallback),
+        **stage_reports_json(stages),
         "results": (
             search_results_brief_json(results, cost=cost)
             if brief

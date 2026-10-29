@@ -118,6 +118,9 @@ Claude Desktop's tools indicator (gear / plug icon) should show the `brain_*` to
 - `fallback_transient: true` means a temporary outage (embedder down, timeout); semantic ranking returns once the embedder does. `fallback_transient: false` means a configuration problem a retry will not fix: run `brain doctor` in a terminal. The one exception is `OllamaEmbedContextOverflow`: the query is longer than `BRAIN_OLLAMA_EMBED_NUM_CTX`, so shorten it.
 - For `arctic` / `qwen3`, confirm Ollama is running and the model is pulled.
 - For `voyage`, check the key and rate limits.
+
+**`brain_search` results carry a `stages` list**
+- Each entry is a ranking stage applied after the search (`name`, `applied`, `skipped_reason`, `ms`). It is `[]` until a stage is configured. `applied: false` with a class name in `skipped_reason` means that stage failed and the results are the ones it was given.
 - The server log (Claude Desktop's MCP log) records each fallback at INFO, by class only.
 
 **Postgres connection error**

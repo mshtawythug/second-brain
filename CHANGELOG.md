@@ -22,6 +22,22 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — one search pipeline for every search surface
+
+`brain search`, `brain explain`, MCP `brain_search`, `brain ui`'s search,
+`brain recall` and the retrieval behind `brain ask` now all search through one
+function, `brain.search_pipeline.run_search` (roadmap ticket RM-09). It runs the
+search, the text-only fallback, and then any configured ranking stages, in that
+order, so a later stage (a reranker, a document-level leg) is wired in one place
+and reaches every surface at once. No stage ships yet, so results are unchanged.
+`brain search --json --meta` and MCP `brain_search` gain one always-present key,
+`stages`, after the four `fallback*` keys: `[]` today, and one
+`{name, applied, skipped_reason, ms}` object per stage once one is configured. A
+stage that fails is reported as skipped (class name only) and costs that stage,
+never the search. The bare `--json` list, `brain explain --json` and the
+`brain ui` response are unchanged. A new test fails if any other module calls
+the search directly.
+
 ### Added — feature settings leaves, where new knobs go
 
 New configuration knobs now live in small per-feature modules under

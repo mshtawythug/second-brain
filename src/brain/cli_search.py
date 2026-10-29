@@ -13,9 +13,9 @@ additionally keeps ``monkeypatch.setattr("brain.cli.<name>", ...)`` — the patc
 point the existing test suite uses — effective for these commands. Same pattern
 as :mod:`brain._capture_command`.
 
-Since 2026-10-23 both commands fall back to text-only (FTS) matching when the
-query embed fails, with a stderr notice and exit 0, via
-:mod:`brain.search_fallback` (plan ``docs/plans/2026-10-23-search-fts-fallback.md``).
+Both search through :func:`brain.search_pipeline.run_search` (RM-09): ranking
+stages, and since 2026-10-23 text-only (FTS) matching when the query embed fails,
+with a stderr notice and exit 0 (``docs/plans/2026-10-23-search-fts-fallback.md``).
 """
 from __future__ import annotations
 
@@ -46,7 +46,8 @@ from .gaps import record_search_query
 from .ingest import Embedder
 from .queries import PersonMatch
 from .search import SearchDiagnostics, build_tsquery
-from .search_fallback import SearchFallback, search_with_fts_fallback
+from .search_fallback import SearchFallback
+from .search_pipeline import run_search
 from .search_predicate import build_predicate
 from .sensitivity import VALID_SENSITIVITY_LEVELS
 from .token_report import count_results_tokens
@@ -384,10 +385,9 @@ def search(
         # search already does (no extra query) — the lexical-miss signal that
         # `brain gaps` keys off (the vector leg always returns filler).
         diagnostics = SearchDiagnostics()
-        # Text-only fallback when the query embed fails (plan
-        # docs/plans/2026-10-23-search-fts-fallback.md); the notice is printed
-        # straight away so it lands above the results.
-        outcome = search_with_fts_fallback(
+        # The pipeline (RM-09): stages, and a text-only fallback on a failed query
+        # embed (plan docs/plans/2026-10-23-search-fts-fallback.md); its notice prints first.
+        outcome = run_search(
             hybrid_search,
             conn,
             embedder=embedder,
@@ -532,6 +532,7 @@ def search(
                     brief=brief,
                     cost=embedder.count_tokens,
                     fallback=outcome.fallback,
+                    stages=outcome.stages,
                 )
             )
         else:
@@ -644,10 +645,9 @@ def explain(
     _warn_if_fts_only_degraded(embedder)
     with connect(cfg.database_url) as conn:
         person_match = _resolve_search_person(conn, person)
-        # Text-only fallback when the query embed fails (plan
-        # docs/plans/2026-10-23-search-fts-fallback.md); the notice is printed
-        # straight away so it lands above the results.
-        outcome = search_with_fts_fallback(
+        # The pipeline (RM-09): stages, and a text-only fallback on a failed query
+        # embed (plan docs/plans/2026-10-23-search-fts-fallback.md); its notice prints first.
+        outcome = run_search(
             hybrid_search,
             conn,
             embedder=embedder,
