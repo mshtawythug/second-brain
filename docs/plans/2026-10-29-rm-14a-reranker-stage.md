@@ -103,6 +103,29 @@ left alone on purpose: editing it would cost a ceiling hop for a comment, and wi
 6. **The backlog rows read "IN PROGRESS: built, off", not SHIPPED** (DoD 12 closes the row in the
    ticket that finishes it). The reranker is not on until RM-14c's measurement decides, so closing
    BL-5 here would claim a ranking change nobody has measured.
+7. **An eval row whose stage SKIPPED is refused like a degraded row** (rev-76, ruled in this PR,
+   not deferred to RM-14c). A reranker that times out for one query leaves that row in hybrid
+   order while `config_signature` names the reranker, so `--record-baseline` would write hybrid
+   numbers under a reranker signature: PR #33's failure mode by another route. `EvalResult` gains
+   `stages_skipped` (in `brain eval --json`, never in a baseline), and `stage_ms` times applied
+   stages only. `save_baseline` raises `StageSkippedBaselineError`, a `DegradedBaselineError`
+   subclass, so `eval_cmd`'s existing mapping exits 1, with its own message
+   (`stage_skipped_run_message`). `diff_reports` puts a shared row with a skip into
+   `degraded_queries`, which `eval_cmd` already refuses under `--fail-below` (exit 1).
+   **`cli.py` is not edited**, and that fixes one wording choice: `eval_cmd` passes
+   `degraded_run_message` counts only, so its default wording is now cause-neutral (a failed
+   embed OR a skipped stage). The skip-specific variant is used where the cause is known
+   (`save_baseline`). `degraded_results` keeps meaning "the embed call failed", because the
+   CLI's ad-hoc warning says those rows "counted as 0.0", which a skipped row is not; skipped
+   rows have their own `skipped_stage_results`.
+8. **Test isolation** (rev-76). `run_search(stages=None)` and `run_eval(stages=None, env=None)`
+   read `os.environ`, so a shell-exported or `.env` `BRAIN_RERANKER` reached surface tests. A
+   function-scoped autouse fixture in `tests/conftest.py`, `_reranker_off`, sets
+   `BRAIN_RERANKER=none` (set rather than deleted, because `Config.load()`'s `setdefault` would
+   re-inject a `.env` value) and deletes the five other knobs. `tests/test_rerank_isolation.py`
+   runs a `nodb` probe in a child pytest that exports all six variables. `conftest.py` was
+   already over 800 lines and grows by 29; the fixture belongs beside the other autouse
+   isolation fixtures.
 
 ## Tests (TDD: each lands red first)
 
