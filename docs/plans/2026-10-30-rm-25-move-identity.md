@@ -95,18 +95,19 @@ DB. AC1 also drives the debouncer, with hand-fired timers as in
 | comparison applied to id-bearing files (content decides every dst) | PR #52 (a), both id-bearing guards |
 | content checked before the id (content OR id) | the same-id rewrite guard |
 | the no-row guard on the id-less path removed (round 1) | the never-synced id-less rename |
+| the no-row guard returns `True` (round 1, aud-90) | the never-synced id-less rename |
 | the fence strip removed, `shingles(body)` (round 1) | the derived-fence test |
 
-## Review round 1 (rev-90 at `5341774`)
+## Review round 1 (rev-90 and aud-90 at `5341774`)
 
 Two test gaps, tests only; `move_identity.py` is unchanged.
 
 | Finding | Fix | Mutant, now killed |
 |---|---|---|
-| 1. The id-less path's `if row is None: return False` (a never-synced id-less note renamed) was untested. | `test_never_synced_id_less_rename_syncs_fresh_with_no_row_at_src`: `is_another_document` is False, and the worker syncs dst with its own id and no error. | the guard removed → `TypeError` |
-| 2. Deviation 1's fence strip was unpinned: `shingles(strip_fence(body))` → `shingles(body)` survived. | `test_derived_fence_on_the_destination_does_not_count_against_the_note`: dst is the stored body plus a 200-word derived-links fence (about 36 / 236 unstripped); the rename keeps the id and the backlink. | `shingles(body)` |
+| 1. The id-less path's `if row is None: return False` (a never-synced id-less note renamed) was untested. | `test_never_synced_id_less_rename_syncs_fresh_with_no_row_at_src`: `is_another_document` is False, and the worker syncs dst with its own id and no error. | the guard removed → `TypeError`; the guard returning `True` (dst has 36 shingles, above the floor) |
+| 2. Deviation 1's fence strip was unpinned: `shingles(strip_fence(body))` → `shingles(body)` survived. | `test_derived_fence_on_the_destination_does_not_count_against_the_note`: aud-90's case: a 20-word note (16 shingles) loses its id on disk and gains a linker-shaped fence of 20 links (heading plus `- [[partner-N|Partner N]] *(shared_thread)*` bullets). Unstripped, the Jaccard is 0.148 (16 / 108), and the test asserts that the fixture is below 0.2; stripped, it is 1.0. The rename keeps the id and the backlink. | `shingles(body)` |
 
-After the round: 20 passed in the file; all 11 mutants killed, each in a fresh `git archive` copy, deleted afterwards.
+After the round: 20 passed in the file; all 12 mutants killed, each in a fresh `git archive` copy, deleted afterwards.
 
 ## Deviations
 
