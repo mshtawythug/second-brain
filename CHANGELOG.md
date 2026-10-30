@@ -22,6 +22,23 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — Jira issues as a source, through an agent recipe (RM-34)
+
+- **A new source kind, `jira`.** `brain ingest-stdin --source jira` is accepted, and the facet
+  panel, the source filter and `[[jira:<host>/<KEY>]]` links pick it up. In `brain ui` a Jira row
+  gets its own glyph. `_ingested/jira/` has no month headers in the tree, which is intended.
+- **The recipe lives in the `ingest-brain` skill, not in code.** The Atlassian MCP connector
+  fetches the issues, and the skill pipes each one into `brain ingest-stdin --source jira
+  --content-type jira_issue --sensitivity confidential`. There is no Jira API client. The scope is
+  in the recipe: by default the JQL is
+  `(assignee = currentUser() OR reporter = currentUser()) AND updated >= -30d`, with the
+  parentheses. The agent refuses a JQL with no time bound, and project-wide pulls are not part of
+  the recipe. Issues ingest as `confidential`, because work-tracker content is the employer's.
+  Status and assignee go in metadata, never in the body. Other people's comments go in only on
+  request.
+- **`brain ingest-stdin --help` lists the accepted kinds from the one definition.** It had listed
+  four kinds as a literal, so it would have called `jira` invalid.
+
 ### Fixed — the vault watcher no longer loses a delete across a shutdown or a lost connection (RM-26)
 
 - A file deleted (or renamed away) just as the watcher shut down, or while it

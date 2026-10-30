@@ -5,8 +5,9 @@ description: >
   `brain` CLI's ingestion commands. Use this skill whenever the user asks to
   ingest, save, pull, or capture content into the brain — including files
   (PDFs / DOCX / Markdown / TXT), directories of files, Gmail threads, Krisp
-  meeting transcripts, Slack threads, or arbitrary stdin snippets. For
-  Krisp/Slack the brain does NOT have a direct integration; instead orchestrate
+  meeting transcripts, Slack threads, the user's own Jira issues, or arbitrary
+  stdin snippets. For Krisp/Slack/Jira the brain does NOT have a direct
+  integration; instead orchestrate
   the relevant MCP server and pipe the fetched content into `brain
   ingest-stdin`. Always pick a sensible scope flag — never bulk-ingest the
   Gmail inbox.
@@ -14,7 +15,7 @@ description: >
   directory, pull this email, pull last week's Krisp calls, save this Slack
   thread, save this transcript, add this to my brain, capture this in my
   brain, import this into the brain, brain ingest, brain ingest-stdin, brain
-  ingest-gmail.
+  ingest-gmail, ingest my jira tickets.
 ---
 
 # Ingest Brain
@@ -35,6 +36,7 @@ notes, see `brain-authoring`.
 | A directory of files | `brain ingest-dir <dir>` | Recursive. `--ext md,pdf` to scope. `--dry-run` first. |
 | Gmail messages | `brain ingest-gmail` | **REFUSES without a scope flag.** See Gmail section. |
 | Krisp transcript / Slack thread / arbitrary text | `brain ingest-stdin` | The MCP→stdin chain. See Krisp + Slack sections. |
+| The user's own Jira issues | `brain ingest-stdin --source jira` | Atlassian MCP→stdin, **confidential**. See Jira section. |
 | Krisp action items as a separate doc | `brain enrich --krisp-action-items` (handoff) + `brain ingest-stdin --content-type krisp_action_items` | See `brain-todo` for the full flow. |
 
 ## Files and directories
@@ -161,6 +163,53 @@ Pick `--external-id` so it's stable across re-ingests. Channel-id + thread-ts
 is the canonical Slack identifier; thread-ts alone is also unique within a
 workspace.
 
+## Jira issues — MCP→stdin chain
+
+The user's own tickets, through the Atlassian MCP connector (`searchJiraIssuesUsingJql`,
+then `getJiraIssue`). There is no Jira CLI and no flag to enforce scope, so **this recipe
+is the scope** — follow it exactly.
+
+**The JQL.** Use this one unless the user narrows it further:
+
+`(assignee = currentUser() OR reporter = currentUser()) AND updated >= -30d`
+
+Keep the parentheses: without them `AND` binds tighter and the time bound applies to
+`reporter` only. A narrower JQL is fine (a shorter window, one project, one key), but it
+must still name the user and carry a time bound. **Refuse a JQL with no time bound**, and
+tell the user why. Project-wide pulls (every issue in a project) are not part of this recipe.
+
+**What goes in the body:** the key and summary, the description, and the user's own
+comments. Other people's comments go in only when the user asks for them. Status and
+assignee change often, so they go in `--metadata`, never in the body:
+
+```bash
+echo "<KEY>: <summary>
+
+<description>
+
+<the user's own comments>" | brain ingest-stdin \
+  --source jira \
+  --external-id "<site-host>/<ISSUE-KEY>" \
+  --title "<ISSUE-KEY> — <summary>" \
+  --content-type jira_issue \
+  --sensitivity confidential \
+  --date YYYY-MM-DD \
+  --tag jira \
+  --metadata '{"site": "<site-host>", "issue_key": "<ISSUE-KEY>", "status": "<status>", "assignee": "<name>"}'
+```
+
+- **Always `--sensitivity confidential`.** Work-tracker content belongs to the employer:
+  confidential keeps it off a hosted embedder and out of generated pages and unprompted
+  listings. Only the user can ask for `normal`.
+- **Dedup is `(jira, <site-host>/<ISSUE-KEY>)`**, so the same key on two sites stays two
+  documents. Re-ingesting a changed issue updates it in place.
+- **An unchanged body prints `skipped (already ingested): <title> → <document-id>` and
+  leaves metadata alone.** If only the status or assignee moved, patch it without a
+  re-chunk, passing the id after `→`:
+  `brain edit <document-id> --metadata '{"status": "Done"}'`.
+
+The 30-day bound keeps a run to tens of issues; batch small, as for Krisp.
+
 ## Tags on ingest
 
 Every ingest command takes one or more `--tag` flags. Tags are
@@ -206,6 +255,8 @@ If `brain doctor` flags an Ollama / Postgres issue, route to `brain-maintenance`
 
 - **Never bulk-ingest the inbox.** `brain ingest-gmail` enforces this with the
   scope-flag requirement; respect the spirit when picking scopes.
+- **Jira: the user's own issues, time-bounded, confidential.** No JQL without a
+  time bound, no project-wide pulls, always `--sensitivity confidential`.
 - **Don't invent content for stdin ingests.** If the MCP returned nothing,
   tell the user — don't generate a placeholder transcript.
 - **No untagged dumps.** Always pass `--tag` so the user can find/clean the
