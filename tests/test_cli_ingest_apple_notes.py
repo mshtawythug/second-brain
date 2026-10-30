@@ -569,12 +569,13 @@ def test_the_default_cap_is_200(notes: fx.FakeOsascript) -> None:
 
 _FAKE_OSASCRIPT = """#!{python}
 import json, os, sys
-log = os.environ["RM36_FAKE_LOG"]
-with open(log, "w") as fh:
-    json.dump(sys.argv[1:], fh)
+# The runner passes only PATH, HOME, LANG and TMPDIR, so the paths are written in
+# here, and the environment it saw is logged with the argv.
+with open({log!r}, "w") as fh:
+    json.dump({{"argv": sys.argv[1:], "env": sorted(os.environ)}}, fh)
 sys.stderr.write("osascript: private stderr detail\\n")
 request = json.loads(sys.argv[5])
-answer = json.load(open(os.environ["RM36_FAKE_ANSWER"]))
+answer = json.load(open({answer!r}))
 answer["notes"] = [n for n in answer["notes"] if n["folder"] in request["folders"]]
 sys.stdout.write(json.dumps(answer))
 """
@@ -588,12 +589,17 @@ def test_end_to_end_through_a_fake_osascript_via_the_binary_seam(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     script = bin_dir / "osascript"
-    script.write_text(_FAKE_OSASCRIPT.format(python=sys.executable))
+    script.write_text(
+        _FAKE_OSASCRIPT.format(
+            python=sys.executable,
+            log=str(tmp_path / "argv.json"),
+            answer=str(tmp_path / "answer.json"),
+        )
+    )
     script.chmod(0o755)
     answer = {"notes": [fx.note(1, folder=hostile)], "eligible": 1, "locked": 1, "missing": []}
     (tmp_path / "answer.json").write_text(json.dumps(answer))
-    monkeypatch.setenv("RM36_FAKE_ANSWER", str(tmp_path / "answer.json"))
-    monkeypatch.setenv("RM36_FAKE_LOG", str(tmp_path / "argv.json"))
+    monkeypatch.setenv("GH_TOKEN", "synthetic-token-not-for-osascript")
     # PATH holds nothing runnable: the command must not need it (L1, #103).
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     monkeypatch.setattr(
@@ -604,7 +610,13 @@ def test_end_to_end_through_a_fake_osascript_via_the_binary_seam(
     result = _run("--folder", hostile)
 
     assert result.exit_code == 0, result.output
-    argv = json.loads((tmp_path / "argv.json").read_text())
+    seen = json.loads((tmp_path / "argv.json").read_text())
+    argv = seen["argv"]
+    # sec-103b: the minimal environment, never the caller's tokens (Python may add its own).
+    assert "GH_TOKEN" not in seen["env"]
+    assert set(seen["env"]) - {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"} <= {
+        "PATH", "HOME", "LANG", "TMPDIR"
+    }
     assert argv[:4] == ["-l", "JavaScript", "-e", JXA_SCRIPT]
     assert json.loads(argv[4]) == {"folders": [hostile], "since": None, "limit": 200}
     assert "1 locked note(s) skipped" in result.output
