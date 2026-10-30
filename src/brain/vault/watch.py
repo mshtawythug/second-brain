@@ -42,7 +42,10 @@ Concurrency invariants worth restating:
   after a Postgres restart (``db_reconnect``), which split the worker's job body
   out into ``_run_job`` (bound per job by ``_job_runner``, so a re-run always
   syncs); ``WATCHER_CONNECT_TIMEOUT_S`` keeps a shutdown-time connect inside the
-  shutdown windows.
+  shutdown windows. A delete (or a move's source) dropped after close or left
+  unapplied at shutdown, a delete's id lost with its connection, and a graph
+  remove the lane could not apply are journaled and replayed at the next start
+  (``owed_work``, RM-26); CLAUDE.md's ceiling table records that wiring.
   These are the 2026-10-22 race fixes, reasoned at ``_fire``,
   ``_supersede_pending`` and the drain; CLAUDE.md's ceiling table records them.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
@@ -106,6 +109,8 @@ from .debounce_timer import DebounceTimer, TimerFactory, daemon_timer
 from .derived_links.fence import strip_fence
 from .graph_lane import LOST_REMOVES_REPAIR, GraphLane
 from .move_identity import is_another_document
+from .owed_work import DeleteCapture, OwedJournal, delete_vault_rows, replay_owed
+from .owed_work import vault_relative_posix as _vault_relative_posix
 from .sync import SyncReport, sync_one_file, sync_vault
 
 if TYPE_CHECKING:
@@ -191,6 +196,8 @@ class _Job:
     action: _Action
     abs_path: Path
     dest_path: Path | None = None
+    # A delete's row id, read before deleting, kept across a reconnect re-run (RM-26).
+    capture: DeleteCapture = field(default_factory=DeleteCapture, compare=False, repr=False)
 
 
 @dataclass
@@ -210,6 +217,7 @@ class _WatcherState:
     # and enqueues nothing, so no job can land behind the sentinel.
     closed: bool = False
     dropped_after_close: int = 0
+    owed: OwedJournal | None = None  # RM-26: work a shutdown would lose
     # The graph lane run_watcher built, if any (tests barrier on it).
     graph_lane: GraphLane | None = None
     # ``processed`` and ``errors`` accumulate over the watcher's lifetime
@@ -237,6 +245,7 @@ def run_watcher(
     install_signal_handlers: bool = True,
     graph_syncer: GraphSyncTarget | None = None,
     enable_log_rotation: bool = False,
+    owed_journal: Path | None = None,
 ) -> SyncReport:
     """Block until SIGINT/SIGTERM, watching ``config.vault_path``.
 
@@ -265,8 +274,14 @@ def run_watcher(
     never spawn a background rotator thread. The CLI passes True for the real
     ``brain vault sync --watch`` daemon, which keeps its launchd stderr log
     size-capped for as long as it stays up.
+
+    ``owed_journal`` (RM-26) is the owed-work journal (``brain.vault.owed_work``):
+    replayed after the startup sync, appended to at shutdown. ``None``, the
+    default, disables it so library callers and tests never share one.
     """
     state = _WatcherState()
+    if owed_journal is not None:
+        state.owed = OwedJournal(owed_journal, config.vault_path)
 
     # Keep this daemon's launchd logs bounded while it is UP. The shim wrapper
     # rotates once before exec, which caps the crash-loop shape (process dies,
@@ -300,6 +315,8 @@ def run_watcher(
             owner_participants=config.owner_participants,
             graph_syncer=lane,
         )
+        if owed_journal is not None:  # after the sync, so a rename keeps its row
+            replay_owed(startup_conn, config.vault_path, lane, journal=owed_journal)
     finally:
         startup_conn.close()
 
@@ -432,8 +449,11 @@ def run_watcher(
                 )
         # After the worker, so every live graph request is in: drops pending
         # reconciles (redone by the next startup), drains removes.
-        if lane is not None and not lane.close(timeout=_LANE_CLOSE_TIMEOUT_S):
-            undrained = lane.undrained_removes()
+        lane_exited = lane is None or lane.close(timeout=_LANE_CLOSE_TIMEOUT_S)
+        undrained = lane.undrained_removes() if lane is not None else []
+        if state.owed is not None:
+            state.owed.owe_graph_removes(undrained)  # RM-26: replayed at the next start
+        if not lane_exited:
             logger.warning(
                 "vault watcher: graph lane still finishing a request or reconnecting; %d "
                 "graph remove(s) may not be applied (%s): %s",
@@ -728,6 +748,7 @@ def _schedule_debounced(
             state.dropped_after_close += 1
             if state.dropped_after_close == 1:
                 logger.warning("vault watcher: dropping events after shutdown")
+            _owe(state, [job])  # RM-26 (H-2): the startup sync never prunes a delete
             return
         overflowing = len(state.pending_timers) - (path in state.pending_timers) >= _MAX_PENDING
         if not overflowing:
@@ -885,19 +906,27 @@ def _report_unapplied(state: _WatcherState, job: _Job, exc: ReconnectAbandoned) 
 
     Reads to the sentinel (which shutdown always enqueues) so the drained timer
     jobs are counted too. Edits and renames are redone by the next startup
-    sync; a delete is not, since the watcher never prunes.
+    sync; a delete is not, since the watcher never prunes, so it is owed (RM-26).
     """
     unapplied = [job]
     while (rest := state.jobs.get()) is not None:
         unapplied.append(rest)
+    _owe(state, unapplied)
     logger.warning(
         "vault watcher: worker has no DB connection at shutdown (%s); %d job(s) not "
         "applied (%d delete(s)): the next startup sync redoes edits and renames; a "
-        "delete is redone only by `brain vault sync --prune`",
+        "delete is redone at the next start if journaled, else by `brain vault sync --prune`",
         describe_failure(exc),
         len(unapplied),
         sum(1 for j in unapplied if j.action == "delete"),
     )
+
+
+def _owe(state: _WatcherState, jobs: list[_Job]) -> None:
+    """Journal each dropped or unapplied delete (a move by its source) and lost id."""
+    if state.owed is not None:
+        state.owed.owe_deletes(j.abs_path for j in jobs if j.action != "upsert")
+        state.owed.owe_graph_removes(i for j in jobs for i in j.capture.unhanded())
 
 
 def _job_runner(
@@ -1015,6 +1044,7 @@ def _run_job(
                 job.abs_path,
                 config.vault_path,
                 graph_syncer=graph_syncer,
+                capture=job.capture,
             )
             # Drop the cache entry so a future creation event for
             # the same path is treated as cold-start, not a
@@ -1138,29 +1168,13 @@ def _cache_after_sync(
         _refresh_body_cache(state, abs_path)
 
 
-def _vault_relative_posix(abs_path: Path, vault_path: Path) -> str | None:
-    """Return ``abs_path`` relative to the vault as a POSIX string, or None.
-
-    Mirrors the ``resolve()``-then-lexical-fallback ladder used elsewhere in
-    the watcher so a vanished path (a delete or move source, already gone
-    from disk) still yields the correct relative key without touching the FS.
-    Returns ``None`` when the path is outside the vault.
-    """
-    try:
-        return abs_path.relative_to(vault_path.resolve()).as_posix()
-    except ValueError:
-        try:
-            return abs_path.relative_to(vault_path).as_posix()
-        except ValueError:
-            return None
-
-
 def _handle_delete(
     conn: psycopg.Connection[Any],
     abs_path: Path,
     vault_path: Path,
     *,
     graph_syncer: GraphSyncTarget | None = None,
+    capture: DeleteCapture | None = None,
 ) -> None:
     """Remove the vault-tier ``documents`` row for ``abs_path``.
 
@@ -1187,7 +1201,9 @@ def _handle_delete(
     (manual ``ALTER``, dropped index, migration regression). The
     surplus rows are still deleted (we don't raise) so the user isn't
     left with a half-finished delete and orphaned chunks; the error log
-    is what surfaces the invariant break.
+    is what surfaces the invariant break. The SQL lives in
+    ``owed_work.delete_vault_rows``, which reads the row's id first (``capture``)
+    so a reconnect re-run of a committed delete still removes its graph vertex.
     """
     relative = _vault_relative_posix(abs_path, vault_path)
     if relative is None:
@@ -1196,24 +1212,7 @@ def _handle_delete(
             abs_path,
         )
         return
-    deleted = conn.execute(
-        "DELETE FROM documents WHERE kind = 'vault' AND vault_path = %s "
-        "RETURNING id",
-        (relative,),
-    ).fetchall()
-    if len(deleted) > 1:
-        logger.error(
-            "vault watcher: deleted %d rows for vault_path=%s — "
-            "schema uniqueness invariant broken (expected 0 or 1)",
-            len(deleted),
-            relative,
-        )
-    # Wave G1-c: drop each deleted doc from the people graph (best-effort /
-    # never-raises; no-op when graph sync is disabled or AGE is absent). The
-    # worker connection is autocommit, so the DELETE above already committed.
-    if graph_syncer is not None:
-        for row in deleted:
-            graph_syncer.remove(conn, str(row[0]))
+    delete_vault_rows(conn, relative, graph_syncer=graph_syncer, capture=capture)
 
 
 def _handle_move(
