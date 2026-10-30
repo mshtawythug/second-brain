@@ -30,7 +30,9 @@ Per line, in this order:
      ``2026/10/06``), year ranges (``2026-2028``) and times (``10:30``) are
      masked first, but only as a whole number group that is a valid date or
      time, so "01.70.37.22.46" (no date is a whole group in it) and
-     "+49 30 12-34-5678" (month 34) are still phone numbers;
+     "+49 30 12-34-5678" (month 34) are still phone numbers. A run that starts
+     with ``+`` is checked before any masking: "+49 89 01-02-03" is a phone
+     number even though "01-02-03" is a valid date;
    - the ``,,digits`` / ``digits#`` forms of a one-tap number.
 
    In a description, a location or a display name **the whole line is
@@ -45,7 +47,8 @@ Per line, in this order:
      "manager", "reset", "policy" or "card" ("Password manager rollout",
      "Access code rollout"), stays;
    - a short word with a value (``PIN 4321``, ``PIN-4321``, ``PIN4321``,
-     ``P.I.N. 4321``, ``code is 4321``, ``code — 4321``, ``ID: ENG-123``)
+     ``P.I.N. 4321``, ``code is 4321``, ``code is ABC123``, ``code — 4321``,
+     ``ID: ENG-123``; after a connector the value need only hold a digit)
      truncates the title the same way: "Project ID: ENG-123 kickoff" keeps
      "Project";
    - a dial-in keyword loses its value, and a digit run and a one-tap form are
@@ -62,9 +65,13 @@ they target, and that is accepted (RM-30 security review, S6). Outside a title,
 "Meeting ID card" are dropped as dial-in lines, and "Year 2026 2027 2028
 planning" as a digit run. In every field, "node.js/react" and "README.md/notes"
 are removed as scheme-less links, and "Team at Acme dot com launch" as a
-spelled-out address. Narrowing those rules (a TLD allowlist, a stricter
-keyword grammar) would let real join links and addresses through, so it is not
-done.
+spelled-out address. In titles, "Password reset for Avery" and "Meeting ID card
+design review" are truncated (a credential keyword followed by more than the
+value-less allowlist), and in a description "Room 4B" on the line after "Please
+bring your ID" is dropped (that line ends with a short credential word, so the
+short line after it is taken as its value). Narrowing those rules (a TLD allowlist, a
+stricter keyword grammar) would let real join links and addresses through, so
+it is not done.
 
 **Accepted residual risk** (RM-30 security review): a bare value with no
 keyword and under seven digits ("Sync 123456") and digits spelled out as words
@@ -91,7 +98,10 @@ _DIAL_KEYWORD = r"dial[\s-]*in|join\s+by\s+phone|one[\s-]*tap"
 # "Not followed by a letter" rather than "\b": "PIN4321" counts, "pinned" not.
 _SHORT_WORD = r"(?:\bp\.?\s?i\.?\s?n\.?|\bcode|\bid|\bbridge)(?![^\W\d_])"
 _SHORT_WITH_VALUE = (
-    rf"{_SHORT_WORD}\s*[:=#]\s*\S|{_SHORT_WORD}\s*(?:is\b|->|[-–—])?\s*\d"
+    rf"{_SHORT_WORD}\s*[:=#]\s*\S"
+    # after a connector, a token holding a digit anywhere ("code is ABC123")
+    rf"|{_SHORT_WORD}\s*(?:is\b|->|[-–—])\s*\S*\d"
+    rf"|{_SHORT_WORD}\s*\d"
 )
 # Line mode: any keyword, a join instruction, or a short word with a value.
 _KEYWORD = re.compile(
@@ -133,6 +143,10 @@ _DATE_OR_TIME = re.compile(
 )
 _SEPARATOR = r"\s().\-/+‐-―"
 _DIGIT_RUN = re.compile(rf"\+?\d(?:[{_SEPARATOR}x]*\d){{6,}}", re.IGNORECASE)
+# A run that starts with "+" is a phone number whatever its groups look like
+# (a date never carries a leading "+"), so it is found BEFORE dates are masked:
+# "+49 89 01-02-03" must not keep "01-02-03" as a date.
+_PLUS_DIGIT_RUN = re.compile(rf"\+\d(?:[{_SEPARATOR}x]*\d){{6,}}", re.IGNORECASE)
 _ONE_TAP = re.compile(r",,\s*\d|\d{3,}\s*#")
 _ONE_TAP_TOKEN = re.compile(r"\S*,,\S*|\S*\d{3,}\s*#\S*")
 
@@ -241,8 +255,9 @@ def _clean_title_line(line: str) -> str:
     """Title mode, on a normalised line (module docstring, step 3)."""
     text = _truncate_at_secret(_URL.sub(" ", line))
     text = _DIAL_WITH_VALUE.sub(" ", text)
-    # Digit runs, with dates and times masked in place so positions line up;
-    # then what is left of a one-tap form.
+    # "+" runs on the unmasked text first, then digit runs with dates and times
+    # masked in place so positions line up; then what is left of a one-tap form.
+    text = _PLUS_DIGIT_RUN.sub(" ", text)
     masked = _mask_dates(text)
     for match in reversed(list(_DIGIT_RUN.finditer(masked))):
         text = f"{text[:match.start()]} {text[match.end():]}"
@@ -275,7 +290,7 @@ def _tidy(text: str) -> str:
 
 
 def _is_dial_in(line: str) -> bool:
-    if _KEYWORD.search(line) or _ONE_TAP.search(line):
+    if _KEYWORD.search(line) or _ONE_TAP.search(line) or _PLUS_DIGIT_RUN.search(line):
         return True
     masked = _mask_dates(line)
     return _DIGIT_RUN.search(masked) is not None

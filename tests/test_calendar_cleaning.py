@@ -263,6 +263,7 @@ ORDINARY_TITLES = [
     ("ID card renewal", "ID card renewal"),
     ("Covid 19 update", "Covid 19 update"),
     ("pinned agenda and codebase tour", "pinned agenda and codebase tour"),
+    ("The code is ready", "The code is ready"),
     ("Call +1 323-555-0100,,123456789# US", "Call US"),
     ("Call (+1 323 555 0100) team", "Call team"),
 ]
@@ -318,6 +319,9 @@ CREDENTIAL_PROBES = [
     ("Sync passcode\n4321", "4321"),
     ("Call skype:live:samplename", "samplename"),
     ("pwd hunter2 for the share", "hunter2"),
+    # rev-96 L2: after a connector, a value that merely holds a digit
+    ("Sync, the code is ABC123", "ABC123"),
+    ("Team code -> X9Y", "X9Y"),
 ]
 
 
@@ -375,6 +379,10 @@ PHONES_THAT_LOOK_LIKE_DATES = [
     ("Tel 9123.12.10", "9123"),  # a valid date slice with a digit glued before
     ("Tel 12.10.26.5555", "5555"),  # ... and with digits glued after
     ("Fax 01.12-26 3344", "3344"),  # mixed separators: not one date
+    # rev-96 L1: a "+" number whose trailing groups read as a valid date
+    ("+49 89 01-02-03", "01-02-03"),
+    ("+49 30 12.03.56", "12.03.56"),
+    ("Netherlands +31 6 2012-2015", "2012-2015"),
 ]
 DATES_THAT_STAY = [
     "Team offsite 10/06/2026 - 10/08/2026",
@@ -404,3 +412,17 @@ def test_a_phone_line_between_description_lines_is_dropped() -> None:
 @pytest.mark.parametrize("clean", [clean_line, clean_title, clean_description])
 def test_a_date_is_not_a_phone_number(clean: Callable[[object], str], text: str) -> None:
     assert clean(text) == text
+
+
+
+@pytest.mark.parametrize("title", ["Password reset for Avery", "Meeting ID card design review"])
+def test_a_title_is_over_truncated_by_design(title: str) -> None:
+    """rev-96's accepted over-removal (module docstring, the trade)."""
+    assert _only_doc(_event_with(title, description="Agenda.")).doc.title == PLACEHOLDER
+
+
+def test_a_short_line_after_a_line_ending_with_id_is_dropped_by_design() -> None:
+    event = _event_with("Planning", description="Please bring your ID\nRoom 4B")
+
+    body = _only_doc(event).doc.content
+    assert "Please bring your ID" in body and "Room 4B" not in body

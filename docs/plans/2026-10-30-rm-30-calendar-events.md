@@ -55,6 +55,9 @@ explained below.
      four-digit year in 1900–2099. The first widening (V1) masked date-shaped slices of European
      numbers ("01.70.37.22.46", "+49 30 12-34-5678"), which then survived every field; the
      bounds and the validation close that (rev-96, HIGH), and a test table pins both directions.
+     A digit run that starts with `+` is checked before any masking, since a date never carries a
+     leading `+` ("+49 89 01-02-03" is a phone number; rev-96 L1). After a connector (`is`, `->`,
+     a dash) a short word's value need only hold a digit ("code is ABC123"; rev-96 L2).
    - **The directory is updated once per document per run** (aud-96 D1): attendees are recorded
      before the write when the document is new or its participants changed, and after it only
      when the body changed and they were not recorded already. A first ingest had counted every
