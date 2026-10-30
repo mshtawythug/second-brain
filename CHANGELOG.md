@@ -22,6 +22,42 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — screenshots from a drop folder become searchable (RM-33)
+
+- `brain ingest-folder --dir PATH --since 7d` (one folder) or
+  `brain ingest-folder --configured --since 2d` (every folder in
+  `$BRAIN_HOME/drop-folders.toml` with `auto = true`). Each new file is moved to
+  the folder's `imported/` as `<stem>-<sha8><ext>`, then ingested from there and
+  titled by its original name, so two different files that arrive with one name
+  stay two documents. The same file dropped twice is a no-op that deletes the
+  drop copy, only after its full SHA-256 matches the earlier import. A move never
+  overwrites a file, and a failed ingest returns the file to the folder. Symlinks,
+  sub-folders, hidden files (iCloud stubs and in-progress screenshots), iCloud
+  files evicted from the disk, and files modified in the last 5 seconds are left
+  alone. A run stops after 200 files a folder or 8 minutes, and the rest wait for
+  the next run. Without `--dir` or `--configured`, and `--since`, the command exits 2.
+- A new image extractor OCRs `.png`, `.jpg` and `.jpeg` with the local
+  `tesseract` (RM-32's engine) into a `screenshot` document, stored
+  **confidential** by default (a screenshot can show anything; the secret guard
+  still runs). Only Pillow's PNG and JPEG decoders are reachable. A file over 50 MiB,
+  an image over 70 million pixels or with a side over 32,767 is refused from its
+  header before it is decoded, and `tesseract` reads a grayscale PNG that brain
+  re-encodes, never the original file. Images stay out of `brain ingest-dir`'s
+  default walk. With OCR off or no `tesseract`, image folders are skipped with
+  the fix printed, and their files are not moved.
+- A new `screenshot` source kind, with a 📸 glyph in `brain ui` and month
+  headers under `_ingested/screenshot`. `screenshot` skips concept extraction.
+  That changed the concept-skip set, so its policy version went from `v1` to
+  `v2`: the next graph build or backfill re-reconciles every `calendar_event`
+  document once, with an empty extraction and no model call.
+- `brain-install-launchd --with-dropfolders` installs the opt-in
+  `com.brain.dropfolders` LaunchAgent, which runs
+  `brain ingest-folder --configured --since 2d` every 10 minutes. Like the
+  reranker it is kept by every later install (including `brain-up`'s) and removed
+  only by `brain-uninstall-launchd`. `brain doctor` gains a `drop folders` line,
+  and its `daemons` line checks the job only once it is installed. Guide:
+  `docs/guides/drop-folders.md`.
+
 ### Added — image-only PDFs are OCR'd (RM-32)
 
 - A scanned PDF or a photographed receipt used to ingest as an empty document

@@ -174,13 +174,27 @@ def _docx_errors() -> tuple[type[Exception], ...]:
     return (PackageNotFoundError,)
 
 
+def _load_image() -> ExtractorFn:
+    from .image import extract_image
+
+    return extract_image
+
+
 #: The built-in extractors, in the order ``supported_extensions()`` lists them.
+#: ``image`` (RM-33) stays out of directory walks: drop folders and an explicit
+#: ``--ext`` reach it, so an existing ``brain ingest-dir`` run is unchanged.
 BUILTIN_EXTRACTORS: tuple[ExtractorSpec, ...] = (
     ExtractorSpec(name="text", extensions=(".txt",), load=_load_text),
     ExtractorSpec(name="markdown", extensions=(".md", ".markdown"), load=_load_markdown),
     ExtractorSpec(name="pdf", extensions=(".pdf",), load=_load_pdf, wrap_errors=_pdf_errors),
     ExtractorSpec(
         name="docx", extensions=(".docx",), load=_load_docx, wrap_errors=_docx_errors
+    ),
+    ExtractorSpec(
+        name="image",
+        extensions=(".png", ".jpg", ".jpeg"),
+        load=_load_image,
+        in_directory_walks=False,
     ),
 )
 

@@ -90,7 +90,7 @@ def brain_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_the_reranker_is_optional_and_swept() -> None:
-    assert _OPTIONAL_LABELS == (_RERANKER,)
+    assert _OPTIONAL_LABELS == (_RERANKER, "com.brain.dropfolders")  # RM-14b, RM-33
     assert _RERANKER not in _INSTALLED_LABELS
     assert _RERANKER in _ALL_LABELS
 

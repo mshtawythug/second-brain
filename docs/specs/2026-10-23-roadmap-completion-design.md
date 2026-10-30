@@ -3652,7 +3652,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-30 | Calendar events | M | 7 | RM-06, RM-07 | DONE (#96) |
 | RM-31 | Code-host activity | M | 7 | RM-06, RM-07 | DONE (#100) |
 | RM-32 | OCR and image-only PDFs | M | 7 | RM-07, RM-08 | DONE (#99) |
-| RM-33 | Images and the drop-folder runner | M | 7 | RM-06, RM-32 | TODO |
+| RM-33 | Images and the drop-folder runner | M | 7 | RM-06, RM-32 | DONE (#RM33PR) |
 | RM-34 | Jira issues | S | 7 | RM-07 | DONE (#97) |
 | RM-35 | Notion export | M | 7 | RM-06, RM-07 | TODO |
 | RM-36 | Apple Notes | M | 7 | RM-06, RM-07 | TODO |

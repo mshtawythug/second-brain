@@ -119,6 +119,7 @@ def test_shipped_extension_tuple_registers_exactly_the_shipped_sub_apps() -> Non
         "tags",
         "ingest-calendar",
         "ingest-github",
+        "ingest-folder",
     ]
     assert before == ["mmm-first", "ooo-last", "nnn-group"]
     assert _help_command_names(app) == [
@@ -126,6 +127,7 @@ def test_shipped_extension_tuple_registers_exactly_the_shipped_sub_apps() -> Non
         "ooo-last",
         "ingest-calendar",
         "ingest-github",
+        "ingest-folder",
         "nnn-group",
         "watch",
         "dedup",

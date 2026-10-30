@@ -754,6 +754,59 @@ brain ingest-github --repo example-org/example-repo --since 2026-09-01 --with-th
   `PATH` the command exits 1 with an install hint, and `brain doctor`'s `github`
   row warns.
 
+## Drop folders (screenshots)
+
+`brain ingest-folder` (RM-33) ingests the files saved into a drop folder: a
+screenshot folder, for one. It requires `--dir PATH` (one folder) or
+`--configured` (every folder in `$BRAIN_HOME/drop-folders.toml` with
+`auto = true`), **and** `--since Nd` (1d to 365d, by modification time).
+Otherwise it exits 2 with "ingest-folder requires --dir PATH or --configured,
+and --since Nd".
+
+```bash
+brain ingest-folder --dir ~/Pictures/Screenshots --since 7d --dry-run
+brain ingest-folder --dir ~/Pictures/Screenshots --since 7d
+brain ingest-folder --configured --since 2d          # what the LaunchAgent runs
+```
+
+- **Move first, then ingest.** Each new file is moved to the folder's
+  `imported/` as `<stem>-<sha8><ext>` (`sha8`: the first 8 hex digits of its
+  SHA-256) and ingested from there, titled by its original stem. Two different
+  files with one name stay two documents. The same file dropped twice is a
+  no-op: the drop copy is deleted (only after its full SHA-256 matches the
+  earlier import) and nothing is ingested.
+- **Your files are safe.** A move never overwrites (a hard link, or an exclusive
+  copy on a volume without hard links). A failed ingest moves the file back,
+  unless a new file took its name meanwhile; then it stays in `imported/` and
+  the failure says so. A file that already sat in `imported/` before the run is
+  never moved or deleted. `imported/` must be a real directory: a symlink there
+  refuses the folder.
+- **What is skipped:** sub-folders (`imported/` among them), symlinks, hidden
+  files (iCloud's `.<name>.icloud` stubs and macOS's in-progress screenshot
+  files), iCloud files evicted from the disk, other extensions, and files
+  modified in the last 5 seconds (still being written; the next run takes them).
+- **Images** (`.png`, `.jpg`, `.jpeg`) are OCR'd by the local `tesseract`
+  into a `screenshot` document (source `screenshot`, stored **confidential**
+  unless the folder or `--sensitivity` says otherwise). An image with no
+  recognised text stays in `imported/` and adds no document. With OCR off or no
+  `tesseract`, image folders are skipped with the fix printed, and exit 1.
+- **Bounds.** At most 200 files a folder and 8 minutes a run; the rest are left
+  where they are for the next run, and the report says how many. `screenshot`
+  skips concept extraction; summaries follow `BRAIN_ENRICH_MIN_TOKENS`, which
+  most screenshots are under.
+- `--dir` uses the folder's configured settings when it is in
+  `drop-folders.toml` (even with `auto = false`), else the screenshot defaults.
+  `--dry-run` lists what would be ingested and touches nothing.
+  `--no-enrich` and `--allow-secrets` work as for `brain ingest`.
+- Exit 0 when nothing failed; 1 when a file failed or a folder could not be
+  used. Failures are printed by class only.
+
+`brain ingest <file>.png` works too (source `manual`, the CLI's sensitivity
+default). Images are not in `brain ingest-dir`'s default walk; `--ext png` adds
+them. The folder file and the `com.brain.dropfolders` LaunchAgent
+(`brain-install-launchd --with-dropfolders`) are in
+[guides/drop-folders.md](guides/drop-folders.md).
+
 ## Status and health
 
 ```bash

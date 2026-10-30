@@ -502,6 +502,27 @@ doctor`'s `ocr` line reports the tesseract version and checks that every
 because OCR is optional. Measured with tesseract 5.5.3 (leptonica 1.87.0) from
 Homebrew on 2026-10-30.
 
+### `drop-folders.toml` — drop folders (RM-33)
+
+No environment variable: the folders `brain ingest-folder --configured` reads are
+`[[folder]]` tables in `$BRAIN_HOME/drop-folders.toml`, read by
+`brain/settings/drop_folders.py`. A missing file means no folders.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `path` | (required) | The folder. Absolute or starting with `~`; it must exist, and is stored resolved. |
+| `kind` | `screenshot` | The source kind its documents get; any kind `brain ingest-stdin --source` accepts. |
+| `extensions` | `[".png", ".jpg", ".jpeg"]` | Which files are taken; each must be one an extractor reads. |
+| `sensitivity` | `confidential` | `normal` or `confidential`. A screenshot can show anything, so the default is confidential. |
+| `auto` | `true` | `false`: only `brain ingest-folder --dir PATH` uses the folder, never `--configured`. |
+| `mode` | `ingest` | The only mode; `capture` arrives with RM-39 and is refused until then. |
+
+An unknown key, a bad value, or two entries for one folder is a `ConfigError`
+naming the entry and key (`folder[1].kind`), never the value. Images are read
+with the `BRAIN_OCR*` knobs above. The opt-in LaunchAgent is
+`brain-install-launchd --with-dropfolders`; see
+[guides/drop-folders.md](guides/drop-folders.md).
+
 ### `BRAIN_BRIEF_DELIVERY` — send the daily brief to yourself
 
 | Env var | Default | Purpose |

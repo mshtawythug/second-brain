@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Jinja variables: brain_home, user_home, pipx_bin_dir, vault_path, brain_py
+     The launchd renderer (brain.bin.launchd.render_plist) MUST XML-escape every
+     value before substitution.
+
+     The opt-in drop-folder job (RM-33), installed only by brain-install-launchd
+     with its with-dropfolders flag and then kept by every later install
+     (sticky; only brain-uninstall-launchd removes it). A ONE-SHOT job run every
+     10 minutes by StartInterval (no KeepAlive, no RunAtLoad): the wrapper runs
+     brain ingest-folder over the configured folders and the last two days,
+     which moves each new file of the folders in $BRAIN_HOME/drop-folders.toml
+     into its imported/ and ingests it. launchd never starts a second run of
+     this label while one is running. (No double hyphens: XML comments forbid
+     them.) -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.brain.dropfolders</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{ brain_home }}/.shims/_brain-dropfolders-fg</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{{ user_home }}</string>
+        <key>PATH</key>
+        <string>{{ pipx_bin_dir }}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- As in com.brain.brief: BRAIN_HOME anchors the config chain (and
+             drop-folders.toml), and the cwd .env walk-up is opted out of.
+             Paths only, never secret values. -->
+        <key>BRAIN_HOME</key>
+        <string>{{ brain_home }}</string>
+        <key>BRAIN_IGNORE_CWD_DOTENV</key>
+        <string>1</string>
+        <key>BRAIN_VAULT_PATH</key>
+        <string>{{ vault_path }}</string>
+        <key>BRAIN_PY</key>
+        <string>{{ brain_py }}</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>600</integer>
+    <key>WorkingDirectory</key>
+    <string>{{ brain_home }}</string>
+    <key>StandardOutPath</key>
+    <string>{{ brain_home }}/logs/com.brain.dropfolders.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{ brain_home }}/logs/com.brain.dropfolders.err.log</string>
+</dict>
+</plist>

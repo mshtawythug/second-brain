@@ -558,10 +558,12 @@ def test_all_healthy_yields_no_failures(
     # RM-14b adds "reranker", not configured (ok) under tests/rerank_isolation_plugin.py.
     # RM-31 adds "github", ok here because ``gh`` is found (``shutil.which`` is pinned above).
     # RM-32 adds "ocr", off (ok) under tests/ocr_isolation_plugin.py.
+    # RM-33 adds "drop folders": none configured (ok) in the suite's isolated $BRAIN_HOME.
     assert [c.check for c in checks] == [
-        "config", "daemons", "vault watcher", "brief delivery", "reranker", "github", "ocr"
+        "config", "daemons", "vault watcher", "brief delivery", "reranker", "github", "ocr",
+        "drop folders",
     ]
-    assert [c.status for c in checks] == ["ok", "ok", "ok", "ok", "ok", "ok", "ok"]
+    assert [c.status for c in checks] == ["ok"] * 8
 
 
 def test_every_failing_check_names_a_remedy(

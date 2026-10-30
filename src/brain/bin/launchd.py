@@ -7,12 +7,14 @@ fallback. Resolves the Python interpreter via sys.executable — the running bra
 process is by definition the right Python.
 
 Entry points (registered in pyproject.toml by T1.8):
-    brain-install-launchd  → install_main()   [--with-reranker]
+    brain-install-launchd  → install_main()   [--with-reranker] [--with-dropfolders]
     brain-uninstall-launchd → uninstall_main()
 
 Optional labels (RM-14b): ``com.brain.reranker`` is installed only by
 ``--with-reranker``, then kept by every later install, flagless included,
 because ``brain-up`` runs this installer without flags on every start.
+RM-33's ``com.brain.dropfolders`` (``--with-dropfolders``) is optional and
+sticky the same way; it takes no inputs, so it has no warn-and-skip branch.
 """
 
 import argparse
@@ -54,7 +56,9 @@ _RETIRED_LABELS = ("com.brain.build",)
 # _INSTALLED_LABELS, which doctor treats as agents that must be installed: doctor
 # checks an optional one only when its plist exists.
 _RERANKER_LABEL = "com.brain.reranker"
-_OPTIONAL_LABELS = (_RERANKER_LABEL,)
+# RM-33: `brain ingest-folder --configured --since 2d` every 10 minutes.
+_DROPFOLDERS_LABEL = "com.brain.dropfolders"
+_OPTIONAL_LABELS = (_RERANKER_LABEL, _DROPFOLDERS_LABEL)
 # Every label brain has ever installed: what uninstall_plists sweeps.
 _ALL_LABELS = _INSTALLED_LABELS + _OPTIONAL_LABELS + _RETIRED_LABELS
 
@@ -263,6 +267,7 @@ def install_plists(
     launchctl: str | None = None,
     vault_path: Path | None = None,
     with_reranker: bool = False,
+    with_dropfolders: bool = False,
 ) -> None:
     """Write the installed jobs' plists and load them into launchd. Idempotent.
 
@@ -275,6 +280,11 @@ def install_plists(
     job is still installed: ``brain-up`` runs this flagless on every start, and
     must not fail, or skip the watcher and the brief, because the reranker's
     configuration went bad after it was installed.
+
+    ``with_dropfolders`` installs the opt-in ``com.brain.dropfolders`` (RM-33).
+    Without it, that job is re-rendered and reloaded only when its plist
+    already exists (sticky), like the reranker; it reads no configuration, so
+    there is nothing to validate first.
 
     First, each retired label (``com.brain.build`` at R2) is booted out, errors
     suppressed because "not loaded" is its normal answer, and its plist deleted.
@@ -315,11 +325,15 @@ def install_plists(
                 f"see {_GUIDE}",
                 file=sys.stderr,
             )
+    if with_dropfolders or (launchd_dir / f"{_DROPFOLDERS_LABEL}.plist").exists():
+        optional = (*optional, _DROPFOLDERS_LABEL)
     launchd_dir.mkdir(parents=True, exist_ok=True)
 
     # Install the foreground wrapper scripts the plists reference.
     # ensure_shim() is idempotent — skips the write if the shim is current.
-    for wrapper in ("_brain-watcher-fg", "_brain-brief-fg"):
+    # _brain-dropfolders-fg is shimmed whether or not its job is installed, as
+    # the brief's is: a shim is inert until a plist names it.
+    for wrapper in ("_brain-watcher-fg", "_brain-brief-fg", "_brain-dropfolders-fg"):
         ensure_shim(wrapper, brain_home)
 
     effective_vault_path = resolve_install_vault(brain_home, override=vault_path)
@@ -431,7 +445,7 @@ def uninstall_plists(
 
 
 def install_main(argv: Sequence[str] | None = None) -> None:
-    """Entry point: brain-install-launchd [--with-reranker].
+    """Entry point: brain-install-launchd [--with-reranker] [--with-dropfolders].
 
     *argv* defaults to ``sys.argv[1:]``; tests pass a list (pytest's own
     arguments are in ``sys.argv``). ``bin/brain-install-launchd`` passes its
@@ -449,13 +463,27 @@ def install_main(argv: Sequence[str] | None = None) -> None:
             f"BRAIN_RERANK_URL's port, 8081 by default); see {_GUIDE}"
         ),
     )
+    parser.add_argument(
+        "--with-dropfolders",
+        action="store_true",
+        help=(
+            "also install com.brain.dropfolders (brain ingest-folder --configured --since 2d "
+            "every 10 minutes); see docs/guides/drop-folders.md"
+        ),
+    )
     args = parser.parse_args(argv)
     launchd_dir = Path(
         os.environ.get("BRAIN_LAUNCHD_DIR") or Path.home() / "Library" / "LaunchAgents"
     )
     launchctl = resolve_launchctl()
     brain_home = _brain_home_root()
-    install_plists(brain_home, launchd_dir, launchctl, with_reranker=args.with_reranker)
+    install_plists(
+        brain_home,
+        launchd_dir,
+        launchctl,
+        with_reranker=args.with_reranker,
+        with_dropfolders=args.with_dropfolders,
+    )
     print(f"🧠 brain LaunchAgents installed in {launchd_dir}")
 
 

@@ -32,6 +32,10 @@ PRE_RM07_EXTRACTOR_FOR = {
     ".pdf": ("pdf", extract_pdf),
     ".docx": ("docx", extract_docx),
 }
+# RM-33's image extractor, listed after the built-ins but kept out of directory
+# walks, so ``brain ingest-dir``'s default walk is still exactly the table above.
+IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg"]
+ALL_EXTENSIONS = PRE_RM07_EXTENSIONS + IMAGE_EXTENSIONS
 
 PROBE_EXTENSION = ".probe"
 PROBE_TITLE = "probe-title"
@@ -73,19 +77,31 @@ def test_builtin_dispatch_table_unchanged() -> None:
     walked = registry.supported_extensions(directory_walk=True)
     chosen = {
         ext: (spec.name, spec.load())
-        for ext in listed
+        for ext in walked
         if (spec := registry.spec_for(Path(f"x{ext}"))) is not None
     }
 
     # Assert
-    assert listed == PRE_RM07_EXTENSIONS
+    assert listed == ALL_EXTENSIONS
     assert walked == PRE_RM07_EXTENSIONS
     assert chosen == PRE_RM07_EXTRACTOR_FOR
 
 
 def test_module_functions_match_the_pre_rm07_table() -> None:
-    assert dispatch.supported_extensions() == PRE_RM07_EXTENSIONS
+    assert dispatch.supported_extensions() == ALL_EXTENSIONS
     assert dispatch.supported_extensions(directory_walk=True) == PRE_RM07_EXTENSIONS
+
+
+def test_images_use_the_image_extractor_and_stay_out_of_walks() -> None:
+    """RM-33: ``.png``/``.jpg``/``.jpeg`` dispatch to ``extract_image``, never in a walk."""
+    from brain.ingest.image import extract_image
+
+    for ext in IMAGE_EXTENSIONS:
+        spec = dispatch.spec_for(Path(f"shot{ext.upper()}"))
+        assert spec is not None
+        assert spec.name == "image"
+        assert spec.load() is extract_image
+        assert spec.in_directory_walks is False
 
 
 def test_package_reexports_are_the_dispatch_functions() -> None:
@@ -155,7 +171,7 @@ def test_register_duplicate_extension_raises() -> None:
     # Act / Assert
     with pytest.raises(ValueError, match=r"\.md"):
         registry.register(clash)
-    assert registry.supported_extensions() == PRE_RM07_EXTENSIONS
+    assert registry.supported_extensions() == ALL_EXTENSIONS
 
 
 def test_duplicate_within_one_spec_raises() -> None:
@@ -229,7 +245,7 @@ def test_registered_extractor_is_dispatched_and_listed(tmp_path: Path) -> None:
         "probe body",
         PROBE_CONTENT_TYPE,
     )
-    assert registry.supported_extensions() == [*PRE_RM07_EXTENSIONS, PROBE_EXTENSION]
+    assert registry.supported_extensions() == [*ALL_EXTENSIONS, PROBE_EXTENSION]
     assert PROBE_EXTENSION in registry.supported_extensions(directory_walk=True)
 
 

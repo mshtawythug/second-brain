@@ -46,6 +46,7 @@ never run the command from its table row alone.
 | The user's own Jira issues | `brain ingest-stdin --source jira` | Atlassian MCP→stdin, **confidential**. Read [sources/jira.md](sources/jira.md). |
 | Krisp action items as a separate doc | `brain enrich --krisp-action-items` (handoff) + `brain ingest-stdin --content-type krisp_action_items` | See `brain-todo` for the full flow. |
 | The user's own GitHub PRs, issues, READMEs | `brain ingest-github --mine --since YYYY-MM-DD` | **REFUSES without `--repo`/`--mine` and `--since`.** Read [sources/github.md](sources/github.md). |
+| Screenshots / a drop folder | `brain ingest-folder --dir PATH --since 7d` | **Moves the files** into `imported/`. **REFUSES without `--dir`/`--configured` and `--since Nd`.** `--dry-run` first. Read [sources/drop-folders.md](sources/drop-folders.md). |
 
 ## Files and directories
 

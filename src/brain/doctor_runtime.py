@@ -26,6 +26,8 @@ process:
     Composed in from :mod:`brain.doctor_github` (RM-31): is ``gh`` on ``PATH``?
 ``ocr``
     Composed in from :mod:`brain.doctor_ocr` (RM-32): can image-only PDFs be OCR'd?
+``drop folders``
+    Composed in from :mod:`brain.doctor_drop_folders` (RM-33): do the folders load and OCR?
 ``vault watcher`` / ``retired daemon``
     Composed in from :mod:`brain.doctor_watcher` (wiki-to-ui phase 8): is the
     vault-sync watcher installed or running (A9), and is the retired
@@ -104,6 +106,7 @@ def runtime_doctor_checks(
     """
     # Deferred: doctor_watcher and doctor_delivery import this module's _check.
     from .doctor_delivery import brief_delivery_doctor_check
+    from .doctor_drop_folders import drop_folders_doctor_check
     from .doctor_github import github_doctor_check
     from .doctor_ocr import ocr_doctor_check
     from .doctor_reranker import reranker_doctor_check
@@ -130,6 +133,7 @@ def runtime_doctor_checks(
         *reranker_doctor_check(),
         *github_doctor_check(),
         *ocr_doctor_check(),
+        *drop_folders_doctor_check(launchd_dir=resolved_dir),
     ]
 
 
