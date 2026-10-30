@@ -266,19 +266,23 @@ def test_a_skipped_semantic_watch_is_named_in_both_payloads(
     assert f"- [orbit] {SKIP_EMBEDDER}" in _page_watch_lines(written.read_text())
 
 
-def test_watch_hits_alone_do_not_cost_a_second_suggestion_call(
+def test_watch_fields_alone_do_not_cost_a_second_suggestion_call(
     test_db: psycopg.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The two payloads' watch fields differ by construction (here the terminal one carries a
+    skipped watch's note before ``withheld`` is computed), and no hit reaches the prompt, so
+    the comparison leaves them out (plan D4)."""
     words = WordEmbedder()
-    _watch(test_db, "zephyr", "zephyr")
-    ingest(test_db, words, title="Zephyr open", content="zephyr open")
-    _build(tmp_path, wiki=True)  # the hit is now notified: the payloads' hit sets differ
+    _watch(test_db, "orbit", "orbital", mode=MODE_SEMANTIC, matcher=_word_matcher())
+    ingest(test_db, words, title="Open memo", content="open memo body")
     calls: list[object] = []
     monkeypatch.setattr("brain.brief.suggest_next_steps", lambda b, c: calls.append(b) or ["s"])
 
-    _build(tmp_path, wiki=True, enrich=True)
+    data, written = _build(tmp_path, wiki=True, enrich=True, embedder=DownEmbedder())
 
+    assert data.watch_notes == [WatchNote(watch="orbit", skipped=SKIP_EMBEDDER)]
     assert len(calls) == 1
+    assert written is not None and "1. s" in written.read_text()
 
 
 @pytest.mark.fresh_schema
