@@ -190,3 +190,23 @@ No critical or high findings, and no crafted request reached a file outside the 
   `ui/ingest_service`, `ui/ingest_schemas` and `ui/routes_ingest`. The 76 Ingest-tab browser
   rows pass, 15 of them inbox rows. 20 more mutations were killed (5 for F1 and the EPERM
   path, 15 for M1, L2, L3, L4, L5 and F4), 33 across the PR.
+
+## Review round 2 (#110: sec-110b)
+
+sec-110b verified every round-1 fix at `c87cd49` with proofs of concept, and found three LOW
+findings, each reachable only by someone who can write the inbox's `imported/`:
+
+1. **`_duplicate` admitted nothing.** When `imported/<stem>-<sha8><ext>` already exists, it is
+   now opened with `_Opening.duplicate_admit`: one link, on disk, within the cap, and no
+   identity pin, since it is a different file. A hard link to an outside file with the same
+   bytes is therefore refused (`FileIdentityError`), and the drop copy is kept.
+2. **Its hash was unbounded.** It now goes through `_hash(fd, opening)`, which reads at most
+   the cap plus a byte under `run_one`.
+3. **The no-hard-link copy fallback read to EOF.** `_Mover.move` takes `max_bytes` and passes
+   it to `_copy_exclusive`, which stops at `max_bytes + 1`, removes its partial copy and
+   raises `FileTooLargeError`.
+
+`run` keeps `_PLAIN_OPENING`: no admission, no bound, and the hash called exactly as before.
+RM-33's and RM-38's tests are unchanged. There are five new tests in
+`tests/test_drop_folder_run_one.py`, five mutations were killed, and `drop_folder.py` keeps
+100% line and branch coverage.

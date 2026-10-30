@@ -69,7 +69,9 @@ git tag scheme:
   the hash reads at most the cap plus a byte, so a file that grew or was swapped is refused
   unread); a symlink loop or an inbox that cannot be searched is a 4xx, never a 500; a file
   with a second hard link is refused; the listing reads at most 5,000 entries off the event
-  loop and is fetched only when the user picks Inbox mode.
+  loop and is fetched only when the user picks Inbox mode. A file already in `imported/`
+  under the same content-addressed name is held to the same checks before it counts as the
+  same file, and the copy used on a volume without hard links is bounded by the cap too.
 
 ### Added — voice memos, transcribed on this machine (RM-38)
 

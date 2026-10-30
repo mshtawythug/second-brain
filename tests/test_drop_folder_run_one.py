@@ -389,3 +389,102 @@ def test_the_fstat_size_alone_refuses_before_any_byte_is_read(tmp_path: Path) ->
 
     assert outcome == FileOutcome("small-now.md", "failed", "FileTooLargeError")
     assert ingest.calls == []
+
+
+# --- #110 round 2: the existing duplicate and the copy fallback are admitted too -------
+
+
+def _planted(tmp_path: Path, stem: str, drop_body: bytes, planted: bytes) -> Path:
+    """``imported/<stem>-<sha8(drop_body)>.md`` holding ``planted``: someone else's file."""
+    (tmp_path / IMPORTED_DIR).mkdir(exist_ok=True)
+    path = tmp_path / IMPORTED_DIR / f"{stem}-{_sha8(drop_body)}.md"
+    path.write_bytes(planted)
+    return path
+
+
+def test_a_hard_linked_existing_duplicate_is_refused_and_the_drop_copy_kept(
+    tmp_path: Path,
+) -> None:
+    """sec-110b: a hard link to an outside file with the same bytes was ingested."""
+    body = b"same bytes as a secret elsewhere"
+    outside = tmp_path.parent / f"{tmp_path.name}-secret.md"
+    outside.write_bytes(body)
+    (tmp_path / IMPORTED_DIR).mkdir()
+    os.link(outside, tmp_path / IMPORTED_DIR / f"again-{_sha8(body)}.md")
+    (tmp_path / "again.md").write_bytes(body)
+    ingest = _Ingest()
+
+    outcome = _run_one(_folder(tmp_path), "again.md", ingest)
+
+    assert outcome == FileOutcome("again.md", "failed", "FileIdentityError")
+    assert ingest.calls == []
+    assert (tmp_path / "again.md").read_bytes() == body  # the drop copy is kept
+    assert outside.read_bytes() == body
+
+
+def test_an_oversized_planted_duplicate_is_refused_by_its_fstat(tmp_path: Path) -> None:
+    body = b"tiny"
+    planted = _planted(tmp_path, "pick", body, b"p" * 50)
+    (tmp_path / "pick.md").write_bytes(body)
+    ingest = _Ingest()
+
+    outcome = _run_one(_folder(tmp_path), "pick.md", ingest, max_bytes=10)
+
+    assert outcome == FileOutcome("pick.md", "failed", "FileTooLargeError")
+    assert ingest.calls == [] and planted.read_bytes() == b"p" * 50
+    assert (tmp_path / "pick.md").read_bytes() == body
+
+
+def test_an_oversized_planted_duplicate_is_refused_while_hashing(tmp_path: Path) -> None:
+    """Its fstat lies (says 4 bytes); the bounded hash stops at the cap plus a byte."""
+    body = b"tiny"
+    planted = _planted(tmp_path, "pick", body, b"p" * 50)
+    (tmp_path / "pick.md").write_bytes(body)
+    ingest = _Ingest()
+
+    outcome = _run_one(_folder(tmp_path), "pick.md", ingest, max_bytes=10,
+                       fstat=_fstat_with(st_size=4))
+
+    assert outcome == FileOutcome("pick.md", "failed", "FileTooLargeError")
+    assert ingest.calls == [] and planted.exists() and (tmp_path / "pick.md").exists()
+
+
+def test_a_source_that_grows_during_the_copy_fallback_is_refused_and_the_copy_removed(
+    tmp_path: Path,
+) -> None:
+    """On a volume without hard links the move copies; the copy is bounded too."""
+    source = tmp_path / "grow.md"
+    source.write_bytes(b"small")
+    grew: list[int] = []
+
+    def no_links(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    def write_then_grow(fd: int, data: bytes) -> int:
+        if not grew:  # the writer appends while the copy is under way
+            with source.open("ab") as out:
+                out.write(b"g" * 100)
+            grew.append(1)
+        return os.write(fd, data)
+
+    ingest = _Ingest()
+
+    outcome = _run_one(_folder(tmp_path), "grow.md", ingest, max_bytes=10,
+                       link=no_links, write=write_then_grow)
+
+    assert outcome == FileOutcome("grow.md", "failed", "FileTooLargeError")
+    assert ingest.calls == []
+    assert list((tmp_path / IMPORTED_DIR).iterdir()) == []  # the partial copy is gone
+    assert source.exists()
+
+
+def test_the_copy_fallback_within_the_cap_still_moves(tmp_path: Path) -> None:
+    (tmp_path / "fits.md").write_bytes(b"fits")
+
+    def no_links(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    outcome = _run_one(_folder(tmp_path), "fits.md", _Ingest(), max_bytes=10, link=no_links)
+
+    assert outcome.status == "ingested"
+    assert _tree(tmp_path) == {f"{IMPORTED_DIR}/fits-{_sha8(b'fits')}.md": b"fits"}
