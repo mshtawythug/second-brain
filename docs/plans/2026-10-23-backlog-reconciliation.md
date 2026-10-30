@@ -181,7 +181,7 @@ residues, recorded with their repairs.
 
 | Id | Follow-up | Source PR |
 |---|---|---|
-| H-1 | Move-identity residue: a brand-new, never-synced, id-less file that replaces P and is renamed within one debounce window still adopts the previous document's id. | #52 |
+| H-1 | **SHIPPED (RM-25, PR #90).** ~~Move-identity residue: a brand-new, never-synced, id-less file that replaces P and is renamed within one debounce window still adopts the previous document's id.~~ An id-less destination is now compared by content (shingle Jaccard below 0.2, at least 8 shingles a side). | #52 |
 | H-2 | A closed watcher drops late events. The next startup sync reconciles them, but a delete is pruned only with prune on. | #51 |
 | H-3 | Graph-lock residuals 2–4: `build_graph` raises for a document deleted mid-enumeration; the plan re-check compares `content_hash` only; the cross-type collapse window is cosmetic. | #53 |
 | H-4 | Watcher reconnect residue: a delete committed just before the connection died leaves a ghost AGE vertex (repair: `brain graphrag remove`); a delete not applied at shutdown is redone only by `brain vault sync --prune`. | #56 |
@@ -257,7 +257,7 @@ eval only now that the eval has just been re-judged.
 | 13 | **7.4: tag merge / rename** | S | SHIPPED (#87, RM-21). ~~Housekeeping. Normalization already prevents new drift.~~ |
 | 14 | **1.3 phase 2: interactions-aware ranking** | M | Only worth doing once `brain usage` shows enough opens to learn from. Gate it on the data. The readout that decides the gate is **SHIPPED (#88, RM-22a)**: `brain usage --engagement`. The ranking stage itself (RM-22b) waits until that gate is met. |
 | 15 | **BL-4: copy-path / external-editor affordance** | XS | SHIPPED (#89, RM-23): the note pane's Copy path button, `abs_path` on loopback only. ~~Small. Its default was already decided.~~ |
-| 16 | **H-1 to H-6, BL-12: watcher / graph / log residues, and the stale ingest docstring** | XS–S each | Each has a known repair, and none loses data. Take them when their module is next opened (Scout rule). |
+| 16 | **H-1 to H-6, BL-12: watcher / graph / log residues, and the stale ingest docstring** | XS–S each | Each has a known repair, and none loses data. Take them when their module is next opened (Scout rule). H-1 is **SHIPPED (RM-25, PR #90)**. |
 | 17 | **3.3 leg: `--entity` search filter** | S | Mostly covered by `brain graphrag` today. Ask whether it is wanted before building it. |
 | 18 | **Source breadth: 2.1, 2.3, 3.5 / 5.1, 2.8, 2.4 (Apple Notes), 5.2** | M–L each | Each is a new extractor and a new source kind. Order them by what the owner actually generates. Each needs its own design for scope and PII. |
 | 19 | **2.5 browser history, 2.6 + 7.3 code ingestion, 2.9 long tail** | L | The heaviest privacy load, or the least evidence of need. Keep them, because the owner accepted them, but last. |
