@@ -78,6 +78,15 @@ PRE_CHANGE_PREDICATES: dict[str, tuple[dict[str, Any], str]] = {
     "draft": ({"draft": False}, "TRUE AND d.draft = %s"),
     "without_tag": ({"without_tag": "archived"}, "TRUE AND NOT (%s = ANY(d.tags))"),
     "sensitivity": ({"sensitivity": "normal"}, "TRUE AND d.sensitivity = %s"),
+    # RM-24 (`--entity`): added after T7, so this row pins the clause as shipped.
+    "entity": (
+        {
+            "entity_ids": ["00000000-0000-4000-8000-000000000001"],
+            "entity_tenant": "default",
+        },
+        "TRUE AND d.id IN (SELECT gem.document_id FROM graph_entity_mentions gem "
+        "WHERE gem.tenant_id = %s AND gem.entity_id = ANY(%s::uuid[]))",
+    ),
     "combined": (
         {
             "source_kind": "gmail",

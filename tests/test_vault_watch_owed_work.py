@@ -704,7 +704,6 @@ def test_an_abandoned_worker_owes_a_job_it_dequeues_and_never_starts_it(
     assert state.processed == 0 and state.current_job is None
 
 
-
 class _FlagSetAsTheSlotIsWritten(_WatcherState):
     """Shutdown sets ``worker_abandoned`` exactly as the worker writes its slot.
 

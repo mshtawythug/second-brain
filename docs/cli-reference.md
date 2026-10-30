@@ -176,6 +176,20 @@ matches docs recorded under **any** known variant of that person — space-form
 combination the sources emitted — so Gmail-header and Krisp-label spellings of
 the same person all count as one identity.
 
+`--entity "<name>"` (`brain search` only) keeps documents that mention that
+graph entity. The name is matched against the entity's canonical key, and only
+when no key matches, against its display name, case-insensitively. A curated
+alias rule (`BRAIN_GRAPH_ALIASES_PATH`) adds its target entity and keeps the
+named one: rules are merged only by `brain graphrag build` / `refresh`, so an
+unmerged name can still have documents of its own. The FTS leg, the vector leg, the total and `--facets` all
+see the filter. A name that matches entities of several types exits 2 and asks
+for `--entity-type org|person|project|tool|topic`. A name that matches nothing
+exits 2 and points at `brain graphrag entities`. It needs the graph: with
+`BRAIN_GRAPH_ENABLED` off, or no graph tables, it exits 2 with "`--entity` needs
+the graph: set BRAIN_GRAPH_ENABLED=true and run `brain graphrag build`". MCP
+`brain_search` takes `entity` and `entity_type` and raises `INVALID_PARAMS` in
+the same cases.
+
 `--since` takes a bare number or a duration suffix — `7d` (days), `24h`
 (hours), `90m` (minutes) — on the commands that share this parser: `search`,
 `explain`, `todo`, `enrich`, and `gaps` (bare number = **days**), plus `brain

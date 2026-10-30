@@ -221,6 +221,18 @@ uniform: every graph write transaction takes the lock.
 
 ## Residuals (recorded, not fixed)
 
+> **Closed by RM-27 (2026-10-30),** plan `docs/plans/2026-10-30-rm-27-graph-lock-residuals.md`.
+> RM-27 numbers this section's open residuals 2 to 4, as the roadmap spec does:
+>
+> - **2, FIXED.** `build_graph` and a document deleted between id enumeration and its read phase
+>   (the last paragraph of this section). The document is counted as `skipped_deleted`, not raised.
+> - **3, FIXED.** Metadata-only edits. The plan records an `inputs_fingerprint` over every document
+>   input it read, and the write compares it.
+> - **4, ACCEPTED.** The cross-type collapse window. The reason is in `graph_rag/cross_type.py`'s
+>   module docstring.
+>
+> The paragraphs below are kept as written.
+
 **Metadata-only edits are not re-checked.** `is_current` compares the
 `content_hash` only. An edit that changes a document's participants without
 touching its body can still be overtaken. An older reconcile's persons, read
@@ -324,7 +336,7 @@ document delete cascades into.
 
 Separately, `build_graph` already raises `GraphReconcileError` if a document is
 deleted between id enumeration and its reconcile's read phase. That is
-pre-existing and still a follow-up.
+pre-existing and still a follow-up. *(FIXED by RM-27: counted as `skipped_deleted`.)*
 
 ## Tests
 
