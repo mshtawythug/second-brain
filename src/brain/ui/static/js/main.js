@@ -52,6 +52,8 @@ import { wireThread } from "/static/js/thread.js";
    which no renderer touches, and subscribes to nothing. It loads its config the
    first time the tab is shown, so boot makes no extra request. */
 import { wireIngest } from "/static/js/ingest.js";
+/* RM-18b: the Agent tab, mounted like the Ingest tab (order-free, owns #tab-agent). */
+import { wireAsk } from "/static/js/ask.js";
 
 /* The filter controls, as [element id, state.filters key] pairs. Declared once
    because boot() seeds them from the URL and wireControls() binds them, and two
@@ -236,6 +238,7 @@ async function boot() {
   wireRelated();
   wireWatcherStatus();
   wireIngest();
+  wireAsk();
 
   seedControls();
 

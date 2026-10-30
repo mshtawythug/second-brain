@@ -1,7 +1,7 @@
 /* The job client: submit, poll, cancel, and the ids this tab submitted.
  *
  * KIND-AGNOSTIC on purpose (Ingest spec §8): nothing here knows what an ingest
- * is. The Agent tab (RM-18b) reuses it for `ask` jobs as it is.
+ * is. The Agent tab (RM-18b) reuses it for `ask` jobs, in its own scope.
  *
  * POLLING, NOT A STREAM (D2, §4.3). Each poll is `GET /api/jobs/{id}?after=<seq>`,
  * an in-memory read on the server; the client keeps the last seq it saw, so the
@@ -12,6 +12,11 @@
  * REMEMBERED IDS live in sessionStorage, so a reload (or a server restart behind
  * it) can still say what became of a job. Read and written inside `try`: a
  * private window or blocked storage just means the panel starts empty.
+ *
+ * SCOPED, so two tabs' ids never mix (RM-18b). Every store function takes an
+ * optional `scope`: the Ingest tab passes none and keeps the original keys; the
+ * Agent tab passes "ask". Without it the Ingest tab, which resumes every id it
+ * finds, drew a reloaded ask as an ingest row.
  *
  * SETTLED IDS are remembered too, separately. The server evicts a finished job
  * after an hour or past fifty, and a 404 for a job this tab already SAW finish is
@@ -29,6 +34,19 @@ export const MAX_REMEMBERED = 20;
 
 const STORE_KEY = "brain-ui-jobs";
 const SETTLED_KEY = "brain-ui-jobs-settled";
+
+/* A job id as the server mints it: `uuid.uuid4().hex` in brain/ui/jobs.py. */
+export const JOB_ID_RE = /^[0-9a-f]{32}$/;
+
+/* Scopes whose remembered ids are checked against the server's format on every
+   read: sessionStorage is writable by anything running in this origin, and the
+   Agent tab polls and renders whatever it resumes. */
+const STRICT_SCOPES = new Set(["ask"]);
+
+/* The sessionStorage key for `base` in `scope`; no scope is the original key. */
+function scoped(base, scope) {
+  return scope ? `${base}:${scope}` : base;
+}
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
 export function isTerminal(state) {
@@ -40,10 +58,12 @@ export function pollDelay(elapsedMs, hidden) {
   return hidden || elapsedMs > SLOW_AFTER_MS ? POLL_SLOW_MS : POLL_FAST_MS;
 }
 
-function readIds(key) {
+function readIds(key, scope) {
   try {
     const parsed = JSON.parse(sessionStorage.getItem(key) || "[]");
-    return Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : [];
+    if (!Array.isArray(parsed)) return [];
+    const strict = STRICT_SCOPES.has(scope);
+    return parsed.filter((id) => typeof id === "string" && (!strict || JOB_ID_RE.test(id)));
   } catch (e) {
     return [];
   }
@@ -53,34 +73,36 @@ function storeIds(key, ids) {
   try { sessionStorage.setItem(key, JSON.stringify(ids)); } catch (e) { /* ignore */ }
 }
 
-export function rememberedJobs() {
-  return readIds(STORE_KEY);
+export function rememberedJobs(scope) {
+  return readIds(scoped(STORE_KEY, scope), scope);
 }
 
-function remember(id) {
-  const ids = [id, ...rememberedJobs().filter((other) => other !== id)];
-  storeIds(STORE_KEY, ids.slice(0, MAX_REMEMBERED));
+function remember(id, scope) {
+  const ids = [id, ...rememberedJobs(scope).filter((other) => other !== id)];
+  storeIds(scoped(STORE_KEY, scope), ids.slice(0, MAX_REMEMBERED));
 }
 
-export function forget(id) {
-  storeIds(STORE_KEY, rememberedJobs().filter((other) => other !== id));
-  storeIds(SETTLED_KEY, readIds(SETTLED_KEY).filter((other) => other !== id));
+export function forget(id, scope) {
+  storeIds(scoped(STORE_KEY, scope), rememberedJobs(scope).filter((other) => other !== id));
+  const settled = scoped(SETTLED_KEY, scope);
+  storeIds(settled, readIds(settled, scope).filter((other) => other !== id));
 }
 
 /* Record that this tab saw job `id` reach a terminal state. */
-export function markSettled(id) {
-  const ids = readIds(SETTLED_KEY);
-  if (!ids.includes(id)) storeIds(SETTLED_KEY, [id, ...ids].slice(0, MAX_REMEMBERED));
+export function markSettled(id, scope) {
+  const key = scoped(SETTLED_KEY, scope);
+  const ids = readIds(key, scope);
+  if (!ids.includes(id)) storeIds(key, [id, ...ids].slice(0, MAX_REMEMBERED));
 }
 
-export function wasSettled(id) {
-  return readIds(SETTLED_KEY).includes(id);
+export function wasSettled(id, scope) {
+  return readIds(scoped(SETTLED_KEY, scope), scope).includes(id);
 }
 
-/* POST a job and remember its id. Resolves to the server's snapshot. */
-export async function submitJob(path, body) {
+/* POST a job and remember its id in `scope`. Resolves to the server's snapshot. */
+export async function submitJob(path, body, { scope } = {}) {
   const snapshot = await api(path, { method: "POST", body });
-  remember(snapshot.id);
+  remember(snapshot.id, scope);
   return snapshot;
 }
 

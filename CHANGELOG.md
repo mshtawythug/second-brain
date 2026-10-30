@@ -22,6 +22,28 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — the Agent tab: ask your brain from the browser
+
+`brain ui`'s **Agent** tab is no longer a placeholder (roadmap ticket RM-18b, the
+front end of RM-18a's backend, and the model-output hardening pass the UI spec
+requires before model text reaches the page).
+
+- Ask a question, optionally as a quick answer with no planning loop, and watch
+  each plan, retrieve, reflect and synthesize step as it runs. **Cancel** works
+  until the answer is ready; a question waiting behind an ingest job says so.
+- The answer cites its notes: each in-range `[n]` marker is a link that opens the
+  cited note in the Notes tab, and the citation list beside it gives each note's
+  title, source and snippet. A citation withheld by the confidential lens shows
+  no title and no link.
+- Model output is text, never markup. The answer, the sub-queries and every
+  server string are inserted with `textContent`; a marker becomes a link only when
+  its number is a returned citation whose id is a canonical UUID; no model string
+  becomes an attribute; and the Content-Security-Policy is unchanged (no inline
+  script). A static test fails the build if the tab's modules gain any HTML sink.
+- The tab remembers the asks it submitted by id only (in their own scope, so they
+  never appear in the Ingest tab), and is disabled, with the reason, on a
+  `--read-only` or LAN-bound server.
+
 ### Added — the daily brief can be delivered to you (RM-16)
 
 - **`BRAIN_BRIEF_DELIVERY`** (`none` by default, `email` or `slack`): once
@@ -51,7 +73,7 @@ git tag scheme:
 ### Added — the Agent tab's backend: ask over HTTP
 
 `brain ui` can now answer a question as a job (roadmap ticket RM-18a, the server
-half of the Agent tab; the tab itself ships in RM-18b).
+half of the Agent tab; the tab itself is RM-18b, above).
 
 - `POST /api/ask` with `{question, no_loop?}` queues an ask (202) on the Ingest
   tab's single worker, so an ask and an ingest never run at once. It runs the same

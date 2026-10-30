@@ -1,5 +1,5 @@
 /* components — everything with a name: chrome, rail, ledger, inspector
- * contents, buttons, modals, toast, the deferred tabs. Then, LAST, the
+ * contents, buttons, modals, toast. Then, LAST, the
  * responsive overrides and the motion block.
  *
  * Loads fourth and last. Two sections at the end of this file depend on that
@@ -480,26 +480,6 @@ button[disabled] { cursor: not-allowed; opacity: 0.5; }
    visible — the attribute was set correctly and had no effect. */
 .field[hidden] { display: none; }
 .toast[data-kind="error"] { background: var(--flag-danger); color: var(--paper); }
-
-/* ------------------------------------------------------------- deferred --- */
-
-/* ORDER-DEPENDENT — must stay after `.shell` in layout.css.
-   A tab pane is `class="shell deferred-tab"`, so `.deferred-tab { display:
-   block }` (0,1,0) and `.shell { display: grid }` (0,1,0) are the SAME
-   specificity and only document order decides. layout.css loads before this
-   file, so `block` wins once the pane is unhidden — which is the intent.
-   Move `.deferred-tab` above `.shell` and the tab panes silently render as a
-   three-column grid instead of a prose column. (While `hidden` is present,
-   `.shell[hidden]` at (0,2,0) beats both, so hiding is unaffected either way.) */
-.deferred-tab { display: block; overflow-y: auto; }
-.deferred { max-width: var(--measure); padding: var(--s-7); display: grid; gap: var(--s-4); }
-.deferred h2 { font-family: var(--font-read); font-size: var(--t-h1); }
-.deferred p { color: var(--ink-muted); line-height: var(--lead-read); }
-.deferred pre {
-  font-family: var(--font-mono); background: var(--paper-sunk);
-  border: var(--hair); border-radius: var(--radius); padding: var(--s-3);
-  overflow-x: auto;
-}
 
 /* ----------------------------------------------------------- responsive --- */
 
