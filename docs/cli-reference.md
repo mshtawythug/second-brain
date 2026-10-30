@@ -785,9 +785,12 @@ brain ingest-apple-notes --folder Recipes --sensitivity normal --tag cooking
   extraction takes minutes per note in the watcher's graph lane, so a full
   200-note run keeps it busy for more than a day. Start with `--since`.
 - **Safety.** The `osascript` program is fixed; folder names reach it only as
-  JSON data, never as code, and it only reads. `osascript` is stopped after
-  120 s; its error output is never shown. `brain doctor`'s `apple notes` row
-  says whether `osascript` is available.
+  JSON data, never as code, and it only reads. It always runs
+  `/usr/bin/osascript` (never a `PATH` lookup), stopped after 120 s; its error
+  output is never shown. A body over 2,000,000 characters is skipped (counted
+  as `skipped`), the Markdown kept from a note stops at 1,000,000 characters,
+  and a note that fails to convert costs that note only. `brain doctor`'s
+  `apple notes` row says whether `/usr/bin/osascript` exists.
 - `--dry-run` lists `folder / title` for each note and writes nothing.
 
 ## Status and health

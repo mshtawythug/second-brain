@@ -105,7 +105,7 @@ def test_the_runner_passes_argv_untouched_and_returns_stdout(tmp_path: Path) -> 
     tool = _script(tmp_path, 'for a in "$@"; do printf "[%s]" "$a"; done')
     argv = osascript_argv(NotesRequest(folders=(HOSTILE_NAMES[0],), since=None, limit=1))
 
-    out = osascript_runner(argv, which=lambda _n: tool)
+    out = osascript_runner(argv, binary=tool)
 
     assert out == "".join(f"[{a}]" for a in argv[1:])
 
@@ -118,30 +118,60 @@ def test_the_runner_gets_the_environment_no_stdin_and_its_own_session(tmp_path: 
         seen.update(kwargs)
         return subprocess.Popen(argv, **kwargs)
 
-    assert osascript_runner(["osascript"], which=lambda _n: tool, popen=popen) == "ok"
+    assert osascript_runner(["osascript"], binary=tool, popen=popen) == "ok"
     assert seen["env"] == dict(os.environ)
     assert seen["stdin"] is subprocess.DEVNULL
     assert seen["stderr"] is subprocess.DEVNULL
     assert seen["start_new_session"] is True
 
 
-def test_a_missing_osascript_names_macos() -> None:
-    with pytest.raises(AppleNotesError) as info:
-        osascript_runner(["osascript"], which=lambda _n: None)
+def test_a_missing_osascript_names_macos(tmp_path: Path) -> None:
+    missing = str(tmp_path / "osascript")
 
-    assert str(info.value) == "osascript not found on PATH: brain ingest-apple-notes needs macOS"
+    with pytest.raises(AppleNotesError) as info:
+        osascript_runner(["osascript"], binary=missing)
+
+    assert str(info.value) == f"{missing} not found: brain ingest-apple-notes needs macOS"
+
+
+def test_the_binary_is_the_absolute_system_path_and_path_is_never_searched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L1 (#103): a fake ``osascript`` first on ``PATH`` is never run.
+
+    The ``popen`` seam records the argv and raises, so even on a Mac the real
+    ``osascript`` is never started.
+    """
+    _script(tmp_path, "printf hijacked")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    started: list[list[str]] = []
+
+    def popen(argv: list[str], **_kwargs: Any) -> Any:
+        started.append(argv)
+        raise PermissionError(13, "stopped before running")
+
+    with pytest.raises(AppleNotesError) as info:
+        osascript_runner(["osascript", "-l", "JavaScript"], popen=popen)
+
+    assert an.OSASCRIPT_PATH == "/usr/bin/osascript"
+    if Path(an.OSASCRIPT_PATH).is_file():  # macOS: the absolute path, never the PATH hit
+        assert started == [["/usr/bin/osascript", "-l", "JavaScript"]]
+        assert str(info.value) == "`osascript` could not run (PermissionError)"
+    else:  # elsewhere: refused before anything starts
+        assert started == []
+        assert "/usr/bin/osascript not found" in str(info.value)
 
 
 def test_the_runner_refuses_empty_args() -> None:
     with pytest.raises(AppleNotesError):
-        osascript_runner([], which=lambda _n: "/usr/bin/osascript")
+        osascript_runner([], binary="/bin/sh")
 
 
 def test_a_failure_names_the_permission_and_never_its_stderr(tmp_path: Path) -> None:
     tool = _script(tmp_path, "echo 'Not authorized: private detail' >&2\necho partial\nexit 1")
 
     with pytest.raises(AppleNotesError) as info:
-        osascript_runner(["osascript"], which=lambda _n: tool)
+        osascript_runner(["osascript"], binary=tool)
 
     assert str(info.value) == (
         "`osascript` failed (exit 1); if macOS asked for permission to control Notes, "
@@ -156,7 +186,7 @@ def test_a_hung_osascript_is_killed_at_the_timeout(tmp_path: Path) -> None:
     started = time.monotonic()
 
     with pytest.raises(AppleNotesError) as info:
-        osascript_runner(["osascript"], which=lambda _n: tool, timeout=0.3)
+        osascript_runner(["osascript"], binary=tool, timeout=0.3)
 
     assert str(info.value) == (
         "`osascript` timed out after 0.3s; lower --max or narrow --since"
@@ -172,19 +202,21 @@ def test_output_over_the_cap_is_refused(tmp_path: Path) -> None:
     tool = _script(tmp_path, "head -c 300000 /dev/zero\nsleep 30")
 
     with pytest.raises(AppleNotesError) as info:
-        osascript_runner(["osascript"], which=lambda _n: tool, max_stdout_bytes=1000)
+        osascript_runner(["osascript"], binary=tool, max_stdout_bytes=1000)
 
     assert str(info.value) == (
         "`osascript` output exceeded 1000 bytes; lower --max or narrow --since"
     )
 
 
-def test_an_os_error_is_reported_by_class_only() -> None:
+def test_an_os_error_is_reported_by_class_only(tmp_path: Path) -> None:
+    tool = _script(tmp_path, "printf never")
+
     def popen(*_a: Any, **_k: Any) -> Any:
         raise PermissionError(13, "denied /private/path")
 
     with pytest.raises(AppleNotesError) as info:
-        osascript_runner(["osascript"], which=lambda _n: "/x/osascript", popen=popen)
+        osascript_runner(["osascript"], binary=tool, popen=popen)
 
     assert str(info.value) == "`osascript` could not run (PermissionError)"
 

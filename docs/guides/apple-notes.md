@@ -74,6 +74,8 @@ yourself, from the app you granted.
 
 - At most `--max` notes a run (default 200), the most recently modified first. The command says
   how many more matched, so you can run it again with a higher `--max` or a narrower `--since`.
+- A note whose HTML body is over 2,000,000 characters is skipped and counted, and the Markdown
+  kept from one note stops at 1,000,000 characters, marked `[note truncated: …]`.
 - Notes scripting is slow on large folders, so `osascript` is stopped after 120 seconds. If a run
   times out, lower `--max` or add `--since`.
 - Every new note gets an Ollama summary (`--no-enrich` skips it) and, when the graph is on,
@@ -82,6 +84,7 @@ yourself, from the app you granted.
 
 ## Checking the setup
 
-`brain doctor` has an `apple notes` row. On macOS it says whether `osascript` is on `PATH`;
+`brain doctor` has an `apple notes` row. On macOS it says whether `/usr/bin/osascript` exists
+(the command always runs that path and never searches `PATH`);
 elsewhere it says the command is unavailable. It never runs `osascript`, so it never triggers
 the permission prompt.

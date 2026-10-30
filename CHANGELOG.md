@@ -34,7 +34,9 @@ git tag scheme:
   `--sensitivity normal`. `--since`, `--max` (default 200, the rest reported),
   `--dry-run`, `--tag` and `--no-enrich` are offered. Dedup is by the Notes id;
   a moved note updates only its metadata. Without `--folder` it exits 2; off
-  macOS, 1. `osascript` is stopped after 120 s. `brain doctor` gains an
+  macOS, 1. `/usr/bin/osascript` (never a `PATH` lookup) is stopped after 120 s;
+  the converter is linear, nesting and output are capped, and a body over
+  2,000,000 characters is skipped. `brain doctor` gains an
   `apple notes` row, and `docs/guides/apple-notes.md` documents macOS's
   Automation permission prompt.
 - `brain.ingest.capped_process` holds the timeout-and-stdout-cap runner that

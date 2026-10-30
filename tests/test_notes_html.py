@@ -3,7 +3,15 @@ from __future__ import annotations
 
 import pytest
 
-from brain.ingest.notes_html import html_to_markdown
+from brain.ingest.notes_html import (
+    MAX_NESTING,
+    MAX_OPEN_INLINE,
+    MAX_OUTPUT_CHARS,
+    TRUNCATION_MARKER,
+    _convert,
+    _Converter,
+    html_to_markdown,
+)
 
 # The shape Notes returns: one <div> per line, a <div><br></div> per blank line.
 NOTE_BODY = (
@@ -190,3 +198,147 @@ def test_plain_text_passes_through() -> None:
 
 def test_self_closed_block_tags() -> None:
     assert html_to_markdown("one<div/>two<br/>three") == "one\ntwo\nthree"
+
+
+# --- bounded on hostile input (#103 security review: M1, M2, M3) -------------------------------
+
+
+def test_list_indent_stops_growing_at_max_nesting() -> None:
+    """M1: deep nesting once repeated the full indent on every line (54 KB in, 36 MB out)."""
+    depth = MAX_NESTING + 40
+    out = html_to_markdown("<ul><li>x" * depth)
+
+    lines = out.splitlines()
+    assert len(lines) == depth
+    assert lines[MAX_NESTING] == "  " * MAX_NESTING + "- x"
+    assert lines[-1] == "  " * MAX_NESTING + "- x"
+
+
+def test_quote_markers_stop_growing_at_max_nesting() -> None:
+    out = html_to_markdown("<blockquote>q<br>" * (MAX_NESTING + 40))
+
+    assert max(len(line) for line in out.splitlines()) == len("> " * MAX_NESTING + "q")
+
+
+def test_max_nesting_is_eight() -> None:
+    assert MAX_NESTING == 8
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<ul><li>x" * 120_000,
+        "<blockquote>q<br>" * 70_000,
+        "<ul>" * 9 + "<li>x" * 250_000,
+        "&lt;x" * 600_000,  # one long line of decoded entities
+    ],
+)
+def test_the_output_is_capped_and_marked(body: str) -> None:
+    out = html_to_markdown(body)
+
+    assert out.endswith(f"\n\n{TRUNCATION_MARKER}")
+    assert len(out) <= MAX_OUTPUT_CHARS + len(TRUNCATION_MARKER) + 2
+
+
+def test_output_just_under_the_cap_is_not_marked() -> None:
+    body = "x" * (MAX_OUTPUT_CHARS - 1)  # one line plus its newline fills the cap exactly
+
+    out = html_to_markdown(body)
+
+    assert out == body
+    assert TRUNCATION_MARKER not in out
+
+
+def test_output_one_over_the_cap_is_cut_and_marked() -> None:
+    out = html_to_markdown("x" * MAX_OUTPUT_CHARS)
+
+    assert out == "x" * (MAX_OUTPUT_CHARS - 1) + f"\n\n{TRUNCATION_MARKER}"
+
+
+def test_nothing_after_the_cap_is_kept() -> None:
+    out = html_to_markdown("x" * MAX_OUTPUT_CHARS + "<div>after</div><pre>code</pre><hr>")
+
+    assert "after" not in out and "code" not in out and "---" not in out
+
+
+def _work(body: str) -> int:
+    converter = _convert(body)
+    converter.markdown()
+    return converter.work
+
+
+# Each shape once took time quadratic in its size (M2: 1 MB of nested <a> took 94 s).
+HOSTILE_SHAPES = {
+    "nested links": '<a href="https://e.x">x',
+    "nested emphasis": "<b><i>x",
+    "open bold, stray italic ends": "<b>x</i>",
+    "closing emphasis after a full stack": "<b>x</b><b>",
+    "nested lists": "<ul><li>x",
+    "nested quotes": "<blockquote>x<br>",
+    "links across lines": '<a href="https://e.x">x<br>',
+}
+
+
+@pytest.mark.parametrize("shape", HOSTILE_SHAPES.values(), ids=HOSTILE_SHAPES.keys())
+def test_work_grows_linearly_with_the_input(shape: str) -> None:
+    """Timing-free: ``_Converter.work`` counts characters joined and stack entries scanned.
+
+    The bound is per input character, so a quadratic converter fails it at this size by
+    two orders of magnitude.
+    """
+    for repeat in (2_000, 8_000):
+        body = shape * repeat
+
+        assert _work(body) <= (MAX_OPEN_INLINE + 4) * len(body), repeat
+
+
+def test_the_inline_stacks_are_bounded() -> None:
+    converter = _convert('<a href="https://e.x">' * 500 + "<b>" * 500 + "x")
+
+    assert converter.lines  # flushed at the end
+    converter2 = _Converter()
+    converter2.feed('<a href="https://e.x">' * 500 + "<b>" * 500 + "x")
+    assert len(converter2.links) == MAX_OPEN_INLINE
+    assert len(converter2.marks) == MAX_OPEN_INLINE
+    assert MAX_OPEN_INLINE == 64
+
+
+def test_a_link_left_open_does_not_reach_the_next_line() -> None:
+    """The links stack is cleared at a line end, like the emphasis stack."""
+    converter = _Converter()
+    converter.feed('<div><a href="https://e.x">one</div><div>two</a></div>')
+
+    assert converter.links == []
+    assert html_to_markdown('<div><a href="https://e.x">one</div><div>two</a></div>') == (
+        "one\ntwo"
+    )
+
+
+def test_deep_links_keep_their_text() -> None:
+    body = '<a href="https://e.x">' * (MAX_OPEN_INLINE + 3) + "deep" + "</a>" * 80
+
+    assert "deep" in html_to_markdown(body)
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected"),
+    [
+        ("&#" + "9" * 5000 + ";", "�"),  # once ValueError: over Python's 4,300 digits
+        ("&#" + "9" * 5000, "�"),  # no semicolon
+        ("&#x" + "F" * 5000 + ";", "�"),
+        ("&#X" + "0" * 16 + "41;", "�"),  # at the digit bound, even if zero-padded
+        ("&#" + "0" * 15 + ";", "�"),  # 15 digits: html.unescape's own U+FFFD for 0
+        ("&#" + "0" * 13 + "65;", "A"),  # 15 digits: below the bound, decoded
+        ("&#65;&#x42;", "AB"),
+    ],
+)
+def test_huge_character_references_become_the_replacement_character(
+    ref: str, expected: str
+) -> None:
+    assert html_to_markdown(f"<div>{ref}</div>") == expected
+
+
+def test_a_huge_character_reference_in_an_attribute_is_harmless() -> None:
+    body = f'<a href="https://e.x/&#{"9" * 5000};">t</a>'
+
+    assert html_to_markdown(body) == "[t](https://e.x/�)"

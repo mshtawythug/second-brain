@@ -184,7 +184,7 @@ class _Run:
     allow_secrets: bool
     counts: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(
-            ("ingested", "updated", "refreshed", "unchanged", "empty", "failed"), 0
+            ("ingested", "updated", "refreshed", "unchanged", "empty", "skipped", "failed"), 0
         )
     )
 
@@ -205,15 +205,14 @@ def _ingest_all(
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         for note in batch.notes:
-            doc = an.build_document(note)
-            if doc is None:
-                run.counts["empty"] += 1
-                continue
-            _guarded(note.id, run, lambda n=note.id, d=doc: _write(conn, n, d, run))
+            # The conversion runs inside the guard too: a body is the note author's
+            # HTML, and whatever it raises must cost one note, not the run (#103).
+            _guarded(note.id, run, lambda n=note: _ingest_note(conn, n, run))
     c = run.counts
     typer.echo(
         f"{c['ingested']} ingested, {c['updated']} updated, {c['refreshed']} refreshed, "
-        f"{c['unchanged']} unchanged, {c['empty']} empty, {c['failed']} failed"
+        f"{c['unchanged']} unchanged, {c['empty']} empty, {c['skipped']} skipped, "
+        f"{c['failed']} failed"
     )
 
 
@@ -231,8 +230,23 @@ def _guarded(note_id: str, run: _Run, step: Any) -> None:
         typer.secho(f"  failed {note_id}: {describe_failure(exc)}", fg="red", err=True)
         outcome = "failed"
     run.counts[outcome] += 1
-    if outcome not in ("unchanged", "failed"):
+    if outcome not in ("unchanged", "empty", "skipped", "failed"):
         typer.echo(f"  {outcome} {note_id}")
+
+
+def _ingest_note(conn: psycopg.Connection[Any], note: an.Note, run: _Run) -> str:
+    """Convert and write one note; ``empty`` or ``skipped`` when there is nothing to write."""
+    if len(note.body_html) > an.MAX_BODY_CHARS:
+        typer.secho(
+            f"  skipped {note.id}: body over {an.MAX_BODY_CHARS} characters",
+            fg="yellow",
+            err=True,
+        )
+        return "skipped"
+    doc = an.build_document(note)
+    if doc is None:
+        return "empty"
+    return _write(conn, note.id, doc, run)
 
 
 def _write(conn: psycopg.Connection[Any], note_id: str, doc: ExtractedDoc, run: _Run) -> str:

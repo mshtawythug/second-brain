@@ -4,14 +4,13 @@ The ``osascript`` runner is the synthetic ``FakeOsascript``
 (``tests/apple_notes_fixtures.py``) and the host platform is pinned to
 ``darwin``, both swapped in with ``monkeypatch.setattr`` (standard test doubles,
 rule 13), so the suite runs on Linux CI. The real ``osascript`` is never run: the
-end-to-end test at the end puts a throwaway script named ``osascript`` alone on
-``PATH``.
+end-to-end test at the end hands the production runner a throwaway script
+through its ``binary`` seam (the command never searches ``PATH``).
 """
 from __future__ import annotations
 
+import functools
 import json
-import os
-import shutil
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,6 +21,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from brain.cli import app
+from brain.ingest import apple_notes as an
 from brain.ingest.apple_notes import JXA_SCRIPT, AppleNotesError
 from tests import apple_notes_fixtures as fx
 from tests.conftest import CountingEmbedder
@@ -220,7 +220,9 @@ def test_notes_land_confidential_and_locked_notes_are_counted(
 
     assert result.exit_code == 0, result.output
     assert "2 locked note(s) skipped (locked notes cannot be read)" in result.output
-    assert "2 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 0 failed" in result.output
+    assert "2 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 0 skipped, 0 failed" in (
+        result.output
+    )
     docs = _docs(test_db)
     assert set(docs) == {fx.note_id(1), fx.note_id(2)}
     first = docs[fx.note_id(1)]
@@ -290,7 +292,9 @@ def test_an_empty_note_is_counted_and_not_stored(
 
     result = _run(*FOLDER)
 
-    assert "1 ingested, 0 updated, 0 refreshed, 0 unchanged, 1 empty, 0 failed" in result.output
+    assert "1 ingested, 0 updated, 0 refreshed, 0 unchanged, 1 empty, 0 skipped, 0 failed" in (
+        result.output
+    )
     assert set(_docs(test_db)) == {fx.note_id(2)}
 
 
@@ -321,7 +325,9 @@ def test_a_database_error_is_reported_by_class(
     assert result.exit_code == 0, result.output
     assert f"failed {fx.note_id(1)}: CheckViolation" in result.output
     assert "SECRETROW" not in result.output
-    assert "0 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 2 failed" in result.output
+    assert "0 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 0 skipped, 2 failed" in (
+        result.output
+    )
 
 
 def test_the_secret_guard_runs_on_every_note(
@@ -336,6 +342,76 @@ def test_the_secret_guard_runs_on_every_note(
     assert f"refused {fx.note_id(1)}" in result.output
     assert set(_docs(test_db)) == {fx.note_id(2)}
     assert SYNTHETIC_AWS_KEY not in result.output
+
+
+def test_a_conversion_failure_costs_one_note_not_the_run(
+    notes: fx.FakeOsascript, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M3 (#103): the conversion runs inside the per-note guard."""
+    real = an.build_document
+
+    def build(note: an.Note) -> Any:
+        if note.id == fx.note_id(2):
+            raise ValueError("SECRETBODY text from the note")
+        return real(note)
+
+    monkeypatch.setattr("brain.cli_ingest_apple_notes.an.build_document", build)
+
+    result = _run(*FOLDER)
+
+    assert result.exit_code == 0, result.output
+    assert f"failed {fx.note_id(2)}: ValueError" in result.output
+    assert "SECRETBODY" not in result.output
+    assert "1 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 0 skipped, 1 failed" in (
+        result.output
+    )
+    assert set(_docs(test_db)) == {fx.note_id(1)}
+
+
+def test_a_huge_character_reference_is_replaced_not_fatal(
+    notes: fx.FakeOsascript, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    """M3 (#103): a 5,000-digit decimal reference once raised ValueError and ended the run."""
+    notes.notes = [fx.note(1, body=f"<div>before &#{'9' * 5000}; after</div>"), fx.note(2)]
+
+    result = _run(*FOLDER)
+
+    assert result.exit_code == 0, result.output
+    assert "2 ingested" in result.output
+    assert _docs(test_db)[fx.note_id(1)]["content"] == "before \ufffd after"
+
+
+def test_an_oversized_body_is_skipped_and_counted(
+    notes: fx.FakeOsascript, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("brain.cli_ingest_apple_notes.an.MAX_BODY_CHARS", 100)
+    notes.notes = [fx.note(1, body="<div>" + "x" * 101 + "</div>"), fx.note(2)]
+
+    result = _run(*FOLDER)
+
+    assert result.exit_code == 0, result.output
+    assert f"  skipped {fx.note_id(1)}: body over 100 characters" in result.output
+    assert "1 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 1 skipped, 0 failed" in (
+        result.output
+    )
+    assert set(_docs(test_db)) == {fx.note_id(2)}
+
+
+def test_a_body_at_the_cap_is_converted(
+    notes: fx.FakeOsascript, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = "<div>" + "x" * 89 + "</div>"
+    monkeypatch.setattr("brain.cli_ingest_apple_notes.an.MAX_BODY_CHARS", len(body))
+    notes.notes = [fx.note(1, body=body)]
+
+    assert "1 ingested" in _run(*FOLDER).output
+
+
+def test_the_body_cap_is_two_million_characters() -> None:
+    assert an.MAX_BODY_CHARS == 2_000_000
 
 
 # --- the cap (AC5) ------------------------------------------------------------------------------
@@ -362,7 +438,7 @@ def test_the_default_cap_is_200(notes: fx.FakeOsascript) -> None:
     assert notes.request()["limit"] == 200
 
 
-# --- end to end: a fake osascript alone on PATH, a hostile folder name -------------------------
+# --- end to end: a fake osascript through the binary seam, a hostile folder name ---------------
 
 _FAKE_OSASCRIPT = """#!{python}
 import json, os, sys
@@ -377,7 +453,7 @@ sys.stdout.write(json.dumps(answer))
 """
 
 
-def test_end_to_end_through_a_fake_osascript_on_path(
+def test_end_to_end_through_a_fake_osascript_via_the_binary_seam(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, embedder: CountingEmbedder,
     test_db: psycopg.Connection,
 ) -> None:
@@ -391,8 +467,12 @@ def test_end_to_end_through_a_fake_osascript_on_path(
     (tmp_path / "answer.json").write_text(json.dumps(answer))
     monkeypatch.setenv("RM36_FAKE_ANSWER", str(tmp_path / "answer.json"))
     monkeypatch.setenv("RM36_FAKE_LOG", str(tmp_path / "argv.json"))
-    monkeypatch.setenv("PATH", str(bin_dir))  # the real /usr/bin/osascript is not on it
-    assert shutil.which("osascript") == str(script)
+    # PATH holds nothing runnable: the command must not need it (L1, #103).
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setattr(
+        "brain.cli_ingest_apple_notes.apple_notes_runner",
+        functools.partial(an.osascript_runner, binary=str(script)),
+    )
 
     result = _run("--folder", hostile)
 
@@ -405,4 +485,3 @@ def test_end_to_end_through_a_fake_osascript_on_path(
     [doc] = _docs(test_db).values()
     assert doc["sensitivity"] == "confidential"
     assert doc["metadata"]["folder"] == hostile
-    assert os.environ["PATH"] == str(bin_dir)

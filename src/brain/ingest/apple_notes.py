@@ -31,12 +31,12 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 from . import ExtractedDoc
@@ -57,6 +57,12 @@ NotesRunner = Callable[[list[str]], str]
 OSASCRIPT_TIMEOUT_SECONDS = 120
 #: The largest answer read (bodies have their images removed already).
 OSASCRIPT_MAX_STDOUT_BYTES = 64 * 1024 * 1024
+#: The binary, by absolute path: a ``PATH`` lookup would run whatever ``osascript``
+#: comes first on it (#103 security review).
+OSASCRIPT_PATH = "/usr/bin/osascript"
+#: The largest body converted; a bigger note is skipped and counted. The
+#: converter is linear and its output capped, so this bounds the work per note.
+MAX_BODY_CHARS = 2_000_000
 #: A Notes id is ``x-coredata://<store>/ICNote/p<n>``; anything far longer is not one.
 _MAX_ID_CHARS = 512
 
@@ -108,7 +114,6 @@ function run(argv) {
 }
 """
 
-_NOT_FOUND = "osascript not found on PATH: brain ingest-apple-notes needs macOS"
 _PERMISSION_HINT = (
     "if macOS asked for permission to control Notes, allow it in System Settings → "
     "Privacy & Security → Automation, then rerun"
@@ -169,17 +174,19 @@ def osascript_argv(request: NotesRequest) -> list[str]:
 def osascript_runner(
     args: list[str],
     *,
-    which: Callable[[str], str | None] = shutil.which,
+    binary: str = OSASCRIPT_PATH,
     popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
     timeout: float = OSASCRIPT_TIMEOUT_SECONDS,
     max_stdout_bytes: int = OSASCRIPT_MAX_STDOUT_BYTES,
 ) -> str:
-    """The production :data:`NotesRunner`. ``which`` and ``popen`` are test seams."""
+    """The production :data:`NotesRunner`; ``args[0]`` names it, ``binary`` runs.
+
+    ``binary`` (default :data:`OSASCRIPT_PATH`) and ``popen`` are test seams.
+    """
     if not args:
         raise AppleNotesError("osascript runner invoked with no arguments")
-    binary = which(args[0])
-    if binary is None:
-        raise AppleNotesError(_NOT_FOUND)
+    if not Path(binary).is_file():
+        raise AppleNotesError(f"{binary} not found: brain ingest-apple-notes needs macOS")
     try:
         run = run_capped(
             [binary, *args[1:]],

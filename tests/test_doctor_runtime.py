@@ -544,9 +544,8 @@ def test_all_healthy_yields_no_failures(
     launchd_dir.mkdir()
     _install_plists(launchd_dir, *_LABELS)
     monkeypatch.setattr("brain.doctor_github.shutil.which", lambda _name: "/usr/local/bin/gh")
-    monkeypatch.setattr(
-        "brain.doctor_apple_notes.shutil.which", lambda _name: "/usr/bin/osascript"
-    )
+    (tmp_path / "osascript").write_text("")
+    monkeypatch.setattr("brain.doctor_apple_notes.OSASCRIPT_PATH", str(tmp_path / "osascript"))
 
     with patch(
         "brain.doctor_runtime.subprocess.run",
@@ -560,7 +559,7 @@ def test_all_healthy_yields_no_failures(
     # RM-16 adds "brief delivery", off (ok) under tests/delivery_isolation_plugin.py.
     # RM-14b adds "reranker", not configured (ok) under tests/rerank_isolation_plugin.py.
     # RM-31 adds "github", ok here because ``gh`` is found (``shutil.which`` is pinned above).
-    # RM-36 adds "apple notes", ok here because ``osascript`` is found (pinned above too).
+    # RM-36 adds "apple notes", ok here because its osascript path exists (pinned above too).
     assert [c.check for c in checks] == [
         "config", "daemons", "vault watcher", "brief delivery", "reranker", "github",
         "apple notes",

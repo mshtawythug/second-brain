@@ -20,6 +20,21 @@ What it drops: attachments and embedded media (``img``, ``object``, ``embed``,
 ``video``, ``audio``, ``iframe``, ``svg``), which the ticket scopes out, and
 ``script``/``style``/``head`` content. Text is not Markdown-escaped: the result
 is for search and reading, and an escape would only add noise to both.
+
+**Bounded on hostile input** (the #103 security review). A body is the note
+author's HTML, so its shape is not trusted:
+
+- list indentation and quote markers stop growing at :data:`MAX_NESTING` levels,
+  because every line repeats them and deep nesting would otherwise grow the
+  output quadratically;
+- at most :data:`MAX_OPEN_INLINE` links and emphasis marks are tracked at once
+  (deeper ones keep their text and lose their markup), and both stacks are
+  cleared at every line end, so closing tags cost linear work in all;
+- the output stops at :data:`MAX_OUTPUT_CHARS`, with :data:`TRUNCATION_MARKER`;
+- a numeric character reference with :data:`_MAX_CHARREF_DIGITS` or more digits
+  becomes U+FFFD before parsing, because ``html.unescape`` turns a decimal one
+  into an ``int`` and Python refuses more than 4,300 digits with a
+  ``ValueError``. No valid code point needs more than seven decimal digits.
 """
 from __future__ import annotations
 
@@ -27,7 +42,25 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 
-__all__ = ["html_to_markdown"]
+__all__ = [
+    "MAX_NESTING",
+    "MAX_OPEN_INLINE",
+    "MAX_OUTPUT_CHARS",
+    "TRUNCATION_MARKER",
+    "html_to_markdown",
+]
+
+#: List and quote depth past which the indent and the ``>`` markers stop growing.
+MAX_NESTING = 8
+#: Open links and emphasis marks tracked at once; deeper ones are kept as plain text.
+MAX_OPEN_INLINE = 64
+#: The longest Markdown one body yields; the rest is cut and marked.
+MAX_OUTPUT_CHARS = 1_000_000
+TRUNCATION_MARKER = f"[note truncated: over {MAX_OUTPUT_CHARS} characters]"
+_MAX_CHARREF_DIGITS = 16
+_HUGE_CHARREF = re.compile(
+    rf"&#(?:[xX][0-9a-fA-F]{{{_MAX_CHARREF_DIGITS},}}|[0-9]{{{_MAX_CHARREF_DIGITS},}});?"
+)
 
 _HEADINGS = {f"h{n}": n for n in range(1, 7)}
 _BLOCKS = frozenset(
@@ -65,19 +98,41 @@ class _Converter(HTMLParser):
         self.marks: list[tuple[str, int]] = []
         self.links: list[tuple[str | None, int]] = []
         self.cells = 0
+        self.size = 0
+        self.truncated = False
+        #: Characters joined and stack entries scanned: the linearity tests read it.
+        self.work = 0
 
     # --- lines ------------------------------------------------------------------------
 
     def flush(self, *, blank: bool = False) -> None:
         """End the current line; ``blank`` keeps an empty one (a ``<br>`` paragraph gap)."""
-        text = _SPACES.sub(" ", "".join(self.inline)).strip()
+        text = _SPACES.sub(" ", self._join(self.inline)).strip()
         if text or self.prefix.strip():
-            self.lines.append(f"{'> ' * self.quote}{self.prefix}{text}".rstrip())
+            quote = "> " * min(self.quote, MAX_NESTING)
+            self.emit(f"{quote}{self.prefix}{text}".rstrip())
         elif blank:
-            self.lines.append("")
+            self.emit("")
         self.inline = []
         self.prefix = ""
         self.marks = []
+        self.links = []
+
+    def emit(self, line: str) -> None:
+        """Append one output line, or stop for good once :data:`MAX_OUTPUT_CHARS` is passed."""
+        if self.truncated:
+            return
+        room = MAX_OUTPUT_CHARS - self.size
+        if len(line) + 1 > room:
+            self.truncated = True
+            line = line[: max(0, room - 1)]  # the part that fits; then nothing more
+        self.size += len(line) + 1
+        self.lines.append(line)
+
+    def _join(self, parts: list[str]) -> str:
+        joined = "".join(parts)
+        self.work += len(joined)
+        return joined
 
     # --- tags -------------------------------------------------------------------------
 
@@ -99,12 +154,14 @@ class _Converter(HTMLParser):
         elif tag == "input" and attr.get("type", "").lower() == "checkbox":
             self._box("checked" in attr)
         elif tag == "a":
-            href = attr.get("href", "").strip()
-            safe = href.lower().startswith(_SAFE_SCHEMES)
-            self.links.append((href if safe else None, len(self.inline)))
+            if len(self.links) < MAX_OPEN_INLINE:
+                href = attr.get("href", "").strip()
+                safe = href.lower().startswith(_SAFE_SCHEMES)
+                self.links.append((href if safe else None, len(self.inline)))
         elif tag in _EMPHASIS:
-            self.marks.append((tag, len(self.inline)))
-            self.inline.append(_EMPHASIS[tag])
+            if len(self.marks) < MAX_OPEN_INLINE:
+                self.marks.append((tag, len(self.inline)))
+                self.inline.append(_EMPHASIS[tag])
         elif tag == "br":
             self.flush(blank=True)
         elif tag == "blockquote":
@@ -112,11 +169,11 @@ class _Converter(HTMLParser):
             self.quote += 1
         elif tag == "pre":
             self.flush()
-            self.lines.append("```")
+            self.emit("```")
             self.pre = True
         elif tag == "hr":
             self.flush()
-            self.lines.append("---")
+            self.emit("---")
         elif tag == "tr":
             self.flush()
             self.cells = 0
@@ -138,9 +195,10 @@ class _Converter(HTMLParser):
             return
         if tag == "pre":
             if self.pre:
-                self.lines.extend("".join(self.inline).strip("\n").split("\n"))
+                for line in self._join(self.inline).strip("\n").split("\n"):
+                    self.emit(line)
                 self.inline = []
-                self.lines.append("```")
+                self.emit("```")
                 self.pre = False
             return
         if self.pre:
@@ -160,8 +218,14 @@ class _Converter(HTMLParser):
             self.flush()
 
     def handle_data(self, data: str) -> None:
-        if not self.skip:
+        if not self.skip and not self.truncated:
             self.inline.append(data)
+
+    def markdown(self) -> str:
+        text = _BLANK_RUN.sub("\n\n", "\n".join(self.lines)).strip()
+        if self.truncated:
+            return f"{text}\n\n{TRUNCATION_MARKER}".strip()
+        return text
 
     # --- helpers ----------------------------------------------------------------------
 
@@ -169,7 +233,7 @@ class _Converter(HTMLParser):
         self.flush()
         current = self.lists[-1] if self.lists else _List(ordered=False, checklist=False)
         current.count += 1
-        indent = "  " * max(0, len(self.lists) - 1)
+        indent = "  " * min(max(0, len(self.lists) - 1), MAX_NESTING)
         bullet = f"{current.count}. " if current.ordered else "- "
         self.prefix = indent + bullet
         if current.checklist:
@@ -191,7 +255,7 @@ class _Converter(HTMLParser):
         if not self.links:
             return
         href, start = self.links.pop()
-        text = _SPACES.sub(" ", "".join(self.inline[start:])).strip()
+        text = _SPACES.sub(" ", self._join(self.inline[start:])).strip()
         if href is None:
             return  # an unsafe or missing target: the text stays, the target goes
         target = href.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
@@ -199,6 +263,7 @@ class _Converter(HTMLParser):
 
     def _end_mark(self, tag: str) -> None:
         for i in range(len(self.marks) - 1, -1, -1):
+            self.work += 1
             if self.marks[i][0] == tag:
                 _tag, start = self.marks.pop(i)
                 break
@@ -206,7 +271,7 @@ class _Converter(HTMLParser):
             return
         if start >= len(self.inline):
             return  # the line was flushed under the open mark
-        inner = "".join(self.inline[start + 1:])
+        inner = self._join(self.inline[start + 1:])
         if not inner.strip():
             if self.inline[start] == _EMPHASIS[tag]:
                 del self.inline[start]  # an empty or blank emphasis: no stray markers
@@ -220,10 +285,14 @@ class _Converter(HTMLParser):
 
 def html_to_markdown(body: str) -> str:
     """``body`` (a Notes HTML body) as Markdown; ``""`` when nothing readable is left."""
+    return _convert(body).markdown()
+
+
+def _convert(body: str) -> _Converter:
     converter = _Converter()
-    converter.feed(body)
+    converter.feed(_HUGE_CHARREF.sub("\ufffd", body))
     converter.close()
     if converter.pre:
         converter.handle_endtag("pre")
     converter.flush()
-    return _BLANK_RUN.sub("\n\n", "\n".join(converter.lines)).strip()
+    return converter
