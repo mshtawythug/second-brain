@@ -56,6 +56,15 @@ today (the wiki that would have is deleted), but the action is allowed, so it is
   `session_id IS NOT NULL` alone would be wrong: `brain_ask` logs its citations with the ask's own
   session id, and no search is logged under it. The share is over read events, and is `None`
   (printed as no percentage) when there are none.
+  **How it is computed (review rounds 1 and 2):** a `LEFT JOIN` against
+  `SELECT DISTINCT session_id FROM search_queries WHERE session_id IS NOT NULL`. It is not a
+  sub-select inside the aggregate FILTER, which Postgres can only run as a SubPlan:
+  - correlated (`EXISTS`), it re-scanned `search_queries` per read row (27.6 s at 30k × 30k);
+  - uncorrelated (`IN`), it is hashed only while the hash is estimated to fit in `work_mem`, and on
+    PG 16 defaults it was not at 1M searches (> 120 s).
+
+  `search_queries` is never pruned. `DISTINCT` keeps the join from duplicating an interaction row.
+  A test pins that the plan has no SubPlan.
 - **Explicit ratings are `rated_useful` + `rated_irrelevant`.** `pinned` is not a rating.
 - **The window** is `at >= NOW() - make_interval(days => %s)`, the same predicate as `brain usage`.
   `days < 1` raises `ValueError` (the CLI's `--days` already has `min=1`).

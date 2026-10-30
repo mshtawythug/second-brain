@@ -174,19 +174,24 @@ _TOTALS_SQL = """
         COUNT(*) FILTER (WHERE i.action = 'rated_useful'),
         COUNT(*) FILTER (WHERE i.action = 'rated_irrelevant'),
         COUNT(*) FILTER (WHERE i.action = ANY(%(ratings)s)),
-        -- An uncorrelated IN, so Postgres builds one hashed SubPlan. A
-        -- correlated EXISTS here runs once per read row, because a sub-select
-        -- inside an aggregate FILTER cannot become a join: 23 s against 46 ms
-        -- on 30k x 30k synthetic rows. IN also counts a read once however
-        -- many searches share its session, where a JOIN would not.
         COUNT(*) FILTER (
-            WHERE i.action = ANY(%(reads)s)
-              AND i.session_id IN (
-                  SELECT sq.session_id FROM search_queries sq
-                  WHERE sq.session_id IS NOT NULL
-              )
+            WHERE i.action = ANY(%(reads)s) AND ss.session_id IS NOT NULL
         )
     FROM interactions i
+    -- The search-session leg is a JOIN, not a sub-select in the FILTER. A
+    -- sub-select there cannot become a join, so Postgres runs it as a
+    -- SubPlan: correlated (EXISTS), it re-scans search_queries once per read
+    -- row (27.6 s on 30k x 30k synthetic rows); uncorrelated (IN), it is
+    -- hashed only while the hash is estimated to fit in work_mem, and on
+    -- PG 16 defaults it stopped fitting at ~300k searches (> 120 s).
+    -- search_queries is never pruned, so every install gets there. DISTINCT
+    -- makes ss hold each session id at most once, so the join cannot
+    -- duplicate an interaction row: every other count is unchanged, and a
+    -- read is counted once however many searches share its session.
+    LEFT JOIN (
+        SELECT DISTINCT session_id FROM search_queries
+        WHERE session_id IS NOT NULL
+    ) ss ON ss.session_id = i.session_id
     WHERE i.document_id IS NOT NULL
       AND i.at >= NOW() - make_interval(days => %(days)s)
 """

@@ -177,14 +177,18 @@ def test_a_session_with_two_logged_searches_counts_its_read_once(
     assert stats.search_session_share == 1.0
 
 
-def test_the_search_session_check_is_hashed_not_correlated(
+def test_the_search_session_check_is_a_join_not_a_subplan(
     test_db: psycopg.Connection[Any],
 ) -> None:
-    """A per-row correlated lookup took 23 s on 30k x 30k rows; a hashed one, 46 ms.
+    """The search-session leg must be a join, with no SubPlan anywhere.
 
     Postgres cannot turn a sub-select inside an aggregate FILTER into a join,
-    so it runs it as a SubPlan. Only a hashed SubPlan is built once. A
-    correlated one re-scans search_queries for every read row.
+    so it runs it as a SubPlan. A correlated one re-scans search_queries for
+    every read row (27.6 s on 30k x 30k synthetic rows). An uncorrelated IN is
+    hashed only while the planner thinks the hash fits in work_mem; past
+    roughly 300k logged searches it is not, and the count ran past 120 s.
+    search_queries is never pruned, so every install reaches that size. A
+    join against the distinct session ids scales with no such cliff.
     """
     plan = "\n".join(
         str(row[0])
@@ -198,18 +202,9 @@ def test_the_search_session_check_is_hashed_not_correlated(
         ).fetchall()
     )
 
-    # VERBOSE prints each SubPlan as its own node ("SubPlan 1"), and names
-    # it inside the expression that uses it, as "(hashed SubPlan 1)" when it
-    # is hashed and "(SubPlan 1)" when it runs once per row.
-    names = [
-        line.strip() for line in plan.splitlines()
-        if re.fullmatch(r"SubPlan \d+", line.strip())
-    ]
-    assert names, plan
-    for name in names:
-        uses = re.findall(rf"(hashed )?{name}\b(?!\d)", plan)
-        assert uses.count("hashed ") >= 1, plan
-        assert len(uses) - 1 == uses.count("hashed "), plan
+    assert "SubPlan" not in plan, plan
+    assert "public.search_queries" in plan, plan
+    assert re.search(r"(Hash|Merge)( Right| Left)? Join|Nested Loop", plan), plan
 
 
 def test_an_ask_citation_counts_as_a_read_but_not_a_search_session_read(
