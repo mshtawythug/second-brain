@@ -171,3 +171,20 @@ fsync), the worker could take queued job B before `_take_queued` did. B's
 `finally` owed only B's captured ids, so a B that then hung past exit lost its
 delete. Once `worker_abandoned` is set, the worker now owes each job it dequeues
 (`_owe`: path and unhanded ids) and starts none (`305b9a4`).
+
+`305b9a4` read the flag BEFORE writing `current_job`, which left a window: the
+worker reads the flag as False, shutdown sets it and reads an empty slot, then
+the worker writes the slot and starts the job, owed by nobody. rev-95's ordering
+(`8351382`): the worker writes the slot, then reads the flag; shutdown writes the
+flag, then reads the slot. With plain attributes under the GIL, either
+shutdown's slot read sees the job or the worker's flag read sees True; if both
+do, the job is owed twice, which the replay absorbs. The worker owes it with
+`_owe_in_flight`, clears the slot, and loops to the sentinel `_take_queued` put
+back. No lock: the worker never takes `state.lock`. Shutdown now takes the queue
+BEFORE owing the in-flight job, which shrinks the window.
+`test_an_abandoned_worker_owes_a_job_it_dequeues_and_never_starts_it` pins the
+guard's behaviour. It sets the flag before the dequeue, so it cannot tell the
+two placements apart. `test_the_flag_is_read_after_the_slot_is_written` pins the
+ordering without threads (`784f516`): its state sets the flag inside the
+`current_job` setter, so only a check placed after the slot write sees it. It
+is RED at `4fd153a`.
