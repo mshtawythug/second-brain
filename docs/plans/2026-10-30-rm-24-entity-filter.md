@@ -116,6 +116,19 @@ check dropped; the graph-off check dropped; MCP mapping to `INTERNAL_ERROR`.
    (`EntityFilterError`). Without them, the first would be silently ignored, and the second would
    match nothing and report "not found".
 
+## Round 3 (aud-91)
+
+- aud-91's mutant M20 drops the `in present` guard in `resolve_entity_ids`' `found_types`. A source
+  whose alias target is absent then counts as the target's type, and every earlier test passed.
+  `test_a_cross_type_alias_with_an_absent_target_is_still_ambiguous` pins the guard. It seeds topic
+  `sam` and person `sam`, plus a `topic sam → person "sam rivera"` rule with no `sam rivera` row.
+  "Sam" must raise `EntityAmbiguous` naming both types. Under M20 the topic counts as a person,
+  `found_types` collapses to `{person}`, and nothing raises.
+- The red-first check is static, because 5434 was down, and CI is the run evidence. No `src/`
+  change.
+- `second-brain/master` (#88, #90) was merged in as its own commit, with both sides kept in the
+  CHANGELOG, the backlog and Appendix B.
+
 ## Found, not fixed
 
 MCP `brain_search`'s facet predicate omits `updated_after` / `updated_before`, so with `facets=true`
