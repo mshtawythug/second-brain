@@ -10,7 +10,9 @@ from typing import Any
 import psycopg
 import pytest
 
+from brain.entity_filter import resolve_entity_ids
 from brain.facets import compute_facets
+from brain.graph_rag.aliases import AliasRule
 from brain.ingest import Embedder
 from brain.search import SearchDiagnostics, build_tsquery, hybrid_search
 from brain.search_predicate import build_predicate
@@ -116,3 +118,36 @@ def test_total_and_facets_agree_with_the_filtered_set(
 
     assert diagnostics.total_documents == len(corpus["mentioned"])
     assert facets.total_documents == len(corpus["mentioned"])
+
+
+def test_an_unmerged_alias_source_keeps_its_documents(
+    test_db: psycopg.Connection[Any], fake_embedder: Embedder
+) -> None:
+    """Regression (rev-91 b): both entities exist and neither is merged yet.
+
+    One note mentions only the source, one only the target, one neither; the
+    search must return the first two.
+    """
+    only_source, only_target, neither = (
+        seed_document(test_db, fake_embedder, f"Harbor note {n}") for n in range(3)
+    )
+    source = seed_entity(test_db, name="Harbor", canonical_key="harbor")
+    target = seed_entity(test_db, name="Harbor Light", canonical_key="harborlight")
+    seed_mention(test_db, source, only_source)
+    seed_mention(test_db, target, only_target)
+    rules = [AliasRule("project", "harbor", "project", "harborlight")]
+
+    ids = resolve_entity_ids(
+        test_db, tenant_id=TENANT, name="Harbor", entity_type=None, rules=rules
+    )
+    got = _search(
+        test_db,
+        fake_embedder,
+        query=SHARED_TERM,
+        fts_only=True,
+        entity_ids=ids,
+        entity_tenant=TENANT,
+    )
+
+    assert got == {only_source, only_target}
+    assert neither not in got

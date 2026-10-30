@@ -71,14 +71,38 @@ def test_name_match_does_not_run_when_a_key_matched(test_db: psycopg.Connection[
     assert _resolve(test_db, "Ferncastle") == [by_key]
 
 
-def test_alias_redirects_a_merged_source_that_still_exists(
+def test_alias_keeps_the_source_beside_its_target(
     test_db: psycopg.Connection[Any],
 ) -> None:
-    seed_entity(test_db, name="Harbor", canonical_key="harbor")
+    # Rules are merged only at `graphrag build` / `refresh`; ingest and the watcher
+    # apply none, so an unmerged source can still carry mentions of its own.
+    source = seed_entity(test_db, name="Harbor", canonical_key="harbor")
     target = seed_entity(test_db, name="Harbor Light", canonical_key="harborlight")
     rules = [AliasRule("project", "harbor", "project", "harborlight")]
 
-    assert _resolve(test_db, "Harbor", rules=rules) == [target]
+    assert _resolve(test_db, "Harbor", rules=rules) == sorted([source, target])
+
+
+def test_alias_with_no_target_yet_resolves_to_the_source(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    # Regression (rev-91 a): the rule's target has not been created yet.
+    source = seed_entity(test_db, name="Harbor", canonical_key="harbor")
+    rules = [AliasRule("project", "harbor", "project", "harborlight")]
+
+    assert _resolve(test_db, "Harbor", rules=rules) == [source]
+
+
+def test_a_cross_type_alias_is_not_ambiguous(test_db: psycopg.Connection[Any]) -> None:
+    # Ambiguity is judged after the redirect: a topic source that a rule maps to a
+    # person counts as that person, so one name of "two types" is one entity.
+    source = seed_entity(test_db, name="Sam", canonical_key="sam", entity_type="topic")
+    target = seed_entity(
+        test_db, name="Sam Rivera", canonical_key="sam rivera", entity_type="person"
+    )
+    rules = [AliasRule("topic", "sam", "person", "sam rivera")]
+
+    assert _resolve(test_db, "Sam", rules=rules) == sorted([source, target])
 
 
 def test_alias_redirects_a_merged_source_already_deleted(

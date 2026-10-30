@@ -51,13 +51,18 @@ their SQL byte-identical.
 1. Keys: `name` lowercased with its whitespace collapsed (the ticket's `lower(name)`, and the
    alias rules' key form), and the strip-all concept key (`graph_rag.extract._canonical_key`).
 2. Alias redirects (`graph_rag.aliases` rules, loaded from `BRAIN_GRAPH_ALIASES_PATH`): a rule whose
-   source `(type, key)` matches the name, or matches an entity the name resolved to, is replaced by
-   its target entity. A merged source is left with no mentions and is later deleted, so without
-   this step a merged name resolves to nothing or to an empty entity.
+   source `(type, key)` matches the name, or matches an entity the name resolved to, ADDS its
+   target entity; the source is kept. Rules are merged only by `brain graphrag build` / `refresh`,
+   and ingest and the watcher apply none, so an unmerged source can still carry mentions, and its
+   target may not exist yet. A merged source has no mentions, so keeping it costs nothing, and a
+   source already deleted by the orphan GC still reaches its target. (Round 1, rev-91: the first
+   cut REPLACED the source with the target, which lost an unmerged source's documents and raised
+   `EntityNotFound` when the target did not exist yet.)
 3. `canonical_key` match, tenant-scoped, narrowed by `entity_type` when given.
 4. Only when 2 and 3 found nothing: a case-insensitive `name` match.
 5. No entity → `EntityNotFound`, whose message points at `brain graphrag entities`. Entities of
-   more than one type and no `entity_type` → `EntityAmbiguous`, which lists the types.
+   more than one type and no `entity_type` → `EntityAmbiguous`, which lists the types. Types are
+   judged after the redirect: a source whose target was found counts as the target's type.
 
 `search_kwargs(conn, cfg, name, entity_type)` returns `{}` when `name` is `None`. Otherwise it checks
 `cfg.graph_enabled` and that `graph_entities` and `graph_entity_mentions` exist (`to_regclass`). It
@@ -115,4 +120,5 @@ check dropped; the graph-off check dropped; MCP mapping to `INTERNAL_ERROR`.
 
 MCP `brain_search`'s facet predicate omits `updated_after` / `updated_before`, so with `facets=true`
 and an F9 edit range, the facet counts describe a wider set than the results. The CLI passes both.
-This predates RM-24 and is outside its scope; it is reported, not changed here.
+This predates RM-24 and is outside its scope; it is reported, not changed here, and tracked as
+BL-24 in `docs/plans/2026-10-23-backlog-reconciliation.md`.

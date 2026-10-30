@@ -177,9 +177,11 @@ combination the sources emitted — so Gmail-header and Krisp-label spellings of
 the same person all count as one identity.
 
 `--entity "<name>"` (`brain search` only) keeps documents that mention that
-graph entity. The name is matched against the entity's canonical key, then any
-curated alias rule (`BRAIN_GRAPH_ALIASES_PATH`), and only then its display name,
-case-insensitively. The FTS leg, the vector leg, the total and `--facets` all
+graph entity. The name is matched against the entity's canonical key, and only
+when no key matches, against its display name, case-insensitively. A curated
+alias rule (`BRAIN_GRAPH_ALIASES_PATH`) adds its target entity and keeps the
+named one: rules are merged only by `brain graphrag build` / `refresh`, so an
+unmerged name can still have documents of its own. The FTS leg, the vector leg, the total and `--facets` all
 see the filter. A name that matches entities of several types exits 2 and asks
 for `--entity-type org|person|project|tool|topic`. A name that matches nothing
 exits 2 and points at `brain graphrag entities`. It needs the graph: with

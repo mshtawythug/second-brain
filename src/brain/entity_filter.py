@@ -118,9 +118,16 @@ def resolve_entity_ids(
 
     Order of matching: ``canonical_key`` (see :func:`_keys`), with any curated alias
     rule (``graph_rag.aliases``) applied, then, only when that found nothing, a
-    case-insensitive ``name`` match. A rule redirects its source to its target,
-    whether the source row still exists (merged, left with no mentions) or has
-    already been deleted by the orphan GC. ``entity_type`` narrows the match.
+    case-insensitive ``name`` match. ``entity_type`` narrows the match.
+
+    A rule ADDS its target to the result and keeps the source. Rules are merged
+    into the graph only by ``brain graphrag build`` / ``refresh``; ingest and the
+    watcher's sync apply none, so an unmerged source can still carry mentions of
+    its own, and its target may not exist yet. A merged source has no mentions,
+    so keeping it costs nothing, and a source already deleted by the orphan GC
+    still reaches its target through the rule. Ambiguity is judged on each row's
+    type AFTER the redirect: a source whose target was found counts as the
+    target's type, so a cross-type rule (``topic`` → ``person``) is one entity.
 
     Raises:
         EntityNotFound: nothing matched.
@@ -131,24 +138,28 @@ def resolve_entity_ids(
     keys = _keys(name)
     if not keys:
         raise EntityNotFound(name)
-    by_source = {(rule.from_type, rule.from_key) for rule in rules}
+    target_of = {(r.from_type, r.from_key): (r.to_type, r.to_key) for r in rules}
     hits = [
         (str(r[0]), str(r[1]), str(r[2]))
         for r in conn.execute(_BY_KEY, (tenant_id, keys, types)).fetchall()
     ]
     named = {(t, k) for t in types for k in keys} | {(h[1], h[2]) for h in hits}
-    rows = [h for h in hits if (h[1], h[2]) not in by_source]
-    rows += _alias_targets(conn, tenant_id, named, rules)
+    rows = hits + _alias_targets(conn, tenant_id, named, rules)
     if not rows:
         found = [
             (str(r[0]), str(r[1]), str(r[2]))
             for r in conn.execute(_BY_NAME, (tenant_id, name.strip(), types)).fetchall()
         ]
-        rows = [h for h in found if (h[1], h[2]) not in by_source]
-        rows += _alias_targets(conn, tenant_id, {(h[1], h[2]) for h in found}, rules)
+        rows = found + _alias_targets(conn, tenant_id, {(h[1], h[2]) for h in found}, rules)
     if not rows:
         raise EntityNotFound(name)
-    found_types = sorted({row[1] for row in rows})
+    present = {(row[1], row[2]) for row in rows}
+    found_types = sorted(
+        {
+            target[0] if (target := target_of.get((row[1], row[2]))) in present else row[1]
+            for row in rows
+        }
+    )
     if entity_type is None and len(found_types) > 1:
         raise EntityAmbiguous(name, found_types)
     return sorted({row[0] for row in rows})
