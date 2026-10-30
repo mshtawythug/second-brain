@@ -64,7 +64,7 @@ from .ingest.github_docs import (
     build_readme_document,
     one_line,
 )
-from .ingest.volatile_patch import refresh_volatile, stored_document
+from .ingest.volatile_patch import rare_outcomes, settle, stored_document
 from .sensitivity import CONFIDENTIAL, DEFAULT_SENSITIVITY
 from .tags import normalize_tags
 
@@ -205,7 +205,8 @@ class _Run:
     private: dict[str, bool] = field(default_factory=dict)
     counts: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(
-            ("ingested", "updated", "refreshed", "unchanged", "failed"), 0
+            ("ingested", "updated", "refreshed", "unchanged", "empty", "same_body", "failed"),
+            0,
         )
     )
 
@@ -254,7 +255,7 @@ def _ingest_all(
     c = run.counts
     typer.echo(
         f"{c['ingested']} ingested, {c['updated']} updated, {c['refreshed']} refreshed, "
-        f"{c['unchanged']} unchanged, {c['failed']} failed"
+        f"{c['unchanged']} unchanged, {c['failed']} failed{rare_outcomes(c, 'item')}"
     )
 
 
@@ -275,7 +276,9 @@ def _guarded(external_id: str, run: _Run, step: Any) -> None:
         typer.secho(f"  failed {external_id}: {describe_failure(exc)}", fg="red", err=True)
         outcome = "failed"
     run.counts[outcome] += 1
-    if outcome not in ("unchanged", "failed"):
+    if outcome == "same_body":
+        typer.secho(f"  same body as another item: {external_id}", fg="yellow", err=True)
+    elif outcome not in ("unchanged", "failed"):
         typer.echo(f"  {outcome} {external_id}")
 
 
@@ -317,7 +320,7 @@ def _write(
     *,
     stored: tuple[str, dict[str, Any]] | None = None,
 ) -> str:
-    """Ingest one document; return ``ingested|updated|refreshed|unchanged``."""
+    """Ingest one document; ``ingested|updated|refreshed|unchanged|empty|same_body``."""
     result = ingest_document(
         conn,
         embedder=run.embedder,
@@ -337,13 +340,11 @@ def _write(
     )
     _emit_secret_notice(result.secret_notice)
     _emit_egress_notice(result.egress_notice)
-    if result.created or result.body_changed:
-        return "ingested" if result.created else "updated"
-    assert result.document_id is not None  # every non-replace path returns the row id
-    return refresh_volatile(
+    # Only this item's own row is refreshed (volatile_patch.settle, BL-34).
+    return settle(
         conn,
-        document_id=result.document_id,
-        stored=stored[1] if stored is not None else {},
+        result,
+        stored=stored,
         metadata=gd.doc.metadata,
         keys=(*VOLATILE_KEYS, "with_thread", "repo_private"),
         vault_root=run.cfg.vault_path,

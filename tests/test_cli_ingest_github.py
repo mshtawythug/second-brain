@@ -18,6 +18,7 @@ import psycopg
 import pytest
 from typer.testing import CliRunner, Result
 
+from brain import cli_ingest_github as github_cli
 from brain.cli import app
 from brain.ingest import github
 from brain.ingest.github import GithubError
@@ -517,3 +518,69 @@ def test_no_token_from_gh_output_or_stderr_reaches_documents_or_the_terminal(
     for secret in (TOKEN, FINE_TOKEN):
         for where in (failing.output, passing.output, stored, chunks):
             assert secret not in where
+
+
+# --- BL-34: only an item's own row is ever refreshed --------------------------------------
+
+
+def test_a_row_that_is_not_the_items_own_is_never_patched(
+    gh: fx.FakeGh, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BL-34: a new item whose body matched another stdin document's got that document's
+    id back from ingest_document (its content-hash fallback), and the refresh patched it.
+    GitHub bodies open with ``<repo>#<n>``, so a natural collision cannot be built: an
+    ``ingest_document`` double returns the PR's id for the issue, as the fallback would.
+    """
+    from brain.ingest import IngestResult
+
+    gh.prs, gh.issues = [fx.pr_hit()], []
+    _run("--repo", fx.PUBLIC_REPO, *SINCE, "--no-readmes")
+    pr_before = _docs(test_db)[PR_ID]
+    gh.issues = [fx.issue_hit()]
+    real = github_cli.ingest_document
+
+    def double(conn: psycopg.Connection[Any], **kwargs: Any) -> Any:
+        if kwargs["source_external_id"] == ISSUE_ID:
+            return IngestResult(document_id=pr_before["id"], created=False)
+        return real(conn, **kwargs)
+
+    monkeypatch.setattr("brain.cli_ingest_github.ingest_document", double)
+
+    result = _run("--repo", fx.PUBLIC_REPO, *SINCE, "--no-readmes")
+
+    assert result.exit_code == 0, result.output
+    assert f"same body as another item: {ISSUE_ID}" in result.output
+    assert result.output.rstrip().endswith("0 failed, 1 same body as another item")
+    docs = _docs(test_db)
+    assert set(docs) == {PR_ID}
+    assert docs[PR_ID] == pr_before  # the PR's state, labels and times are untouched
+
+
+def test_no_document_from_ingest_is_empty_not_an_assertion(
+    gh: fx.FakeGh, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from brain.ingest import IngestResult
+
+    gh.prs, gh.issues = [fx.pr_hit()], []
+    monkeypatch.setattr(
+        "brain.cli_ingest_github.ingest_document",
+        lambda *_a, **_k: IngestResult(document_id=None, created=False),
+    )
+
+    result = _run("--repo", fx.PUBLIC_REPO, *SINCE, "--no-readmes")
+
+    assert result.exit_code == 0, result.output
+    assert f"  empty {PR_ID}" in result.output
+    assert result.output.rstrip().endswith("0 failed, 1 empty")
+
+
+def test_a_run_without_rare_outcomes_prints_the_summary_unchanged(
+    gh: fx.FakeGh, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    """BL-34 D1: the new counts appear only when non-zero."""
+    result = _run("--mine", *SINCE)
+
+    assert result.output.rstrip().endswith(" unchanged, 0 failed")
+    assert "same body" not in result.output and "empty" not in result.output

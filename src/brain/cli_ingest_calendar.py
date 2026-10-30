@@ -57,7 +57,12 @@ from .errors import SecretGuardError, describe_failure
 from .ingest import Embedder, ingest_document
 from .ingest import calendar as calendar_ingest
 from .ingest.calendar import CalendarDoc, CalendarError
-from .ingest.volatile_patch import refresh_volatile, stored_document
+from .ingest.volatile_patch import (
+    rare_outcomes,
+    refresh_volatile,
+    settle,
+    stored_document,
+)
 from .sensitivity import CONFIDENTIAL, DEFAULT_SENSITIVITY
 from .tags import normalize_tags
 from .vault.derived_links import real_gws_runner
@@ -216,7 +221,9 @@ def _ingest_all(
         graph_syncer=_build_graph_syncer(cfg),
         allow_secrets=allow_secrets,
     )
-    counts = {"ingested": 0, "updated": 0, "refreshed": 0, "unchanged": 0, "failed": 0}
+    counts = dict.fromkeys(
+        ("ingested", "updated", "refreshed", "unchanged", "empty", "same_body", "failed"), 0
+    )
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         for cd in documents:
@@ -234,17 +241,24 @@ def _ingest_all(
                 )
                 outcome = "failed"
             counts[outcome] += 1
-            if outcome != "unchanged":
+            if outcome == "same_body":
+                typer.secho(
+                    f"  same body as another event: {cd.external_id}", fg="yellow", err=True
+                )
+            elif outcome == "empty":
+                typer.echo(f"  empty {cd.external_id}")
+            elif outcome != "unchanged":
                 typer.echo(f"  {outcome} {cd.doc.title}")
     typer.echo(
         f"{counts['ingested']} ingested, {counts['updated']} updated, "
         f"{counts['refreshed']} occurrences refreshed, {counts['unchanged']} unchanged, "
-        f"{counts['failed']} failed"
+        f"{counts['failed']} failed{rare_outcomes(counts, 'event')}"
     )
 
 
+
 def _ingest_one(conn: psycopg.Connection[Any], cd: CalendarDoc, run: _Run) -> str:
-    """Ingest one document; return ``ingested|updated|refreshed|unchanged``."""
+    """Ingest one document; ``ingested|updated|refreshed|unchanged|empty|same_body``."""
     stored = stored_document(conn, calendar_ingest.SOURCE_KIND, cd.external_id)
     stored_meta = stored[1] if stored is not None else {}
     # An earlier window must not move a series backwards, and an occurrence the
@@ -283,12 +297,22 @@ def _ingest_one(conn: psycopg.Connection[Any], cd: CalendarDoc, run: _Run) -> st
     )
     _emit_secret_notice(result.secret_notice)
     _emit_egress_notice(result.egress_notice)
-    assert result.document_id is not None  # every non-replace path returns the row id
-    if result.created or result.body_changed:
-        if not recorded:
-            _record_attendees(conn, cd)  # a changed body can mean changed names
-        return "ingested" if result.created else "updated"
-    return _refresh_metadata(conn, result.document_id, stored_meta, metadata, run)
+    # One rule for every sourced CLI (volatile_patch.settle, BL-34): only this
+    # event's own row is refreshed; a returned row that is another event's
+    # (identical text: one meeting on two calendars, a duplicated invite) is
+    # reported as same_body and never patched.
+    outcome = settle(
+        conn,
+        result,
+        stored=stored,
+        metadata=metadata,
+        keys=_VOLATILE_KEYS,
+        vault_root=run.cfg.vault_path,
+        graph_syncer=run.graph_syncer,
+    )
+    if outcome in ("ingested", "updated") and not recorded:
+        _record_attendees(conn, cd)  # a changed body can mean changed names
+    return outcome
 
 
 def _refresh_metadata(

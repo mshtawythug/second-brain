@@ -711,3 +711,73 @@ def test_a_renamed_attendee_reaches_the_directory(
     )
     assert search.exit_code == 0, search.output
     assert fx.SERIES_TITLE in [hit["title"] for hit in json.loads(search.stdout)]
+
+
+# --- BL-34: a same-body event never touches another event's row ------------------------
+
+
+DUPLICATE_ID = "evtsingle002"
+
+
+def _duplicate_invite() -> dict[str, Any]:
+    """The same meeting under a second id (a duplicated invite): an identical body."""
+    return {**fx.single(), "id": DUPLICATE_ID}
+
+
+def test_a_same_body_event_is_reported_and_never_patches_the_other_row(
+    test_db: psycopg.Connection[Any], embedder: CountingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BL-34: the second id fell through ingest_document's content-hash fallback onto the
+    first event's row, which was then patched (occurrences, date, participants) and
+    reported refreshed, and the second event was never stored.
+    """
+    fake = fx.FakeGws([fx.single(), _duplicate_invite()])
+    monkeypatch.setattr("brain.cli_ingest_calendar.calendar_gws_runner", fake)
+
+    first = _run()
+    stored = _calendar_docs(test_db)
+    second = _run()
+
+    for result in (first, second):
+        assert result.exit_code == 0, result.output
+        assert f"same body as another event: {DUPLICATE_ID}" in result.output
+        assert result.output.rstrip().endswith(", 1 same body as another event")
+    assert "1 ingested" in first.output
+    assert "0 ingested, 0 updated, 0 occurrences refreshed, 1 unchanged, 0 failed" in (
+        second.output
+    )
+    assert set(_calendar_docs(test_db)) == {fx.SINGLE_ID}
+    assert _calendar_docs(test_db) == stored  # the first event's row is untouched
+
+
+def test_a_run_without_rare_outcomes_prints_the_summary_unchanged(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
+) -> None:
+    """BL-34 D1: the new counts appear only when non-zero."""
+    result = _run()
+
+    [summary] = [line for line in result.output.splitlines() if "occurrences refreshed" in line]
+    assert summary.endswith(" failed")
+    assert "same body" not in result.output and "empty" not in summary
+
+
+def test_no_document_from_ingest_is_empty_not_an_assertion(
+    test_db: psycopg.Connection[Any], embedder: CountingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BL-34: ``document_id=None`` (nothing to chunk) used to hit an assert."""
+    from brain.ingest import IngestResult
+
+    fake = fx.FakeGws([fx.single()])
+    monkeypatch.setattr("brain.cli_ingest_calendar.calendar_gws_runner", fake)
+    monkeypatch.setattr(
+        "brain.cli_ingest_calendar.ingest_document",
+        lambda *_a, **_k: IngestResult(document_id=None, created=False),
+    )
+
+    result = _run()
+
+    assert result.exit_code == 0, result.output
+    assert f"  empty {fx.SINGLE_ID}" in result.output
+    assert result.output.rstrip().endswith("0 failed, 1 empty")
