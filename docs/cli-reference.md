@@ -701,6 +701,13 @@ brain ingest-calendar --since 2026-10-01 --until 2026-10-31 --calendar primary -
   `graph_rag.extract_policy.CONCEPT_SKIP_CONTENT_TYPES` (the people aspect still
   runs). Attendee names and addresses are recorded in the people directory, so
   `brain search --source calendar --person "<name>"` finds the event.
+- **Identical events.** An event whose stored text would be identical to
+  another stored event's (the same meeting on two calendars, a duplicated
+  invite) is reported by id as `same body as another event: <id>` and not
+  stored; the other event's document, its occurrences, date and attendees
+  included, is left untouched. A result with no document is reported as
+  `empty <id>`. The summary line gains `, N same body as another event` and
+  `, N empty` only when those counts are non-zero.
 - `--dry-run` lists the titles and dates and writes nothing. There is no daemon
   run; schedule the command yourself if you want one.
 
@@ -750,6 +757,13 @@ brain ingest-github --repo example-org/example-repo --since 2026-09-01 --with-th
   the graph is on, concept extraction takes minutes per document in the
   watcher's graph lane, so a full 500-document run keeps the lane busy for days.
   Start with a short `--since`.
+- **Identical items.** An item whose stored text would be identical to another
+  stored document's is reported by id as `same body as another item: <id>` and
+  not stored; the other document is left untouched. (Every item's text opens
+  with its `<owner>/<repo>#<number>`, so this is a safeguard rather than a case
+  you should meet.) A result with no document is reported as `empty <id>`. The
+  summary line gains `, N same body as another item` and `, N empty` only when
+  those counts are non-zero.
 - `--dry-run` lists what would be read and writes nothing. Without `gh` on
   `PATH` the command exits 1 with an install hint, and `brain doctor`'s `github`
   row warns.
