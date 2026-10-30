@@ -521,7 +521,13 @@ brain rm <id-prefix> --yes
 `brain ingest-gmail` uses the `gws` CLI and requires at least one scope flag so
 you do not accidentally ingest your entire mailbox. It excludes Gmail drafts,
 groups messages by `threadId`, stores each thread as one `email_thread`
-document, and updates a stable row when a thread grows.
+document, and updates a stable row when a thread grows. It never ingests the
+briefs `brain brief` emails to you (RM-16): a message is skipped when it is from
+`BRAIN_USER_EMAIL` and its subject starts with `[brain brief]`, after any `Re:`,
+`Fwd:` or `Fw:`, so your replies to and forwards of a brief are skipped too. A
+message from anyone else with that subject, and your other mail, are ingested.
+`--dry-run` marks a thread of nothing but your briefs as skipped. With
+`BRAIN_USER_EMAIL` unset, nothing is skipped.
 
 ```bash
 brain ingest-gmail --label interviews --since 2026/04/01 --tag interview
@@ -1120,6 +1126,20 @@ hit first seen in the capture window; the `--wiki` page lists the hits no page
 has listed yet, at most 5 per watch ("and N more"), and leaves out confidential
 documents. Once the page is written, those hits are marked as notified, so the
 next page does not repeat them. The section is absent when you have no watches.
+
+**Delivery (opt-in, off by default).** With `BRAIN_BRIEF_DELIVERY=email` or
+`slack` (see [configuration](configuration.md#brain_brief_delivery--send-the-daily-brief-to-yourself)),
+`brain brief --wiki` also sends the page's content to you once it is written:
+an email to `BRAIN_USER_EMAIL` through `gws gmail +send`, with the fixed subject
+`[brain brief] YYYY-MM-DD`, or a post to a Slack incoming webhook (link previews
+off). Only what the page carries is sent (never a confidential title), minus any
+draft document, and by default only titles and counts: todo text and the
+suggestions built from it go out only with
+`BRAIN_BRIEF_DELIVERY_INCLUDE_TODOS=true`. A delivery problem never fails the
+brief: it prints one warning and exits 0, and the watch hits stay unnotified so
+the next brief sends them again. A `gws` authorization failure names the fix,
+`bin/gws-reauth`. `brain doctor` has a `brief delivery` row. `brain ingest-gmail`
+skips your own delivered briefs (see [Gmail ingest](#gmail-ingest)).
 
 ### brain watch
 

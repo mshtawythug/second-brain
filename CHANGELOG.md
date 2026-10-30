@@ -44,6 +44,32 @@ requires before model text reaches the page).
   never appear in the Ingest tab), and is disabled, with the reason, on a
   `--read-only` or LAN-bound server.
 
+### Added — the daily brief can be delivered to you (RM-16)
+
+- **`BRAIN_BRIEF_DELIVERY`** (`none` by default, `email` or `slack`): once
+  `brain brief --wiki` (the 07:00 job) has written the page, it sends the same
+  content to the owner, by email through `gws gmail +send` to `BRAIN_USER_EMAIL`
+  only, or to a Slack incoming webhook (`BRAIN_BRIEF_SLACK_WEBHOOK_URL`, a secret,
+  `https://hooks.slack.com/` only). The subject is always `[brain brief]
+  YYYY-MM-DD`.
+- What is sent is the published page's payload: confidential documents never
+  leave, and by default only titles and counts.
+  `BRAIN_BRIEF_DELIVERY_INCLUDE_TODOS=true` adds the todo text and the
+  suggestions built from it.
+- A delivery problem never fails the brief: one class-only warning, exit 0
+  (a `gws` authorization failure names `bin/gws-reauth`). When delivery was
+  configured and did not happen, the watch hits stay unnotified, so the next
+  brief sends them again.
+- `brain doctor` gains a `brief delivery` row (the channel and its
+  prerequisite, never the webhook URL).
+- `brain ingest-gmail` never ingests your own delivered brief: a fetched message
+  is skipped when it is from `BRAIN_USER_EMAIL` and its subject starts with
+  `[brain brief]` (after any `Re:` / `Fwd:` / `Fw:`, so your replies and
+  forwards of a brief are skipped too). Mail from anyone else with that subject,
+  and your other mail, are still ingested. The Gmail query itself is unchanged.
+- Draft documents are never delivered (they stay on the local page), and the
+  Slack post turns link previews off.
+
 ### Added — the Agent tab's backend: ask over HTTP
 
 `brain ui` can now answer a question as a job (roadmap ticket RM-18a, the server

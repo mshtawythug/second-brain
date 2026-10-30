@@ -3630,7 +3630,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-14b | Local reranker runtime | S | 4 | RM-14a | TODO |
 | RM-14c | Reranker measurement and adoption | S | 4 | RM-14b | TODO |
 | RM-15 | Saved searches and watch lists (with the `brief --wiki` extraction) | M | 4 | RM-06, RM-09 | DONE (#78) |
-| RM-16 | Brief delivery (email to self / Slack webhook) | S | 4 | RM-08, RM-15 | TODO |
+| RM-16 | Brief delivery (email to self / Slack webhook) | S | 4 | RM-08, RM-15 | DONE (#82) |
 | RM-17 | Brief "new this week" entities | S | 4 | — | TODO |
 | RM-18a | Agent tab backend | M | 4 | RM-10, RM-02 | DONE (#79) |
 | RM-18b | Agent tab front end and output hardening | M | 4 | RM-18a, RM-11 | DONE (#83) |
