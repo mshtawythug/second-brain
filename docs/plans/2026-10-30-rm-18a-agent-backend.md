@@ -121,3 +121,68 @@ check before the interaction write, the lens withholding, the evict-on-get line,
 - An ask holds the single worker for up to the deadline; a queued ingest waits (A1). The front
   end (RM-18b) shows the queue state.
 - An ask result keeps confidential bodies in memory for 10 minutes (A10).
+
+## Evidence
+
+### Mutation proofs (2026-10-30)
+
+Run in a `git archive` copy of `c2235e3` (scratch directory, deleted after), with
+`PYTHONDONTWRITEBYTECODE=1`, every `__pycache__` purged before each run, and `PYTHONPATH`
+pinned to the copy's `src`; `brain` was checked by realpath to import from the copy. Each
+mutation's anchor matched exactly once and the file was checked to differ before its tests
+ran. **11 of 11 turned their tests red**, and the restored copy ran 70 passed.
+
+| # | Mutation | Red test |
+|---|---|---|
+| M1 | drop the `kind != ASK_KIND` listing filter | `test_ask_jobs_are_left_out_of_the_job_list` |
+| M2 | `Deadline.check` never raises | `test_a_chat_that_runs_past_the_deadline_ends_timeout_at_the_next_step` |
+| M3 | drop the cancel check before the interaction rows | `test_a_cancel_during_synthesis_is_honoured_before_anything_is_recorded` |
+| M4 | the citation lens never withholds | `test_the_lens_withholds_a_non_normal_citation_when_bodies_are_not_served` |
+| M5 | `get()` no longer evicts | `test_get_evicts_a_job_past_its_retention_without_a_list_or_submit` |
+| M6 | `exclude_confidential=False` in the runner | `test_a_confidential_document_is_cited_only_when_bodies_are_served[False]` |
+| M7 | `hosted_egress` not forwarded | `test_the_step_guard_embedder_forwards_the_capability_flags` |
+| M8 | no guard in the runner's `on_step` | the deadline test (the job now fails one step later) |
+| M9 | no `_model` on the wrapper | `test_the_step_guard_embedder_keeps_the_backends_query_cache_identity_apart` |
+| M10 | no `plan` step report in `ask` | `tests/test_ask_on_step.py` |
+| M11 | the guarded chat skips its guard | `test_the_guarded_chat_checks_the_deadline_before_calling` |
+
+### End to end (real uvicorn, middleware and worker; 5434 sibling database; scripted chat)
+
+`brain ui` itself always uses the real `chat_json`, and this ticket may not call a live
+Ollama, so the pass builds the app with `server.build_context` (the real registry, runtime,
+middleware and worker thread) against `second_brain_test_rm18a`, swaps in a scripted
+`ChatJson`, serves it with uvicorn on loopback, and drives it over HTTP. Two synthetic
+documents: one `normal`, one `confidential`.
+
+```
+=== loopback, bodies served ===
+GET /api/ask/config -> {'enabled': True, 'reason': None, 'max_question_chars': 2000, 'modes': ['hybrid']}
+POST /api/ask -> 202 {'kind': 'ask', 'state': 'queued'}
+events: [('queued', None, None), ('plan', 1, 3), ('retrieve', 1, 3), ('reflect', 1, 3), ('synthesize', 1, 3)]
+state: succeeded error: None
+answer: It ships in three waves [1]. Pricing is in [2]. Bogus.
+citations: [(1, 'Sealed zorbel memo', 'confidential', False), (2, 'Zorbel rollout notes', 'normal', False)]
+elapsed_ms int: True fallback: None
+GET /api/jobs lists ask? False
+
+=== bodies withheld ===
+POST /api/ask -> 202 {'kind': 'ask', 'state': 'queued'}
+events: [('queued', None, None), ('plan', 1, 3), ('retrieve', 1, 3), ('reflect', 1, 3), ('synthesize', 1, 3)]
+state: succeeded error: None
+answer: It ships in three waves [1]. Pricing is in. Bogus.
+citations: [(1, 'Zorbel rollout notes', 'normal', False)]
+GET /api/jobs lists ask? False
+
+=== cancel during a slow plan step ===
+POST /api/ask -> 202 {'kind': 'ask', 'state': 'queued'}
+POST cancel -> 202 running
+events: [('queued', None, None), ('plan', 1, 3)]
+state: cancelled error: None
+
+=== --read-only ===
+config: {'enabled': False, 'reason': 'read_only', 'max_question_chars': 2000, 'modes': ['hybrid']}
+POST -> 403 read_only
+```
+
+The out-of-range `[9]` (and `[2]` where only one document was retrieved) is dropped by
+`ask._sanitize_answer`, as in the CLI.
