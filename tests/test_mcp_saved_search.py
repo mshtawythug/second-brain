@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
-from mcp.types import INVALID_PARAMS
+from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
 from brain import mcp_server
 from brain.config import Config
@@ -231,3 +232,37 @@ def test_brain_brief_reads_the_terminal_set_through_its_lens_and_runs_no_check(
         "Zephyr sealed",
     ]
     assert _hit_count(test_db) == 2  # "Zephyr unchecked" was never recorded
+
+
+@pytest.mark.fresh_schema
+def test_without_migration_029_the_tools_say_run_init(
+    mcp_state: mcp_server._State, test_db: psycopg.Connection[Any]
+) -> None:
+    test_db.execute("DROP TABLE saved_search_hits")
+    test_db.execute("DROP TABLE saved_searches")
+
+    with pytest.raises(MCPError) as excinfo:
+        tools.brain_watch_list()
+
+    assert _code(excinfo) == INTERNAL_ERROR
+    assert "brain init" in str(excinfo.value)
+
+
+def test_a_database_failure_is_internal_error_naming_only_its_class(
+    mcp_state: mcp_server._State, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret_detail = "synthetic-detail-7c1e"
+
+    @contextmanager
+    def failing_connect(url: str) -> Iterator[psycopg.Connection[Any]]:
+        raise psycopg.OperationalError(secret_detail)
+        yield  # pragma: no cover - a generator, never reached
+
+    monkeypatch.setattr(mcp_server, "connect", failing_connect)
+
+    with pytest.raises(MCPError) as excinfo:
+        tools.brain_watch_list()
+
+    assert _code(excinfo) == INTERNAL_ERROR
+    assert "OperationalError" in str(excinfo.value)
+    assert secret_detail not in str(excinfo.value)

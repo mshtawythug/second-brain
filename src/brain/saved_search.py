@@ -201,6 +201,20 @@ def get_watch(conn: psycopg.Connection[Any], name: str) -> SavedSearch:
     return _row(row)
 
 
+def lock_watch(conn: psycopg.Connection[Any], name: str) -> tuple[SavedSearch, datetime]:
+    """Lock the watch's row (``FOR UPDATE``) and return it with the transaction's start time.
+
+    Call inside a transaction: the lock is held until it ends. Raises
+    :class:`SavedSearchNotFound`.
+    """
+    row = conn.execute(
+        f"SELECT {_COLUMNS}, now() FROM saved_searches WHERE name = %s FOR UPDATE", (name,)
+    ).fetchone()
+    if row is None:
+        raise SavedSearchNotFound(f"no watch named {name!r}")
+    return _row(row), row[8]
+
+
 def list_watches(
     conn: psycopg.Connection[Any], *, enabled_only: bool = False
 ) -> list[SavedSearch]:

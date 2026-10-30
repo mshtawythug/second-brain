@@ -48,6 +48,7 @@ from .saved_search import (
     create_watch,
     get_watch,
     list_watches,
+    lock_watch,
 )
 from .search import CANDIDATE_LIMIT, SearchResult, hybrid_search
 from .search_fallback import SearchFn
@@ -301,17 +302,10 @@ def check_watch(conn: psycopg.Connection[Any], name: str, matcher: Matcher) -> C
         SavedSearchNotFound: no watch has this name (or it was removed meanwhile).
     """
     with conn.transaction():
-        watch = get_watch(conn, name)
-        row = conn.execute(
-            "SELECT last_checked_at, now() FROM saved_searches WHERE id = %s FOR UPDATE",
-            (watch.id,),
-        ).fetchone()
-        if row is None:
-            raise SavedSearchNotFound(f"no watch named {name!r}")
-        last_checked_at, started_at = row
+        watch, started_at = lock_watch(conn, name)
         try:
             results = _search(
-                conn, watch, matcher, updated_after=last_checked_at - WINDOW_OVERLAP
+                conn, watch, matcher, updated_after=watch.last_checked_at - WINDOW_OVERLAP
             )
         except _Skip as exc:
             return CheckResult(

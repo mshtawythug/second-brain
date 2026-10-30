@@ -191,3 +191,22 @@ def test_without_migration_029_watch_says_run_init(
 
     assert result.exit_code == 1
     assert "brain init" in result.output
+
+
+def test_empty_states_say_so(test_db: psycopg.Connection[Any]) -> None:
+    listed = _run("list")
+    checked = _run("check")
+    no_hits = _run("hits")
+
+    assert "No watches" in listed.stdout
+    assert "No enabled watches" in checked.stdout
+    assert "No hits in that window" in no_hits.stdout
+
+
+def test_a_bad_config_is_a_clean_exit_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRAIN_BRIEF_SINCE_HOURS", "0")
+
+    result = _run("list")
+
+    assert result.exit_code == 1
+    assert "Configuration error" in result.output

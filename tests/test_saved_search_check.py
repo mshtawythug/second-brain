@@ -415,3 +415,90 @@ def test_two_concurrent_checks_report_each_hit_once(test_db: psycopg.Connection[
     assert sorted(reported_a + reported_b) == sorted(new)
     assert results["b"].started_at > results["a"].started_at
     assert _last_checked(test_db, "zephyr") == results["b"].started_at
+
+
+# --- the matcher, and the paths a brief must survive -------------------------
+
+
+def test_build_matcher_reads_the_knob_and_builds_the_embedder_at_most_once() -> None:
+    from brain.config import Config
+    from brain.saved_search_check import build_matcher
+
+    built: list[object] = []
+    words = WordEmbedder()
+
+    def factory() -> Any:
+        built.append(words)
+        return words
+
+    matcher = build_matcher(
+        Config(database_url=TEST_DATABASE_URL, vector_sim_floor=0.3),
+        embedder=factory,
+        env={"BRAIN_WATCH_MIN_COSINE": "0.7"},
+    )
+
+    assert (matcher.min_cosine, matcher.vector_sim_floor) == (0.7, 0.3)
+    assert built == []
+    assert matcher.embedder() is words and matcher.embedder() is words
+    assert len(built) == 1
+
+
+def test_build_matcher_defaults_to_the_configured_embedder(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    from brain.config import Config
+    from brain.saved_search_check import build_matcher
+
+    words = WordEmbedder()
+    _add(test_db, "orbit", "orbital", mode=MODE_SEMANTIC, matcher=_matcher(words))
+    matcher = build_matcher(Config(database_url=TEST_DATABASE_URL, embedder="none"), env={})
+
+    result = check_watch(test_db, "orbit", matcher)
+
+    assert result.skipped == SKIP_EMBEDDER
+
+
+def test_an_embedder_that_cannot_be_built_skips_the_semantic_check(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    from brain.config import ConfigError
+
+    def refuse() -> Any:
+        raise ConfigError("synthetic bad embedder configuration")
+
+    _add(test_db, "orbit", "orbital", mode=MODE_SEMANTIC, matcher=_matcher())
+
+    result = check_watch(
+        test_db, "orbit", Matcher(embedder=refuse, vector_sim_floor=0.25, min_cosine=0.45)
+    )
+
+    assert result.skipped == SKIP_EMBEDDER and result.matches == []
+
+
+def test_a_semantic_peek_with_the_embedder_down_says_skipped(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    _add(test_db, "orbit", "orbital", mode=MODE_SEMANTIC, matcher=_matcher())
+
+    result = peek_watch(test_db, "orbit", _matcher(DownEmbedder()))
+
+    assert result.skipped == SKIP_EMBEDDER and result.started_at is None
+
+
+def test_check_enabled_passes_over_a_watch_removed_meanwhile(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    _add(test_db, "a", "zephyr")
+    _add(test_db, "b", "zephyr")
+    remover = psycopg.connect(TEST_DATABASE_URL, autocommit=True, connect_timeout=5)
+
+    def search_then_remove_b(*args: Any, **kwargs: Any) -> Any:
+        remover.execute("DELETE FROM saved_searches WHERE name = 'b'")
+        return hybrid_search(*args, **kwargs)
+
+    try:
+        results = check_enabled(test_db, _lexical_matcher(search_fn=search_then_remove_b))
+    finally:
+        remover.close()
+
+    assert [r.watch for r in results] == ["a"]
