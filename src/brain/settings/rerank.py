@@ -31,6 +31,10 @@ LLAMACPP_RERANK_DEFAULT_MODEL = "bge-reranker-v2-m3"
 VOYAGE_RERANK_DEFAULT_MODEL = "rerank-3"
 #: Where RM-14b's launchd job binds ``llama-server``.
 DEFAULT_RERANK_URL = "http://127.0.0.1:8081"
+#: The GGUF the launchd job serves when ``BRAIN_RERANK_GGUF`` is unset, under
+#: ``$BRAIN_HOME/models/`` (RM-14b; ``brain.bin.launchd.resolve_rerank_model``).
+#: The file ``docs/guides/local-reranker.md`` downloads and measured.
+DEFAULT_RERANK_GGUF_NAME = "bge-reranker-v2-m3-Q8_0.gguf"
 
 BACKEND_NONE = "none"
 BACKEND_LLAMACPP = "llamacpp"

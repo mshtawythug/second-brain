@@ -7,24 +7,32 @@ fallback. Resolves the Python interpreter via sys.executable — the running bra
 process is by definition the right Python.
 
 Entry points (registered in pyproject.toml by T1.8):
-    brain-install-launchd  → install_main()
+    brain-install-launchd  → install_main()   [--with-reranker]
     brain-uninstall-launchd → uninstall_main()
+
+Optional labels (RM-14b): ``com.brain.reranker`` is installed only by
+``--with-reranker``, then kept by every later install, flagless included,
+because ``brain-up`` runs this installer without flags on every start.
 """
 
+import argparse
 import contextlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Sequence
 from importlib.resources import files as resource_files
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
 from ..config import _brain_home_root
 from ..errors import BrainError
-from ..install_config import resolve_install_vault
+from ..install_config import brain_home_dotenv_value, resolve_install_vault
+from ..settings.rerank import DEFAULT_RERANK_GGUF_NAME
 from ._launcher import ensure_shim
 
 # The launchd labels brain installs. watcher is the KeepAlive vault-sync daemon;
@@ -35,8 +43,18 @@ _INSTALLED_LABELS = ("com.brain.watcher", "com.brain.brief")
 # uninstall still sweeps it. Its template and _brain-build-fg wrapper were deleted
 # with the wiki at R3 (phase 9); the sweep stays for upgraded machines (R9-1).
 _RETIRED_LABELS = ("com.brain.build",)
+# Opt-in agents (RM-14b). Each is installed only by its flag, then STICKY: a
+# flagless install re-renders and re-bootstraps one whose plist exists, so a
+# template change reaches it, and never removes it; only uninstall does. Not in
+# _INSTALLED_LABELS, which doctor treats as agents that must be installed: doctor
+# checks an optional one only when its plist exists.
+_RERANKER_LABEL = "com.brain.reranker"
+_OPTIONAL_LABELS = (_RERANKER_LABEL,)
 # Every label brain has ever installed: what uninstall_plists sweeps.
-_ALL_LABELS = _INSTALLED_LABELS + _RETIRED_LABELS
+_ALL_LABELS = _INSTALLED_LABELS + _OPTIONAL_LABELS + _RETIRED_LABELS
+
+_GUIDE = "docs/guides/local-reranker.md"
+_LEFTOVER_MARKER = re.compile(r"\{\{ *(\w+) *\}\}")
 
 
 class LaunchdError(BrainError):
@@ -106,19 +124,39 @@ def resolve_brain_py() -> Path:
     return Path(sys.executable)
 
 
+def resolve_rerank_model(brain_home: Path) -> Path:
+    """The GGUF ``com.brain.reranker`` serves (RM-14b).
+
+    ``BRAIN_RERANK_GGUF`` from the process env, then from ``$BRAIN_HOME/.env``
+    (the installer never calls ``Config.load``; see
+    :func:`brain.install_config.brain_home_dotenv_value`), then
+    ``$BRAIN_HOME/models/<DEFAULT_RERANK_GGUF_NAME>``, where the guide puts it.
+    """
+    raw = os.environ.get("BRAIN_RERANK_GGUF") or brain_home_dotenv_value(
+        brain_home, "BRAIN_RERANK_GGUF"
+    )
+    if raw:
+        return Path(raw).expanduser()
+    return brain_home / "models" / DEFAULT_RERANK_GGUF_NAME
+
+
 def render_plist(
     label: str,
     brain_home: Path,
     vault_path: Path,
     pipx_bin_dir: Path,
     brain_py: Path,
+    rerank_model: Path | None = None,
 ) -> str:
     """Render the .plist.j2 template for *label* into a string.
 
     XML-escapes every substituted value so the resulting document is always
     valid XML, even when paths contain ``&``, ``<``, or ``>``.
 
-    Raises :class:`LaunchdError` if the rendered XML does not parse.
+    Raises :class:`LaunchdError` if the rendered XML does not parse, or if a
+    ``{{ marker }}`` is left unsubstituted (``com.brain.reranker`` rendered
+    without *rerank_model* would otherwise hand launchd a literal marker as
+    the model path).
     """
     template_ref = resource_files("brain.templates.launchd") / f"{label}.plist.j2"
     text: str = template_ref.read_text(encoding="utf-8")
@@ -130,8 +168,13 @@ def render_plist(
         "pipx_bin_dir": xml_escape(str(pipx_bin_dir)),
         "brain_py": xml_escape(str(brain_py)),
     }
+    if rerank_model is not None:
+        substitutions["rerank_model_path"] = xml_escape(str(rerank_model))
     for key, value in substitutions.items():
         text = text.replace("{{ " + key + " }}", value)
+    leftover = _LEFTOVER_MARKER.search(text)
+    if leftover:
+        raise LaunchdError(f"rendered plist for {label} leaves {leftover.group(0)} unset")
 
     # Sanity-check: validate that the result is well-formed XML.
     try:
@@ -147,8 +190,15 @@ def install_plists(
     launchd_dir: Path,
     launchctl: str | None = None,
     vault_path: Path | None = None,
+    with_reranker: bool = False,
 ) -> None:
     """Write the installed jobs' plists and load them into launchd. Idempotent.
+
+    ``with_reranker`` also installs the opt-in ``com.brain.reranker``, and is
+    refused (before any launchctl call) when its GGUF is missing. Without it,
+    an optional label is re-rendered and reloaded only when its plist already
+    exists (sticky), with no file check: ``brain-up`` must not fail because a
+    model moved, and ``brain doctor`` reports the dead agent.
 
     First, each retired label (``com.brain.build`` at R2) is booted out, errors
     suppressed because "not loaded" is its normal answer, and its plist deleted.
@@ -169,6 +219,18 @@ def install_plists(
     vault was rewritten to the default on the next ``brain-up``.
     """
     launchctl = launchctl if launchctl is not None else resolve_launchctl()
+    rerank_model = resolve_rerank_model(brain_home)
+    if with_reranker and not rerank_model.is_file():
+        raise LaunchdError(
+            f"--with-reranker: no model at {rerank_model}. Download it, or set "
+            f"BRAIN_RERANK_GGUF; see {_GUIDE}"
+        )
+    optional = tuple(
+        label
+        for label in _OPTIONAL_LABELS
+        if (with_reranker and label == _RERANKER_LABEL)
+        or (launchd_dir / f"{label}.plist").exists()
+    )
     launchd_dir.mkdir(parents=True, exist_ok=True)
 
     # Install the foreground wrapper scripts the plists reference.
@@ -189,13 +251,14 @@ def install_plists(
         )
         (launchd_dir / f"{label}.plist").unlink(missing_ok=True)
 
-    for label in _INSTALLED_LABELS:
+    for label in (*_INSTALLED_LABELS, *optional):
         plist_content = render_plist(
             label,
             brain_home=brain_home,
             vault_path=effective_vault_path,
             pipx_bin_dir=pipx_bin_dir,
             brain_py=brain_py,
+            rerank_model=rerank_model,
         )
         plist_path = launchd_dir / f"{label}.plist"
 
@@ -282,14 +345,29 @@ def uninstall_plists(
 # ---------------------------------------------------------------------------
 
 
-def install_main() -> None:
-    """Entry point: brain-install-launchd."""
+def install_main(argv: Sequence[str] | None = None) -> None:
+    """Entry point: brain-install-launchd [--with-reranker].
+
+    *argv* defaults to ``sys.argv[1:]``; tests pass a list (pytest's own
+    arguments are in ``sys.argv``). ``bin/brain-install-launchd`` passes its
+    arguments through, and ``brain-up`` passes none.
+    """
+    parser = argparse.ArgumentParser(
+        prog="brain-install-launchd",
+        description="Install brain's LaunchAgents. Idempotent; keeps opt-in agents installed.",
+    )
+    parser.add_argument(
+        "--with-reranker",
+        action="store_true",
+        help=f"also install com.brain.reranker (llama-server on 127.0.0.1:8081); see {_GUIDE}",
+    )
+    args = parser.parse_args(argv)
     launchd_dir = Path(
         os.environ.get("BRAIN_LAUNCHD_DIR") or Path.home() / "Library" / "LaunchAgents"
     )
     launchctl = resolve_launchctl()
     brain_home = _brain_home_root()
-    install_plists(brain_home, launchd_dir, launchctl)
+    install_plists(brain_home, launchd_dir, launchctl, with_reranker=args.with_reranker)
     print(f"🧠 brain LaunchAgents installed in {launchd_dir}")
 
 

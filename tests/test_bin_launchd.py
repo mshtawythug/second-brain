@@ -235,7 +235,7 @@ def test_install_main_uses_env_overrides(
     # Override BRAIN_HOME so _brain_home_root() doesn't resolve to the live checkout.
     monkeypatch.setenv("BRAIN_HOME", str(tmp_path / "brain"))
 
-    install_main()
+    install_main([])
 
     for label in _INSTALLED_LABELS:
         plist = agents_dir / f"{label}.plist"

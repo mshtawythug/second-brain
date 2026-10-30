@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Jinja variables: brain_home, user_home, rerank_model_path
+     The launchd renderer (brain.bin.launchd.render_plist) MUST XML-escape every
+     value before substitution. (No double hyphen may appear inside an XML
+     comment, so the flags below are named without their dashes.)
+
+     OPT-IN (RM-14b): installed only by brain-install-launchd's with-reranker
+     flag, then kept (re-rendered, never removed) by the flagless install every
+     brain-up runs; only brain-uninstall-launchd removes it.
+
+     The local cross-encoder reranker: llama.cpp's llama-server serving a
+     bge-reranker-v2-m3 GGUF. ProgramArguments are FIXED here on purpose: the
+     model path is the only variable, so the bind cannot be widened past
+     loopback (the passages it scores are document text). The "reranking" flag
+     only enables the endpoint; "embedding" with "pooling rank" is what makes
+     the model score pairs. /usr/bin/env resolves llama-server through the PATH
+     below (Homebrew's prefix on Apple Silicon and on Intel). Guide:
+     docs/guides/local-reranker.md. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.brain.reranker</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>llama-server</string>
+        <string>-m</string>
+        <string>{{ rerank_model_path }}</string>
+        <string>--embedding</string>
+        <string>--pooling</string>
+        <string>rank</string>
+        <string>--reranking</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>8081</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{{ user_home }}</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- A missing model or a taken port makes llama-server exit at once; this
+         keeps KeepAlive from respawning it more than once a minute. -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+    <key>WorkingDirectory</key>
+    <string>{{ brain_home }}</string>
+    <key>StandardOutPath</key>
+    <string>{{ brain_home }}/logs/com.brain.reranker.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{ brain_home }}/logs/com.brain.reranker.err.log</string>
+</dict>
+</plist>
