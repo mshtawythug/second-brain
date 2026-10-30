@@ -35,6 +35,31 @@ git tag scheme:
   is withheld or whose vault file is missing. There is no `obsidian://` link, and
   the server never starts an editor.
 
+### Added — tag rename, merge and suggested merges (RM-21)
+
+- **`brain tags`**: `list [--json]`, `rename OLD NEW`, `merge A B --into C` and
+  `suggest-merges [--limit N] [--json]`. `rename` and `merge` are a dry run
+  unless `--apply`: they print the mapping and every document and saved search
+  they would change.
+- `--apply` rewrites every place a tag lives: the document row, its chunks'
+  tag text (so `brain search --tag NEW` and a text query for the new tag find
+  it at once), the frontmatter of its vault file, and saved searches' `tag` /
+  `without_tag` filters. It runs per document, like
+  `brain backfill normalize-tags`, so a re-run finishes an interrupted one and
+  is otherwise a no-op. `updated_at` is not bumped.
+- A vault file that cannot be rewritten (unreadable, broken frontmatter, or a
+  path outside the vault) no longer stops the run, in `brain tags` and in
+  `brain backfill normalize-tags` alike: it is reported by error class, counted
+  in the summary, and the command exits 1 after finishing everything else. The
+  database row is already updated, so a re-run does not retry the file: fix it
+  by hand. Every `vault_path` is checked to stay inside the vault first.
+- `suggest-merges` ranks pairs by close spelling, singular/plural and
+  co-occurrence on the same documents, each with its evidence.
+- MCP: `brain_tags_list` and `brain_tags_suggest_merges`, read-only, with
+  confidential documents left out by default. There is no MCP rename or merge.
+- `brain backfill normalize-tags` now runs on the same engine
+  (`brain.tag_mapping`); its output is unchanged, byte for byte.
+
 ### Added — near-duplicate detection: `brain dedup` (RM-19)
 
 - **`brain dedup scan` finds pairs of near-copies** (a forwarded email, a re-sent

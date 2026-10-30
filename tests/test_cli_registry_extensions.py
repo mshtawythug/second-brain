@@ -95,11 +95,12 @@ def test_extension_command_lists_after_every_builtin_command(
     assert names == ["mmm-first", "ooo-last", "aaa-ext", "nnn-group", "aaa-ext-group"]
 
 
-def test_shipped_extension_tuple_registers_exactly_the_watch_and_dedup_sub_apps() -> None:
-    """The shipped tuple: RM-15's ``watch`` and RM-19's ``dedup`` sub-apps, after every built-in.
+def test_shipped_extension_tuple_registers_exactly_the_shipped_sub_apps() -> None:
+    """The shipped tuple: RM-15's ``watch``, RM-19's ``dedup`` and RM-21's ``tags``.
 
     RM-06 shipped the tuple empty and this test pinned that; RM-15 is the first module behind
-    the seam. A new extension module updates the expected names here.
+    the seam, RM-19 the second, RM-21 the third. A new extension module updates the expected
+    names here.
     """
     # Arrange
     app = _builtin_app()
@@ -109,8 +110,12 @@ def test_shipped_extension_tuple_registers_exactly_the_watch_and_dedup_sub_apps(
     cli_registry.register_extensions(app)
 
     # Assert
-    assert [name for name, _ in cli_registry.EXTENSION_REGISTRARS] == ["watch", "dedup"]
-    assert _help_command_names(app) == [*before, "watch", "dedup"]
+    assert [name for name, _ in cli_registry.EXTENSION_REGISTRARS] == [
+        "watch",
+        "dedup",
+        "tags",
+    ]
+    assert _help_command_names(app) == [*before, "watch", "dedup", "tags"]
 
 
 def test_brain_cli_calls_the_seam_after_its_last_registration() -> None:
