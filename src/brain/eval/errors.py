@@ -26,3 +26,14 @@ class DegradedBaselineError(EvalBaselineError):
     retrieval missed; saved, it would become the reference every later
     ``--fail-below`` run is judged against.
     """
+
+
+class StageSkippedBaselineError(DegradedBaselineError):
+    """Raised when asked to save a baseline from a run in which a ranking stage skipped.
+
+    A row whose stage (the reranker, RM-14a) skipped was scored in hybrid order,
+    while ``config_signature`` names the stage, so it measured a pipeline the
+    report does not describe. A subclass of :class:`DegradedBaselineError` so
+    every caller that refuses a degraded run (``brain eval --record-baseline``,
+    exit 1) refuses this one with no change of its own.
+    """

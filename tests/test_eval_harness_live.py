@@ -164,6 +164,7 @@ def test_live_harness_runs_against_brain(query_obj, live_db, live_embedder) -> N
         snippet_context_tokens=cfg.snippet_context_tokens,
         vector_sim_floor=cfg.vector_sim_floor,
         embedder_name=cfg.embedder,
+        stages=(),
     )
 
     assert len(report.results) == 1

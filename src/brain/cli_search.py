@@ -46,13 +46,15 @@ from .format_search import (
 from .gaps import record_search_query
 from .ingest import Embedder
 from .queries import PersonMatch
+from .rerank import rerank_notice
 from .search import SearchDiagnostics, build_tsquery
-from .search_fallback import SearchFallback
-from .search_pipeline import run_search
+from .search_pipeline import PipelineResult, override_stages, run_search
 from .search_predicate import build_predicate
 from .sensitivity import VALID_SENSITIVITY_LEVELS
 from .token_report import count_results_tokens
 
+# One option object for both commands: the reranker's one-run override (RM-14a).
+_RERANK = typer.Option(None, "--rerank/--no-rerank", help="Override BRAIN_RERANKER for this run.")
 # Rich console bound to stderr, for the facet panel. Rich resolves ``file``
 # lazily, so a module-level instance still honours a redirected ``sys.stderr``
 # — which is what keeps this assertable under ``CliRunner``.
@@ -224,16 +226,18 @@ def _warn_if_fts_only_degraded(embedder: Embedder) -> None:
         )
 
 
-def _warn_if_fell_back(fallback: SearchFallback | None) -> None:
-    """Print the one-line text-only fallback notice on stderr, if there was one.
+def _warn_if_fell_back(outcome: PipelineResult) -> None:
+    """Print the text-only fallback notice, then a skipped reranker's, on stderr.
 
     Stderr, like :func:`_warn_if_fts_only_degraded`, so ``--json`` stdout stays
     parseable and the exit code stays 0: the results are real, only weaker.
     The bare ``--json`` list keeps its shape, so this notice is its only
     signal; ``--json --meta`` also carries the ``fallback*`` keys.
     """
-    if fallback is not None:
-        typer.echo(fallback.note, err=True)
+    if outcome.fallback is not None:
+        typer.echo(outcome.fallback.note, err=True)
+    if (note := rerank_notice(outcome.stages)) is not None:
+        typer.echo(note, err=True)
 
 
 def search(
@@ -343,6 +347,7 @@ def search(
             "the surface, which is always 'cli' here."
         ),
     ),
+    rerank: bool | None = _RERANK,
 ) -> None:
     """Hybrid search across the brain.
 
@@ -394,6 +399,7 @@ def search(
             embedder=embedder,
             query=query,
             limit=limit,
+            stages=override_stages(rerank),
             source_kind=source,
             tag=effective_tag,
             since_days=since_days,
@@ -419,7 +425,7 @@ def search(
             sensitivity=sensitivity,
         )
         results = outcome.results
-        _warn_if_fell_back(outcome.fallback)
+        _warn_if_fell_back(outcome)
         if facets:
             # ``hybrid_search`` does not return its predicate, so rebuild it
             # here from the SAME kwargs rather than widening that function's
@@ -550,7 +556,8 @@ def search(
     # Everything below goes to stderr, following ``_warn_if_fts_only_degraded``
     # — so it never pollutes ``--json`` stdout or a redirected table.
     if show_meta:
-        typer.echo(search_meta_line(diagnostics, returned=len(results)), err=True)
+        footer = search_meta_line(diagnostics, returned=len(results), stages=outcome.stages)
+        typer.echo(footer, err=True)
         if diagnostics.total_documents is None:
             # The count was requested (``want_total`` is implied by
             # ``show_meta``) and failed. The footer already printed
@@ -630,6 +637,7 @@ def explain(
         None, "--without-tag",
         help="Exclude docs carrying this tag.",
     ),
+    rerank: bool | None = _RERANK,
 ) -> None:
     """Show per-result ranking diagnostics for a query.
 
@@ -654,6 +662,7 @@ def explain(
             embedder=embedder,
             query=query,
             limit=limit,
+            stages=override_stages(rerank),
             source_kind=source,
             tag=effective_tag,
             since_days=since_days,
@@ -677,7 +686,7 @@ def explain(
             without_tag=without_tag,
         )
         results = outcome.results
-        _warn_if_fell_back(outcome.fallback)
+        _warn_if_fell_back(outcome)
 
     if json_output:
         # The seven public keys come from the one shared projection; ``explain``

@@ -63,7 +63,7 @@ def test_transient_embed_failure_is_still_a_degraded_row_with_no_results(
     down = QueryEmbedDownEmbedder(fake_embedder, transient=True)
 
     # Act
-    report = run_eval(test_db, embedder=down, queries=[_query(doc_id)])
+    report = run_eval(test_db, embedder=down, queries=[_query(doc_id)], stages=())
 
     # Assert
     (row,) = report.results
@@ -81,7 +81,7 @@ def test_permanent_embed_failure_still_aborts_the_run(
 
     # Act / Assert
     with pytest.raises(EmbedError):
-        run_eval(test_db, embedder=down, queries=[_query(doc_id)])
+        run_eval(test_db, embedder=down, queries=[_query(doc_id)], stages=())
 
 
 def test_no_eval_module_imports_the_fallback() -> None:
