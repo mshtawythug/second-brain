@@ -232,7 +232,9 @@ def _guarded(note_id: str, run: _Run, step: Any) -> None:
         typer.secho(f"  refused {note_id}", fg="red", err=True)
         typer.secho(str(exc), fg="red", err=True)
         outcome = "failed"
-    except (psycopg.Error, ValueError, KeyError) as exc:
+    # AssertionError and RecursionError: html.parser on some 3.11 releases asserts on
+    # malformed markup (``<![bogus[``), and a body can nest deeply (sec-103b).
+    except (psycopg.Error, ValueError, KeyError, AssertionError, RecursionError) as exc:
         typer.secho(f"  failed {note_id}: {describe_failure(exc)}", fg="red", err=True)
         outcome = "failed"
     run.counts[outcome] += 1

@@ -105,7 +105,7 @@ Notes in the Apple Notes folders the owner names become searchable, read through
 ## Review round (#103)
 
 - **Security (sec-103):** the converter is bounded. Indent and quote depth stop at
-  `MAX_NESTING` (8). Links and emphasis are tracked to `MAX_OPEN_INLINE` (64) and cleared at
+  `MAX_NESTING` (8). Links and emphasis are tracked to `MAX_OPEN_INLINE` (16; 64 at first, lowered after sec-103b measured 4.5 s on 2M characters) and cleared at
   each line end. Output stops at `MAX_OUTPUT_CHARS`, cut and marked. A timing-free work
   counter pins linear growth. A note is converted inside the per-note guard. Charrefs of 16+
   digits become U+FFFD before parsing. A body over `MAX_BODY_CHARS` is skipped and counted.

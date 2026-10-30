@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import subprocess
 import time
@@ -233,7 +232,9 @@ def test_the_runner_passes_argv_untouched_and_returns_stdout(tmp_path: Path) -> 
     assert out == "".join(f"[{a}]" for a in argv[1:])
 
 
-def test_the_runner_gets_the_environment_no_stdin_and_its_own_session(tmp_path: Path) -> None:
+def test_the_runner_gets_the_minimal_environment_no_stdin_and_its_own_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     tool = _script(tmp_path, "printf ok")
     seen: dict[str, Any] = {}
 
@@ -242,10 +243,37 @@ def test_the_runner_gets_the_environment_no_stdin_and_its_own_session(tmp_path: 
         return subprocess.Popen(argv, **kwargs)
 
     assert osascript_runner(["osascript"], binary=tool, popen=popen) == "ok"
-    assert seen["env"] == dict(os.environ)
+    assert seen["env"] == an.osascript_env()
+    assert set(seen["env"]) <= {"PATH", "HOME", "LANG", "TMPDIR"}
     assert seen["stdin"] is subprocess.DEVNULL
     assert seen["stderr"] is subprocess.DEVNULL
     assert seen["start_new_session"] is True
+
+
+def test_only_path_home_lang_and_tmpdir_reach_osascript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sec-103b: nothing else in the caller's environment (tokens, keys) passes through."""
+    tool = _script(tmp_path, "env")
+    for key, value in {
+        "PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "LANG": "en_US.UTF-8",
+        "TMPDIR": str(tmp_path), "VOYAGE_API_KEY": "synthetic-key", "GH_TOKEN": "synthetic",
+        "DATABASE_URL": "postgresql://synthetic", "LC_ALL": "C",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    out = osascript_runner(["osascript"], binary=tool)
+
+    names = {line.split("=", 1)[0] for line in out.splitlines() if "=" in line}
+    assert names - {"PWD", "SHLVL", "_", "OLDPWD"} == {"PATH", "HOME", "LANG", "TMPDIR"}
+    assert "synthetic" not in out
+
+
+@pytest.mark.parametrize("present", [(), ("PATH",), ("PATH", "HOME", "LANG", "TMPDIR")])
+def test_the_minimal_environment_holds_only_the_set_keys(present: tuple[str, ...]) -> None:
+    environ = {**{key: f"v-{key}" for key in present}, "SECRET": "x", "USER": "y"}
+
+    assert an.osascript_env(environ) == {key: f"v-{key}" for key in present}
 
 
 def test_a_missing_osascript_names_macos(tmp_path: Path) -> None:

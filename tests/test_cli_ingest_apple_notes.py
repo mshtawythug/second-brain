@@ -442,6 +442,29 @@ def test_a_conversion_failure_costs_one_note_not_the_run(
     assert set(_docs(test_db)) == {fx.note_id(1)}
 
 
+@pytest.mark.parametrize("error", [AssertionError, RecursionError])
+def test_a_parser_assertion_or_recursion_costs_one_note(
+    error: type[BaseException], notes: fx.FakeOsascript, embedder: CountingEmbedder,
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sec-103b: html.parser asserts on some malformed markup in older 3.11 releases."""
+    real = an.build_document
+
+    def build(note: an.Note) -> Any:
+        if note.id == fx.note_id(2):
+            raise error("SECRETBODY from the parser")
+        return real(note)
+
+    monkeypatch.setattr("brain.cli_ingest_apple_notes.an.build_document", build)
+
+    result = _run(*FOLDER)
+
+    assert result.exit_code == 0, result.output
+    assert f"failed {fx.note_id(2)}: {error.__name__}" in result.output
+    assert "SECRETBODY" not in result.output
+    assert set(_docs(test_db)) == {fx.note_id(1)}
+
+
 def test_a_huge_character_reference_is_replaced_not_fatal(
     notes: fx.FakeOsascript, embedder: CountingEmbedder, test_db: psycopg.Connection
 ) -> None:

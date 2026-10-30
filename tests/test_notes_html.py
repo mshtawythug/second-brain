@@ -300,7 +300,7 @@ def test_the_inline_stacks_are_bounded() -> None:
     converter2.feed('<a href="https://e.x">' * 500 + "<b>" * 500 + "x")
     assert len(converter2.links) == MAX_OPEN_INLINE
     assert len(converter2.marks) == MAX_OPEN_INLINE
-    assert MAX_OPEN_INLINE == 64
+    assert MAX_OPEN_INLINE == 16
 
 
 def test_a_link_left_open_does_not_reach_the_next_line() -> None:

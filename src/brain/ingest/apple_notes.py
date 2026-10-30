@@ -36,7 +36,7 @@ import json
 import os
 import subprocess
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -174,6 +174,17 @@ def osascript_argv(request: NotesRequest) -> list[str]:
     return ["osascript", "-l", "JavaScript", "-e", JXA_SCRIPT, request.to_json()]
 
 
+#: The only variables ``osascript`` inherits (sec-103b): it needs none of the rest,
+#: and the rest can hold tokens and keys.
+OSASCRIPT_ENV_KEYS = ("PATH", "HOME", "LANG", "TMPDIR")
+
+
+def osascript_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The minimal environment for ``osascript``: :data:`OSASCRIPT_ENV_KEYS` that are set."""
+    source = os.environ if environ is None else environ
+    return {key: source[key] for key in OSASCRIPT_ENV_KEYS if key in source}
+
+
 def osascript_runner(
     args: list[str],
     *,
@@ -195,7 +206,7 @@ def osascript_runner(
             [binary, *args[1:]],
             timeout=timeout,
             max_stdout_bytes=max_stdout_bytes,
-            env=os.environ,
+            env=osascript_env(),
             popen=popen,
         )
     except OSError as exc:

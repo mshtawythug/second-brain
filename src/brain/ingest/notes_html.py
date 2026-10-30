@@ -53,7 +53,9 @@ __all__ = [
 #: List and quote depth past which the indent and the ``>`` markers stop growing.
 MAX_NESTING = 8
 #: Open links and emphasis marks tracked at once; deeper ones are kept as plain text.
-MAX_OPEN_INLINE = 64
+#: Each closing tag re-joins its run, so the work per character grows with this bound:
+#: 64 took 4.5 s on a 2M-character body of nested a/b (sec-103b), so it is 16.
+MAX_OPEN_INLINE = 16
 #: The longest Markdown one body yields; the rest is cut and marked.
 MAX_OUTPUT_CHARS = 1_000_000
 TRUNCATION_MARKER = f"[note truncated: over {MAX_OUTPUT_CHARS} characters]"
