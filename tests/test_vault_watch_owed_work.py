@@ -640,7 +640,7 @@ def test_a_worker_past_its_join_owes_its_in_flight_delete_and_its_id(
         owed_at_stop = _journal_entries(journal) if journal.exists() else []
         factory.blocking.release.set()
         wait_for(lambda: not worker.is_alive())
-        owed = _journal_entries(journal)
+        owed = _journal_entries(journal) if journal.exists() else []
 
         graph = _Remover()
         _Watcher(vault, journal, fake_embedder, factory, graph_syncer=graph).stop()
