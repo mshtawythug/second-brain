@@ -7,7 +7,7 @@ Pure: no database, and no real ``gh``. The runner tests inject ``which`` and
 from __future__ import annotations
 
 import json
-import subprocess
+import time
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -53,118 +53,93 @@ def test_parse_pages_refuses_garbage_without_quoting_it() -> None:
 # --- gh_runner --------------------------------------------------------------------
 
 
-class _Run:
-    """A ``subprocess.run`` stand-in that records its call and plays a scripted outcome."""
-
-    def __init__(self, outcome: Any) -> None:
-        self.outcome = outcome
-        self.kwargs: dict[str, Any] = {}
-        self.args: list[str] = []
-
-    def __call__(self, args: list[str], **kwargs: Any) -> Any:
-        self.args, self.kwargs = list(args), kwargs
-        if isinstance(self.outcome, BaseException):
-            raise self.outcome
-        return self.outcome
+def _script(tmp_path: Path, body: str) -> str:
+    """A throwaway executable named ``gh`` (never the installed CLI)."""
+    script = tmp_path / "gh"
+    script.write_text(f"#!/bin/sh\n{body}\n")
+    script.chmod(0o755)
+    return str(script)
 
 
-def _done(returncode: int = 0, stdout: str = "", stderr: str = "") -> Any:
-    return subprocess.CompletedProcess(["gh"], returncode, stdout=stdout, stderr=stderr)
+def test_runner_returns_stdout_with_a_quiet_environment(tmp_path: Path) -> None:
+    env = "$GH_PROMPT_DISABLED:$GH_NO_UPDATE_NOTIFIER:$NO_COLOR"
+    gh = _script(tmp_path, f'printf \'%s\' "{env}:$*"')
+
+    out = github.gh_runner(["gh", "api", "user"], which=lambda _n: gh)
+
+    assert out == "1:1:1:api user"
 
 
-def _which(name: str) -> str | None:
-    return f"/usr/local/bin/{name}"
+def test_runner_gives_gh_no_stdin(tmp_path: Path) -> None:
+    """``gh`` reads stdin for some prompts; it must see end of file, never wait on a terminal."""
+    gh = _script(tmp_path, "cat; printf done")
 
-
-def test_runner_returns_stdout_and_bounds_the_call() -> None:
-    run = _Run(_done(stdout='{"login": "x"}'))
-
-    out = github.gh_runner(["gh", "api", "user"], which=_which, run=run)
-
-    assert out == '{"login": "x"}'
-    assert run.args == ["/usr/local/bin/gh", "api", "user"]
-    assert run.kwargs["timeout"] == github.GH_TIMEOUT_SECONDS
-    assert run.kwargs["check"] is False
-    assert run.kwargs["capture_output"] is True
-    env = run.kwargs["env"]
-    assert env["GH_PROMPT_DISABLED"] == "1"
-    assert env["GH_NO_UPDATE_NOTIFIER"] == "1"
+    assert github.gh_runner(["gh", "api", "user"], which=lambda _n: gh, timeout=5) == "done"
 
 
 def test_runner_without_gh_on_path_names_the_install() -> None:
     with pytest.raises(GithubError) as info:
-        github.gh_runner(["gh", "api", "user"], which=lambda _n: None, run=_Run(_done()))
+        github.gh_runner(["gh", "api", "user"], which=lambda _n: None)
 
     assert "gh CLI not found on PATH" in str(info.value)
     assert "gh auth login" in str(info.value)
 
 
-def test_runner_failure_reports_the_exit_code_never_stderr() -> None:
-    run = _Run(_done(returncode=4, stderr=f"HTTP 401: Bad credentials (token {TOKEN})"))
-
-    with pytest.raises(GithubError) as info:
-        github.gh_runner(["gh", "api", "user"], which=_which, run=run)
-
-    assert str(info.value) == "`gh api` failed (exit 4)"
-    assert TOKEN not in str(info.value)
-    assert info.value.__cause__ is None
-
-
-def test_runner_timeout_is_a_github_error() -> None:
-    run = _Run(subprocess.TimeoutExpired(["gh"], 60, stderr=TOKEN.encode()))
-
-    with pytest.raises(GithubError) as info:
-        github.gh_runner(["gh", "search", "prs"], which=_which, run=run)
-
-    assert str(info.value) == "`gh search` timed out after 60s"
-
-
-def test_runner_os_error_is_a_github_error_by_class() -> None:
-    run = _Run(PermissionError(13, f"denied {TOKEN}"))
-
-    with pytest.raises(GithubError) as info:
-        github.gh_runner(["gh", "api", "user"], which=_which, run=run)
-
-    assert str(info.value) == "`gh api` could not run (PermissionError)"
-
-
-def test_runner_refuses_output_over_the_cap() -> None:
-    run = _Run(_done(stdout="x" * 11))
-
-    with pytest.raises(GithubError) as info:
-        github.gh_runner(["gh", "api", "user"], which=_which, run=run, max_stdout_bytes=10)
-
-    assert "exceeded 10 bytes" in str(info.value)
-
-
 def test_runner_refuses_empty_args() -> None:
     with pytest.raises(GithubError):
-        github.gh_runner([], which=_which, run=_Run(_done()))
+        github.gh_runner([], which=lambda _n: "/usr/local/bin/gh")
 
 
 def test_a_real_failing_process_never_surfaces_its_stderr(tmp_path: Path) -> None:
-    """A real subprocess (a script named ``gh``, not the CLI) that prints a token and fails."""
-    script = tmp_path / "gh"
-    script.write_text(
-        f"#!/bin/sh\necho 'token {FINE_TOKEN}' >&2\necho 'partial {TOKEN}'\nexit 1\n"
-    )
-    script.chmod(0o755)
+    gh = _script(tmp_path, f"echo 'token {FINE_TOKEN}' >&2\necho 'partial {TOKEN}'\nexit 4")
 
     with pytest.raises(GithubError) as info:
-        github.gh_runner(["gh", "api", "user"], which=lambda _n: str(script))
+        github.gh_runner(["gh", "api", "user"], which=lambda _n: gh)
 
-    assert str(info.value) == "`gh api` failed (exit 1)"
+    assert str(info.value) == "`gh api` failed (exit 4)"
     assert FINE_TOKEN not in str(info.value) and TOKEN not in str(info.value)
+    assert info.value.__cause__ is None and info.value.__context__ is None
 
 
-def test_a_real_process_success_returns_stdout(tmp_path: Path) -> None:
-    script = tmp_path / "gh"
-    script.write_text("#!/bin/sh\nprintf '%s' \"$GH_PROMPT_DISABLED:$*\"\n")
-    script.chmod(0o755)
+def test_a_hung_process_is_killed_at_the_timeout(tmp_path: Path) -> None:
+    gh = _script(tmp_path, f"echo 'token {TOKEN}' >&2\nsleep 30")
+    started = time.monotonic()
 
-    out = github.gh_runner(["gh", "api", "user"], which=lambda _n: str(script))
+    with pytest.raises(GithubError) as info:
+        github.gh_runner(["gh", "search", "prs"], which=lambda _n: gh, timeout=0.3)
 
-    assert out == "1:api user"
+    assert str(info.value) == "`gh search` timed out after 0.3s"
+    assert time.monotonic() - started < 10
+
+
+def test_output_over_the_cap_is_refused_while_reading(tmp_path: Path) -> None:
+    """The cap kills ``gh`` mid-stream: the script would otherwise run for 30 s."""
+    gh = _script(tmp_path, "head -c 300000 /dev/zero\nsleep 30")
+    started = time.monotonic()
+
+    with pytest.raises(GithubError) as info:
+        github.gh_runner(["gh", "api", "user"], which=lambda _n: gh, max_stdout_bytes=1000)
+
+    assert str(info.value) == "`gh api` output exceeded 1000 bytes; narrow --since or --repo"
+    assert time.monotonic() - started < 10
+
+
+def test_output_at_the_cap_is_returned(tmp_path: Path) -> None:
+    gh = _script(tmp_path, "printf 12345")
+
+    out = github.gh_runner(["gh", "api", "user"], which=lambda _n: gh, max_stdout_bytes=5)
+
+    assert out == "12345"
+
+
+def test_runner_os_error_is_a_github_error_by_class() -> None:
+    def popen(*_a: Any, **_k: Any) -> Any:
+        raise PermissionError(13, f"denied {TOKEN}")
+
+    with pytest.raises(GithubError) as info:
+        github.gh_runner(["gh", "api", "user"], which=lambda _n: "/x/gh", popen=popen)
+
+    assert str(info.value) == "`gh api` could not run (PermissionError)"
 
 
 # --- viewer_login -------------------------------------------------------------------
@@ -217,18 +192,83 @@ def test_every_search_is_bounded_by_since_sort_and_limit() -> None:
         assert "body" in call[call.index("--json") + 1].split(",")
 
 
-def test_repo_scope_without_mine_is_one_query_per_type_with_every_repo() -> None:
+def test_repo_scope_narrows_every_role_search_to_the_named_repos() -> None:
+    """``--repo`` narrows the owner's searches; it never reads every contributor's items."""
     fake = fx.FakeGh()
     scope = SearchScope(repos=(fx.PUBLIC_REPO, fx.OWN_REPO), mine=False, since=SINCE)
 
     github.search_items(scope, limit=10, runner=fake)
 
     calls = fake.search_calls()
-    assert [c[2] for c in calls] == ["prs", "issues"]
+    assert [(c[2], c[3], c[4]) for c in calls] == [
+        ("prs", "--author", "@me"), ("prs", "--assignee", "@me"), ("prs", "--reviewed-by", "@me"),
+        ("issues", "--author", "@me"), ("issues", "--assignee", "@me"),
+    ]
     for call in calls:
-        assert "--author" not in call
         repos = [call[i + 1] for i, a in enumerate(call) if a == "--repo"]
         assert repos == [fx.PUBLIC_REPO, fx.OWN_REPO]
+
+
+def test_each_search_asks_only_for_fields_its_gh_type_has() -> None:
+    """gh 2.92 refuses an unknown ``--json`` field (``issues`` has no ``isDraft``) with exit 1."""
+    fake = fx.FakeGh()
+
+    github.search_items(SearchScope(repos=(), mine=True, since=SINCE), limit=1, runner=fake)
+
+    allowed = {"prs": fx.GH_SEARCH_PR_FIELDS, "issues": fx.GH_SEARCH_ISSUE_FIELDS}
+    for call in fake.search_calls():
+        fields = set(call[call.index("--json") + 1].split(","))
+        assert fields <= allowed[call[2]], (call[2], fields - allowed[call[2]])
+    pr_fields = fake.search_calls()[0][fake.search_calls()[0].index("--json") + 1]
+    assert "isDraft" in pr_fields.split(",")
+
+
+def test_another_persons_item_is_returned_only_through_an_owner_role() -> None:
+    theirs = fx.search_hit(fx.PUBLIC_REPO, 5, "Their change", author=fx.OTHER)
+    reviewed = fx.search_hit(fx.PUBLIC_REPO, 6, "Reviewed change", author=fx.OTHER)
+    fake = fx.FakeGh(prs=[theirs, reviewed], reviewed={f"{fx.PUBLIC_REPO}#6"})
+
+    hits = github.search_items(
+        SearchScope(repos=(fx.PUBLIC_REPO,), mine=False, since=SINCE), limit=10, runner=fake
+    )
+
+    assert [h.number for h in hits] == [6]
+
+
+@pytest.mark.parametrize(
+    ("name", "valid"),
+    [
+        ("example-org/example-repo", True),
+        ("example-org/.github", True),
+        ("a/b.c_d-e", True),
+        ("a/b\n", False),
+        ("a/b/c", False),
+        ("owner/.", False),
+        ("owner/..", False),
+        ("-owner/repo", False),
+        ("owner", False),
+        (" owner/repo", False),
+    ],
+)
+def test_is_repo_name(name: str, valid: bool) -> None:
+    assert github.is_repo_name(name) is valid
+
+
+def test_deeply_nested_json_is_a_github_error_everywhere() -> None:
+    deep = "[" * 100_000 + "]" * 100_000
+    fake = fx.FakeGh(api={"user": deep})
+
+    class _Deep(fx.FakeGh):
+        def __call__(self, args: list[str]) -> str:
+            return deep
+
+    with pytest.raises(GithubError):
+        github.parse_pages(deep)
+    with pytest.raises(GithubError):
+        github.viewer_login(runner=fake)
+    with pytest.raises(GithubError):
+        github.search_items(SearchScope(repos=(), mine=True, since=SINCE), limit=1,
+                            runner=_Deep())
 
 
 def test_hits_are_newest_first_and_malformed_ones_are_dropped() -> None:
@@ -359,3 +399,12 @@ def test_a_blank_readme_is_none() -> None:
     api = {f"repos/{fx.PUBLIC_REPO}/readme": json.dumps(fx.readme("  \n"))}
 
     assert github.fetch_readme(fx.PUBLIC_REPO, runner=fx.FakeGh(api=api)) is None
+
+
+def test_killing_a_group_that_is_already_gone_is_quiet(tmp_path: Path) -> None:
+    import subprocess
+
+    proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
+    proc.wait()
+
+    github._kill_group(proc)  # no ProcessLookupError escapes

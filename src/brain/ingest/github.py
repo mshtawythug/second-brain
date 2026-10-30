@@ -16,16 +16,27 @@ original either.
 **Pagination.** ``gh api --paginate`` prints each page as its own JSON value,
 one after another; :func:`parse_pages` reads that stream, which ``--slurp``
 would do only on newer ``gh`` releases.
+
+**Scope.** Every search is the owner's: author, assignee or reviewer
+(:data:`_ROLES`), so ``--repo`` narrows a search to the named repositories and
+never widens it to their other contributors' items (the #100 review ruling).
+
+**The output cap** is enforced while reading: stdout is read in chunks and
+``gh`` is killed as soon as :data:`GH_MAX_STDOUT_BYTES` is passed, so an
+oversized answer is refused before it is held. stderr is discarded unread.
 """
 from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -38,17 +49,27 @@ GhRunner = Callable[[list[str]], str]
 
 #: Per call. A search of up to 501 results, or one paginated comment list, is far below it.
 GH_TIMEOUT_SECONDS = 60
-#: Refuse a larger answer rather than hold it (one search page of 501 bodies is a few MB).
+#: The largest answer read; ``gh`` is killed past it (module docstring).
 GH_MAX_STDOUT_BYTES = 32 * 1024 * 1024
-#: ``OWNER/REPO`` as the code host spells them.
-REPO_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
+_READ_CHUNK_BYTES = 65536
+#: ``OWNER/REPO`` as the code host spells them; see :func:`is_repo_name`.
+REPO_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}")
 
-_SEARCH_FIELDS = (
-    "number,title,body,repository,url,state,updatedAt,createdAt,author,"
-    "isDraft,isPullRequest,labels,commentsCount"
-)
-#: The roles ``--mine`` means, per search type (the ticket: author, assignee or reviewer).
-_MINE_ROLES: Mapping[str, tuple[tuple[str, str], ...]] = {
+#: The ``--json`` fields per search type. They must be fields that type has in
+#: ``gh search <type> --help``: ``issues`` has no ``isDraft``, and gh refuses an
+#: unknown field with exit 1 (``tests/github_fixtures.py`` pins both sets).
+_SEARCH_FIELDS: Mapping[str, str] = {
+    "prs": (
+        "number,title,body,repository,url,state,updatedAt,createdAt,author,"
+        "isDraft,isPullRequest,labels,commentsCount"
+    ),
+    "issues": (
+        "number,title,body,repository,url,state,updatedAt,createdAt,author,"
+        "isPullRequest,labels,commentsCount"
+    ),
+}
+#: The owner's roles, per search type (the ticket: author, assignee or reviewer).
+_ROLES: Mapping[str, tuple[tuple[str, str], ...]] = {
     "prs": (("--author", "@me"), ("--assignee", "@me"), ("--reviewed-by", "@me")),
     "issues": (("--author", "@me"), ("--assignee", "@me")),
 }
@@ -65,7 +86,11 @@ class GithubError(RuntimeError):
 
 @dataclass(frozen=True)
 class SearchScope:
-    """What one run reads: ``--repo`` repositories, ``--mine``, and ``--since``."""
+    """What one run reads: the owner's items in ``repos`` (all repositories when empty).
+
+    ``mine`` changes no search (every search is the owner's); it adds the
+    READMEs of the result repositories the owner owns (plan ruling R1).
+    """
 
     repos: tuple[str, ...]
     mine: bool
@@ -106,41 +131,80 @@ class Readme:
     sha: str
 
 
+def is_repo_name(name: str) -> bool:
+    """``OWNER/REPO``, whole string, and never a ``.`` or ``..`` repository segment."""
+    return REPO_PATTERN.fullmatch(name) is not None and name.split("/")[1] not in {".", ".."}
+
+
 def gh_runner(
     args: list[str],
     *,
     which: Callable[[str], str | None] = shutil.which,
-    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
     timeout: float = GH_TIMEOUT_SECONDS,
     max_stdout_bytes: int = GH_MAX_STDOUT_BYTES,
 ) -> str:
-    """The production :data:`GhRunner`. ``which`` and ``run`` are test seams."""
+    """The production :data:`GhRunner`. ``which`` and ``popen`` are test seams.
+
+    A timer kills ``gh`` at ``timeout``; the read kills it past ``max_stdout_bytes``.
+    ``gh`` runs in its own process group and the whole group is killed, because a
+    child it started (an extension, a credential helper) would otherwise keep
+    stdout open and the read would wait for it.
+    """
     if not args:
         raise GithubError("gh runner invoked with no arguments")
     binary = which(args[0])
     if binary is None:
         raise GithubError(_INSTALL_HINT)
     label = f"`gh {args[1]}`" if len(args) > 1 else "`gh`"
+    timed_out = threading.Event()
+    oversized = False
+    chunks: list[bytes] = []
     try:
-        proc = run(
+        with popen(
             [binary, *args[1:]],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             env={**os.environ, **_QUIET_ENV},
-        )
-    except subprocess.TimeoutExpired:
-        raise GithubError(f"{label} timed out after {timeout:g}s") from None
+            start_new_session=True,
+        ) as proc:
+            def _kill() -> None:
+                timed_out.set()
+                _kill_group(proc)
+
+            timer = threading.Timer(timeout, _kill)
+            timer.start()
+            try:
+                size = 0
+                assert proc.stdout is not None  # stdout=PIPE
+                while chunk := proc.stdout.read(_READ_CHUNK_BYTES):
+                    size += len(chunk)
+                    if size > max_stdout_bytes:
+                        oversized = True
+                        _kill_group(proc)
+                        break
+                    chunks.append(chunk)
+                returncode = proc.wait()
+            finally:
+                timer.cancel()
     except OSError as exc:
         raise GithubError(f"{label} could not run ({type(exc).__name__})") from None
-    if proc.returncode != 0:
-        raise GithubError(f"{label} failed (exit {proc.returncode})")
-    if len(proc.stdout.encode()) > max_stdout_bytes:
+    if oversized:
         raise GithubError(
             f"{label} output exceeded {max_stdout_bytes} bytes; narrow --since or --repo"
         )
-    return proc.stdout
+    if timed_out.is_set():
+        raise GithubError(f"{label} timed out after {timeout:g}s")
+    if returncode != 0:
+        raise GithubError(f"{label} failed (exit {returncode})")
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def _kill_group(proc: subprocess.Popen[bytes]) -> None:
+    """SIGKILL ``proc``'s process group (it leads one: ``start_new_session``)."""
+    with contextlib.suppress(ProcessLookupError):  # already gone
+        os.killpg(proc.pid, signal.SIGKILL)
 
 
 def parse_pages(raw: str) -> list[Any]:
@@ -155,7 +219,7 @@ def parse_pages(raw: str) -> list[Any]:
             return values
         try:
             value, pos = decoder.raw_decode(raw, pos)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):  # RecursionError: nesting too deep
             raise GithubError("could not parse the gh output") from None
         values.extend(value if isinstance(value, list) else [value])
 
@@ -163,7 +227,7 @@ def parse_pages(raw: str) -> list[Any]:
 def _object(raw: str) -> dict[str, Any]:
     try:
         value = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):  # RecursionError: nesting too deep
         raise GithubError("could not parse the gh output") from None
     if not isinstance(value, dict):
         raise GithubError("the gh output was not a JSON object")
@@ -183,11 +247,10 @@ def viewer_login(*, runner: GhRunner) -> str:
 
 
 def search_items(scope: SearchScope, *, limit: int, runner: GhRunner) -> list[SearchHit]:
-    """Every PR and issue in scope, deduplicated, newest ``updatedAt`` first."""
+    """The owner's PRs and issues in scope, deduplicated, newest ``updatedAt`` first."""
     hits: dict[str, SearchHit] = {}
     for kind in ("prs", "issues"):
-        roles: tuple[tuple[str, ...], ...] = _MINE_ROLES[kind] if scope.mine else ((),)
-        for role in roles:
+        for role in _ROLES[kind]:
             for hit in _search(kind, role, scope, limit=limit, runner=runner):
                 hits.setdefault(hit.external_id, hit)
     return sorted(hits.values(), key=lambda h: (h.updated_at, h.external_id), reverse=True)
@@ -203,11 +266,11 @@ def _search(
         "--updated", f">={scope.since.isoformat()}",
         "--sort", "updated", "--order", "desc",
         "--limit", str(limit),
-        "--json", _SEARCH_FIELDS,
+        "--json", _SEARCH_FIELDS[kind],
     ]
     try:
         results = json.loads(runner(args))
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):  # RecursionError: nesting too deep
         raise GithubError(f"could not parse the gh search {kind} output") from None
     if not isinstance(results, list):
         raise GithubError(f"the gh search {kind} output was not a list")
@@ -222,7 +285,7 @@ def _hit(kind: Literal["pr", "issue"], raw: Any) -> SearchHit | None:
     repository = raw.get("repository")
     repo = repository.get("nameWithOwner") if isinstance(repository, dict) else None
     number = raw.get("number")
-    if not isinstance(repo, str) or not REPO_PATTERN.match(repo):
+    if not isinstance(repo, str) or not is_repo_name(repo):
         return None
     if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
         return None

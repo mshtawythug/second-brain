@@ -47,10 +47,11 @@ No file in the CLAUDE.md ceiling table is touched, so no trail promotion is owed
 5. **Scope.** At least one of `--repo OWNER/REPO` (repeatable) or `--mine`, **and** `--since
    YYYY-MM-DD`. Otherwise exit 2 with exactly "ingest-github requires --repo or --mine, and
    --since". A malformed `--repo`, a malformed `--since` or a future `--since` is refused with the
-   same message plus a reason. Semantics: `--mine` alone is the owner's activity everywhere
-   (author, assignee or reviewer for PRs; author or assignee for issues); `--repo` alone is every
-   PR and issue in the named repositories updated since `--since` (one named repository is not an
-   organisation); both together is the owner's activity in those repositories.
+   same message plus a reason. Semantics (**revised by the #100 review ruling**): every search is
+   the owner's activity (author, assignee or reviewer for PRs; author or assignee for issues).
+   `--mine` reads it everywhere; `--repo` narrows it to the named repositories and never reads
+   their other contributors' items. (The first cut read every item in a `--repo` repository,
+   which went past the goal, "your authored activity".)
 6. **PII and sensitivity.** Body: the title line, the description, and the **owner's own**
    comments (issue comments, review bodies, inline review comments); other people's only with
    `--with-thread`. Other people's logins never enter the body by default; the item's author login
@@ -116,3 +117,20 @@ No file in the CLAUDE.md ceiling table is touched, so no trail promotion is owed
   is `.get` with a type check.
 - Rate limits on a long `--since`: about four API calls per PR; the cap bounds a run at about two
   thousand calls, under the 5,000/hour REST limit.
+
+## Review round 1 (#100)
+
+- **rev-100 HIGH:** `gh search issues` (gh 2.92) has no `isDraft`, and gh refuses an unknown
+  `--json` field with exit 1, so every real run failed. The field list is now per search type.
+  `tests/github_fixtures.py` pins both gh 2.92 field sets (copied from `--help`), and `FakeGh`
+  refuses a `--json` field outside its type's set; `gh api` takes no `--json`.
+- **Scope ruling:** `--repo` narrows (above). `FakeGh` applies role flags and `--repo` as the
+  code host does, so a dropped role would read another person's item, and a test pins that it
+  is not ingested.
+- **sec-100 LOW:** `is_repo_name` (`fullmatch`, no `.`/`..` segment); `RecursionError` from deep
+  JSON is a `GithubError`; the runner streams stdout and kills `gh` past the cap (stderr is
+  discarded unread, stdin is closed); titles go through `github_docs.one_line` (no Unicode `C*`
+  character), stored and printed; the secret guard gains `gh[ousr]_[A-Za-z0-9]{36,}`
+  (`github_app_token`), regenerated into the pre-commit hook.
+- **rev-100 LOW:** the skill's sensitivity sentence names every non-public case, and the recipe
+  says which content type an issue takes.

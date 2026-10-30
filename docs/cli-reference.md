@@ -662,11 +662,11 @@ brain ingest-github --mine --since 2026-10-01 --tag github
 brain ingest-github --repo example-org/example-repo --since 2026-09-01 --with-thread
 ```
 
-- **Scope.** `--mine` alone is your activity everywhere: PRs you authored, are
-  assigned or reviewed, and issues you authored or are assigned. `--repo` alone
-  is every PR and issue in the named repositories updated since `--since`. Both
-  together is your activity in those repositories. Organisation-wide pulls and
-  commits are not read.
+- **Scope.** Only your own items are read: PRs you authored, are assigned or
+  reviewed, and issues you authored or are assigned, updated since `--since`.
+  `--mine` reads them everywhere; `--repo` narrows them to the named
+  repositories and never reads other contributors' items there.
+  Organisation-wide pulls and commits are not read.
 - **One document per PR or issue** (source `github`, content types `github_pr`
   and `github_issue`, deduplicated by `<owner>/<repo>#<number>`), and one per
   README (`github_readme`, `<owner>/<repo>:README`). READMEs are read for each
@@ -684,6 +684,10 @@ brain ingest-github --repo example-org/example-repo --since 2026-09-01 --with-th
 - **Sensitivity.** Items and READMEs from a repository that is not public
   (private, or an enterprise `internal` one) are stored as `confidential`, and
   so is anything from a repository whose visibility could not be read.
+- **Terminal safety.** Titles are stored and printed on one line with control
+  and format characters removed, so a title cannot drive your terminal. `gh`'s
+  output is read up to 32 MiB per call and `gh` is stopped past that; its
+  error output is never shown.
 - **Cap and cost.** At most 500 documents a run: PRs and issues first, newest
   first, then READMEs in the budget left. The command says when it stopped at
   the cap. Every new document gets a summary (`--no-enrich` skips it), and when

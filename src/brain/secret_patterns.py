@@ -139,6 +139,15 @@ SECRET_PATTERNS: tuple[SecretPattern, ...] = (
         label="GitHub fine-grained token",
         preview_head=4,
     ),
+    # The code host's other token prefixes (RM-31 review): gho_ (OAuth), ghu_
+    # (user-to-server), ghs_ (server-to-server, e.g. Actions) and ghr_ (refresh).
+    # ``gh auth token`` prints a gho_ token, so it is the one `gh` itself carries.
+    SecretPattern(
+        kind="github_app_token",
+        regex="gh[ousr]_[A-Za-z0-9]{36,}",
+        label="GitHub OAuth or app token",
+        preview_head=4,
+    ),
     SecretPattern(
         kind="gitlab_pat",
         regex="glpat-[A-Za-z0-9_-]{18,}",

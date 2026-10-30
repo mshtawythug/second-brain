@@ -221,3 +221,17 @@ def test_labels_that_are_not_a_list_are_dropped() -> None:
     item = RawItem(_hit(raw), fx.pr_detail(), (), (), ())
 
     assert _build(item).doc.metadata["labels"] == []
+
+
+def test_a_stored_title_carries_no_control_or_format_character() -> None:
+    raw = fx.search_hit(fx.PUBLIC_REPO, 4, "Fix\tthe \x1b[31mred\x1b[0m\u202e\n cache")
+    item = RawItem(_hit(raw), fx.pr_detail(), (), (), ())
+
+    gd = _build(item)
+
+    assert gd.doc.title == f"{fx.PUBLIC_REPO}#4 — Fix the [31mred[0m cache"
+    assert gd.doc.content.startswith(f"{fx.PUBLIC_REPO}#4: Fix the [31mred[0m cache\n")
+
+
+def test_one_line_of_only_control_characters_is_empty() -> None:
+    assert github_docs.one_line("\x1b\x07\u200b") == ""

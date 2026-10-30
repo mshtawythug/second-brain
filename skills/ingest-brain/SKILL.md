@@ -164,18 +164,20 @@ workspace.
 
 ## GitHub PRs, issues and READMEs
 
-**Prefer the CLI**: `brain ingest-github` reads through the user's own `gh` login. It
-**refuses without `--repo OWNER/REPO` or `--mine`, and `--since`**, stops at 500 documents a
-run, keeps only the user's own comments unless `--with-thread`, and stores private
-repositories as **confidential**. Start with a short `--since` and a `--dry-run`: every new
-document gets a summary and, with the graph on, minutes of concept extraction.
+**Prefer the CLI**: `brain ingest-github` reads through the user's own `gh` login, and only
+the user's own items (author, assignee or reviewer). It **refuses without `--repo OWNER/REPO`
+or `--mine`, and `--since`**; `--repo` narrows to those repositories, never to everyone's items
+there. It stops at 500 documents a run, keeps only the user's own comments unless
+`--with-thread`, and stores any repository that is not public as **confidential**. Start with
+a short `--since` and a `--dry-run`: each new document costs a summary and concept extraction.
 
 **Without `gh`, use the GitHub MCP connector** (`search_pull_requests` / `search_issues`, then
 `pull_request_read` / `issue_read`). The recipe is the scope: only the user's own items
-(`author:@me` or `assignee:@me`, never an organisation) with an `updated:>=YYYY-MM-DD` bound;
-refuse a search with no date bound. Body: the title line, the description and the user's own
-comments; state goes in `--metadata`, never the body. Pass `--sensitivity confidential` for any
-private repository:
+(`author:@me`, `assignee:@me` or `reviewed-by:@me`, never an organisation) with an
+`updated:>=YYYY-MM-DD` bound; refuse a search with no date bound. Body: the title line, the
+description and the user's own comments; state goes in `--metadata`, never the body. Pass
+`--sensitivity confidential` for any repository that is not public (private, internal, or
+visibility unknown), and `--content-type github_issue` for an issue:
 
 ```bash
 echo "<owner>/<repo>#<n>: <title>
@@ -234,7 +236,7 @@ If `brain doctor` flags an Ollama / Postgres issue, route to `brain-maintenance`
 - **Never bulk-ingest the inbox.** `brain ingest-gmail` enforces this with the
   scope-flag requirement; respect the spirit when picking scopes.
 - **GitHub: the user's own activity, date-bounded.** Never an organisation-wide
-  pull; private repositories are always confidential.
+  pull; a repository that is not public is always confidential.
 - **Don't invent content for stdin ingests.** If the MCP returned nothing,
   tell the user — don't generate a placeholder transcript.
 - **No untagged dumps.** Always pass `--tag` so the user can find/clean the

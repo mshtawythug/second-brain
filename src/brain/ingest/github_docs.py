@@ -20,9 +20,12 @@ protocol points 3 and 6):
   precedent for calendar events).
 - **Dating.** ``metadata.date`` (promoted to ``sent_at``) is the item's
   ``createdAt``, which never moves. A README has no date.
+- **Titles** are one line with control and format characters removed
+  (:func:`one_line`), because a title is printed to terminals.
 """
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -36,6 +39,7 @@ __all__ = [
     "GithubDoc",
     "build_item_document",
     "build_readme_document",
+    "one_line",
 ]
 
 CONTENT_TYPES = {"pr": "github_pr", "issue": "github_issue", "readme": "github_readme"}
@@ -76,7 +80,7 @@ def build_item_document(
 ) -> GithubDoc:
     """The document for one PR or issue."""
     hit, raw = item.hit, item.hit.raw
-    title = " ".join(_text(raw.get("title")).split()) or "(untitled)"
+    title = one_line(_text(raw.get("title"))) or "(untitled)"
     kind_line = _KIND_LINE[hit.kind] + (f" · {_VISIBILITY}" if confidential else "")
     parts = [
         f"{hit.repo}#{hit.number}: {title}\n{kind_line}",
@@ -192,6 +196,17 @@ def build_readme_document(repo: str, readme: Readme, *, confidential: bool) -> G
         ),
         confidential=confidential,
     )
+
+
+def one_line(text: str) -> str:
+    """``text`` on one line with every control and format character removed.
+
+    A title is someone else's text and reaches the terminal (``--dry-run``, the
+    document lists), where an ESC or other Unicode category ``C*`` character
+    could drive the terminal. Whitespace runs collapse to one space first.
+    """
+    collapsed = " ".join(text.split())
+    return "".join(ch for ch in collapsed if not unicodedata.category(ch).startswith("C"))
 
 
 def _text(value: Any) -> str:

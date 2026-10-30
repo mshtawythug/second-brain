@@ -159,6 +159,19 @@ def test_dry_run_lists_and_writes_nothing(gh: fx.FakeGh, test_db: psycopg.Connec
     assert _docs(test_db) == {}
 
 
+def test_dry_run_strips_control_characters_from_titles(gh: fx.FakeGh) -> None:
+    gh.prs = [fx.search_hit(fx.PUBLIC_REPO, fx.PR_NUMBER,
+                            "Fix \x1b[2J\x1b]0;owned\x07 the\u202e cache\u200b")]
+    gh.issues = []
+
+    result = _run("--repo", fx.PUBLIC_REPO, *SINCE, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    for ch in ("\x1b", "\x07", "\u202e", "\u200b"):
+        assert ch not in result.output
+    assert f"{PR_ID}  Fix [2J]0;owned the cache" in result.output
+
+
 # --- ingest (AC2, AC3) ----------------------------------------------------------------------
 
 
@@ -197,6 +210,28 @@ def test_repo_scope_reads_that_repositorys_readme(
 
     assert result.exit_code == 0, result.output
     assert set(_docs(test_db)) == {PR_ID, f"{fx.PUBLIC_REPO}:README"}
+
+
+def test_repo_scope_never_ingests_another_persons_item(
+    gh: fx.FakeGh, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    """The #100 ruling: ``--repo`` narrows the owner's activity, it does not widen to a repo's."""
+    theirs = fx.search_hit(fx.PUBLIC_REPO, 5, "Their unrelated change", author=fx.OTHER)
+    reviewed = fx.search_hit(fx.PUBLIC_REPO, 6, "A change the owner reviewed", author=fx.OTHER)
+    gh.prs, gh.issues = [fx.pr_hit(), theirs, reviewed], []
+    gh.reviewed = {f"{fx.PUBLIC_REPO}#6"}
+    for n in (6,):
+        base = f"repos/{fx.PUBLIC_REPO}"
+        gh.api[f"{base}/pulls/{n}"] = json.dumps(fx.pr_detail())
+        for path in (f"{base}/pulls/{n}/reviews", f"{base}/pulls/{n}/comments",
+                     f"{base}/issues/{n}/comments"):
+            gh.api[path] = fx.pages([])
+
+    result = _run("--repo", fx.PUBLIC_REPO, *SINCE, "--no-readmes")
+
+    assert result.exit_code == 0, result.output
+    assert set(_docs(test_db)) == {PR_ID, f"{fx.PUBLIC_REPO}#6"}
+    assert "Their unrelated change" not in result.output
 
 
 def test_no_readmes_and_a_repo_without_one(

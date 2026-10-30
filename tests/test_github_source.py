@@ -41,14 +41,19 @@ def _github_section() -> str:
     text = INGEST_SKILL.read_text(encoding="utf-8")
     match = re.search(r"^## GitHub PRs.*?(?=^## )", text, re.DOTALL | re.MULTILINE)
     assert match, "ingest-brain has no '## GitHub PRs' section"
-    return match.group(0)
+    return " ".join(match.group(0).split())  # line wrapping is not part of the contract
 
 
 def test_the_recipe_names_the_scope_and_the_refusal() -> None:
     section = _github_section()
 
     assert "refuses without `--repo OWNER/REPO` or `--mine`, and `--since`" in section
-    assert "`author:@me` or `assignee:@me`, never an organisation" in section
+    assert "(`author:@me`, `assignee:@me` or `reviewed-by:@me`, never an organisation)" in (
+        section
+    )
+    assert "`--repo` narrows to those repositories, never to everyone's items" in (
+        section
+    )
     assert "`updated:>=YYYY-MM-DD` bound" in section
     assert "refuse a search with no date bound" in section
 
@@ -56,8 +61,12 @@ def test_the_recipe_names_the_scope_and_the_refusal() -> None:
 def test_the_recipe_names_the_sensitivity_and_the_owner_only_comments() -> None:
     section = _github_section()
 
-    assert "stores private\nrepositories as **confidential**" in section
-    assert "`--sensitivity confidential` for any\nprivate repository" in section
+    assert "stores any repository that is not public as **confidential**" in section
+    assert (
+        "`--sensitivity confidential` for any repository that is not public (private, "
+        "internal, or visibility unknown)"
+    ) in section
+    assert "`--content-type github_issue` for an issue" in section
     assert "only the user's own comments unless `--with-thread`" in section
     assert "--source github" in section
     assert '--external-id "<owner>/<repo>#<n>"' in section
@@ -76,3 +85,21 @@ def test_maintenance_sees_a_running_ingest_github_as_an_ingest() -> None:
     assert maintenance.ingest_in_flight(
         ["/usr/bin/python /x/bin/brain ingest-github --mine --since 2026-10-01"]
     ) is True
+
+
+@pytest.mark.parametrize("prefix", ["gho", "ghu", "ghs", "ghr"])
+def test_the_secret_guard_finds_every_code_host_token_prefix(prefix: str) -> None:
+    """``gh auth token`` prints a ``gho_`` token; the guard must catch it (and its kin)."""
+    from brain.ingest.guard import scan_secrets
+
+    token = f"{prefix}_" + "EXAMPLENOTAREALTOKEN" + "0" * 16
+
+    kinds = [f.kind for f in scan_secrets(f"the token is {token} here")]
+
+    assert kinds == ["github_app_token"]
+
+
+def test_a_short_lookalike_is_not_a_token() -> None:
+    from brain.ingest.guard import scan_secrets
+
+    assert scan_secrets("gho_short and ghs_" + "A" * 35) == []

@@ -25,8 +25,10 @@ git tag scheme:
 ### Added — your pull requests, issues and READMEs as documents (RM-31)
 
 - `brain ingest-github` reads your code-host activity through the `gh` CLI and
-  its own login. It refuses to run without `--repo OWNER/REPO` or `--mine`, and
-  `--since` (exit 2), and stops at 500 documents a run, saying so. One document
+  its own login: only items you authored, are assigned or reviewed. It refuses
+  to run without `--repo OWNER/REPO` or `--mine`, and `--since` (exit 2);
+  `--repo` narrows to those repositories and never reads other contributors'
+  items there. It stops at 500 documents a run, saying so. One document
   per PR, issue and README, deduplicated by `<owner>/<repo>#<n>` and
   `<owner>/<repo>:README` under the new `github` source.
 - The body keeps only your own comments; `--with-thread` adds everyone's. State,
@@ -38,6 +40,9 @@ git tag scheme:
   code.
 - `brain doctor` has a `github` row (is `gh` on `PATH`?), and the `ingest-brain`
   skill has a recipe for the GitHub MCP connector when `gh` is not installed.
+- The ingest secret guard (and the pre-commit hook) now also catches the code
+  host's `gho_`, `ghu_`, `ghs_` and `ghr_` tokens, not only `ghp_` and
+  `github_pat_`.
 
 ### Fixed — the vault watcher no longer loses a delete across a shutdown or a lost connection (RM-26)
 

@@ -6,10 +6,10 @@ and the document shapes in :mod:`brain.ingest.github_docs`; this module checks
 the scope, applies the cap, runs the ingest loop and prints the report.
 
 **Scope (protocol point 5).** At least one of ``--repo OWNER/REPO`` or
-``--mine``, and ``--since``; no account is ever bulk-imported. ``--mine`` alone
-is the owner's activity everywhere (author, assignee or reviewer); ``--repo``
-alone is every PR and issue in those repositories; both together is the
-owner's activity there.
+``--mine``, and ``--since``; no account is ever bulk-imported. Every item read
+is the owner's: author, assignee or reviewer. ``--mine`` alone reads that
+activity everywhere; ``--repo`` narrows it to the named repositories, and never
+reads their other contributors' items (the #100 review ruling).
 
 **The cap (protocol point 9).** At most :data:`MAX_ITEMS` documents a run: PRs
 and issues first, newest ``updatedAt`` first, then READMEs in the budget left.
@@ -62,6 +62,7 @@ from .ingest.github_docs import (
     GithubDoc,
     build_item_document,
     build_readme_document,
+    one_line,
 )
 from .sensitivity import CONFIDENTIAL, DEFAULT_SENSITIVITY
 from .tags import normalize_tags
@@ -79,10 +80,10 @@ github_gh_runner: gh.GhRunner = gh.gh_runner
 
 def ingest_github(
     repo: list[str] = typer.Option(
-        [], "--repo", help="OWNER/REPO to read (repeatable)."
+        [], "--repo", help="Only your items in OWNER/REPO (repeatable); also its README."
     ),
     mine: bool = typer.Option(
-        False, "--mine", help="Only items you authored, are assigned or reviewed."
+        False, "--mine", help="Your items everywhere (author, assignee or reviewer)."
     ),
     since: str | None = typer.Option(
         None, "--since", help="Items updated on or after this day (YYYY-MM-DD)."
@@ -117,7 +118,7 @@ def ingest_github(
     typer.echo(f"found {len(hits)} item(s) and {len(readme_repos)} README(s)")
     if dry_run:
         for hit in hits:
-            title = " ".join(str(hit.raw.get("title") or "").split())
+            title = one_line(str(hit.raw.get("title") or ""))
             typer.echo(f"  {hit.kind:<6} {hit.external_id}  {title}")
         for name in readme_repos:
             typer.echo(f"  readme {name}")
@@ -148,7 +149,7 @@ def _scope_or_exit(
     if first > today:
         _refuse(f"{SCOPE_REFUSAL}: --since is in the future")
     for name in repos:
-        if not gh.REPO_PATTERN.match(name):
+        if not gh.is_repo_name(name):
             _refuse(f"{SCOPE_REFUSAL}: --repo must be OWNER/REPO")
     return SearchScope(repos=tuple(dict.fromkeys(repos)), mine=mine, since=first)
 

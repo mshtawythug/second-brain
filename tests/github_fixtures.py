@@ -5,6 +5,12 @@ accounts, the logins are synthetic, and no item exists on any code host. The
 shapes follow ``gh search prs --json …`` (field list from ``gh search prs
 --help``, gh 2.92) and the REST resources ``gh api`` returns. The fake never
 runs a process; it answers by the arguments it is called with and records them.
+
+The fake also holds every ``gh search`` call to what gh 2.92 accepts: its
+``--json`` list must be a subset of that type's field set below (copied from
+``gh search prs --help`` and ``gh search issues --help``), and it applies the
+role flags (``--author``/``--assignee``/``--reviewed-by @me``) and ``--repo``
+the way the code host does, so a query that drops a role reads everyone's items.
 """
 from __future__ import annotations
 
@@ -39,6 +45,20 @@ ISSUE_TITLE = "Widget cache misses after restart"
 ISSUE_DESCRIPTION = "After a restart every widget renders again."
 README_TEXT = "# example-repo\n\nA synthetic repository for tests.\n"
 
+#: ``gh search prs --help``, JSON FIELDS, gh 2.92.0.
+GH_SEARCH_PR_FIELDS = frozenset({
+    "assignees", "author", "authorAssociation", "body", "closedAt", "commentsCount",
+    "createdAt", "id", "isDraft", "isLocked", "isPullRequest", "labels", "number",
+    "repository", "state", "title", "updatedAt", "url",
+})
+#: ``gh search issues --help``, JSON FIELDS, gh 2.92.0: no ``isDraft``.
+GH_SEARCH_ISSUE_FIELDS = frozenset({
+    "assignees", "author", "authorAssociation", "body", "closedAt", "commentsCount",
+    "createdAt", "id", "isLocked", "isPullRequest", "labels", "number", "repository",
+    "state", "title", "updatedAt", "url",
+})
+_SEARCH_FIELD_SETS = {"prs": GH_SEARCH_PR_FIELDS, "issues": GH_SEARCH_ISSUE_FIELDS}
+
 
 def search_hit(
     repo: str,
@@ -52,10 +72,11 @@ def search_hit(
     created: str = "2026-10-01T09:00:00Z",
     comments: int = 0,
     labels: Sequence[str] = (),
+    assignees: Sequence[str] = (),
     is_pr: bool = True,
 ) -> dict[str, Any]:
-    """One ``gh search prs|issues --json`` result."""
-    return {
+    """One ``gh search prs|issues --json`` result (``isDraft`` only on a PR, as gh has it)."""
+    hit = {
         "number": number,
         "title": title,
         "body": body,
@@ -68,8 +89,12 @@ def search_hit(
         "isDraft": False,
         "isPullRequest": is_pr,
         "labels": [{"name": name} for name in labels],
+        "assignees": [{"login": login} for login in assignees],
         "commentsCount": comments,
     }
+    if not is_pr:
+        del hit["isDraft"]
+    return hit
 
 
 def pr_hit(**overrides: Any) -> dict[str, Any]:
@@ -81,7 +106,9 @@ def pr_hit(**overrides: Any) -> dict[str, Any]:
 
 def issue_hit(**overrides: Any) -> dict[str, Any]:
     """The public issue, authored by someone else and assigned to the owner."""
-    kwargs: dict[str, Any] = {"body": ISSUE_DESCRIPTION, "author": OTHER, "is_pr": False}
+    kwargs: dict[str, Any] = {
+        "body": ISSUE_DESCRIPTION, "author": OTHER, "assignees": (OWNER,), "is_pr": False
+    }
     kwargs.update(overrides)
     return search_hit(PUBLIC_REPO, ISSUE_NUMBER, ISSUE_TITLE, **kwargs)
 
@@ -164,16 +191,19 @@ def pages(*items: Sequence[dict[str, Any]]) -> str:
 class FakeGh:
     """A ``GhRunner`` serving canned output, keyed by command shape.
 
-    ``prs`` / ``issues`` are the search results (every role query gets the same
-    list; the union step must dedupe them). ``api`` maps an API path (without
-    query string) to the raw stdout. ``fail`` maps a path, or ``"search"``, to the
-    exception the call raises.
+    ``prs`` / ``issues`` are every item the code host holds; a search returns
+    those its role flag and ``--repo`` select (module docstring), so several role
+    queries can return one item and the union step must dedupe it. ``reviewed``
+    holds the external ids the owner reviewed (``--reviewed-by @me``). ``api``
+    maps an API path (without query string) to the raw stdout. ``fail`` maps a
+    path, or ``"search"``, to the exception the call raises.
     """
 
     prs: list[dict[str, Any]] = field(default_factory=list)
     issues: list[dict[str, Any]] = field(default_factory=list)
     api: dict[str, str] = field(default_factory=dict)
     fail: Mapping[str, BaseException] = field(default_factory=dict)
+    reviewed: set[str] = field(default_factory=set)
     calls: list[list[str]] = field(default_factory=list)
 
     def __call__(self, args: list[str]) -> str:
@@ -182,7 +212,7 @@ class FakeGh:
         if args[1] == "search":
             if "search" in self.fail:
                 raise self.fail["search"]
-            return json.dumps(self.prs if args[2] == "prs" else self.issues)
+            return json.dumps(self._search(args))
         assert args[1] == "api", args
         path = args[-1].split("?")[0]
         if path in self.fail:
@@ -191,11 +221,43 @@ class FakeGh:
             raise GithubError("gh api failed (exit 1)")
         return self.api[path]
 
+    def _search(self, args: list[str]) -> list[dict[str, Any]]:
+        kind = args[2]
+        fields = set(args[args.index("--json") + 1].split(","))
+        unknown = fields - _SEARCH_FIELD_SETS[kind]
+        assert not unknown, f"gh search {kind}: Unknown JSON field(s) {sorted(unknown)}"
+        repos = {args[i + 1] for i, a in enumerate(args) if a == "--repo"}
+
+        def selected(hit: Any) -> bool:
+            if not isinstance(hit, dict):
+                return True  # malformed results pass through, for the parser's tests
+            repo = (hit.get("repository") or {}).get("nameWithOwner")
+            if repos and repo not in repos:
+                return False
+            if "--author" in args and _login(hit.get("author")) != OWNER:
+                return False
+            if "--assignee" in args and OWNER not in {
+                _login(a) for a in hit.get("assignees", [])
+            }:
+                return False
+            return "--reviewed-by" not in args or _external_id(hit) in self.reviewed
+
+        hits = [h for h in (self.prs if kind == "prs" else self.issues) if selected(h)]
+        return hits
+
     def api_calls(self) -> list[str]:
         return [c[-1].split("?")[0] for c in self.calls if c[1] == "api"]
 
     def search_calls(self) -> list[list[str]]:
         return [c for c in self.calls if c[1] == "search"]
+
+
+def _login(value: Any) -> Any:
+    return value.get("login") if isinstance(value, dict) else None
+
+
+def _external_id(hit: dict[str, Any]) -> str:
+    return f"{(hit.get('repository') or {}).get('nameWithOwner')}#{hit.get('number')}"
 
 
 def standard_api(*, merged: bool = False, pr_state: str = "open") -> dict[str, str]:
