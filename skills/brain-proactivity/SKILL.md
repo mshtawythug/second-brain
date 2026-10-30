@@ -91,14 +91,8 @@ The suggestions leg is best-effort — it is skipped silently when Ollama
 is down or `--no-enrich` is passed. A brief with no suggestions is not
 an error.
 
-**Delivery** is opt-in (`BRAIN_BRIEF_DELIVERY=email|slack`, default
-`none`): `brief --wiki` then emails the page's content to the owner's own
-`BRAIN_USER_EMAIL` through `gws`, or posts it to a private Slack webhook.
-Titles and counts only, never confidential documents; todo text needs
-`BRAIN_BRIEF_DELIVERY_INCLUDE_TODOS=true`. Never point it at a shared
-channel. A failed send is a warning, never an error; `brain doctor`
-shows the `brief delivery` row, and `bin/gws-reauth` fixes a `gws`
-authorization failure.
+**Delivery** (opt-in, `BRAIN_BRIEF_DELIVERY=email|slack`) sends the page's titles to you, never
+to a shared channel; detail in `docs/configuration.md` (`BRAIN_BRIEF_DELIVERY`).
 
 ## Saved searches — `brain watch`
 
