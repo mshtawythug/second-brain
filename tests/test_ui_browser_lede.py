@@ -97,7 +97,7 @@ ROWS: list[dict[str, Any]] = [
     {"id": "r-slack", "title": "Quarterly Channel Digest",
      "source_kind": "slack", "glyph": "\N{SPEECH BALLOON}"},
     {"id": "r-other", "title": "Quarterly Vendor Notebook",
-     "source_kind": "notion", "glyph": "\N{SEEDLING}"},
+     "source_kind": "carrier-pigeon", "glyph": "\N{SEEDLING}"},
 ]
 
 SEARCH_PAYLOAD: dict[str, Any] = {

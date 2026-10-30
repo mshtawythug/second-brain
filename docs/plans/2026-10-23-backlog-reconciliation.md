@@ -83,7 +83,7 @@ three other series:
 | 2.5 | Browser history and bookmarks (domain allowlist) | **NOT STARTED** | No code. The owner accepted the item on 2026-05-11 (EXEC "Resolved decisions"); it was never scheduled. |
 | 2.6 | Code-repo ingestion | **NOT STARTED** | No `code` source kind and no extractor. Depends on 7.3. |
 | 2.7 | Krisp action items as structured documents | **SHIPPED** | `content_type='krisp_action_items'`, `brain enrich --krisp-action-items` (deferred fetch), `brain todo` (`3ed57d0`). |
-| 2.8 | Notion / Jira extractors | **PARTIAL** — Jira SHIPPED (RM-34, PR #97): the `jira` kind plus the `ingest-brain` recipe (Atlassian MCP → `ingest-stdin --source jira --sensitivity confidential`); no extractor by design (RM-34.D1). Notion: RM-35, TODO. | No extractor. Exports can be imported as `manual` files through `ingest-dir`, which is what a document-set import in October did (CLAUDE.md eval notes). That is a file import, not an extractor. |
+| 2.8 | Notion / Jira extractors | **SHIPPED** — Jira (RM-34, PR #97): the `jira` kind plus the `ingest-brain` recipe (Atlassian MCP → `ingest-stdin --source jira --sensitivity confidential`); no extractor by design (RM-34.D1). Notion (RM-35, PR #PR): `brain ingest-notion <export-path>` reads Notion's Markdown & CSV export (folder or zip, no API) into the `notion` kind, deduplicated by page id. | Before RM-35 there was no extractor; exports were imported as `manual` files through `ingest-dir`, which is what a document-set import in October did (CLAUDE.md eval notes). |
 | 2.9 | Long tail: social bookmarks, receipts, voice memos | **NOT STARTED** | Deliberately left for later in the roadmap itself ("defer until 2.1–2.7 land"). For voice memos, see 5.2. |
 
 ### 1.3 Section 3 — LLM enrichment

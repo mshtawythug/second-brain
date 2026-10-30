@@ -22,6 +22,28 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — Notion pages from Notion's Markdown export (RM-35)
+
+- **`brain ingest-notion <export-path>`** reads a Notion "Export → Markdown & CSV" folder or
+  `.zip` and stores each page as a `notion_page` document under the new `notion` source kind. No
+  Notion API, no token: the export you chose is the scope. Titles lose Notion's 32-hex id suffix.
+- Each page is deduplicated by its page id, parsed from the export's file names, not by its path:
+  re-export to a new folder or zip and re-run, and every page updates in place. A file whose
+  name carries no id, and every copy of an id that appears twice, is skipped and counted, never
+  guessed.
+- Images and attachments are skipped and counted; so are nested archives (unzip the outer one and
+  pass the inner one). Database rows are ingested, one document per row page, only with
+  `--with-databases`; a row's last-edited property dates it. `--since YYYY-MM-DD` keeps pages
+  last edited on or after that day (pages without the property are kept and counted).
+- `--max` (default 200) caps the pages written a run and prints how many remain, so a large
+  workspace drains over several runs; unchanged pages do not count. `--sensitivity`, `--tag`,
+  `--no-enrich` and `--allow-secrets` as for the other ingest commands.
+- The export is read as untrusted input: a zip is read member by member in memory and never
+  extracted; a member name that is absolute or leaves the archive, a symbolic-link, encrypted or
+  duplicate member, more than 100,000 entries, or more than 512 MiB of pages and tables refuses
+  the whole archive; a page over 8 MiB is skipped. A folder is walked without following links.
+  Output names pages by id, never by title.
+
 ### Changed — the `ingest-brain` skill keeps its per-source recipes in `sources/`
 
 - The Gmail, Krisp, Slack, Jira and GitHub recipes moved out of
