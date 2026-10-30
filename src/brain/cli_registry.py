@@ -42,6 +42,7 @@ from .cli_note import register as register_note
 from .cli_recall import register as register_recall
 from .cli_search import register as register_search
 from .cli_sensitivity import register_backfill as register_backfill_sensitivity
+from .cli_tags import register as register_tags
 from .cli_usage import register as register_usage
 from .cli_watch import register as register_watch
 
@@ -80,6 +81,7 @@ REGISTRARS: tuple[tuple[str, Registrar], ...] = (
 #: command module needs.
 EXTENSION_REGISTRARS: tuple[tuple[str, Registrar], ...] = (
     ("watch", register_watch),  # RM-15, saved searches
+    ("tags", register_tags),  # RM-21, tag rename / merge / suggest-merges
 )
 
 #: Registrars that attach to a SUB-APP rather than the root ``app``, and so
