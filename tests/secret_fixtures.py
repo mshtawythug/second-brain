@@ -46,6 +46,7 @@ SYNTHETIC_POSITIVES: dict[str, str] = {
     "stripe_restricted_key_live": "rk_live_EXAMPLENOTAREAL000000",
     "github_pat": "ghp_EXAMPLENOTAREALTOKEN0000000000000000",
     "github_pat_fine_grained": "github_pat_EXAMPLE_NOT_A_REAL_TOKEN_0000",
+    "github_app_token": "gho_EXAMPLENOTAREALTOKEN0000000000000000",
     "gitlab_pat": "glpat-EXAMPLE-NOT-REAL-0000",
     "google_api_key": "AIzaEXAMPLENOTAREALGOOGLEAPIKEY00000000",
 }
@@ -64,6 +65,7 @@ SYNTHETIC_NEGATIVES: dict[str, str] = {
     "stripe_restricted_key_live": "rk_live_short",
     "github_pat": "ghp_tooshort",
     "github_pat_fine_grained": "github_pat_short",
+    "github_app_token": "gho_tooshort",
     "gitlab_pat": "glpat-short",
     "google_api_key": "AIzaShort",
 }

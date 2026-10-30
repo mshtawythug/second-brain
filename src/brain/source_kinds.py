@@ -45,13 +45,15 @@ class InvalidSourceKind(BrainError):
 #: ``calendar`` (RM-30): Google Calendar events, from ``brain ingest-calendar``.
 #: ``jira`` (RM-34) has no ingest code: the ``ingest-brain`` skill pipes issues
 #: from the Atlassian MCP connector into ``brain ingest-stdin --source jira``.
+#: ``github`` (RM-31): ``brain ingest-github`` (``gh``), or the ``ingest-brain``
+#: skill's recipe through the GitHub MCP connector into ``brain ingest-stdin``.
 VALID_SOURCE_KINDS: frozenset[str] = frozenset(
-    {"manual", "krisp", "gmail", "slack", "calendar", "jira"}
+    {"manual", "krisp", "gmail", "slack", "calendar", "jira", "github"}
 )
 
 
 def source_kinds_hint() -> str:
-    """The kinds, sorted and ``|``-joined (``gmail|jira|…``), for messages and help."""
+    """The kinds, sorted and ``|``-joined (``github|gmail|…``), for messages and help."""
     return "|".join(sorted(VALID_SOURCE_KINDS))
 
 

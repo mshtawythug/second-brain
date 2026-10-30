@@ -39,6 +39,7 @@ notes, see `brain-authoring`.
 | Krisp transcript / Slack thread / arbitrary text | `brain ingest-stdin` | The MCP→stdin chain. See Krisp + Slack sections. |
 | The user's own Jira issues | `brain ingest-stdin --source jira` | Atlassian MCP→stdin, **confidential**. See Jira section. |
 | Krisp action items as a separate doc | `brain enrich --krisp-action-items` (handoff) + `brain ingest-stdin --content-type krisp_action_items` | See `brain-todo` for the full flow. |
+| The user's own GitHub PRs, issues, READMEs | `brain ingest-github --mine --since YYYY-MM-DD` | **REFUSES without `--repo`/`--mine` and `--since`.** See GitHub section. |
 
 ## Files and directories
 
@@ -211,6 +212,34 @@ echo "<KEY>: <summary>
 
 The 30-day bound keeps a run to tens of issues; batch small, as for Krisp.
 
+## GitHub PRs, issues and READMEs
+
+**Prefer the CLI**: `brain ingest-github` reads through the user's own `gh` login, and only
+the user's own items (author, assignee or reviewer). It **refuses without `--repo OWNER/REPO`
+or `--mine`, and `--since`**; `--repo` narrows to those repositories, never to everyone's items
+there. It stops at 500 documents a run, keeps only the user's own comments unless
+`--with-thread`, and stores any repository that is not public as **confidential**. Start with
+a short `--since` and a `--dry-run`: each new document costs a summary and concept extraction.
+
+**Without `gh`, use the GitHub MCP connector** (`search_pull_requests` / `search_issues`, then
+`pull_request_read` / `issue_read`). The recipe is the scope: only the user's own items
+(`author:@me`, `assignee:@me` or `reviewed-by:@me`, never an organisation) with an
+`updated:>=YYYY-MM-DD` bound; refuse a search with no date bound. Body: the title line, the
+description and the user's own comments; state goes in `--metadata`, never the body. Pass
+`--sensitivity confidential` for any repository that is not public (private, internal, or
+visibility unknown), and `--content-type github_issue` for an issue:
+
+```bash
+echo "<owner>/<repo>#<n>: <title>
+
+<description>
+
+<the user's own comments>" | brain ingest-stdin --source github \
+  --external-id "<owner>/<repo>#<n>" --title "<owner>/<repo>#<n> — <title>" \
+  --content-type github_pr --date YYYY-MM-DD --tag github \
+  --metadata '{"repo": "<owner>/<repo>", "state": "<state>"}'
+```
+
 ## Tags on ingest
 
 Every ingest command takes one or more `--tag` flags. Tags are
@@ -258,6 +287,8 @@ If `brain doctor` flags an Ollama / Postgres issue, route to `brain-maintenance`
   scope-flag requirement; respect the spirit when picking scopes.
 - **Jira: the user's own issues, time-bounded, confidential.** No JQL without a
   time bound, no project-wide pulls, always `--sensitivity confidential`.
+- **GitHub: the user's own activity, date-bounded.** Never an organisation-wide
+  pull; a repository that is not public is always confidential.
 - **Don't invent content for stdin ingests.** If the MCP returned nothing,
   tell the user — don't generate a placeholder transcript.
 - **No untagged dumps.** Always pass `--tag` so the user can find/clean the

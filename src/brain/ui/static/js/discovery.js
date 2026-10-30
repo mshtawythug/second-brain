@@ -51,6 +51,7 @@ import { openNote } from "/static/js/inspector.js";
 const SOURCE_ICONS = {
   krisp: "🎙️", slack: "💬", gmail: "📧", calendar: "📅", manual: "✍️", vault: "🌱",
   jira: "🎫",
+  github: "🔀",
 };
 const sourceIconFor = (kind) => SOURCE_ICONS[kind] || SOURCE_ICONS.vault;
 
