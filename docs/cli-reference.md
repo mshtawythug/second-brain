@@ -1140,6 +1140,14 @@ has listed yet, at most 5 per watch ("and N more"), and leaves out confidential
 documents. Once the page is written, those hits are marked as notified, so the
 next page does not repeat them. The section is absent when you have no watches.
 
+A **New this week** section names the people, organisations and projects whose
+first mention in a non-draft document was ingested in the last 7 days
+(most-mentioned first, at most 10; `[person] Name`). The terminal lists every
+such name; the `--wiki` page, and anything delivered, leaves out an entity
+known only from confidential documents. The section comes from the GraphRAG
+entity tables, so it is absent when `BRAIN_GRAPH_ENABLED=false` or those tables
+do not exist. `--json` carries it as `new_entities`.
+
 **Delivery (opt-in, off by default).** With `BRAIN_BRIEF_DELIVERY=email` or
 `slack` (see [configuration](configuration.md#brain_brief_delivery--send-the-daily-brief-to-yourself)),
 `brain brief --wiki` also sends the page's content to you once it is written:

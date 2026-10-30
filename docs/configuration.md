@@ -453,7 +453,8 @@ and `gws` on `PATH`; the subject is always `[brain brief] YYYY-MM-DD`, so a mail
 filter can label it, and `brain ingest-gmail` never ingests your own copy back.
 What is sent is the published page's content, built with confidential documents
 excluded, and with draft documents removed: the date, counts, capture and pinned
-titles, and the watch hits. The Slack post turns link previews off. With
+titles, the watch hits, and the "New this week" entity names. The Slack post
+turns link previews off. With
 `BRAIN_BRIEF_DELIVERY` unset or `none`, the other two knobs are not read by the
 brief at all. A bad value with delivery on (an unknown channel, a non-Slack URL,
 `email` without one `BRAIN_USER_EMAIL`) does not stop the brief: it logs one
@@ -775,7 +776,7 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `brain_note_new` | Create a vault note from chat content without opening `$EDITOR`; auto-tags `source-mcp`. |
 | `brain_daily` | Resolve or create a daily note for a date. |
 | `brain_link_proposal` | Propose a `[[link]]` from one vault note to another without writing files. |
-| `brain_brief` | Daily digest: recent captures, open todos, pins, best-effort next steps. Params: `since_hours`, `todo_since_days`, `no_enrich`. Titles + todo texts only. Also carries `watch_hits` (saved-search hits first seen in the capture window) and `watch_notes`; it runs no watch check. |
+| `brain_brief` | Daily digest: recent captures, open todos, pins, best-effort next steps. Params: `since_hours`, `todo_since_days`, `no_enrich`. Titles + todo texts only. Also carries `watch_hits` (saved-search hits first seen in the capture window) and `watch_notes`; it runs no watch check. `new_entities`: people, orgs and projects first mentioned this week, under the same lens. |
 | `brain_watch_list` | The saved searches (`brain watch`): name, query, mode, enabled, filters, timestamps. Names no document. |
 | `brain_watch_add` | Save a search. Params: `name`, `query`, `source`, `tag`, `person`, `kind`, `without_tag`, `semantic`. Current matches are recorded as already seen; no count is returned. A taken name or a bad filter is `INVALID_PARAMS`. |
 | `brain_watch_check` | What is new for a watch (or every enabled one) right now. **Peek only**: nothing is recorded and the brief still reports the same documents. Params: `name`, `include_confidential`. A check looks at 50 documents at most: `unrecorded` counts further full-text matches, and `capped` says a semantic check reached 50. |
