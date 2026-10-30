@@ -22,6 +22,21 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Fixed — the vault watcher no longer loses a delete across a shutdown or a lost connection (RM-26)
+
+- A file deleted (or renamed away) just as the watcher shut down, or while it
+  could not reach the database, kept its row until `brain vault sync --prune`:
+  the startup sync never prunes. The watcher now writes each such delete to
+  `$BRAIN_HOME/state/watcher-owed.jsonl` and applies it at its next start,
+  after the startup sync. A path whose file is back on disk is never deleted.
+- A delete whose database write landed just before the connection dropped no
+  longer leaves the document's graph vertex behind (it used to need
+  `brain graphrag remove`). Graph removes the watcher could not apply at
+  shutdown are written to the same journal and applied at the next start.
+- The journal is mode 0600 and holds vault-relative paths and document ids,
+  never content. A line it cannot read is skipped with a warning; the rest is
+  applied. Only `brain vault sync --watch` keeps it.
+
 ### Fixed — two terminal error reports no longer quote exception text (RM-29)
 
 - **`brain vault export`** reports a file it could not write as `<path>: <class>`,
