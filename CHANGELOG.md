@@ -58,8 +58,9 @@ git tag scheme:
     and neither tool sees the memo's name. Before this, a name holding a newline and a fake
     `estimated duration` line could set the duration.
   - `afconvert` runs under a file-size limit of the cap plus a second, so a memo whose
-    header understates its length cannot fill the disk. A WAV cut off at that limit is
-    `rejected` as too long. The stored duration is measured from the WAV, not read from the
+    header understates its length cannot fill the disk. Hitting the limit is `rejected`
+    as too long, whether `afconvert` is killed by SIGXFSZ or stops with the WAV cut off.
+    A memo of exactly the cap is still transcribed. The stored duration is measured from the WAV, not read from the
     header.
   - Whisper printing more than 4 MiB is `rejected`; it is not retried.
   - A memo whisper fails on three times is `rejected` instead of being retried every run.

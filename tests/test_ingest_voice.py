@@ -11,6 +11,7 @@ import contextlib
 import logging
 import os
 import shutil
+import signal
 import struct
 import wave
 from dataclasses import dataclass, field
@@ -614,6 +615,46 @@ def test_a_wav_stopped_at_the_limit_is_too_long(memo: Path, returncode: int) -> 
         extract_voice(memo, whisper=_setup(tools, max_minutes=1))
 
     assert BINARY not in [argv[0] for argv, _, _ in tools.calls]
+
+
+def test_afconvert_killed_by_sigxfsz_is_too_long_whatever_the_size(memo: Path) -> None:
+    """A tool that honours SIGXFSZ may die before the WAV reaches the limit."""
+    tools = FakeTools(
+        duration=5.0, wav_bytes=1000, afconvert=CappedRun(b"", -signal.SIGXFSZ, False, False)
+    )
+
+    with pytest.raises(AudioTooLongError):
+        extract_voice(memo, whisper=_setup(tools, max_minutes=1))
+
+
+def test_another_signal_with_a_short_wav_is_unreadable(memo: Path) -> None:
+    tools = FakeTools(
+        duration=5.0, wav_bytes=1000, afconvert=CappedRun(b"", -signal.SIGKILL, False, False)
+    )
+
+    with pytest.raises(UnreadableAudioError):
+        extract_voice(memo, whisper=_setup(tools, max_minutes=1))
+
+
+def test_a_memo_of_exactly_the_cap_with_afconvert_s_header_is_transcribed(memo: Path) -> None:
+    """60 s of audio plus afconvert's real 4 KiB header must not be read as too long."""
+    tools = FakeTools(duration=60.0, wav_bytes=60 * WAV_BYTES_PER_S + 4096)
+
+    doc = extract_voice(memo, whisper=_setup(tools, max_minutes=1))
+
+    assert doc.content == TRANSCRIPT
+    assert wav_byte_limit(60.0) > 60 * WAV_BYTES_PER_S + 4096
+
+
+def test_the_largest_wav_accepted_is_the_cap_plus_its_slack(memo: Path) -> None:
+    biggest = int((60.0 + 1.0) * WAV_BYTES_PER_S)
+    ok = FakeTools(duration=60.0, wav_bytes=biggest)
+    over = FakeTools(duration=60.0, wav_bytes=biggest + 1)
+
+    assert extract_voice(memo, whisper=_setup(ok, max_minutes=1)).content == TRANSCRIPT
+    with pytest.raises(AudioTooLongError):
+        extract_voice(memo, whisper=_setup(over, max_minutes=1))
+    assert wav_byte_limit(60.0) > biggest + 1  # rejected by length, inside the rlimit
 
 
 def test_the_duration_stored_is_the_wav_s(memo: Path) -> None:

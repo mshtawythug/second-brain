@@ -319,3 +319,48 @@ def test_outside_the_main_thread_the_context_changes_nothing() -> None:
     thread.join()
 
     assert seen == [before]
+
+
+def test_the_limit_hook_restores_sigxfsz_and_sets_the_limit() -> None:
+    """Run in a fresh interpreter: the hook changes the process it runs in."""
+    import sys
+
+    code = (
+        "import resource, signal\n"
+        "from brain.ingest.capped_process import limit_file_size\n"
+        "limit_file_size(123456)\n"
+        "print(signal.getsignal(signal.SIGXFSZ) == signal.SIG_DFL,"
+        " resource.getrlimit(resource.RLIMIT_FSIZE))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    ).stdout
+
+    assert out.strip() == "True (123456, 123456)"
+
+
+def test_a_writer_that_honours_sigxfsz_is_killed_at_the_limit(tmp_path: Path) -> None:
+    """``head`` dies of SIGXFSZ (the shell reports 128 + 25); the file stops at the limit."""
+    out = tmp_path / "out.bin"
+    tool = _script(tmp_path, 'head -c 100000 /dev/zero > "$1"\nprintf "%s" "$?"')
+
+    run = _run([tool, str(out)], max_file_bytes=1000)
+
+    assert run.stdout == b"153"
+    assert out.stat().st_size == 1000
+
+
+def test_the_hook_does_not_rely_on_popen_restoring_signals(tmp_path: Path) -> None:
+    """Python ignores SIGXFSZ; with ``restore_signals=False`` only the hook resets it."""
+    import signal
+
+    assert signal.getsignal(signal.SIGXFSZ) == signal.SIG_IGN  # inherited unless reset
+    out = tmp_path / "out.bin"
+    tool = _script(tmp_path, 'head -c 100000 /dev/zero > "$1" 2>/dev/null\nprintf "%s" "$?"')
+
+    def popen(argv: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+        return subprocess.Popen(argv, restore_signals=False, **kwargs)
+
+    run = _run([tool, str(out)], max_file_bytes=1000, popen=popen)
+
+    assert run.stdout == b"153"  # killed by SIGXFSZ (128 + 25), not an EFBIG exit 1

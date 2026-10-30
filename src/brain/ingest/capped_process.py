@@ -27,8 +27,10 @@ file the caller has already opened (as ``/dev/fd/N``), and ``max_file_bytes`` se
 child's ``RLIMIT_FSIZE``, so no file it writes can grow past that size. What the tool
 then does varies (killed by SIGXFSZ, an error exit, or, as ``afconvert`` does, a quiet
 exit 0 with the file cut at the limit), so a caller judges the file, not the exit code.
-The limit is set by a ``preexec_fn`` that makes one ``setrlimit`` call on a value
-computed before the fork.
+The limit is set by a ``preexec_fn`` (:func:`limit_file_size`) on a value computed before
+the fork. It also sets SIGXFSZ to its default action, so a tool that does not handle the
+signal itself dies of it at the limit, ``returncode == -SIGXFSZ``. (``Popen``'s default
+``restore_signals`` already does this; the hook does not rely on it.)
 """
 from __future__ import annotations
 
@@ -82,9 +84,7 @@ def run_capped(
         options["pass_fds"] = tuple(pass_fds)
     if max_file_bytes is not None:
         limit = file_size_limit(max_file_bytes)
-        options["preexec_fn"] = functools.partial(
-            resource.setrlimit, resource.RLIMIT_FSIZE, (limit, limit)
-        )
+        options["preexec_fn"] = functools.partial(limit_file_size, limit)
     with popen(
         argv,
         stdin=subprocess.DEVNULL,
@@ -125,6 +125,17 @@ def kill_group(proc: subprocess.Popen[bytes]) -> None:
     """SIGKILL ``proc``'s process group (it leads one: ``start_new_session``)."""
     with contextlib.suppress(ProcessLookupError):  # already gone
         os.killpg(proc.pid, signal.SIGKILL)
+
+
+def limit_file_size(limit: int) -> None:  # pragma: no cover — runs in the forked child
+    """The ``preexec_fn``: SIGXFSZ to its default action, then ``RLIMIT_FSIZE`` to ``limit``.
+
+    It changes the process it runs in, so only a child about to ``exec`` may call it; it is
+    tested in a fresh interpreter (``tests/test_capped_process.py``), which coverage does
+    not trace.
+    """
+    signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
 
 
 def file_size_limit(requested: int) -> int:

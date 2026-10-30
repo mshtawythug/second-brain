@@ -206,3 +206,24 @@ directory:
   digest.
 - The `O_NONBLOCK` flag was not mutated: removing it would block the FIFO test forever,
   rather than fail it.
+
+**Follow-up (coordinator, same round).**
+
+- The `preexec_fn` is now `capped_process.limit_file_size`. It sets SIGXFSZ to `SIG_DFL`,
+  then `RLIMIT_FSIZE`. `Popen`'s default `restore_signals` already resets SIGXFSZ, so the
+  hook only matters when that is off, as a test shows.
+- On this macOS, `afconvert` still exits 0 with the WAV cut off at the limit; it handles the
+  signal itself. `head` under the same hook dies of SIGXFSZ.
+- A hit on the limit is `AudioTooLongError` in either of two forms:
+  - `returncode == -SIGXFSZ`, whatever the WAV's size;
+  - a WAV longer than the cap plus 1 s. A WAV stopped at the limit always is, because the
+    limit adds 4,096 bytes on top.
+- Any other signal with a short WAV is still `UnreadableAudioError`.
+- Boundary tests:
+  - exactly 60 s of audio plus `afconvert`'s real 4 KiB header is transcribed;
+  - the largest WAV accepted is (cap + 1 s) × 32,000 bytes, and one byte more is rejected;
+  - both sizes sit under the limit.
+- 5 more mutations, all killed. Wiring the hook first survived: with `restore_signals` on,
+  it behaves the same as a bare `setrlimit`. A `restore_signals=False` test now kills it.
+  The hook runs in the forked child, which coverage does not trace, so it carries a
+  `pragma: no cover` and is tested in a fresh interpreter.
