@@ -11,7 +11,7 @@ Ingest, by **name**, a file already in the inbox folder, from the browser. `GET 
 lists names; `POST /api/ingest/inbox {name}` queues job kind `ingest.inbox`, which uses RM-33's
 move-first step, so the file ends in `<inbox>/imported/` and appears in the tree.
 
-## Decisions (proposed; each needs team-lead's ruling)
+## Decisions (as proposed; see "Rulings and deviations" for what was ruled and built)
 
 - **D1 — which drop folder is the inbox.** The first `[[folder]]` entry (file order) with
   `mode = "ingest"`, `kind = "manual"` and `auto = false`. No new TOML key. `auto = false` keeps the
@@ -91,3 +91,102 @@ the `/` check, the `..` check, the resolve-then-compare, the `lstat` symlink ref
 re-validation; the browser harness for the Ingest tab only (≥6 GiB free);
 `python scripts/check_ceiling_table.py`. Security review with `ecc:security-reviewer` on opus
 follows (new traversal surface).
+
+## Rulings and deviations
+
+**Rulings (team-lead, 2026-10-30).** D1–D8 approved as proposed, with these notes:
+
+- **D1:** the inbox is the first usable `mode = "ingest"`, `kind = "manual"`, `auto = false`
+  entry; no new key. Documented in `docs/guides/drop-folders.md` and `docs/configuration.md`.
+- **D2:** `drop_folder.run_one` is added by this ticket, in its own section after `run`, and it
+  reuses `_open_dirs`, `_Mover` and `_one`, with `run` unchanged. RM-39 (impl-rm39) adds
+  `_Mover.delete_on_success: bool = False` and sets it only for capture folders. `run_one` refuses
+  any mode but `"ingest"` with wording that does not depend on RM-39, and it builds `_Mover`
+  with the default, so it never deletes in either merge order. Whichever PR merges second
+  resolves the textual conflict.
+- **D6, the L5 exemption (revised ruling):** the listing is NOT gated on
+  `BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`. That knob defaults off and an inbox defaults to
+  confidential, so gating would make the inbox unusable out of the box. It is exempt because:
+  (a) it is a prompted view: the tab fetches it only when the user picks Inbox mode or presses
+  Refresh, never on load or in the background, and a browser test pins this;
+  (b) it is served only on a loopback, writable server, the trust of `serve_confidential_bodies`;
+  (c) it names local files that are not yet brain documents. A job's result keeps the lens, so
+  `original_filename` is withheld with the title.
+
+**Additions beyond the plan, all approved:**
+
+- (a) the upload size caps apply to inbox files (413 `inbox_file_too_large`);
+- (b) `GET` returns `default_sensitivity`, so the tab preselects the folder's level. Otherwise
+  the form would send `normal` and override D5;
+- (c) `_ingest` is split into `_ingest` and `_ingest_on(conn, ...)`, because `run_one` needs the
+  connection;
+- (d) `ingest_schemas._optional_title` is shared by `parse_file` and `parse_inbox`.
+
+**Deviations from the text above:**
+
+- **D6's real response shape:** `{available, reason, extensions, files: [{name, size}],
+  truncated, default_sensitivity}`. `reason` is an ingest reason, `inbox_unconfigured`,
+  `inbox_misconfigured` or `inbox_unreadable`.
+- **The name rule:** no Unicode category-C character (control, format, surrogate, private use)
+  and not `one_line(name) == name`. `one_line` also collapses whitespace runs, which would refuse
+  real names with two spaces.
+- **Tests:** `run_one`'s tests are in `tests/test_drop_folder_run_one.py`, not in rows added to
+  `tests/test_drop_folder.py`, to keep this diff clear of RM-39's.
+- **The full code list.**
+
+  Route:
+
+  | Status | Codes |
+  |---|---|
+  | 400 | `invalid_name`, `outside_inbox`, `not_a_regular_file`, `hard_linked_file`, `unknown_field`, `invalid_sensitivity`, `invalid_title`, `invalid_tags`, `invalid_enrich` |
+  | 404 | `inbox_file_unknown`, `inbox_unconfigured` |
+  | 409 | `inbox_misconfigured`, `inbox_unreadable`, `file_not_on_disk` |
+  | 413 | `inbox_file_too_large` |
+  | 415 | `unsupported_file` |
+  | 403 / 503 / 429 | from the existing ingest gates |
+
+  Job: `inbox_file_changed`, `inbox_file_gone`, `inbox_file_too_large`, `file_not_on_disk`,
+  `inbox_unreadable`, `inbox_move_failed`, `inbox_unusable`, and the ingest codes.
+
+## Review round 1 (#110: rev-110 and sec-110)
+
+No critical or high findings, and no crafted request reached a file outside the inbox.
+
+- **M1, the cap was bypassable after the check.** `run_one` takes `max_bytes` and
+  `expect_identity` (both default `None`, so `run` is unaffected). It checks the OPENED fd's
+  `fstat`: one link, no dataless flag, size at most the cap, and the given `(st_dev, st_ino)`.
+  The hash then reads at most `max_bytes + 1`, so a growing file is refused rather than read
+  whole. The job pins the identity from the SUBMIT: its own re-check must match, and so must the
+  opened fd. Before extraction, the moved file's size is checked once more, because a writer
+  still holding it could append after the hash. Refusals are `FileTooLargeError`,
+  `FileIdentityError` and `DatalessFileError` (subclasses of `OpenRefusedError`), mapped to job
+  codes. One residual remains: a writer can still append after that last check, while the
+  extractor reads. That window is narrow, the user's own process is the only writer, and the
+  server is loopback-only.
+- **L1 (= rev F1), a symlink loop gave a 500.** `lstat` now runs before resolve-then-compare, and
+  a `RuntimeError` or `OSError` from the resolve is `not_a_regular_file`.
+- **rev LOW, `PermissionError` from lstat.** Any lstat `OSError` other than ENOENT is 409
+  `inbox_unreadable`, on the route and in the job.
+- **L2, blocking work in async handlers.** `find_inbox`, `list_inbox`, `require_inbox` and
+  `resolve_inbox_file` run under `run_in_threadpool`. The listing reads at most
+  `MAX_SCANNED = 5000` entries and reports `truncated`. It has its own loop rather than
+  `drop_folder.scan`, so the LaunchAgent's scan is unchanged.
+- **L3, the dataless check was path-based.** It is now also on the opened fd's `fstat`. The
+  path check stays as the pre-open guard.
+- **L4, hard links.** `st_nlink != 1` is refused at submit (400 `hard_linked_file`), left out
+  of the listing, and refused on the opened fd, as defence in depth.
+- **L5:** the revised ruling above. The on-demand fetch is pinned by a browser test.
+- **rev F2, no ingestible type.** When the inbox is available but takes no uploadable type, the
+  tab says so and names the extensions to add, instead of "The inbox is empty".
+- **rev F3:** `inbox.INBOX_KIND` is renamed `INBOX_SOURCE_KIND`, so it no longer clashes with
+  the job kind.
+- **rev F4 (also the §9.5 sandbox finding):** the folder's level is preselected only while Inbox
+  mode is still shown, and leaving Inbox mode restores the config default.
+- **rev F5:** a 4xx on submit refreshes the list.
+- **§9.5 sandbox pass:** clean on the `brain demo` sandbox. Its one finding, the sticky radio,
+  is rev F4.
+- **Verification (round 1):** `ruff check`, `mypy src/` and `check_ceiling_table` are clean.
+  1,304 named tests pass, with 100% line and branch coverage on `drop_folder`, `ui/inbox`,
+  `ui/ingest_service`, `ui/ingest_schemas` and `ui/routes_ingest`. The 76 Ingest-tab browser
+  rows pass, 15 of them inbox rows. 20 more mutations were killed (5 for F1 and the EPERM
+  path, 15 for M1, L2, L3, L4, L5 and F4), 33 across the PR.

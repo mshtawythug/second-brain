@@ -9,6 +9,7 @@ No PII: nonsense file names.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -151,3 +152,81 @@ def test_a_refused_submit_shows_the_servers_message(harness: Harness) -> None:
     page.wait_for_selector("#ingest-error:not([hidden])")
     assert "not a regular file" in page.text_content("#ingest-error")
     assert page.locator("#ingest-jobs > li").count() == 0
+
+
+# --- review round 1 -------------------------------------------------------------------
+
+
+def test_the_listing_is_fetched_only_when_inbox_mode_is_picked(harness: Harness) -> None:
+    """L5: a prompted view. Never on page load, on opening the tab, or in Paste/File mode."""
+    harness.open_tab()
+    page = harness.page
+    page.check("#ingest-mode-file")
+    page.check("#ingest-mode-paste")
+    page.wait_for_timeout(300)  # an ABSENCE: give a stray background fetch time to show
+
+    assert harness.jobs.inbox_lists == 0
+
+    page.check("#ingest-mode-inbox")
+    page.wait_for_selector("#ingest-inbox-list li")
+
+    assert harness.jobs.inbox_lists == 1
+
+
+def test_an_inbox_with_no_ingestible_type_says_so_not_empty(harness: Harness) -> None:
+    """F2: a manual folder without `extensions` gets the image defaults."""
+    harness.jobs.inbox = {**harness.jobs.inbox, "extensions": [], "files": []}
+    page = _inbox_mode(harness)
+
+    page.wait_for_selector("#ingest-inbox-empty:not([hidden])")
+
+    text = page.text_content("#ingest-inbox-empty")
+    assert "no file type this tab can ingest" in text and ".md" in text
+    assert "empty" not in text
+
+
+def test_leaving_inbox_mode_restores_the_modes_sensitivity(harness: Harness) -> None:
+    """F4: the inbox preselects its folder's level; Paste and File keep theirs."""
+    page = _inbox_mode(harness)
+    page.wait_for_selector("#ingest-inbox-list li")
+    assert page.is_checked("#ingest-sensitivity-confidential")
+
+    page.check("#ingest-mode-paste")
+
+    assert page.is_checked("#ingest-sensitivity-normal")
+
+
+def test_a_listing_that_answers_after_the_user_left_never_moves_the_radio(
+    harness: Harness,
+) -> None:
+    """F4: the preselect happens only while Inbox mode is still the one shown."""
+    held: list[Any] = []
+    harness.page.route("**/api/ingest/inbox", lambda route: held.append(route))
+    harness.open_tab()
+    page = harness.page
+    page.check("#ingest-mode-inbox")
+    harness.wait_until(lambda: bool(held), "the held listing request")
+    page.check("#ingest-mode-paste")
+
+    held[0].fulfill(status=200, content_type="application/json",
+                    body=json.dumps(harness.jobs.inbox))
+    page.wait_for_selector("#ingest-inbox-list li", state="attached")
+
+    assert page.is_checked("#ingest-sensitivity-normal")
+
+
+def test_a_refusal_refreshes_the_list(harness: Harness) -> None:
+    """F5: a 4xx can mean the list is stale, so it is fetched again."""
+    harness.jobs.inbox_error = (404, "inbox_file_unknown", "no such file in the inbox")
+    page = _inbox_mode(harness)
+    page.wait_for_selector("#ingest-inbox-list li")
+    harness.jobs.inbox = {**harness.jobs.inbox, "files": [{"name": "flonk.txt", "size": 7}]}
+
+    page.check("#ingest-inbox-file-0")
+    page.click("#ingest-submit")
+
+    page.wait_for_selector("#ingest-error:not([hidden])")
+    harness.wait_until(lambda: harness.jobs.inbox_lists == 2, "the refreshed listing")
+    page.wait_for_function(
+        "() => document.querySelectorAll('#ingest-inbox-list li').length === 1"
+    )

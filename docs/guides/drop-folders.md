@@ -100,14 +100,23 @@ and press **Ingest**. The file is moved into the inbox's `imported/` folder firs
 ingested from there, exactly as above, so it ends up in `imported/` and in the tree. The
 folder's `sensitivity` is preselected; you can change it, and add tags or a title.
 
-- The tab lists names and sizes only, newest first (200 at most), and only on a loopback,
-  writable `brain ui`. It leaves out symlinks, sub-folders, hidden files, iCloud files that
-  are not downloaded, files of other types, and files modified in the last 5 seconds.
+- The tab lists names and sizes only, newest first (200 at most, from the first 5,000
+  entries of the folder), and only on a loopback, writable `brain ui`. It asks for the list
+  only when you choose **From the inbox** (or press **Refresh**), never on its own. It leaves
+  out symlinks, sub-folders, hidden files, files with a second hard link, iCloud files that
+  are not downloaded, files of other types, and files modified in the last 5 seconds. If it
+  says the inbox takes no file type it can ingest, the entry has no `extensions`; add them.
+- **The names are shown even when confidential titles are hidden.** An inbox is confidential
+  by default and `BRAIN_UI_SERVE_CONFIDENTIAL_TITLES` is off by default, so the list is
+  exempt: it appears only when you ask for it, only on this machine's own `brain ui`, and it
+  names files that are not yet in your brain. Once a file is ingested, its title follows that
+  knob like any other confidential document's.
 - The browser sends a **name**, never a path. A name with `/`, a `..`, a symlink (inside or
-  out of the inbox), a folder or a pipe is refused, and so is a file over the upload caps
-  (25 MiB for `.pdf` / `.docx`, 5 MiB for text). The name is checked again when the job
-  starts, and the file is opened without following a link, so a file swapped after you
-  picked it is refused rather than read.
+  out of the inbox), a folder, a pipe or a file with another hard link is refused, and so is
+  a file over the upload caps (25 MiB for `.pdf` / `.docx`, 5 MiB for text). The job ingests
+  the exact file you picked or nothing: it checks the name again, opens the file without
+  following a link, and refuses it if it is no longer the same file, has grown past the cap,
+  or is now an iCloud placeholder.
 - Any failure (the database or the embedding model was down, the secret guard refused it,
   the file could not be read, or you cancelled) puts the file back in the inbox to try
   again or delete. A file with no text stays in `imported/` and adds no document.

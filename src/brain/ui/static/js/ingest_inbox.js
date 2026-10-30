@@ -12,7 +12,13 @@
  *
  * THE FOLDER'S SENSITIVITY IS THE DEFAULT. An inbox is `confidential` unless its
  * entry says otherwise, so switching to this mode preselects the level the
- * listing names; the user can still change it.
+ * listing names, but only while this mode is still the one shown: a listing that
+ * answers after the user has left never touches the radio. The user can still
+ * change it.
+ *
+ * FETCHED ONLY ON DEMAND. The listing names private files, so it is requested
+ * when the user picks this mode (or Refresh), never on page load or in the
+ * background: a prompted view (#110 review round 1, L5).
  *
  * Every name is the user's own file name: it is shown as text, never logged.
  */
@@ -57,6 +63,11 @@ function render() {
   const empty = $("ingest-inbox-empty");
   if (!listing || !listing.available) {
     empty.textContent = (listing && REASONS[listing.reason]) || "The inbox is not available.";
+  } else if (!(listing.extensions || []).length) {
+    /* A `manual` folder with no `extensions` gets the image defaults; files sit
+       there, so "empty" would be wrong (#110 review F2). */
+    empty.textContent = "The inbox takes no file type this tab can ingest. Add "
+      + "\".md\", \".txt\", \".pdf\" or \".docx\" to its extensions in drop-folders.toml.";
   } else if (!files.length) {
     empty.textContent = "The inbox is empty.";
   } else {
@@ -90,7 +101,7 @@ export async function refreshInbox() {
 /* Called when the user switches to inbox mode. */
 export async function showInbox() {
   await refreshInbox();
-  preselectSensitivity();
+  if ($("ingest-mode-inbox").checked) preselectSensitivity();
 }
 
 /* The client-side check: a file must be picked. "" when it is. */
@@ -107,9 +118,16 @@ function pickedName() {
 export async function submitInboxFile(common) {
   const name = pickedName();
   const title = $("ingest-inbox-title").value.trim();
-  const snapshot = await submitJob("/api/ingest/inbox", {
-    name, ...(title ? { title } : {}), ...common,
-  });
+  let snapshot;
+  try {
+    snapshot = await submitJob("/api/ingest/inbox", {
+      name, ...(title ? { title } : {}), ...common,
+    });
+  } catch (error) {
+    /* A refusal can mean the list is stale (the file moved or changed): redraw it. */
+    if (error.status >= 400 && error.status < 500) refreshInbox();
+    throw error;
+  }
   listing = { ...listing, files: listing.files.filter((f) => f.name !== name) };
   $("ingest-inbox-title").value = "";
   render();

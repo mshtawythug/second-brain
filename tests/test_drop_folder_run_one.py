@@ -12,6 +12,7 @@ import hashlib
 import os
 import stat
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -268,3 +269,123 @@ def test_a_capture_folder_is_refused_and_nothing_moves(tmp_path: Path) -> None:
 def test_an_ingest_folder_needs_a_kind(tmp_path: Path) -> None:
     with pytest.raises(DropFolderError, match="source kind"):
         _run_one(_folder(tmp_path, kind=None), "x.md", _Ingest())
+
+
+# --- the opened fd is admitted, not the name (#110 review round 1) ----------------------
+
+
+class _OverStat(_FakeStat):
+    def __init__(self, real: os.stat_result, **over: Any) -> None:
+        super().__init__(real, getattr(real, "st_flags", 0))
+        self.__dict__.update(over)
+
+
+def _fstat_with(**over: Any) -> Any:
+    return lambda fd: _OverStat(os.fstat(fd), **over)
+
+
+def test_a_file_over_max_bytes_is_refused_unread(tmp_path: Path) -> None:
+    (tmp_path / "big.md").write_bytes(b"x" * 11)
+    ingest = _Ingest()
+
+    outcome = _run_one(_folder(tmp_path), "big.md", ingest, max_bytes=10)
+
+    assert outcome == FileOutcome("big.md", "failed", "FileTooLargeError")
+    assert ingest.calls == [] and _tree(tmp_path) == {"big.md": b"x" * 11}
+
+
+def test_a_file_of_exactly_max_bytes_is_taken(tmp_path: Path) -> None:
+    (tmp_path / "full.md").write_bytes(b"x" * 10)
+
+    assert _run_one(_folder(tmp_path), "full.md", _Ingest(), max_bytes=10).status == "ingested"
+
+
+def test_a_file_that_grew_after_the_fstat_is_refused_by_the_bounded_hash(tmp_path: Path) -> None:
+    """The fstat saw 5 bytes (a download in progress); 50 are there by the read."""
+    (tmp_path / "growing.md").write_bytes(b"y" * 50)
+    ingest = _Ingest()
+
+    outcome = _run_one(_folder(tmp_path), "growing.md", ingest, max_bytes=10,
+                       fstat=_fstat_with(st_size=5))
+
+    assert outcome == FileOutcome("growing.md", "failed", "FileTooLargeError")
+    assert ingest.calls == [] and _tree(tmp_path) == {"growing.md": b"y" * 50}
+
+
+def test_a_file_swapped_in_after_the_callers_check_is_refused(tmp_path: Path) -> None:
+    checked = tmp_path / "pick.md"
+    checked.write_bytes(b"the file the user picked")
+    identity = (os.lstat(checked).st_dev, os.lstat(checked).st_ino)
+    keep = tmp_path.parent / f"{tmp_path.name}-keep"
+    os.link(checked, keep)  # holds the inode, so the new file cannot reuse its number
+    checked.unlink()
+    checked.write_bytes(b"something else entirely")
+    ingest = _Ingest()
+
+    outcome = _run_one(_folder(tmp_path), "pick.md", ingest, expect_identity=identity)
+
+    assert outcome == FileOutcome("pick.md", "failed", "FileIdentityError")
+    assert ingest.calls == [] and _tree(tmp_path) == {"pick.md": b"something else entirely"}
+
+
+def test_the_file_the_caller_checked_is_taken(tmp_path: Path) -> None:
+    path = tmp_path / "same.md"
+    path.write_bytes(b"unchanged")
+    identity = (os.lstat(path).st_dev, os.lstat(path).st_ino)
+
+    outcome = _run_one(_folder(tmp_path), "same.md", _Ingest(), expect_identity=identity)
+
+    assert outcome.status == "ingested"
+
+
+def test_a_hard_linked_file_is_refused(tmp_path: Path) -> None:
+    """A second name could be a file from outside the folder; defence in depth (L4)."""
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+    outside.write_bytes(b"lives elsewhere")
+    os.link(outside, tmp_path / "linked.md")
+    ingest = _Ingest()
+
+    outcome = _run_one(_folder(tmp_path), "linked.md", ingest)
+
+    assert outcome == FileOutcome("linked.md", "failed", "FileIdentityError")
+    assert ingest.calls == [] and outside.read_bytes() == b"lives elsewhere"
+    assert (tmp_path / "linked.md").exists()
+
+
+def test_a_file_evicted_after_the_lstat_is_refused_by_its_fstat(tmp_path: Path) -> None:
+    (tmp_path / "evicted.md").write_bytes(b"in the cloud by now")
+    ingest = _Ingest()
+
+    outcome = _run_one(_folder(tmp_path), "evicted.md", ingest,
+                       fstat=_fstat_with(st_flags=SF_DATALESS))
+
+    assert outcome == FileOutcome("evicted.md", "failed", "DatalessFileError")
+    assert ingest.calls == []
+
+
+def test_run_is_unaffected_by_run_ones_admission(tmp_path: Path) -> None:
+    """``run`` (the LaunchAgent's) keeps its behaviour: a hard-linked drop still moves."""
+    from brain.drop_folder import run
+
+    outside = tmp_path.parent / f"{tmp_path.name}-other.md"
+    outside.write_bytes(b"dropped by hard link")
+    os.link(outside, tmp_path / "dropped.md")
+    os.utime(tmp_path / "dropped.md", (1_700_000_000, 1_700_000_000))
+    ingest = _Ingest()
+
+    report = run(None, _folder(tmp_path), since=datetime.fromtimestamp(0, UTC),  # type: ignore[arg-type]
+                 ingest=ingest)
+
+    assert [o.status for o in report.outcomes] == ["ingested"]
+
+
+def test_the_fstat_size_alone_refuses_before_any_byte_is_read(tmp_path: Path) -> None:
+    """The fd's size is checked before the hash: a file reported over the cap is not read."""
+    (tmp_path / "small-now.md").write_bytes(b"tiny")
+    ingest = _Ingest()
+
+    outcome = _run_one(_folder(tmp_path), "small-now.md", ingest, max_bytes=10,
+                       fstat=_fstat_with(st_size=11))
+
+    assert outcome == FileOutcome("small-now.md", "failed", "FileTooLargeError")
+    assert ingest.calls == []

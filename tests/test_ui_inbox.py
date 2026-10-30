@@ -142,10 +142,13 @@ def test_spaces_and_unicode_letters_are_fine() -> None:
 # --- resolve_inbox_file (AC1, AC2) ----------------------------------------------------
 
 
-def test_a_regular_file_resolves_to_its_size(tmp_path: Path) -> None:
-    _write(tmp_path / "keep.md", b"12345")
+def test_a_regular_file_resolves_to_its_size_and_identity(tmp_path: Path) -> None:
+    path = _write(tmp_path / "keep.md", b"12345")
 
-    assert resolve_inbox_file(_folder(tmp_path), "keep.md") == 5
+    checked = resolve_inbox_file(_folder(tmp_path), "keep.md")
+
+    assert checked.size == 5
+    assert checked.identity == (os.lstat(path).st_dev, os.lstat(path).st_ino)
 
 
 def test_a_missing_file_is_unknown(tmp_path: Path) -> None:
@@ -301,7 +304,9 @@ def test_a_file_at_its_upload_cap_is_allowed(tmp_path: Path) -> None:
     def lstat(path: Path) -> Any:
         return _FakeStat(os.lstat(path), st_size=MAX_TEXT_UPLOAD_BYTES)
 
-    assert resolve_inbox_file(_folder(tmp_path), "full.md", lstat=lstat) == MAX_TEXT_UPLOAD_BYTES
+    assert resolve_inbox_file(_folder(tmp_path), "full.md", lstat=lstat).size == (
+        MAX_TEXT_UPLOAD_BYTES
+    )
 
 
 # --- list_inbox -----------------------------------------------------------------------
@@ -347,14 +352,69 @@ def test_the_listing_is_capped(tmp_path: Path) -> None:
 def test_a_file_that_vanishes_while_listing_is_left_out(tmp_path: Path) -> None:
     _write(tmp_path / "stays.md")
     _write(tmp_path / "goes.md")
-    calls: list[Path] = []
-
-    def lstat(path: Path) -> Any:
-        calls.append(path)
-        if path.name == "goes.md" and calls.count(path) > 1:
+    def lstat(path: Path) -> Any:  # read by scandir, gone by its lstat
+        if path.name == "goes.md":
             raise FileNotFoundError(path)
         return os.lstat(path)
 
     listing = list_inbox(_folder(tmp_path), now=NOW, lstat=lstat)
 
     assert [f.name for f in listing.files] == ["stays.md"]
+
+
+# --- review round 1 -------------------------------------------------------------------
+
+
+def test_a_hard_linked_file_is_refused_and_not_listed(tmp_path: Path) -> None:
+    """L4: a second name could be a file from outside the inbox."""
+    root = tmp_path / "inbox"
+    root.mkdir()
+    outside = _write(tmp_path / "elsewhere.md")
+    os.link(outside, root / "linked.md")
+    _write(root / "plain.md")
+
+    with pytest.raises(UiBadRequest) as exc:
+        resolve_inbox_file(_folder(root), "linked.md")
+
+    assert exc.value.code == "hard_linked_file"
+    assert [f.name for f in list_inbox(_folder(root), now=NOW).files] == ["plain.md"]
+
+
+def test_a_dataless_file_is_not_listed(tmp_path: Path) -> None:
+    _write(tmp_path / "cloud.md")
+    _write(tmp_path / "here.md")
+
+    def lstat(path: Path) -> Any:
+        flags = SF_DATALESS if path.name == "cloud.md" else 0
+        return _FakeStat(os.lstat(path), st_flags=flags)
+
+    assert [f.name for f in list_inbox(_folder(tmp_path), now=NOW, lstat=lstat).files] == [
+        "here.md"
+    ]
+
+
+def test_the_scan_stops_after_max_scanned_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L2: a folder with a huge number of entries is read only so far, and says so."""
+    monkeypatch.setattr(inbox, "MAX_SCANNED", 3)
+    for i in range(5):
+        _write(tmp_path / f"f{i}.md")
+
+    listing = list_inbox(_folder(tmp_path), now=NOW)
+
+    assert len(listing.files) == 3 and listing.truncated is True
+
+
+def test_a_folder_within_both_bounds_is_not_truncated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(inbox, "MAX_SCANNED", 3)
+    for i in range(3):
+        _write(tmp_path / f"f{i}.md")
+
+    assert list_inbox(_folder(tmp_path), now=NOW).truncated is False
+
+
+def test_the_inbox_source_kind_is_manual() -> None:
+    assert inbox.INBOX_SOURCE_KIND == "manual"

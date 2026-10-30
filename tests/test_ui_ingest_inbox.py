@@ -552,13 +552,19 @@ def _spec(name: str = "x.md") -> InboxSpec:
     return InboxSpec(name=name, title=None, tags=(), sensitivity="normal", enrich=False)
 
 
+def _identity(path: Path) -> tuple[int, int]:
+    st = os.lstat(path)
+    return st.st_dev, st.st_ino
+
+
 def _run_with(ctx: UiContext, registry: JobRegistry, inbox: Path, run: Any) -> JobSnapshot:
     from brain.ui.inbox import find_inbox
 
     folder = find_inbox(ctx.cfg.brain_home)
     assert folder is not None and ctx.ingest_runtime is not None
-    job = registry.submit(INBOX_KIND, inbox_runner(ctx, ctx.ingest_runtime, folder, _spec(),
-                                                   run=run), on_error=inbox_failure)
+    runner = inbox_runner(ctx, ctx.ingest_runtime, folder, _spec(),
+                          identity=_identity(inbox / "x.md"), run=run)
+    job = registry.submit(INBOX_KIND, runner, on_error=inbox_failure)
     assert registry.run_next()
     return registry.get(job.id)
 
@@ -572,6 +578,12 @@ def _run_with(ctx: UiContext, registry: JobRegistry, inbox: Path, run: Any) -> J
          "PermissionError[EPERM]"),
         (FileOutcome("x.md", "failed", "a different file holds x-0123abcd.md"),
          "inbox_move_failed", "it changed"),
+        # run_one's refusals of the OPENED file (review round 1: M1, L3, L4).
+        (FileOutcome("x.md", "failed", "FileTooLargeError"), "inbox_file_too_large",
+         "size limit"),
+        (FileOutcome("x.md", "failed", "FileIdentityError"), "inbox_file_changed",
+         "replaced"),
+        (FileOutcome("x.md", "failed", "DatalessFileError"), "file_not_on_disk", "iCloud"),
     ],
 )
 def test_a_move_that_never_reached_the_ingest_is_named_by_class_only(
@@ -611,3 +623,116 @@ def test_an_inbox_that_cannot_be_opened_is_a_class_only_failure(
 
     assert snap.error is not None and snap.error.code == "inbox_move_failed"
     assert str(inbox) not in snap.error.message
+
+
+# ---------------------------------------- review round 1: the cap and the identity --
+
+
+def test_the_job_hands_run_one_the_cap_and_the_submits_identity(
+    ctx: UiContext, registry: JobRegistry, inbox: Path
+) -> None:
+    from brain.ui.ingest_limits import MAX_TEXT_UPLOAD_BYTES
+
+    _drop(inbox, "x.md")
+    seen: dict[str, Any] = {}
+
+    def run(*a: Any, **k: Any) -> FileOutcome:
+        seen.update(k)
+        return FileOutcome("x.md", "vanished")
+
+    _run_with(ctx, registry, inbox, run)
+
+    assert seen["max_bytes"] == MAX_TEXT_UPLOAD_BYTES
+    assert seen["expect_identity"] == _identity(inbox / "x.md")
+
+
+def test_a_file_that_grew_over_the_cap_after_the_submit_is_refused_unread(
+    client: TestClient, registry: JobRegistry, inbox: Path, test_db: psycopg.Connection[Any]
+) -> None:
+    from brain.ui.ingest_limits import MAX_TEXT_UPLOAD_BYTES
+
+    path = _drop(inbox, "grows.md")
+    response = _post(client, {"name": "grows.md", "enrich": False})
+    assert response.status_code == 202
+    with path.open("ab") as out:  # the same inode, now over the cap
+        out.write(b"z" * MAX_TEXT_UPLOAD_BYTES)
+
+    assert registry.run_next()
+    snap = registry.get(response.json()["id"])
+
+    assert snap.error is not None and snap.error.code == "inbox_file_too_large"
+    assert sorted(_tree(inbox)) == ["grows.md"] and _documents(test_db) == []
+
+
+def test_a_regular_file_swapped_in_after_the_submit_is_refused(
+    client: TestClient, registry: JobRegistry, inbox: Path, tmp_path: Path,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    path = _drop(inbox, "pick.md")
+    response = _post(client, {"name": "pick.md", "enrich": False})
+    assert response.status_code == 202
+    os.link(path, tmp_path / "keeps-the-inode")  # so the new file cannot reuse its number
+    path.unlink()
+    _drop(inbox, "pick.md", b"# Another file\n\nNot the one the user picked.\n")
+
+    assert registry.run_next()
+    snap = registry.get(response.json()["id"])
+
+    assert snap.error is not None and snap.error.code == "inbox_file_changed"
+    assert _tree(inbox) == {"pick.md": b"# Another file\n\nNot the one the user picked.\n"}
+    assert _documents(test_db) == []
+
+
+def test_a_file_appended_to_after_the_hash_is_refused_before_extraction(
+    ctx: UiContext, registry: JobRegistry, inbox: Path, tmp_path: Path
+) -> None:
+    """A writer still holding the file can append between the hash and the extractor."""
+    from brain.ui.ingest_limits import MAX_TEXT_UPLOAD_BYTES
+
+    _drop(inbox, "x.md")
+    moved = tmp_path / "moved.md"
+    moved.write_bytes(b"w" * (MAX_TEXT_UPLOAD_BYTES + 1))
+
+    def run(conn: Any, folder: Any, name: str, *, ingest: Any, **k: Any) -> FileOutcome:
+        try:
+            ingest(conn, moved, title="x", timeout=1.0)
+        except Exception:  # noqa: BLE001 - run_one moves the file back here
+            return FileOutcome(name, "failed", "InboxRefused")
+        return FileOutcome(name, "ingested")  # pragma: no cover - the step must refuse
+
+    snap = _run_with(ctx, registry, inbox, run)
+
+    assert snap.error is not None and snap.error.code == "inbox_file_too_large"
+
+
+def test_a_hard_linked_file_is_refused_at_submit(
+    client: TestClient, registry: JobRegistry, inbox: Path, tmp_path: Path
+) -> None:
+    outside = _drop(tmp_path, "elsewhere.md")
+    os.link(outside, inbox / "linked.md")
+
+    response = _post(client, {"name": "linked.md"})
+
+    assert (response.status_code, response.json()["error"]["code"]) == (
+        400, "hard_linked_file")
+    assert registry.list_recent() == () and outside.read_bytes() == BODY
+
+
+def test_a_name_now_holding_another_file_never_reaches_run_one(
+    ctx: UiContext, registry: JobRegistry, inbox: Path
+) -> None:
+    """The job's own identity check, before run_one is called at all."""
+    from brain.ui.inbox import find_inbox
+
+    _drop(inbox, "x.md")
+    folder = find_inbox(ctx.cfg.brain_home)
+    assert folder is not None and ctx.ingest_runtime is not None
+    called: list[Any] = []
+    runner = inbox_runner(ctx, ctx.ingest_runtime, folder, _spec(), identity=(0, 0),
+                          run=lambda *a, **k: called.append(k))
+    job = registry.submit(INBOX_KIND, runner, on_error=inbox_failure)
+    assert registry.run_next()
+    snap = registry.get(job.id)
+
+    assert snap.error is not None and snap.error.code == "inbox_file_changed"
+    assert called == []

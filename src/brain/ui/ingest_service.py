@@ -53,6 +53,7 @@ from .inbox import resolve_inbox_file
 from .ingest_progress import ProgressEmbedder
 from .ingest_schemas import FileSpec, InboxSpec, PasteSpec
 from .jobs import JobError, JobHandle, JobRegistry, JobSnapshot
+from .upload_checks import upload_cap
 from .upload_staging import StagedUpload, UploadStaging
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
@@ -317,11 +318,15 @@ def submit_inbox(
     runtime: IngestRuntime,
     folder: DropFolder,
     spec: InboxSpec,
+    identity: tuple[int, int],
 ) -> JobSnapshot:
-    """Queue the job for one inbox file (RM-40). Raises ``QueueFull`` / ``ShuttingDown``."""
-    return jobs.submit(
-        INBOX_KIND, inbox_runner(ctx, runtime, folder, spec), on_error=inbox_failure
-    )
+    """Queue the job for one inbox file (RM-40). Raises ``QueueFull`` / ``ShuttingDown``.
+
+    ``identity`` is the ``(st_dev, st_ino)`` the submit checked: the job ingests that
+    file or nothing.
+    """
+    runner = inbox_runner(ctx, runtime, folder, spec, identity=identity)
+    return jobs.submit(INBOX_KIND, runner, on_error=inbox_failure)
 
 
 def inbox_runner(
@@ -330,6 +335,7 @@ def inbox_runner(
     folder: DropFolder,
     spec: InboxSpec,
     *,
+    identity: tuple[int, int],
     run: RunOne = run_one,
 ) -> Callable[[JobHandle], Mapping[str, Any]]:
     """The runner for one inbox file: re-validate, then RM-33's move-first step.
@@ -341,26 +347,29 @@ def inbox_runner(
     exception is re-raised here so the job reports it by class. ``empty`` stays in
     ``imported/``, as RM-33 rules. ``run`` is a seam for the outcomes no real file
     produces on demand (a race between the re-check and the open).
+
+    The file must still be the one the submit checked (``identity``), and ``run_one``
+    admits the opened fd against that identity and the upload cap, so a file that grew
+    or was replaced at any point after the submit is refused unread (review round 1).
     """
 
     def job(handle: JobHandle) -> Mapping[str, Any]:
         handle.check_cancelled()  # point 1: on pick-up, before anything moves
         handle.progress("preparing")
         try:
-            resolve_inbox_file(folder, spec.name)
+            checked = resolve_inbox_file(folder, spec.name)
         except UiError as exc:
-            if exc.code == "inbox_unreadable":
-                raise InboxRefused(
-                    "inbox_unreadable", "The inbox folder could not be read. Nothing was moved."
-                ) from None
-            raise InboxRefused(
-                "inbox_file_changed",
-                f"The file changed since it was listed ({exc.code}). Nothing was moved.",
-            ) from None
-        step = _InboxStep(handle, ctx, runtime, spec)
+            raise _recheck_refused(exc.code) from None
+        if checked.identity != identity:  # a different file now holds the name
+            raise InboxRefused(*_OPEN_REFUSALS["FileIdentityError"])
+        cap = upload_cap(Path(spec.name).suffix.lower())
+        step = _InboxStep(handle, ctx, runtime, spec, cap)
         with ctx.connect() as conn:
             try:
-                outcome = run(conn, folder, spec.name, ingest=step)
+                # The cap and the identity are admitted on the OPENED fd, so a file that
+                # grew or was swapped after the check is refused unread (review round 1, M1).
+                outcome = run(conn, folder, spec.name, ingest=step, max_bytes=cap,
+                              expect_identity=identity)
             except OSError as exc:  # the folder itself: gone, or unreadable
                 raise InboxRefused(
                     "inbox_move_failed",
@@ -374,13 +383,59 @@ def inbox_runner(
             raise InboxRefused(
                 "inbox_file_gone", "The file is no longer in the inbox. Nothing was written."
             )
-        reason = outcome.detail if _CLASS_ONLY.fullmatch(outcome.detail) else "it changed"
-        raise InboxRefused(
-            "inbox_move_failed",
-            f"The file could not be moved into imported/ ({reason}). Nothing was written.",
-        )
+        raise _refused_open(outcome.detail)
 
     return job
+
+
+#: ``run_one``'s refusals of the file it opened, by class: ``(code, message)``. A fresh
+#: :class:`InboxRefused` is raised each time; an exception instance is never shared.
+_OPEN_REFUSALS: Mapping[str, tuple[str, str]] = {
+    "FileTooLargeError": (
+        "inbox_file_too_large",
+        "The file is over the size limit (it grew, or was replaced). Nothing was written.",
+    ),
+    "FileIdentityError": (
+        "inbox_file_changed",
+        "The file was replaced, or has another hard link, since it was checked. "
+        "Nothing was written.",
+    ),
+    "DatalessFileError": (
+        "file_not_on_disk", "The file is in iCloud, not on this disk. Nothing was written."
+    ),
+}
+
+
+def _refused_open(detail: str) -> InboxRefused:
+    """The job error for a ``run_one`` failure that never reached the ingest, class-only."""
+    if detail in _OPEN_REFUSALS:
+        return InboxRefused(*_OPEN_REFUSALS[detail])
+    reason = detail if _CLASS_ONLY.fullmatch(detail) else "it changed"
+    return InboxRefused(
+        "inbox_move_failed",
+        f"The file could not be moved into imported/ ({reason}). Nothing was written.",
+    )
+
+
+#: The job's re-check codes that keep their own meaning; any other refusal there means
+#: the file changed since the submit.
+_RECHECK_REFUSALS: Mapping[str, tuple[str, str]] = {
+    "inbox_unreadable": (
+        "inbox_unreadable", "The inbox folder could not be read. Nothing was moved."
+    ),
+    "inbox_file_too_large": _OPEN_REFUSALS["FileTooLargeError"],
+    "file_not_on_disk": _OPEN_REFUSALS["DatalessFileError"],
+}
+
+
+def _recheck_refused(code: str) -> InboxRefused:
+    """The job error when its re-check refuses the file (``code`` is the route's)."""
+    if code in _RECHECK_REFUSALS:
+        return InboxRefused(*_RECHECK_REFUSALS[code])
+    return InboxRefused(
+        "inbox_file_changed",
+        f"The file changed since it was listed ({code}). Nothing was moved.",
+    )
 
 
 class _InboxStep:
@@ -391,9 +446,15 @@ class _InboxStep:
     """
 
     def __init__(
-        self, handle: JobHandle, ctx: UiContext, runtime: IngestRuntime, spec: InboxSpec
+        self,
+        handle: JobHandle,
+        ctx: UiContext,
+        runtime: IngestRuntime,
+        spec: InboxSpec,
+        cap: int,
     ) -> None:
         self._handle, self._ctx, self._runtime, self._spec = handle, ctx, runtime, spec
+        self._cap = cap
         self.payload: Mapping[str, Any] | None = None
         self.error: Exception | None = None
 
@@ -411,6 +472,10 @@ class _InboxStep:
     def _ingest(self, conn: psycopg.Connection[Any], path: Path, title: str) -> Mapping[str, Any]:
         handle, spec = self._handle, self._spec
         handle.check_cancelled()  # point 2: after the move
+        # The bytes were hashed under the cap; a writer still holding the file open
+        # could append before the extractor reads it, so the size is checked once more.
+        if path.stat().st_size > self._cap:
+            raise _refused_open("FileTooLargeError")
         handle.progress("extracting")
         try:
             extracted = extract_path(path)

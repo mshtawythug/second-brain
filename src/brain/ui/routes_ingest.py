@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -89,11 +90,20 @@ async def inbox_list(request: Request) -> JSONResponse:
     Always 200, so the tab renders from it. ``files`` is empty unless this server may
     ingest (loopback, writable): the names are someone's private file names, and a
     LAN-bound or read-only server could not ingest them anyway.
+
+    **Exempt from the confidential-titles lens, deliberately** (review round 1, L5): an
+    inbox is confidential by default and ``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`` is off by
+    default, so gating on it would make the inbox unusable out of the box. The listing
+    is a PROMPTED view (the tab fetches it only when the user picks Inbox mode), served
+    only on a loopback, writable server (the trust of ``serve_confidential_bodies``), and
+    it names local files that are not yet brain documents. A job's result keeps the lens.
+
+    The folder read and the scan run on a worker thread, never the event loop (L2).
     """
     ctx = context_of(request)
     reason = unavailable_reason(ctx)
     if reason is None:
-        reason, body = _inbox_listing(ctx.cfg.brain_home)
+        reason, body = await run_in_threadpool(_inbox_listing, ctx.cfg.brain_home)
     else:
         body = {}
     return ok(
@@ -128,16 +138,16 @@ async def inbox_submit(request: Request) -> JSONResponse:
     ctx = context_of(request)
     jobs, runtime = require_ingest(ctx)
     raw = await read_body_capped(request, MAX_FILE_SUBMIT_WIRE_BYTES)
-    folder = require_inbox(ctx.cfg.brain_home)
+    folder = await run_in_threadpool(require_inbox, ctx.cfg.brain_home)  # file reads: L2
     spec = parse_inbox(
         parse_json_object(raw),
         extensions=inbox_extensions(folder),
         default_sensitivity=folder.sensitivity,
     )
     # Resolve-then-compare and lstat now, for a clear 4xx; the job checks again (AC2).
-    resolve_inbox_file(folder, spec.name)
+    checked = await run_in_threadpool(resolve_inbox_file, folder, spec.name)
     with queue_errors():
-        snap = submit_inbox(ctx, jobs, runtime, folder, spec)
+        snap = submit_inbox(ctx, jobs, runtime, folder, spec, checked.identity)
     return ok(
         snapshot_payload(snap, serve_confidential_titles=ctx.serve_confidential_titles),
         status=202,

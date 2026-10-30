@@ -113,7 +113,13 @@ function onModeChange() {
   $("ingest-file-fields").hidden = current !== "file";
   $("ingest-inbox-fields").hidden = current !== "inbox";
   showError("");
-  if (current === "inbox") showInbox();
+  if (current === "inbox") {
+    showInbox();
+  } else if (config) {
+    /* The inbox preselects its folder's level; leaving it restores this mode's. */
+    const input = document.getElementById(`ingest-sensitivity-${config.default_sensitivity}`);
+    if (input) input.checked = true;
+  }
 }
 
 async function loadConfig() {

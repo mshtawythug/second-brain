@@ -42,6 +42,12 @@ git tag scheme:
 - Every failure (database, embedder, secret guard, unreadable file, cancel) puts the file
   back in the inbox; a file with no text stays in `imported/`. Job errors name the cause by
   class or fixed code only. Guide: `docs/guides/drop-folders.md#the-ingest-tabs-inbox-rm-40`.
+- Hardening from the PR #110 review: the job ingests the exact file the submit checked or
+  nothing (its identity, one hard link, and the size cap are checked on the opened file, and
+  the hash reads at most the cap plus a byte, so a file that grew or was swapped is refused
+  unread); a symlink loop or an inbox that cannot be searched is a 4xx, never a 500; a file
+  with a second hard link is refused; the listing reads at most 5,000 entries off the event
+  loop and is fetched only when the user picks Inbox mode.
 
 ### Added — voice memos, transcribed on this machine (RM-38)
 

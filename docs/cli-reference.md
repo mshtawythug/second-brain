@@ -1421,19 +1421,23 @@ The inbox (RM-40) is the first `drop-folders.toml` entry with `kind = "manual"` 
 `auto = false`, which the `--configured` LaunchAgent never ingests
 ([guide](guides/drop-folders.md#the-ingest-tabs-inbox-rm-40)). `GET /api/ingest/inbox`
 answers 200 `{available, reason, extensions, files: [{name, size}], truncated,
-default_sensitivity}`: names only, never a path, newest first, at most 200, and an empty
-list unless ingest is available (`reason` is also `inbox_unconfigured`,
+default_sensitivity}`: names only, never a path, newest first, at most 200 from the first
+5,000 directory entries, and an empty list unless ingest is available. The names are not
+lensed by `BRAIN_UI_SERVE_CONFIDENTIAL_TITLES` (the tab asks only on demand, and only a
+loopback, writable server answers) (`reason` is also `inbox_unconfigured`,
 `inbox_misconfigured` or `inbox_unreadable`). `POST /api/ingest/inbox` with JSON
 `{name, tags?, sensitivity?, enrich?, title?}` queues a job of kind `ingest.inbox` (202);
 `sensitivity` defaults to the folder's (confidential unless set). Refusals: 400
 `invalid_name` (a `/`, `..`, NUL, control character or leading dot), `outside_inbox`,
-`not_a_regular_file` (a symlink, folder or pipe) or `unknown_field`; 404
+`not_a_regular_file` (a symlink, folder or pipe), `hard_linked_file` or `unknown_field`; 404
 `inbox_file_unknown` or `inbox_unconfigured`; 409 `inbox_misconfigured`,
 `inbox_unreadable` (the inbox cannot be searched) or `file_not_on_disk`; 413 `inbox_file_too_large`; 415 `unsupported_file`. The job checks the
 name again, moves the file into the inbox's `imported/` folder and ingests it from there
 (source `manual`, deduplicated by that path); every failure puts it back, by error code
-(`inbox_file_changed`, `inbox_file_gone`, `inbox_unreadable`, `inbox_move_failed`,
-`inbox_unusable`, or the ingest codes above).
+(`inbox_file_changed`, `inbox_file_gone`, `inbox_file_too_large`, `file_not_on_disk`,
+`inbox_unreadable`, `inbox_move_failed`, `inbox_unusable`, or the ingest codes above). The
+job ingests the file the submit checked or nothing: the opened file must have that identity,
+one link, and a size within the cap, and it is hashed reading at most the cap plus a byte.
 
 The Agent tab's backend asks a question as a job
 on the same worker, one at a time with ingest. `POST /api/ask` with JSON
