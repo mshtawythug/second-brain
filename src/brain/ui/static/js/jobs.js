@@ -35,6 +35,14 @@ export const MAX_REMEMBERED = 20;
 const STORE_KEY = "brain-ui-jobs";
 const SETTLED_KEY = "brain-ui-jobs-settled";
 
+/* A job id as the server mints it: `uuid.uuid4().hex` in brain/ui/jobs.py. */
+export const JOB_ID_RE = /^[0-9a-f]{32}$/;
+
+/* Scopes whose remembered ids are checked against the server's format on every
+   read: sessionStorage is writable by anything running in this origin, and the
+   Agent tab polls and renders whatever it resumes. */
+const STRICT_SCOPES = new Set(["ask"]);
+
 /* The sessionStorage key for `base` in `scope`; no scope is the original key. */
 function scoped(base, scope) {
   return scope ? `${base}:${scope}` : base;
@@ -50,10 +58,12 @@ export function pollDelay(elapsedMs, hidden) {
   return hidden || elapsedMs > SLOW_AFTER_MS ? POLL_SLOW_MS : POLL_FAST_MS;
 }
 
-function readIds(key) {
+function readIds(key, scope) {
   try {
     const parsed = JSON.parse(sessionStorage.getItem(key) || "[]");
-    return Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : [];
+    if (!Array.isArray(parsed)) return [];
+    const strict = STRICT_SCOPES.has(scope);
+    return parsed.filter((id) => typeof id === "string" && (!strict || JOB_ID_RE.test(id)));
   } catch (e) {
     return [];
   }
@@ -64,7 +74,7 @@ function storeIds(key, ids) {
 }
 
 export function rememberedJobs(scope) {
-  return readIds(scoped(STORE_KEY, scope));
+  return readIds(scoped(STORE_KEY, scope), scope);
 }
 
 function remember(id, scope) {
@@ -75,18 +85,18 @@ function remember(id, scope) {
 export function forget(id, scope) {
   storeIds(scoped(STORE_KEY, scope), rememberedJobs(scope).filter((other) => other !== id));
   const settled = scoped(SETTLED_KEY, scope);
-  storeIds(settled, readIds(settled).filter((other) => other !== id));
+  storeIds(settled, readIds(settled, scope).filter((other) => other !== id));
 }
 
 /* Record that this tab saw job `id` reach a terminal state. */
 export function markSettled(id, scope) {
   const key = scoped(SETTLED_KEY, scope);
-  const ids = readIds(key);
+  const ids = readIds(key, scope);
   if (!ids.includes(id)) storeIds(key, [id, ...ids].slice(0, MAX_REMEMBERED));
 }
 
 export function wasSettled(id, scope) {
-  return readIds(scoped(SETTLED_KEY, scope)).includes(id);
+  return readIds(scoped(SETTLED_KEY, scope), scope).includes(id);
 }
 
 /* POST a job and remember its id in `scope`. Resolves to the server's snapshot. */

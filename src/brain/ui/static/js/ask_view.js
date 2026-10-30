@@ -92,9 +92,15 @@ export function answerNodes(answer, citations) {
   return nodes;
 }
 
+/* Own keys only: `in` would also accept "toString" or "constructor" from
+   Object.prototype, and then call it as a step's text. */
+function isStep(phase) {
+  return typeof phase === "string" && Object.hasOwn(STEP_TEXT, phase);
+}
+
 function lastStep(record) {
   return record.events
-    .filter((e) => e.phase in STEP_TEXT)
+    .filter((e) => isStep(e.phase))
     .reduce((latest, e) => (!latest || e.seq > latest.seq ? e : latest), null);
 }
 
@@ -170,7 +176,7 @@ function syncSteps(row, record) {
   const list = row.querySelector(".turn-steps");
   const shown = new Set([...list.children].map((li) => li.dataset.seq));
   for (const event of record.events) {
-    if (!(event.phase in STEP_TEXT) || shown.has(String(event.seq))) continue;
+    if (!isStep(event.phase) || shown.has(String(event.seq))) continue;
     const item = el("li", "turn-step", stepText(event));
     item.dataset.seq = String(event.seq);
     list.append(item);

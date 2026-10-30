@@ -315,25 +315,64 @@ def check_single_innerhtml(js: str) -> None:
     assert "body.innerHTML = note.html;" in js, "the one innerHTML is not the body"
 
 
-#: RM-18b, hardening rule 1: the HTML-parsing entry points the Agent tab's two
-#: modules may not contain, as (what the message names, the pattern). The first
-#: seven are the ticket's list; the last three are the other ways a string becomes
-#: markup in a browser, and forbidding them costs nothing. Matched ANYWHERE in the
-#: file, comments included, which is the ticket's wording ("contains"): a comment
-#: that needs the word can say "an HTML sink" instead. ``eval`` is matched as a
-#: whole word, or "retrieval" would trip it.
-ASK_FORBIDDEN_SINKS: tuple[tuple[str, str], ...] = (
-    ("innerHTML", r"innerHTML"),
-    ("outerHTML", r"outerHTML"),
-    ("insertAdjacentHTML", r"insertAdjacentHTML"),
-    ("document.write", r"document\s*\.\s*write"),
-    ("eval", r"\beval\b"),
-    ("new Function", r"\bnew\s+Function\b"),
-    ('setAttribute("on...")', r"""(?i)setAttribute\(\s*["'`]on"""),
-    ("createContextualFragment", r"createContextualFragment"),
-    ("DOMParser", r"DOMParser"),
-    ("srcdoc", r"srcdoc"),
+#: RM-18b, hardening rules 1 and 3: what the Agent tab's two modules may not
+#: contain, as (the name the message gives, the pattern, an example it must match).
+#: Three families. HTML parsing: the ticket's seven, then four more that turn a
+#: string into markup (``createContextualFragment``, ``DOMParser``,
+#: ``setHTMLUnsafe``, ``parseHTMLUnsafe``) and ``srcdoc``, which parses its value as
+#: a document. Navigation: assigning ``location`` or ``location.href``, and the
+#: ``.assign(`` / ``.replace(`` calls (no code here uses either name, so the
+#: pattern can be that broad). Attribute-borne URLs and styles: ``.src =``, a
+#: ``.style`` write or ``setProperty``, and ``.href =`` everywhere except the one
+#: UUID-checked site in :data:`ASK_HREF_SITE`.
+#:
+#: Matched ANYWHERE in the file, comments included, which is the ticket's wording
+#: ("contains"): a comment that needs the word can say "an HTML sink" instead.
+#: ``eval`` is a whole word, or "retrieval" would trip it. Each pattern matches its
+#: own example and NO other pattern does
+#: (:func:`test_each_forbidden_ask_sink_is_matched_by_its_own_pattern_alone`), so
+#: each GUARDS row below, which uses that example, proves its one pattern.
+ASK_FORBIDDEN_SINKS: tuple[tuple[str, str, str], ...] = (
+    ("innerHTML", r"innerHTML", "answer.innerHTML = result.answer;"),
+    ("outerHTML", r"outerHTML", "answer.outerHTML = result.answer;"),
+    ("insertAdjacentHTML", r"insertAdjacentHTML",
+     'answer.insertAdjacentHTML("beforeend", result.answer);'),
+    ("document.write", r"document\s*\.\s*write", "document.write(result.answer);"),
+    ("eval", r"\beval\b", "eval(result.answer);"),
+    ("new Function", r"\bnew\s+Function\b", "new Function(result.answer)();"),
+    ('setAttribute("on...")', r"""(?i)setAttribute\(\s*["'`]on""",
+     'answer.setAttribute("onclick", result.answer);'),
+    ("createContextualFragment", r"createContextualFragment",
+     "answer.append(document.createRange().createContextualFragment(result.answer));"),
+    ("DOMParser", r"DOMParser",
+     'answer.append(new DOMParser().parseFromString(result.answer, "text/html").body);'),
+    ("setHTMLUnsafe", r"setHTMLUnsafe", "answer.setHTMLUnsafe(result.answer);"),
+    ("parseHTMLUnsafe", r"parseHTMLUnsafe",
+     "answer.append(Document.parseHTMLUnsafe(result.answer).body);"),
+    ("srcdoc", r"srcdoc", "answer.srcdoc = result.answer;"),
+    ("location =", r"\blocation\s*=(?!=)", "location = result.answer;"),
+    ("location.href =", r"\blocation\.href\s*=(?!=)", "location.href = result.answer;"),
+    (".assign(", r"\.assign\s*\(", "location.assign(result.answer);"),
+    (".replace(", r"\.replace\s*\(", "location.replace(result.answer);"),
+    (".src =", r"\.src\s*=(?!=)", "answer.src = result.answer;"),
+    (".style write", r"\.style\b(?:\.[\w$]+)?\s*=(?!=)",
+     "answer.style.background = result.answer;"),
+    (".style.setProperty(", r"\.style\.setProperty\s*\(",
+     'answer.style.setProperty("background", result.answer);'),
+    (".href =", r"(?<!location)\.href\s*=(?!=)", "answer.href = result.answer;"),
 )
+
+#: The ONE ``.href`` assignment the tab may make: ``noteLink`` in ``ask_view.js``,
+#: whose ``id`` has passed ``linkableId`` (the anchored UUID check). Allowed by its
+#: exact text, removed once before the scan, so ANY change to it (dropping
+#: ``encodeURIComponent``, a second site, a different prefix) is a ``.href =`` again.
+ASK_HREF_SITE = "link.href = `/?id=${encodeURIComponent(id)}`;"
+
+
+def ask_sinks_found(js: str) -> list[str]:
+    """The names of every forbidden pattern ``js`` contains, after the one allowed site."""
+    scanned = js.replace(ASK_HREF_SITE, "", 1)
+    return [name for name, pattern, _ in ASK_FORBIDDEN_SINKS if re.search(pattern, scanned)]
 
 
 def check_ask_has_no_html_sinks(js: str) -> None:
@@ -348,12 +387,13 @@ def check_ask_has_no_html_sinks(js: str) -> None:
     over only the tab's wiring would be green and blind. It is also the test the
     ticket's risk names: a later client-side markdown renderer fails here first.
     """
-    found = [name for name, pattern in ASK_FORBIDDEN_SINKS if re.search(pattern, js)]
+    found = ask_sinks_found(js)
     assert not found, (
         f"an Agent-tab module contains {found}: model text must reach the page only "
-        "through textContent / createTextNode (RM-18b hardening rule 1). If answers "
-        "need markup, render them server-side through render.py's hardened path "
-        "(RM-18b.D1), never in the browser."
+        "through textContent / createTextNode, and no string may become a URL or a "
+        "style except the UUID-checked note link (RM-18b hardening rules 1 and 3). "
+        "If answers need markup, render them server-side through render.py's "
+        "hardened path (RM-18b.D1), never in the browser."
     )
 
 
@@ -1924,41 +1964,21 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
     # The import survives; only the boot() call assertion can fire.
     ("ingest-wired-in-boot", check_the_ingest_tab_is_wired_into_boot, "js/main.js",
      "\n  wireIngest();\n", "\n", 1),
-    # RM-18b, hardening rule 1. One row per forbidden sink, each putting the
-    # model's answer through it at the one place ask_view.js inserts it. The
-    # guard has a single assertion, so any row fires it; the rows exist to prove
-    # each PATTERN matches the sink it names (a typo in one regex would leave
-    # that sink allowed while every other row stayed red).
-    ("ask-view-sink-innerhtml", check_ask_has_no_html_sinks, "js/ask_view.js",
-     "answer.append(...answerNodes(result.answer, result.citations));",
-     "answer.innerHTML = result.answer;", 1),
-    ("ask-view-sink-outerhtml", check_ask_has_no_html_sinks, "js/ask_view.js",
-     "answer.append(...answerNodes(result.answer, result.citations));",
-     "answer.outerHTML = result.answer;", 1),
-    ("ask-view-sink-insertadjacenthtml", check_ask_has_no_html_sinks, "js/ask_view.js",
-     "answer.append(...answerNodes(result.answer, result.citations));",
-     'answer.insertAdjacentHTML("beforeend", result.answer);', 1),
-    ("ask-view-sink-document-write", check_ask_has_no_html_sinks, "js/ask_view.js",
-     "answer.append(...answerNodes(result.answer, result.citations));",
-     "document.write(result.answer);", 1),
-    ("ask-view-sink-eval", check_ask_has_no_html_sinks, "js/ask_view.js",
-     "answer.append(...answerNodes(result.answer, result.citations));",
-     "eval(result.answer);", 1),
-    ("ask-view-sink-new-function", check_ask_has_no_html_sinks, "js/ask_view.js",
-     "answer.append(...answerNodes(result.answer, result.citations));",
-     "new Function(result.answer)();", 1),
-    ("ask-view-sink-setattribute-on", check_ask_has_no_html_sinks, "js/ask_view.js",
-     "answer.append(...answerNodes(result.answer, result.citations));",
-     'answer.setAttribute("onclick", result.answer);', 1),
-    ("ask-view-sink-contextual-fragment", check_ask_has_no_html_sinks, "js/ask_view.js",
-     "answer.append(...answerNodes(result.answer, result.citations));",
-     "answer.append(document.createRange().createContextualFragment(result.answer));", 1),
-    ("ask-view-sink-domparser", check_ask_has_no_html_sinks, "js/ask_view.js",
-     "answer.append(...answerNodes(result.answer, result.citations));",
-     'answer.append(new DOMParser().parseFromString(result.answer, "text/html").body);', 1),
-    ("ask-view-sink-srcdoc", check_ask_has_no_html_sinks, "js/ask_view.js",
-     "answer.append(...answerNodes(result.answer, result.citations));",
-     "answer.srcdoc = result.answer;", 1),
+    # RM-18b, hardening rules 1 and 3. One row per forbidden pattern, each putting
+    # the model's answer through it at the one place ask_view.js inserts it, using
+    # the pattern's own example (built from ASK_FORBIDDEN_SINKS, so the two cannot
+    # drift). The isolation test proves each example trips its pattern ALONE, so a
+    # typo in one regex would leave exactly one of these rows green.
+    *[
+        (f"ask-view-sink-{re.sub(r'[^a-z]+', '-', name.lower()).strip('-')}",
+         check_ask_has_no_html_sinks, "js/ask_view.js",
+         "answer.append(...answerNodes(result.answer, result.citations));", example, 1)
+        for name, _, example in ASK_FORBIDDEN_SINKS
+    ],
+    # The ONE allowed .href site is allowed by its exact text: change it at all
+    # (here, drop the encoding) and it is a forbidden `.href =` again.
+    ("ask-view-href-site-changed", check_ask_has_no_html_sinks, "js/ask_view.js",
+     "link.href = `/?id=${encodeURIComponent(id)}`;", "link.href = `/?id=${id}`;", 1),
     # The tab's own module is guarded too, not only the view: a sink in the
     # announcer would put server text through the parser just the same.
     ("ask-js-sink-innerhtml", check_ask_has_no_html_sinks, "js/ask.js",
@@ -3080,6 +3100,27 @@ def test_the_css_roster_is_every_shipped_stylesheet() -> None:
         "exempt from every rule the app has — marginalia.css carried a real "
         "WCAG AA failure for exactly as long as it sat there."
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "example"), [(name, example) for name, _, example in ASK_FORBIDDEN_SINKS]
+)
+def test_each_forbidden_ask_sink_is_matched_by_its_own_pattern_alone(
+    name: str, example: str
+) -> None:
+    """RM-18b: every pattern catches its example, and only its own does.
+
+    Without the second half, a GUARDS row could be killed by a NEIGHBOURING pattern
+    (``location.href =`` is also an ``.href =``) while its own regex was broken,
+    and the row would still look like proof.
+    """
+    assert ask_sinks_found(example) == [name]
+
+
+def test_the_allowed_href_site_is_the_one_in_ask_view_and_only_there() -> None:
+    """The exemption names real code, once, and nowhere else in the tab."""
+    assert JS["ask_view.js"].count(ASK_HREF_SITE) == 1
+    assert ASK_HREF_SITE not in JS["ask.js"]
 
 
 def test_every_check_function_is_in_the_guards_table() -> None:

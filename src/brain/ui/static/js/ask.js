@@ -16,10 +16,12 @@
  * answer above all, reaches the page as text. `sessionStorage` holds ask ids
  * only, never a question or an answer (plan doc D3).
  *
- * WAITING FOR AN INGEST (A1, plan doc D4). One worker runs ingest and ask jobs.
- * A snapshot carries no queue position, so while an ask is queued the tab reads
- * `GET /api/jobs`, which lists ingest jobs and never asks (A10), and says
- * "waiting for the ingest job" when one is ahead.
+ * WAITING FOR AN INGEST (A1, plan doc D4). One worker runs ingest and ask jobs,
+ * from a FIFO queue. A snapshot carries no queue position, so while an ask is
+ * queued the tab reads `GET /api/jobs`, which lists ingest jobs and never asks
+ * (A10), and says "waiting for the ingest job" only when one is AHEAD: running,
+ * or queued with an earlier `created_at` than the ask's own. An ingest queued
+ * after the ask runs after it.
  */
 
 import { $, toast } from "/static/js/dom.js";
@@ -151,8 +153,18 @@ function apply(id, change) {
   if (record.state === "queued" && "state" in fields) checkIngestAhead(id);
 }
 
-/* D4: is an ingest job ahead of this queued ask? Best effort: on any failure the
-   turn keeps the plain "queued" line. */
+/* True when `stamp` is strictly before `than`. Unparseable is never "before": a
+   turn only claims to wait for an ingest it can show is ahead. */
+function earlier(stamp, than) {
+  const a = Date.parse(stamp);
+  const b = Date.parse(than);
+  return Number.isFinite(a) && Number.isFinite(b) && a < b;
+}
+
+/* D4: is an ingest job ahead of this queued ask? The queue is FIFO
+   (`JobRegistry.run_next` pops its left end), so a queued job counts only when it
+   was submitted first. Best effort: on any failure the turn keeps the plain
+   "queued" line. */
 async function checkIngestAhead(id) {
   let listing;
   try {
@@ -160,9 +172,9 @@ async function checkIngestAhead(id) {
   } catch (error) {
     return;
   }
-  const ahead = (listing.jobs || []).some(
-    (job) => job.state === "running" || job.state === "queued",
-  );
+  const asked = turns.has(id) ? turns.get(id).record.createdAt : undefined;
+  const ahead = (listing.jobs || []).some((job) => job.state === "running"
+    || (job.state === "queued" && earlier(job.created_at, asked)));
   const entry = turns.get(id);
   if (entry && entry.record.state === "queued" && entry.record.waitingOnIngest !== ahead) {
     apply(id, { waitingOnIngest: ahead });
@@ -199,7 +211,9 @@ function track(record, { immediate }) {
     },
     onUnreachable: () => apply(record.id, { unreachable: true }),
   });
-  if (record.state === "queued") checkIngestAhead(record.id);
+  /* A resumed placeholder (`quiet`) is "queued" only until its first poll says
+     what it really is; that poll's apply() checks, if it is still queued. */
+  if (record.state === "queued" && !record.quiet) checkIngestAhead(record.id);
 }
 
 function drop(id) {

@@ -90,13 +90,20 @@ CLAUDE.md ceiling table is touched.
   is not on the wire), exactly as RM-11 labels resumed ingest rows; its answer is re-read from the
   server while retained, and an evicted one is dropped silently (`wasSettled`).
 - **D4 — "Waiting for the ingest job to finish."** A snapshot carries no queue position. While an
-  ask is `queued`, the tab reads `GET /api/jobs` (which lists ingest jobs and never asks, A10); if one
-  is `queued` or `running` the phase reads "Waiting for the ingest job to finish", otherwise "Queued:
-  waiting for the job runner". Read once per poll of a queued ask only.
+  ask is `queued`, the tab reads `GET /api/jobs` (which lists ingest jobs and never asks, A10). The
+  queue is FIFO (`JobRegistry.run_next` pops its left end), so an ingest is **ahead** of the ask only
+  when it is `running`, or `queued` with a `created_at` strictly earlier than the ask's own (both are
+  the registry clock's ISO stamps, compared with `Date.parse`; an unparseable stamp is never
+  "earlier"). Ahead: "Waiting for the ingest job to finish"; otherwise "Queued: waiting for the job
+  runner". Read once per poll of a queued ask, and never for a resumed placeholder before its first
+  poll (it is "queued" only until that poll says what it is). **Known, not changed (sec-83 item 3):**
+  this is one extra `GET /api/jobs` per poll while an ask is queued, bounded by the queue (four
+  jobs) and the 1 s / 3 s poll interval, and an in-memory read on the server.
 - **D5 — One ask at a time per tab.** The submit button is disabled while this tab's ask is unsettled;
   the server has one worker (A1), and a second click would only queue behind the first.
 - **D6 — The steps are a list.** Each `plan` / `retrieve` / `reflect` / `synthesize` event appends one
-  line ("Planning sub-queries (round 1 of 3)", …), so the progress the goal asks to watch stays
+  line ("Planning the search", "Retrieving notes (round 1 of 3)", …), so the progress the goal asks
+  to watch stays
   visible; the phase line and an indeterminate `<progress>` show the current step. The list is not a
   live region (it changes every step); `#agent-announce` gets one sentence per state change, as in
   RM-11 decision 2.
@@ -168,3 +175,20 @@ UUID check dropped; the citation-range check dropped; each must turn a named tes
 - End-to-end: the real app under uvicorn with its worker thread, on the 5434 rm18b database, a fake
   `ChatJson` (no Ollama) and a real Chromium: four steps shown in order, the hostile answer shown as
   text with no `img` and no dialog, `[1]` opened the note in the Notes tab.
+
+## Review round 1 (rev-83, sec-83 at `fc79ce6`)
+
+1. D4 counted every queued ingest as ahead; the queue is FIFO, so only a running one or one queued
+   earlier is. Fixed in `ask.js`; the stub's listed entries carry `created_at`, and
+   `tests/test_ui_ask_wire_contract.py` proves the stub's listing keys and the `created_at` form
+   against the real `GET /api/jobs`.
+2. `setHTMLUnsafe` and `parseHTMLUnsafe` join the sink list.
+3. The guard also refuses navigation (`location =`, `location.href =`, `.assign(`, `.replace(`),
+   `.src =`, `.style` writes and `setProperty`, and `.href =` except the exact `noteLink` line
+   (`ASK_HREF_SITE`). No existing line hit any of them: `ask.js` only READS `link.href` and
+   `location.href` (in `new URL(...)`), which the `=(?!=)` patterns do not match. Each pattern has
+   an example that trips it alone (an isolation test), and a GUARDS row built from that example.
+4. `jobs.js` keeps only ids shaped like `uuid.uuid4().hex` (`JOB_ID_RE`) in the `ask` scope.
+5. D6's quoted step text corrected.
+6. A resumed placeholder no longer reads `GET /api/jobs` before its first poll.
+7. Step phases are tested with `Object.hasOwn`, so `toString` / `constructor` are never steps.

@@ -12,7 +12,11 @@ is checked for the three things the front end depends on:
    is the layer that must keep it text, and an out-of-range ``[99]`` is already
    dropped (``ask._sanitize_answer``), which the client does not rely on;
 3. a real cited document id passes the UUID pattern ``ask_view.js`` checks before
-   it builds a link, read out of the shipped JS, so the two cannot disagree.
+   it builds a link, read out of the shipped JS, so the two cannot disagree;
+4. ``GET /api/jobs``, which a queued ask reads to decide whether an ingest is AHEAD
+   of it, gives each job the keys the stub's :func:`listed_job` gives, with a
+   ``created_at`` in the same form as the ask's own, so the FIFO comparison the tab
+   makes on the stub is the comparison it makes on the wire.
 
 No Ollama; all data synthetic.
 """
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +37,15 @@ from brain.ui.app import create_app, static_dir
 from brain.ui.ask_service import AskRuntime
 from brain.ui.context import UiContext
 from tests.conftest import FakeEmbedder
-from tests.ui_ask_harness import CITATION_KEYS, RESULT_KEYS, SNAPSHOT_KEYS
+from tests.ui_ask_harness import (
+    AFTER,
+    BEFORE,
+    CITATION_KEYS,
+    LISTED_KEYS,
+    RESULT_KEYS,
+    SNAPSHOT_KEYS,
+    listed_job,
+)
 from tests.ui_ingest_support import ORIGIN, WRITE_HEADERS, make_context, make_vault
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -139,3 +152,27 @@ def test_a_hostile_answer_arrives_verbatim_and_its_id_passes_the_js_check(
     for bad in ("javascript:alert(1)", f"{doc_id}?x=1", f"x{doc_id}",
                 doc_id.replace("-", ""), ""):
         assert not pattern.search(bad), bad
+
+
+def test_the_job_listing_has_the_stubs_keys_and_comparable_times(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    ctx = _ctx(test_db, tmp_path, _SchemaChat())
+    client = TestClient(create_app(ctx), base_url=ORIGIN)
+    assert ctx.jobs is not None
+    ingest = ctx.jobs.submit("ingest.paste", lambda handle: {})
+    ask = client.post("/api/ask", json={"question": "q"}, headers=WRITE_HEADERS).json()
+
+    (listed,) = client.get("/api/jobs").json()["jobs"]   # the ask is never listed
+
+    assert set(listed) == LISTED_KEYS
+    assert set(listed_job("queued", BEFORE)) == LISTED_KEYS
+    assert (listed["id"], listed["state"]) == (ingest.id, "queued")
+    # The tab compares the two with Date.parse. Same ISO form, same clock: the
+    # ingest submitted first is earlier, exactly as BEFORE/AFTER bracket STAMP.
+    when = datetime.fromisoformat(listed["created_at"])
+    asked = datetime.fromisoformat(ask["created_at"])
+    assert when.tzinfo is not None and asked.tzinfo is not None
+    assert when <= asked
+    for stub in (BEFORE, AFTER):
+        assert datetime.fromisoformat(stub).tzinfo is not None

@@ -50,6 +50,12 @@ RESULT_KEYS = frozenset({
     "session_id", "fallback", "fallback_reason", "fallback_transient", "fallback_note",
     "elapsed_ms", "title_withheld",
 })
+#: What ``GET /api/jobs`` gives per job (``snapshot_payload(..., listing=True)``):
+#: no result and no events. Proven against the real route by the wire-contract test.
+LISTED_KEYS = frozenset({
+    "id", "kind", "state", "cancellable", "cancel_requested", "created_at",
+    "started_at", "finished_at", "error",
+})
 CITATION_KEYS = frozenset({
     "ref", "document_id", "title", "source_kind", "snippet", "sensitivity", "withheld",
 })
@@ -70,6 +76,21 @@ HOSTILE_TITLE = '<b>Bold</b> <img src=x onerror="alert(6)">'
 HOSTILE_SNIPPET = "<script>alert(7)</script>"
 HOSTILE_NOTE = '<img src=x onerror="alert(8)">'
 HOSTILE_ERROR = 'The chat model did not answer <img src=x onerror="alert(9)">'
+
+
+#: The ask's own submit time is :data:`STAMP`; an ingest listed with one of these
+#: was queued before it (ahead) or after it (behind, FIFO).
+BEFORE = "2026-03-01T09:59:00+00:00"
+AFTER = "2026-03-01T10:00:05+00:00"
+
+
+def listed_job(state: str, created_at: str, kind: str = "ingest.paste") -> dict[str, Any]:
+    """One ``GET /api/jobs`` entry, with every key the real listing emits."""
+    return {
+        "id": "f" * 32, "kind": kind, "state": state,
+        "cancellable": state in ("queued", "running"), "cancel_requested": False,
+        "created_at": created_at, "started_at": None, "finished_at": None, "error": None,
+    }
 
 
 def citation(ref: int, document_id: str | None, **overrides: Any) -> dict[str, Any]:
@@ -145,6 +166,10 @@ SCRIPTS: dict[str, list[Frame]] = {
     "fails": [Frame("failed", [], None, {"code": "chat_unavailable", "message": HOSTILE_ERROR},
                     cancellable=False)],
     "hold": [Frame("running", [("plan", 1, 3)]), Frame("running", [("retrieve", 1, 3)])],
+    # Phases that are names on Object.prototype: never a step.
+    "proto": [Frame("running", [("toString", 1, 3), ("constructor", 1, 3),
+                                ("__proto__", 1, 3), ("plan", 1, 3)]),
+              _done(result())],
     "queue": [Frame("queued")],
 }
 
@@ -287,6 +312,11 @@ class AskHarness:
         row.locator('[data-terminal="true"]').wait_for(timeout=SETTLE_MS)
         return row
 
+    def phases(self) -> list[str]:
+        """Every text any turn's phase line has held, in order."""
+        texts: list[str] = self.page.evaluate("() => window.__phases")
+        return texts
+
     def announced(self) -> list[str]:
         texts: list[str] = self.page.evaluate("() => window.__announced")
         return [t for t in texts if t]
@@ -321,11 +351,15 @@ def _ask_harness_fixture(browser: Any, static_origin: str) -> Iterator[AskHarnes
 
     page.route("**/api/**", route_api)
     page.add_init_script(
-        "window.__announced = [];"
+        "window.__announced = []; window.__phases = [];"
         "document.addEventListener('DOMContentLoaded', () => {"
         "  const region = document.getElementById('agent-announce');"
         "  new MutationObserver(() => window.__announced.push(region.textContent))"
         "    .observe(region, {childList: true, characterData: true, subtree: true});"
+        "  new MutationObserver(() => { for (const p of document.querySelectorAll("
+        "    '#agent-turns .turn-phase')) window.__phases.push(p.textContent); })"
+        "    .observe(document.getElementById('agent-turns'),"
+        "             {childList: true, characterData: true, subtree: true});"
         "});"
     )
     page.goto(f"{static_origin}/static/index.html")

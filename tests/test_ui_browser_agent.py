@@ -19,6 +19,8 @@ from typing import Any
 import pytest
 
 from tests.ui_ask_harness import (
+    AFTER,
+    BEFORE,
     DOC_ID,
     HOSTILE_ANSWER,
     HOSTILE_ERROR,
@@ -29,6 +31,7 @@ from tests.ui_ask_harness import (
     SETTLE_MS,
     AskHarness,
     _ask_harness_fixture,  # noqa: F401 — registers `ask_harness`
+    listed_job,
 )
 from tests.ui_ingest_harness import (
     _browser_fixture,  # noqa: F401 — registers `browser`
@@ -181,7 +184,7 @@ def test_cancel_ends_the_ask_and_the_button_goes(ask_harness: AskHarness) -> Non
 
 def test_a_queued_ask_says_it_waits_for_the_ingest_job(ask_harness: AskHarness) -> None:
     page = ask_harness.page
-    ask_harness.fake.listed = [{"id": "f" * 32, "kind": "ingest.paste", "state": "running"}]
+    ask_harness.fake.listed = [listed_job("running", BEFORE)]
     ask_harness.open_tab()
     ask_harness.ask("queue")
 
@@ -198,6 +201,90 @@ def test_a_queued_ask_says_it_waits_for_the_ingest_job(ask_harness: AskHarness) 
     assert phase.is_visible()
     ask_harness.turn().locator("button.turn-cancel").click()
     assert ask_harness.settled().locator(".turn-outcome").inner_text() == "Cancelled."
+
+
+_WAITING = "Waiting for the ingest job to finish"
+_QUEUED = "Queued: waiting for the job runner"
+
+
+@pytest.mark.parametrize(
+    ("state", "created_at", "ahead"),
+    [
+        ("queued", BEFORE, True),    # queued first: FIFO runs it first
+        ("queued", AFTER, False),    # queued after the ask: it is BEHIND the ask
+        ("running", AFTER, True),    # running holds the worker, whatever its age
+        ("succeeded", BEFORE, False),
+    ],
+)
+def test_only_an_ingest_ahead_of_the_ask_is_waited_for(
+    ask_harness: AskHarness, state: str, created_at: str, ahead: bool
+) -> None:
+    """The queue is FIFO (``JobRegistry.run_next`` pops the left end)."""
+    page = ask_harness.page
+    ask_harness.fake.listed = [listed_job(state, created_at)]
+    ask_harness.open_tab()
+    ask_harness.ask("queue")
+    expected = _WAITING if ahead else _QUEUED
+    page.wait_for_function(
+        f"() => document.querySelector('#agent-turns .turn-phase')?.textContent === '{expected}'",
+        timeout=SETTLE_MS)
+    page.wait_for_timeout(2500)          # two more polls, two more listings
+    assert (_WAITING in ask_harness.phases()) is ahead
+    ask_harness.turn().locator("button.turn-cancel").click()
+    ask_harness.settled()
+
+
+def test_a_resumed_settled_ask_never_shows_the_waiting_text(ask_harness: AskHarness) -> None:
+    """A resumed placeholder is "queued" only until its first poll says otherwise."""
+    page = ask_harness.page
+    ask_harness.open_tab()
+    ask_harness.ask("answer")
+    ask_harness.settled()
+    ask_harness.fake.listed = [listed_job("running", BEFORE)]
+    page.reload()
+    page.wait_for_selector("#tab-notes")
+    before = len(ask_harness.requests)
+    ask_harness.open_tab()
+    turn = ask_harness.settled()
+
+    assert turn.locator(".turn-answer").inner_text() == "Quarkle ships on Fridays [1]."
+    assert _WAITING not in ask_harness.phases()
+    assert "GET /api/jobs" not in ask_harness.requests[before:]
+
+
+def test_a_phase_named_on_object_prototype_is_never_a_step(ask_harness: AskHarness) -> None:
+    ask_harness.open_tab()
+    ask_harness.ask("proto")
+    turn = ask_harness.settled()
+
+    assert turn.locator(".turn-step").all_inner_texts() == ["Planning the search"]
+
+
+def test_a_tampered_remembered_id_is_dropped_before_any_request(
+    ask_harness: AskHarness,
+) -> None:
+    """jobs.js keeps only ids shaped like the server's (``uuid4().hex``) in the ask scope."""
+    page = ask_harness.page
+    ask_harness.open_tab()
+    ask_harness.ask("answer")
+    ask_harness.settled()
+    bad = ["not-a-job", "../ask/config", "A" * 32, "0" * 31 + "g", "0" * 33, 7]
+    page.evaluate(
+        """(bad) => {
+          const key = "brain-ui-jobs:ask";
+          const ids = JSON.parse(sessionStorage.getItem(key));
+          sessionStorage.setItem(key, JSON.stringify([...bad, ...ids]));
+        }""", bad)
+    page.reload()
+    page.wait_for_selector("#tab-notes")
+    before = len(ask_harness.requests)
+    ask_harness.open_tab()
+    ask_harness.settled()
+    page.wait_for_timeout(1500)
+
+    assert page.locator("#agent-turns > li").count() == 1
+    polled = [r for r in ask_harness.requests[before:] if r.startswith("GET /api/jobs/")]
+    assert polled and all(r == f"GET /api/jobs/{1:032x}" for r in polled), polled
 
 
 # --------------------------------------------------- availability and storage --
