@@ -42,8 +42,9 @@ git tag scheme:
   prerequisite, never the webhook URL).
 - `brain ingest-gmail` never ingests your own delivered brief: a fetched message
   is skipped when it is from `BRAIN_USER_EMAIL` and its subject starts with
-  `[brain brief]`. Mail from anyone else with that subject, and your other mail,
-  are still ingested. The Gmail query itself is unchanged.
+  `[brain brief]` (after any `Re:` / `Fwd:` / `Fw:`, so your replies and
+  forwards of a brief are skipped too). Mail from anyone else with that subject,
+  and your other mail, are still ingested. The Gmail query itself is unchanged.
 - Draft documents are never delivered (they stay on the local page), and the
   Slack post turns link previews off.
 

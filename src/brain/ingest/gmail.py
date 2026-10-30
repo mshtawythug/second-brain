@@ -17,7 +17,6 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 
-from brain.brief_mail import is_own_brief_message
 from brain.config import BOILERPLATE_PATTERNS
 
 # Re-using the shared Re/Fwd-prefix helper from vault.slug rather than
@@ -134,12 +133,6 @@ def read_message(message_id: str, *, runner: Runner | None = None) -> dict[str, 
     )
     parsed: dict[str, Any] = json.loads(out)
     return parsed
-
-
-def read_thread_messages(stubs: list[dict[str, Any]], *, owner: str | None) -> list[Any]:
-    """The stubs' full messages, minus the owner's own delivered briefs (RM-16, ``brief_mail``)."""
-    messages = [read_message(stub["id"]) for stub in stubs]
-    return [msg for msg in messages if not is_own_brief_message(msg, owner)]
 
 
 def _headers_to_dict(headers: list[dict[str, str]]) -> dict[str, str]:

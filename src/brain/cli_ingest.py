@@ -23,8 +23,9 @@ at the top of :func:`ingest_stdin`, reasoned inline at the guard:
 guard was the only thing standing between a typo and a permanently mis-bucketed
 row that the facet panel counts but the facet click never returns.
 
-**RM-16 grew it by two lines:** ``ingest_gmail`` skips a thread left empty once
-``ingest.gmail.read_thread_messages`` has dropped the owner's own delivered briefs.
+**RM-16 grew it:** ``ingest_gmail`` and its ``--dry-run`` report read each thread
+through ``ingest.gmail_brief_skip.read_thread_messages``, which drops the owner's own
+delivered briefs; a thread left empty is skipped (reasoned inline at both sites).
 
 That this module cannot import from ``cli`` -- the cycle described above -- is
 exactly why the kind set now lives in :mod:`brain.source_kinds` rather than in
@@ -50,6 +51,7 @@ from .ingest import Embedder, IngestResult, ingest_document
 from .ingest import gmail as gmail_ingest
 from .ingest.dispatch import extract_path, supported_extensions
 from .ingest.gmail import GmailError
+from .ingest.gmail_brief_skip import read_thread_messages
 from .ingest.outcome import IngestOutcome, classify
 from .ingest.stdin import make_doc as _stdin_make_doc
 from .queries import (
@@ -576,7 +578,7 @@ def ingest_gmail(
     if dry_run:
         typer.echo(f"would ingest {len(threads)} thread(s):")
         for tid, ts in threads.items():
-            subject = _gmail_thread_subject_for_dry_run(ts)
+            subject = _gmail_thread_subject_for_dry_run(ts, owner=cfg.user_email)
             typer.echo(
                 f"  [thread_id={tid} messages={len(ts)}] Subject: {subject}"
             )
@@ -597,7 +599,7 @@ def ingest_gmail(
         conn.autocommit = True
         for tid, ts in threads.items():
             try:
-                messages = gmail_ingest.read_thread_messages(ts, owner=cfg.user_email)
+                messages = read_thread_messages(ts, owner=cfg.user_email)
                 if not messages:  # RM-16: only the owner's own delivered briefs; never ingested
                     continue
                 doc = gmail_ingest.to_extracted_thread(messages)
@@ -666,21 +668,24 @@ def ingest_gmail(
     )
 
 
-def _gmail_thread_subject_for_dry_run(stubs: list[dict[str, Any]]) -> str:
+def _gmail_thread_subject_for_dry_run(stubs: list[dict[str, Any]], *, owner: str | None) -> str:
     """Best-effort subject lookup for ``brain ingest-gmail --dry-run``.
 
-    Reads the FIRST message of the thread to pull its ``Subject`` header — a
-    single ``read_message`` call per thread is acceptably cheap for a dry-run
-    report (``ingest-gmail`` callers typically scope to <100 threads). On any
+    Reads the thread as the ingest does (RM-16) and reports the first kept
+    message's ``Subject`` — one ``read_message`` per message is cheap for a
+    dry-run report (``ingest-gmail`` callers typically scope to <100 threads). On any
     failure the function returns ``"(unable to fetch)"`` so a single bad
     message can't abort the whole report; the actual ingest pass will hit
     the same failure and surface it via the structured per-thread error path.
     """
     try:
-        first_id = stubs[0]["id"]
-        full = gmail_ingest.read_message(first_id)
+        # RM-16: the same read as the ingest, so the owner's own briefs are skipped here too.
+        kept = read_thread_messages(stubs, owner=owner)
     except (GmailError, KeyError, IndexError):
         return "(unable to fetch)"
+    if not kept:
+        return "(skipped: your own delivered brief)"
+    full = kept[0]
     payload = full.get("payload") or {}
     headers = payload.get("headers") or []
     for h in headers:

@@ -523,10 +523,11 @@ you do not accidentally ingest your entire mailbox. It excludes Gmail drafts,
 groups messages by `threadId`, stores each thread as one `email_thread`
 document, and updates a stable row when a thread grows. It never ingests the
 briefs `brain brief` emails to you (RM-16): a message is skipped when it is from
-`BRAIN_USER_EMAIL` and its subject starts with `[brain brief]`. A message from
-anyone else with that subject, your replies to a brief, and your other mail are
-all ingested. `--dry-run` reads only each thread's first message, so it can still
-list a brief thread.
+`BRAIN_USER_EMAIL` and its subject starts with `[brain brief]`, after any `Re:`,
+`Fwd:` or `Fw:`, so your replies to and forwards of a brief are skipped too. A
+message from anyone else with that subject, and your other mail, are ingested.
+`--dry-run` marks a thread of nothing but your briefs as skipped. With
+`BRAIN_USER_EMAIL` unset, nothing is skipped.
 
 ```bash
 brain ingest-gmail --label interviews --since 2026/04/01 --tag interview

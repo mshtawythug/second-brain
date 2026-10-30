@@ -2,20 +2,22 @@
 
 The Gmail query is left alone: what Gmail makes of a negated group cannot be checked offline, and
 a misread would silently drop all of the owner's sent mail. So the skip is a predicate on the
-fetched message's ``From`` and ``Subject``: the owner's address AND the brief's subject prefix,
-both. Third-party mail and the owner's other mail are ingested. Messages are synthetic; the runner
-is a fake, so nothing reaches ``gws``.
+fetched message's ``From`` and ``Subject``: the owner's address AND the brief's subject prefix
+(after any ``Re:`` / ``Fwd:`` / ``Fw:``), both. Third-party mail and the owner's other mail are
+ingested. Messages are synthetic; the runner is a fake, so nothing reaches ``gws``.
 """
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
 from brain import brief_delivery
 from brain.brief_mail import SUBJECT_PREFIX, is_own_brief_mail, is_own_brief_message
 from brain.ingest import gmail
-from brain.ingest.gmail import _build_query, read_thread_messages
+from brain.ingest.gmail import _build_query
+from brain.ingest.gmail_brief_skip import read_thread_messages
 
 OWNER = "owner@example.invalid"
 BRIEF_SUBJECT = f"{SUBJECT_PREFIX} 2026-06-09"
@@ -44,12 +46,28 @@ def test_the_owners_own_brief_mail_is_recognised(sender: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "subject",
+    [
+        f"Re: {BRIEF_SUBJECT}",
+        f"Fwd: {BRIEF_SUBJECT}",
+        f"FW: {BRIEF_SUBJECT}",
+        f"re:  RE: Fwd:{BRIEF_SUBJECT}",
+        f"  {BRIEF_SUBJECT}",
+    ],
+)
+def test_the_owners_replies_and_forwards_of_a_brief_are_recognised(subject: str) -> None:
+    # Ruling: they quote the brief's body, so they are skipped too.
+    assert is_own_brief_mail(OWNER, subject, OWNER)
+
+
+@pytest.mark.parametrize(
     ("sender", "subject"),
     [
         ("someone@example.invalid", BRIEF_SUBJECT),  # a third party's mail with that subject
         (OWNER, "Quarterly plan"),  # the owner's other sent mail
-        (OWNER, f"Re: {BRIEF_SUBJECT}"),  # a reply carries the owner's own words
-        (OWNER, f"Fwd: {BRIEF_SUBJECT}"),
+        (OWNER, f"Notes on {BRIEF_SUBJECT}"),  # the prefix is not at the start
+        (OWNER, f"Reply: {BRIEF_SUBJECT}"),  # not a reply marker
+        ("someone@example.invalid", f"Re: {BRIEF_SUBJECT}"),  # a stranger's reply
         ("Someone <someone@example.invalid>", f"{BRIEF_SUBJECT} {OWNER}"),
         ("", BRIEF_SUBJECT),
         (OWNER, ""),
@@ -78,13 +96,15 @@ def test_the_prefix_is_the_one_delivery_sends() -> None:
     assert is_own_brief_mail(OWNER, subject, OWNER)
 
 
-def test_read_thread_messages_drops_only_the_owners_brief(
-    monkeypatch: pytest.MonkeyPatch,
+def test_read_thread_messages_drops_only_the_owners_brief_and_logs_a_count(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.DEBUG)
     messages = {
         "m1": _msg("m1", sender=OWNER, subject=BRIEF_SUBJECT),
         "m2": _msg("m2", sender="someone@example.invalid", subject=BRIEF_SUBJECT),
         "m3": _msg("m3", sender=f"Owner <{OWNER}>", subject="Quarterly plan"),
+        "m4": _msg("m4", sender=OWNER, subject=f"Re: {BRIEF_SUBJECT}"),
     }
 
     def runner(argv: list[str], _runner: object = None) -> str:
@@ -93,9 +113,11 @@ def test_read_thread_messages_drops_only_the_owners_brief(
 
     monkeypatch.setattr(gmail, "_run", runner)
 
-    kept = read_thread_messages([{"id": "m1"}, {"id": "m2"}, {"id": "m3"}], owner=OWNER)
+    kept = read_thread_messages([{"id": m} for m in messages], owner=OWNER)
 
     assert [m["id"] for m in kept] == ["m2", "m3"]
+    assert "skipped 2" in caplog.text
+    assert OWNER not in caplog.text and "brain brief" not in caplog.text
 
 
 def test_a_message_without_headers_is_ingested() -> None:

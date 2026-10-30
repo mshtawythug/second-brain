@@ -13,9 +13,10 @@ risks. Branch `feat/rm-16-brief-delivery`, from `second-brain/master` at `92438f
 | `src/brain/settings/brief_delivery.py` | **New leaf.** `BriefDeliverySettings` (`channel`, `include_todos`, `recipient`, `slack_webhook_url` with `repr=False`) and `load_brief_delivery_settings(env)`. |
 | `src/brain/brief_delivery.py` | **New.** `DeliveryChannel` Protocol, `DeliveryError` / `DeliveryAuthError`, `GwsEmailChannel`, `SlackWebhookChannel`, `run_gws` (the real runner), `render_delivery`, `deliver_brief`, `DeliveryOutcome`, `make_channel`. |
 | `src/brain/brief_publish.py` | `build_brief` delivers the published payload after the page is written, and marks watch hits notified only when delivery did not fail. Two keyword seams: `delivery_env`, `delivery_channel`. |
-| `src/brain/brief_mail.py` | **New leaf.** `SUBJECT_PREFIX`, `is_own_brief_mail(from, subject, owner)` and `is_own_brief_message(msg, owner)`: pure, so `ingest/gmail.py` uses them without importing the delivery code. |
-| `src/brain/ingest/gmail.py` | `read_thread_messages(stubs, *, owner)`: each stub's full message, minus the owner's own delivered briefs. `_build_query` is unchanged from `92438fe` (Deviations 11). +7 against `92438fe` (669 → 676; the ticket's budget is +5). |
-| `src/brain/cli_ingest.py` | `ingest-gmail` reads each thread through `read_thread_messages` and skips a thread left empty (+2), with a module-docstring pointer (+3), and its help names the skipped `[brain brief]` mail (reworded in place). +5 against `92438fe` (848 → 853), recorded inline, in the docstring and in its CLAUDE.md row. |
+| `src/brain/brief_mail.py` | **New leaf.** `SUBJECT_PREFIX`, `is_own_brief_mail(from, subject, owner)` and `is_own_brief_message(msg, owner)`: pure, so the ingest side uses them without importing the delivery code. |
+| `src/brain/ingest/gmail_brief_skip.py` | **New leaf.** `read_thread_messages(stubs, *, owner)`: each stub's full message (`gmail.read_message`), minus the owner's own delivered briefs; logs a skip as a count. Every `ingest-gmail` read goes through it. |
+| `src/brain/ingest/gmail.py` | **Unchanged** from `92438fe` (0 lines; the ticket's budget is +5). The query builder carries no exclusion (Deviations 11). |
+| `src/brain/cli_ingest.py` | `ingest-gmail` and its `--dry-run` read each thread through `read_thread_messages`; a thread left empty is skipped (ingest) or marked skipped (dry-run); the module docstring records it; the help sentence names the skipped `[brain brief]` mail (reworded in place). +10 against `92438fe` (848 → 858), recorded inline, in the docstring and in its CLAUDE.md row. |
 | `src/brain/doctor_delivery.py` | **New leaf.** The `brief delivery` doctor row, beside `doctor_watcher.py` (same shape: imports `doctor_runtime._check`, composed in lazily). |
 | `src/brain/doctor_runtime.py` | The wiring only: one deferred import, one call, a docstring line (+5 of the shared +60 budget, §2.2). The first draft put the probe here (+37) and was moved out so the nine later probe tickets keep the budget. Net +4 against `92438fe` (563 → 567). |
 | `tests/delivery_isolation_plugin.py` | Forces `BRAIN_BRIEF_DELIVERY=none` per test, like `rerank_isolation_plugin.py`. Registered in `tests/conftest.py`. |
@@ -78,9 +79,10 @@ No migration.
   `PATH` or not; `slack` with the webhook set (never the URL); a configuration error as a WARN with
   the leaf's message. It never fails doctor.
 - **D11, the owner's own brief mail is skipped after the fetch, not in the query** (round 2; rounds
-  0 and 1 appended a query exclusion, `-subject:…` then `-(from:me subject:…)`). A message is
-  skipped only when its `From` is the owner AND its subject starts with `[brain brief]`
-  (Deviations 11). Third-party mail with that subject, and the owner's other mail, are ingested.
+  0 and 1 appended a query exclusion, `-subject:…` then `-(from:me subject:…)`, now removed with
+  its plumbing). A message is skipped only when its `From` is the owner AND its subject, after any
+  `Re:` / `Fwd:` / `Fw:`, starts with `[brain brief]` (Deviations 11). Third-party mail with that
+  subject, and the owner's other mail, are ingested.
 - **D12, the test isolation plugin.** `build_brief` reads `os.environ` when no `delivery_env` is
   given (the CLI path). `tests/delivery_isolation_plugin.py` sets `BRAIN_BRIEF_DELIVERY=none` and
   deletes the other two knobs per test, so a developer's `.env` can never make the suite send mail.
@@ -137,7 +139,7 @@ No migration.
 8. **Drafts are removed at the delivery-payload boundary, not from the local page** (sec-82 1, D13). The page is the owner's own vault note and keeps listing drafts as before; only what leaves the machine drops them.
 9. **The email body stays in `gws`'s argv** (sec-82 4). `gws gmail +send --help` offers the body only as `--body <TEXT>`, with no stdin or file option, so the body is visible to a local `ps` for at most the 30 s timeout. Accepted on a single-user machine.
 10. **The DNS lookup is not covered by the 10 s Slack timeout** (sec-82 7). httpx's timeout bounds connect, read, write and pool; `getaddrinfo` runs before it and is bounded by the OS resolver. Accepted, no code change.
-11. **AC6 is met in Python, not in the Gmail query** (round 2, R2-2). The ticket asks the query builder to append the exclusion. What Gmail makes of a negated group (`-(from:me subject:…)`, or `{-from:me -subject:…}`) cannot be checked offline, and a read-only count probe could not run because `gws`'s token had lapsed. A misread would silently drop all of the owner's sent mail from every scoped ingest. So the query is unchanged. `ingest.gmail.read_thread_messages` drops a fetched message only when BOTH its `From` address is the owner's (`BRAIN_USER_EMAIL`, case-insensitive, display name ignored) AND its subject starts with `[brain brief]` (`brain.brief_mail.is_own_brief_message`). A reply or forward (`Re:` / `Fwd:`) is ingested, because it carries the owner's own words. `ingest_gmail` skips a thread left empty. Consequences: `gmail.py` grows by 7 lines, not the ticket's +5, and `cli_ingest.py` (over the ceiling) by 5, recorded. And `--dry-run`, which reads only each thread's first message for its subject, still lists a brief thread under "would ingest".
+11. **AC6 is met by a post-fetch predicate, not by a query-level exclusion** (round 2, R2-2). The ticket asks the Gmail query builder to append the exclusion. Gmail's reading of a negated group (`-(from:me subject:…)`, or `{-from:me -subject:…}`) cannot be verified offline: `gws`'s authorization has lapsed, so the read-only, count-only probe failed (exit 2) and no counts exist. A misread would silently drop all of the owner's sent mail from every scoped ingest. So the query is unchanged, and every `ingest-gmail` read (the ingest and `--dry-run`, under every scope flag) goes through `ingest.gmail_brief_skip.read_thread_messages`. It drops a fetched message only when BOTH its `From` address is `BRAIN_USER_EMAIL` (`cfg.user_email`, the address delivery sends to; parsed with `email.utils`, case-insensitive) AND its subject starts with `[brain brief]` once any repeated `Re:` / `Fwd:` / `Fw:` markers are stripped (`brain.brief_mail.is_own_brief_message`). The owner's replies to and forwards of a brief are skipped too, because they quote its body. With `BRAIN_USER_EMAIL` unset nothing is skipped. A skip is logged as a count only. `ingest_gmail` skips a thread left empty, and `--dry-run` marks it `(skipped: your own delivered brief)`. `ingest/gmail.py` is unchanged; `cli_ingest.py` (over the ceiling) grows by 10, recorded.
 
 ## Risks
 
@@ -179,4 +181,8 @@ No migration.
 - R2-1: `without_drafts` drops the suggestions whenever it removes a draft's todo (D13).
 - R2-2: the Gmail query exclusion is gone; the owner's own brief mail is skipped in Python on the
   fetched `From` and `Subject` (D11, Deviations 11). The read-only count probe that would have
-  settled the query's meaning failed on `gws` authentication (exit 2), so no counts exist.
+  settled the query's meaning failed on `gws` authentication (exit 2), so no counts exist. Per
+  aud-82's checklist and the coordinator's rulings: every read (the ingest and `--dry-run`, under
+  each of `--query`, `--label`, `--from`, `--since`, `--until`) goes through the leaf; the owner's
+  replies and forwards are skipped; nothing is skipped without `BRAIN_USER_EMAIL`; a skip is
+  logged as a count; `ingest/gmail.py` does not grow.
