@@ -22,6 +22,20 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — `--entity` search filter (RM-24)
+
+- **`brain search --entity "<name>" [--entity-type TYPE]`** returns only documents
+  that mention that graph entity (`graph_entity_mentions`, tenant-scoped). The name
+  resolves by canonical key (plus the target of any curated alias rule), then by
+  display name. Every leg, the total and `--facets` see the filter.
+- **MCP `brain_search`** takes `entity` and `entity_type`.
+- Not found, ambiguous, the graph off or absent, or an alias file
+  (`BRAIN_GRAPH_ALIASES_PATH`) that cannot be loaded: exit 2 / `INVALID_PARAMS`.
+  The not-found message points at `brain graphrag entities`; the alias-file
+  message names the failure's class only, never the file's text.
+- Built on the coordinator's ruling adopting the roadmap spec's §5 U4
+  recommendation; no user answer yet.
+
 ### Fixed — two terminal error reports no longer quote exception text (RM-29)
 
 - **`brain vault export`** reports a file it could not write as `<path>: <class>`,

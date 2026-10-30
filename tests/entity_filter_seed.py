@@ -1,0 +1,96 @@
+"""Synthetic seeders for the ``--entity`` search filter tests (RM-24).
+
+Every document, entity name and key here is invented. The entity rows are written
+directly, as the graph build would leave them, so the tests need no Ollama and no AGE graph:
+the filter reads only the relational tables from migration 012.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+import psycopg
+
+from brain.ingest import Embedder, ExtractedDoc, ingest_document
+
+TENANT = "default"
+OTHER_TENANT = "tenant-b"
+
+#: One word every seeded body carries, so the FTS leg matches every document.
+SHARED_TERM = "lanternfish"
+
+#: A made-up name in every bad alias file below; no error message may quote it.
+BAD_ALIAS_SENTINEL = "zephyrquill"
+
+#: Alias files ``load_alias_rules`` refuses, one per failure class, keyed by test id.
+BAD_ALIAS_FILES = {
+    "self-merge": (
+        "rules:\n"
+        f"  - from: {{type: project, key: {BAD_ALIAS_SENTINEL}}}\n"
+        f"    to:   {{type: project, key: {BAD_ALIAS_SENTINEL}}}\n"
+    ),
+    "invalid-type": (
+        "rules:\n"
+        f"  - from: {{type: {BAD_ALIAS_SENTINEL}, key: harbor}}\n"
+        "    to:   {type: project, key: harborlight}\n"
+    ),
+    "malformed-yaml": f"rules:\n  - from: {{type: project, key: {BAD_ALIAS_SENTINEL}\n",
+    "missing-key": f"rules:\n  - from: {{type: project, key: {BAD_ALIAS_SENTINEL}}}\n",
+    # A rule that is a bare string: indexing it raises TypeError.
+    "rule-not-a-mapping": f"rules: [{BAD_ALIAS_SENTINEL}]\n",
+    # A top-level list has no ``.get``: AttributeError.
+    "top-level-list": f"- {BAD_ALIAS_SENTINEL}\n",
+}
+
+
+def seed_document(
+    conn: psycopg.Connection[Any], embedder: Embedder, title: str
+) -> str:
+    """Ingest one synthetic note whose body carries :data:`SHARED_TERM`; return its id."""
+    result = ingest_document(
+        conn,
+        embedder=embedder,
+        doc=ExtractedDoc(
+            title=title,
+            content=f"{title} talks about the {SHARED_TERM} survey.",
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+        source_external_id=f"manual:{title}",
+    )
+    assert result.document_id is not None
+    return result.document_id
+
+
+def seed_entity(
+    conn: psycopg.Connection[Any],
+    *,
+    name: str,
+    canonical_key: str,
+    entity_type: str = "project",
+    tenant_id: str = TENANT,
+) -> str:
+    """Insert one ``graph_entities`` row; return its id."""
+    row = conn.execute(
+        "INSERT INTO graph_entities (tenant_id, entity_type, name, canonical_key)"
+        " VALUES (%s, %s, %s, %s) RETURNING id::text",
+        (tenant_id, entity_type, name, canonical_key),
+    ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def seed_mention(
+    conn: psycopg.Connection[Any],
+    entity_id: str,
+    document_id: str,
+    *,
+    tenant_id: str = TENANT,
+) -> None:
+    """Record that ``document_id`` mentions ``entity_id``."""
+    conn.execute(
+        "INSERT INTO graph_entity_mentions (tenant_id, entity_id, document_id, source)"
+        " VALUES (%s, %s, %s, 'extractor:fake@test')",
+        (tenant_id, entity_id, document_id),
+    )

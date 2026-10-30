@@ -21,6 +21,14 @@ def _ensure_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
+#: The ``--entity`` clause (RM-24): documents that mention one of the entities,
+#: in the tenant. Both values are bound; the ids as a ``uuid[]``.
+_ENTITY_MENTION_CLAUSE = (
+    "d.id IN (SELECT gem.document_id FROM graph_entity_mentions gem "
+    "WHERE gem.tenant_id = %s AND gem.entity_id = ANY(%s::uuid[]))"
+)
+
+
 @dataclass(frozen=True)
 class SearchPredicate:
     """Immutable, fully-built SQL predicate shared by all search legs.
@@ -62,14 +70,16 @@ def build_predicate(
     updated_after: datetime | None = None,
     updated_before: datetime | None = None,
     sensitivity: str | None = None,
+    entity_ids: list[str] | None = None,
+    entity_tenant: str | None = None,
 ) -> SearchPredicate:
     """Build the shared metadata predicate for one search.
 
     Every parameter is keyword-only and defaults to ``None`` (= no filter), so
     a later wave can append a filter without touching any existing call site.
 
-    All thirteen filters bind their value as a ``%s`` parameter; not one caller
-    value is ever concatenated into ``where_sql``.
+    Every filter binds its value as a ``%s`` parameter; not one caller value is
+    ever concatenated into ``where_sql``.
 
     ``source_missing`` (T7) is the only NON-``None``-defaulted filter, and the
     only one that binds no parameter — it is a flag, not a value, so its clause
@@ -106,6 +116,15 @@ def build_predicate(
     design, exactly as ``draft`` is: confidential documents are not hidden from
     an unfiltered ``brain search``. This exists so a user can ask "show me only
     what I've marked" — it is a lens, not an access control.
+
+    ``entity_ids`` / ``entity_tenant`` (RM-24, ``--entity``) keep only documents
+    that mention one of the graph entities, read from ``graph_entity_mentions``
+    (migration 012) and scoped to the tenant. The ids come from
+    :func:`brain.entity_filter.resolve_entity_ids`. As with ``person_keys``, an
+    empty or ``None`` list is "no filter", because the resolver raises rather
+    than return no ids. Ids without a tenant raise ``ValueError``: every graph
+    row is tenant-scoped, and an unscoped clause would match another tenant's
+    mentions.
     """
     where_clauses = ["TRUE"]
     where_params: list[Any] = []
@@ -169,6 +188,11 @@ def build_predicate(
     if sensitivity is not None:
         where_clauses.append("d.sensitivity = %s")
         where_params.append(sensitivity)
+    if entity_ids:
+        if not entity_tenant:
+            raise ValueError("entity_ids needs entity_tenant: graph mentions are tenant-scoped")
+        where_clauses.append(_ENTITY_MENTION_CLAUSE)
+        where_params.extend([entity_tenant, list(entity_ids)])
     where_sql = " AND ".join(where_clauses)
 
     # No-filter fast path (perf F5 + F2). ``where_clauses`` always starts with

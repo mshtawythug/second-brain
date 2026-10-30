@@ -232,6 +232,14 @@ module (``from brain.mcp_server import main``). A new tool is a module in
 both needed is inline at each. Plan:
 ``docs/plans/2026-10-23-rm-06-registration-seams.md``.
 
+**And 2026-10-30 (RM-24): ``brain_search``'s ``entity`` / ``entity_type``.** Two
+optional parameters for the ``--entity`` filter, which cannot avoid this file
+because the tool lives here. Resolution and the graph checks are in
+:mod:`brain.entity_filter`; what grew is the parameters, one docstring line, the
+``INVALID_PARAMS`` mapping and the keyword arguments passed to the search and to
+the facet predicate, recorded inline at the mapping. Plan:
+``docs/plans/2026-10-30-rm-24-entity-filter.md``.
+
 **Hazard this file has already been bitten by.** Every tool is a bare ``def``
 under a lone ``@mcp_app.tool()`` line, so inserting a helper between a decorator
 and the function it was written for silently moves the registration onto the
@@ -269,10 +277,12 @@ from .config import (
 from .db import PersistentConnection, age_extension_available, connect, connect_age
 from .embeddings import make_embedder
 from .enrichment import ContradictionVerdict, OllamaEnricher, make_enricher
+from .entity_filter import search_kwargs as entity_search_kwargs
 from .errors import (
     BrainError,
     ConnectError,
     EmbedError,
+    EntityFilterError,
     GraphBackendError,
     GraphReconcileError,
     GraphTenantError,
@@ -669,6 +679,9 @@ def brain_search(
     include_confidential: bool = False,
     # — Wave-1 brief projection —
     brief: bool = False,
+    # — RM-24 graph-entity filter —
+    entity: str | None = None,
+    entity_type: str | None = None,
 ) -> dict[str, Any]:
     """Hybrid search across the second brain.
 
@@ -745,6 +758,9 @@ def brain_search(
     - ``draft``: ``True`` → drafts only; ``False`` → published only;
       ``None`` (default) → both.
     - ``fts_only``: skip the local Ollama embed call (FTS-only mode).
+    - ``entity`` / ``entity_type`` (RM-24): only docs that mention this graph
+      entity; ``entity_type`` (org/person/project/tool/topic) settles an
+      ambiguous name. Needs the graph, else ``INVALID_PARAMS``.
 
     **Text-only fallback (additive, 2026-10-23):** when the query embedding
     cannot be computed (embedder down, timed out, misconfigured), the search
@@ -812,6 +828,12 @@ def brain_search(
                     person_match = resolve_person_to_keys(conn, person)
                 except (PersonNotFound, PersonAmbiguous) as e:
                     raise _mcp_error(INVALID_PARAMS, str(e)) from e
+            # Twelfth growth (RM-24): the --entity filter, splatted into the search
+            # AND the facet predicate below; logic in brain.entity_filter.
+            try:
+                entity_kw = entity_search_kwargs(conn, state.cfg, entity, entity_type)
+            except EntityFilterError as e:
+                raise _mcp_error(INVALID_PARAMS, str(e)) from e
             # The diagnostics holder captures the FTS-leg hit count from work
             # the search already does (no extra query) — the lexical-miss
             # signal `brain gaps` keys off (the vector leg always returns
@@ -860,6 +882,7 @@ def brain_search(
                 updated_after=updated_after_dt,
                 updated_before=updated_before_dt,
                 sensitivity=_confidential_lens(include_confidential),
+                **entity_kw,
             )
             results = outcome.results
             facet_data: SearchFacets | None = None
@@ -884,6 +907,7 @@ def brain_search(
                         draft=draft,
                         without_tag=without_tag,
                         sensitivity=_confidential_lens(include_confidential),
+                        **entity_kw,
                     ),
                     tsquery=build_tsquery(conn, query),
                 )

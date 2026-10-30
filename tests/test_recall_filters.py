@@ -48,6 +48,10 @@ _INTENTIONALLY_NOT_FORWARDED = {
     # budget. Forwarding it would let a caller resize snippets per-call on a
     # surface whose whole contract is a token budget.
     "snippet_max_chars": "taken from cfg",
+    # RM-24 — the `--entity` filter reaches `brain search` and MCP `brain_search`
+    # only; the ticket names no other surface.
+    "entity_ids": "RM-24 --entity; brain search and MCP brain_search only",
+    "entity_tenant": "RM-24 --entity; brain search and MCP brain_search only",
 }
 
 
