@@ -120,6 +120,10 @@ evicting the tab in the background — leaves every request refused (403) until 
   more on the same single job runner as ingest, so it is offered only when `brain ui` is bound to
   this machine. On a `--lan` or `--host` bind the tab is disabled and says why; run `brain ask` on
   the machine itself.
+- **There is no Copy path button over the LAN.** The note pane's **Copy path** needs the browser's
+  clipboard API, which a page gets only in a secure context. A plain `http://` LAN page is not
+  one, so the button is absent there. On the machine itself (`http://127.0.0.1`) it copies the
+  note file's absolute path, and the server sends that absolute path only on a loopback bind.
 - **Confidential documents are withheld off loopback.** On a LAN bind, the bodies of documents
   marked `sensitivity: confidential` are not served unless you pass `--include-confidential`.
   The startup panel states which mode you got. On a loopback address, or on `localhost` when it

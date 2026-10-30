@@ -26,13 +26,26 @@ git tag scheme:
 
 - **`brain search --entity "<name>" [--entity-type TYPE]`** returns only documents
   that mention that graph entity (`graph_entity_mentions`, tenant-scoped). The name
-  resolves by canonical key, then curated alias rules, then display name. Every
-  leg, the total and `--facets` see the filter.
+  resolves by canonical key (plus the target of any curated alias rule), then by
+  display name. Every leg, the total and `--facets` see the filter.
 - **MCP `brain_search`** takes `entity` and `entity_type`.
 - Not found, ambiguous, or the graph off or absent: exit 2 / `INVALID_PARAMS`.
   The not-found message points at `brain graphrag entities`.
 - Built on the coordinator's ruling adopting the roadmap spec's §5 U4
   recommendation; no user answer yet.
+
+### Added — `brain ui`: Copy path (RM-23)
+
+- **The note pane has a Copy path button**, so a note can be opened in any editor.
+  On a loopback server it copies the absolute path of the note's file, and
+  otherwise its path inside the vault. The status beside it says **Copied**, or
+  why the copy failed (a denied clipboard permission, for example).
+- **It is absent over `--lan`.** The browser's clipboard API exists only in a
+  secure context, and a plain `http://` LAN page is not one.
+- **`GET /api/notes/{id}` gains `abs_path`, only on a loopback bind** (the same
+  bind classification as the Ingest tab's gate), and never for a note whose body
+  is withheld or whose vault file is missing. There is no `obsidian://` link, and
+  the server never starts an editor.
 
 ### Added — tag rename, merge and suggested merges (RM-21)
 
