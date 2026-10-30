@@ -112,9 +112,28 @@ def test_the_switch_shows_one_mode_at_a_time(harness: Harness) -> None:
     assert page.is_visible("#ingest-body") and page.is_hidden("#ingest-drop")
 
 
+def _intercept_file_choosers(page: Any) -> None:
+    """Turn on file-chooser interception now, not inside ``expect_file_chooser``.
+
+    The FIRST ``filechooser`` listener on a page makes the client send
+    ``updateSubscription``, which enables CDP's ``setInterceptFileChooserDialog``,
+    without waiting for a reply; the driver handles messages concurrently.
+    Registered inside ``expect_file_chooser`` around a bare ``keyboard.press``,
+    the driver sent the interception and the Enter ``Input.dispatchKeyEvent`` as
+    consecutive CDP messages, the key before the interception was acknowledged
+    (20 of 20 traced runs). Headless Chromium silently cancels an unintercepted
+    chooser, so the run that lost the race timed out after 30 s: 5 of about 70
+    CI runs, 2 of 30 locally. Registered here, the interception goes out before
+    the awaited calls below, and ``expect_file_chooser`` then adds a SECOND
+    listener, which sends nothing.
+    """
+    page.on("filechooser", lambda _chooser: None)
+
+
 def test_the_whole_upload_works_from_the_keyboard(harness: Harness) -> None:
     harness.open_tab()
     page = harness.page
+    _intercept_file_choosers(page)
     page.focus("#ingest-mode-paste")
     page.keyboard.press("ArrowDown")      # a radio group: arrows move the choice
     assert page.is_checked("#ingest-mode-file")
