@@ -19,8 +19,10 @@ mutate the corpus or the vault) is unchanged by this module.
   held at once, and each is charged in whole filesystem blocks
   (:data:`STAGING_BLOCK_BYTES`), so many tiny files cannot exhaust inodes.
 - **Off the event loop.** Directory creation, every write and the sniff run in a
-  worker thread (``anyio.to_thread``): a 25 MiB write or a 5 MiB UTF-8 check must
-  not stall every other request, the job polls included.
+  worker thread (``starlette.concurrency.run_in_threadpool``, as ``routes_meta``
+  does; it waits for the thread rather than abandoning it on cancellation): a
+  25 MiB write or a 5 MiB UTF-8 check must not stall every other request, the job
+  polls included.
 - **A filesystem failure is a fixed error.** Any ``OSError`` while staging (a full
   disk, a name the filesystem refuses) is 503 ``staging_failed`` with a fixed
   message, logged by class only. Its text would name the staged path, and with it
@@ -56,7 +58,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO
 
-import anyio.to_thread
+from starlette.concurrency import run_in_threadpool
 
 from ..errors import describe_failure
 from .errors import UiNotFound, UiPayloadTooLarge, UiTooManyRequests, UiUnavailable
@@ -331,7 +333,7 @@ class UploadStaging:
         chunks: AsyncIterator[bytes],
     ) -> int:
         """Create, fill and sniff one staging file; every blocking call off the loop."""
-        handle = await anyio.to_thread.run_sync(self._opener, directory, path)
+        handle = await run_in_threadpool(self._opener, directory, path)
         try:
             size = 0
             async for piece in chunks:
@@ -342,10 +344,10 @@ class UploadStaging:
                     self._inflight[upload_id] = size
                     if self._used_locked() > self._budget:
                         raise _full()
-                await anyio.to_thread.run_sync(handle.write, piece)
+                await run_in_threadpool(handle.write, piece)
         finally:
             handle.close()  # synchronous for the same reason as stage()'s cleanup
-        await anyio.to_thread.run_sync(self._sniffer, path, name.ext)
+        await run_in_threadpool(self._sniffer, path, name.ext)
         return size
 
 

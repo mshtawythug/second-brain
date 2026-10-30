@@ -48,7 +48,12 @@ _EOCD_SIGNATURE = b"PK\x05\x06"
 _EOCD_SIZE = 22
 _EOCD_TOTAL_ENTRIES = 10
 _EOCD_CD_SIZE = 12
-_EOCD_SEARCH = _EOCD_SIZE + 0xFFFF
+#: The zip64 end-of-central-directory LOCATOR: 20 bytes immediately before the
+#: end record. When it is there, zipfile takes size_cd and the count from the
+#: zip64 record instead, so the 32-bit fields above prove nothing (rev-77 R5).
+_ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
+_ZIP64_LOCATOR_SIZE = 20
+_EOCD_SEARCH = _EOCD_SIZE + 0xFFFF + _ZIP64_LOCATOR_SIZE
 
 #: Every leading run of dots and whitespace (Unicode whitespace too: U+3000), so a
 #: stem never starts with either, whatever order they come in.
@@ -187,10 +192,11 @@ def _declared_directory(path: Path) -> tuple[int, int] | None:
     """The zip's declared ``(entry count, central directory bytes)``, read from its
     end record WITHOUT opening it.
 
-    ``None`` when no end record is found. A count of ``0xFFFF`` (or a size of
-    ``0xFFFFFFFF``) is the zip64 marker: a real value past the 16- or 32-bit field,
-    or a zip64 archive, which no ``.docx`` under the 25 MiB cap needs; either way it
-    is past the bounds and refused.
+    ``None`` when no end record is found. A zip64 archive (a locator just before
+    the end record, or the ``0xFFFF`` / ``0xFFFFFFFF`` markers in the 32-bit fields)
+    is reported as ``(0xFFFF, 0xFFFFFFFF)``, past both bounds: zipfile would read
+    the real size_cd from the zip64 record, which is not checked here, and no
+    ``.docx`` under the 25 MiB cap needs zip64.
     """
     with path.open("rb") as handle:
         handle.seek(0, 2)
@@ -200,6 +206,9 @@ def _declared_directory(path: Path) -> tuple[int, int] | None:
     at = tail.rfind(_EOCD_SIGNATURE)
     if at < 0 or at + _EOCD_SIZE > len(tail):
         return None
+    locator = at - _ZIP64_LOCATOR_SIZE
+    if locator >= 0 and tail[locator : locator + 4] == _ZIP64_LOCATOR_SIGNATURE:
+        return 0xFFFF, 0xFFFFFFFF
     entries = tail[at + _EOCD_TOTAL_ENTRIES : at + _EOCD_TOTAL_ENTRIES + 2]
     size_cd = tail[at + _EOCD_CD_SIZE : at + _EOCD_CD_SIZE + 4]
     return int.from_bytes(entries, "little"), int.from_bytes(size_cd, "little")
@@ -207,13 +216,14 @@ def _declared_directory(path: Path) -> tuple[int, int] | None:
 
 def _sniff_docx(path: Path) -> None:
     _sniff_magic(path, _ZIP_MAGIC, "the file is not a .docx (not a zip)")
-    # Before ZipFile parses the central directory into memory, from 22 bytes of
-    # the end record. BOTH fields: zipfile parses the directory by its declared
-    # BYTE SIZE and ignores the declared count, so an archive that under-reports
-    # its count would pass a count check alone and still make zipfile build an
-    # entry for every record (sec-77 re-review). The size field is the one
-    # zipfile trusts, so bounding it bounds the parse; the count is refused too,
-    # and re-checked after the parse.
+    # Before ZipFile parses the central directory into memory, from the end
+    # record. The bound that matters is size_cd: zipfile reads exactly size_cd
+    # bytes of central directory and builds an entry for every record in them,
+    # whatever the declared count says, so a count check alone is bypassed by
+    # under-reporting it (sec-77 re-review). size_cd is the field zipfile
+    # trusts, so bounding it bounds the parse; and a zip64 locator is refused
+    # outright, because with one zipfile takes size_cd from the zip64 record
+    # instead (rev-77 R5). The count is refused too, and re-checked after.
     declared = _declared_directory(path)
     if declared is None:
         raise _unsupported("the file is not a .docx (a damaged zip)")

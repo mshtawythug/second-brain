@@ -232,3 +232,34 @@ def test_the_central_directory_bound_fits_the_member_bound() -> None:
     """4 MiB holds DOCX_MAX_MEMBERS entries of 46 bytes plus a ~370-byte name."""
     assert DOCX_MAX_CENTRAL_DIRECTORY_BYTES == 4 * 1024 * 1024
     assert DOCX_MAX_CENTRAL_DIRECTORY_BYTES >= DOCX_MAX_MEMBERS * (46 + 370)
+
+
+def _with_zip64_locator(raw: bytes) -> bytes:
+    """``raw`` with a VALID zip64 end record and locator inserted before its end
+    record, both describing the real central directory: zipfile opens the result."""
+    import struct
+
+    at = raw.rfind(b"PK\x05\x06")
+    eocd = raw[at:]
+    _, _, _, on_disk, total, size_cd, offset_cd, _ = struct.unpack("<4sHHHHIIH", eocd[:22])
+    record = struct.pack(
+        "<4sQHHIIQQQQ", b"PK\x06\x06", 44, 45, 45, 0, 0, on_disk, total, size_cd, offset_cd
+    )
+    locator = struct.pack("<4sIQI", b"PK\x06\x07", 0, at, 1)
+    return raw[:at] + record + locator + eocd
+
+
+def test_a_zip64_locator_is_refused_before_zipfile(tmp_path: Path) -> None:
+    """With a locator, zipfile takes size_cd and the count from the zip64 record, so
+    the end record's 32-bit fields prove nothing (rev-77 R5). The archive here is a
+    VALID .docx shape that zipfile opens and every later check passes, so the
+    refusal can only come from the locator check, before zipfile."""
+    plain = _docx(tmp_path / "plain.docx", {"word/document.xml": _DOCX_BODY})
+    sniff(plain, ".docx")  # the control: the same archive without a locator passes
+    path = _write(tmp_path / "x.docx", _with_zip64_locator(plain.read_bytes()))
+    with zipfile.ZipFile(path) as archive:  # zipfile itself accepts it
+        assert "word/document.xml" in archive.namelist()
+
+    error = _refused(path, ".docx")
+
+    assert error.message == "the .docx holds too many parts to unpack safely"
