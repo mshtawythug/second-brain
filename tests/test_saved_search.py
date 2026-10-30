@@ -41,9 +41,14 @@ def _hit(
     hours_ago: int = 0,
     notified: bool = False,
 ) -> None:
+    """A hit a check found ``hours_ago`` (plus a minute), marked notified now if ``notified``.
+
+    Seen strictly before it was notified, as every real hit is: a row seen and notified in the
+    same instant is a seed (``saved_search.NOT_SEED_SQL``).
+    """
     conn.execute(
         "INSERT INTO saved_search_hits (saved_search_id, document_id, first_seen_at, "
-        "notified_at) VALUES (%s, %s, NOW() - make_interval(hours => %s), "
+        "notified_at) VALUES (%s, %s, NOW() - make_interval(hours => %s, mins => 1), "
         "CASE WHEN %s THEN NOW() END)",
         (watch_id, document_id, hours_ago, notified),
     )
@@ -265,3 +270,16 @@ def test_mark_notified_marks_exactly_the_pending_keys(test_db: psycopg.Connectio
 
 def test_mark_notified_with_nothing_pending_is_a_no_op(test_db: psycopg.Connection[Any]) -> None:
     assert mark_notified(test_db, frozenset()) == 0
+
+
+def test_seeds_are_not_in_the_terminal_set(test_db: psycopg.Connection[Any]) -> None:
+    watch = create_watch(test_db, name="w", query="q", filters=WatchFilters(), mode=MODE_LEXICAL)
+    seed, hit = _docs(test_db, "Seed", "Hit")
+    test_db.execute(
+        "INSERT INTO saved_search_hits (saved_search_id, document_id, notified_at) "
+        "VALUES (%s, %s, NOW())",
+        (watch.id, seed),
+    )
+    _hit(test_db, watch.id, hit, notified=True)
+
+    assert [h.title for h in hits_since(test_db, hours=24)] == ["Hit"]

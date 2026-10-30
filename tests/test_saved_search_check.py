@@ -502,3 +502,23 @@ def test_check_enabled_passes_over_a_watch_removed_meanwhile(
         remover.close()
 
     assert [r.watch for r in results] == ["a"]
+
+
+def test_seeded_matches_are_not_hits_in_the_terminal_set(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Regression (found in the RM-15 e2e run): ``add`` seeds the current matches as already
+    seen, and they then showed up in the terminal brief and ``brain watch hits`` as new hits."""
+    from brain.saved_search import hits_since
+
+    words = WordEmbedder()
+    ingest(test_db, words, title="Zephyr old", content="zephyr old")
+    _add(test_db, "zephyr", "zephyr")
+    new = ingest(test_db, words, title="Zephyr new", content="zephyr new")
+    check_watch(test_db, "zephyr", _lexical_matcher())
+    test_db.execute("UPDATE saved_search_hits SET notified_at = NOW() WHERE notified_at IS NULL")
+
+    hits = hits_since(test_db, hours=24)
+
+    assert [h.document_id for h in hits] == [new]
+    assert test_db.execute("SELECT count(*) FROM saved_search_hits").fetchone()[0] == 2

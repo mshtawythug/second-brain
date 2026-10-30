@@ -223,7 +223,12 @@ def _record(
     *,
     notified: bool,
 ) -> set[str]:
-    """Insert the hits that are new; return their document ids."""
+    """Insert the hits that are new; return their document ids.
+
+    ``notified=True`` writes a SEED: ``notified_at`` and ``first_seen_at`` are both this
+    transaction's ``NOW()``, which is how :data:`brain.saved_search.NOT_SEED_SQL` tells a seed
+    from a hit. Keep the two equal here.
+    """
     if not document_ids:
         return set()
     rows = conn.execute(

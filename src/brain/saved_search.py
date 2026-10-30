@@ -39,6 +39,12 @@ MAX_NAME_LENGTH = 80
 
 _COLUMNS = "id::text, name, query, filters, mode, enabled, created_at, last_checked_at"
 
+#: Excludes the SEED rows of ``saved_search_hits`` (alias ``h``): the matches ``add`` records as
+#: already seen. A seed is the only row inserted seen AND notified in one transaction, so its
+#: ``notified_at`` equals its ``first_seen_at`` (both that transaction's ``NOW()``). A hit a check
+#: finds is inserted unnotified and marked by a later transaction, so the two always differ.
+NOT_SEED_SQL = "h.notified_at IS DISTINCT FROM h.first_seen_at"
+
 
 class SavedSearchError(BrainError):
     """A watch request the caller must fix (a bad name, query or mode)."""
@@ -276,11 +282,14 @@ def hits_since(
 ) -> list[WatchHit]:
     """Every hit first seen in the last ``hours`` hours, notified or not (the terminal set).
 
+    Seeds are not hits: the matches ``add`` records as already seen are left out
+    (:data:`NOT_SEED_SQL`).
+
     By watch name, newest first. ``name`` keeps one watch's hits. ``exclude_confidential`` (F6)
     drops confidential documents in the predicate; it defaults to include, because the terminal
     is inside the trust boundary and MCP passes its lens.
     """
-    where = ["h.first_seen_at >= NOW() - make_interval(hours => %s)"]
+    where = ["h.first_seen_at >= NOW() - make_interval(hours => %s)", NOT_SEED_SQL]
     params: list[Any] = [hours]
     if name is not None:
         where.append("s.name = %s")
