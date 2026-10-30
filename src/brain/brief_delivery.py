@@ -19,7 +19,8 @@ follows a redirect. The timeout does not cover the DNS lookup (``getaddrinfo``),
 resolver bounds (plan, Deviations).
 
 **Drafts never leave** (sec-82 1): the published payload still lists draft documents on the local
-page, so :func:`without_drafts` removes them from what is sent (plan D13).
+page, so :func:`without_drafts` removes them from what is sent (plan D13). The "new this week"
+names (RM-17) need no such step: :mod:`brain.brief_entities` never counts a draft.
 
 **The email body is in ``gws``'s argv** (visible to a local ``ps`` for at most the 30 s timeout):
 ``gws gmail +send`` takes the body only as ``--body`` (plan, Deviations).
@@ -39,6 +40,7 @@ from typing import Literal, Protocol
 import httpx
 
 from .brief import BriefData, watch_section_lines
+from .brief_entities import SECTION_TITLE, section_lines
 
 # Fixed, so a mail filter can label it and ``ingest-gmail`` can skip the owner's copy.
 from .brief_mail import SUBJECT_PREFIX
@@ -267,8 +269,9 @@ def render_delivery(brief: BriefData, *, include_todos: bool) -> tuple[str, str]
     """``(subject, body)`` for ``brief``, the published payload, as plain text.
 
     Titles and counts by default; todo text and suggestions only with ``include_todos``. The
-    watch section is the page's (:func:`brain.brief.watch_section_lines`) without the fetch-limit
-    line, which the page never carries either (RM-15 D14).
+    new-entity names (RM-17) are sent like titles. The watch section is the page's
+    (:func:`brain.brief.watch_section_lines`) without the fetch-limit line, which the page never
+    carries either (RM-15 D14).
     """
     date_text = brief.date.isoformat()
     lines = [f"Brain brief · {date_text}", "", f"Recent captures ({len(brief.captures)})"]
@@ -280,6 +283,10 @@ def render_delivery(brief: BriefData, *, include_todos: bool) -> tuple[str, str]
     )
     if watch_lines:
         lines += ["", "Watch hits", *[f"- {_one_line(line)}" for line in watch_lines]]
+    # Entity names are title-class, and the payload is the gated one (RM-17); no draft-only
+    # entity is in it, because the section never counts a draft.
+    if entity_lines := section_lines(brief.new_entities):
+        lines += ["", SECTION_TITLE, *[f"- {_one_line(line)}" for line in entity_lines]]
     lines += ["", f"Open action items: {len(brief.open_todos)}"]
     if include_todos:
         lines += [f"- [ ] {_one_line(row.text)}" for row in brief.open_todos]
