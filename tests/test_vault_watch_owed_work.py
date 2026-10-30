@@ -697,4 +697,4 @@ def test_an_abandoned_worker_owes_a_job_it_dequeues_and_never_starts_it(
 
     assert journal.exists() and _journal_entries(journal) == [{"action": "delete", "path": "b.md"}]
     assert _row_at(test_db, "b.md") is not None, "an abandoned worker started a job"
-    assert state.processed == 0
+    assert state.processed == 0 and state.current_job is None

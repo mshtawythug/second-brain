@@ -458,9 +458,9 @@ def run_watcher(
             )
             # RM-26: it may never reach the queue, nor finish (or hand on) its job.
             state.worker_abandoned = True  # set BEFORE reading current_job
+            _owe(state, _take_queued(state))  # first, so the worker can dequeue less
             if (in_flight := state.current_job) is not None:
                 _owe_in_flight(state, in_flight)
-            _owe(state, _take_queued(state))
         else:
             try:
                 # The CURRENT connection: a reconnect may have replaced worker_conn.
@@ -908,10 +908,14 @@ def _worker_loop(
         job = state.jobs.get()
         if job is None:
             return
-        if state.worker_abandoned:  # RM-26: shutdown stopped waiting; owe it, never start it
-            _owe(state, [job])
-            continue
         state.current_job = job
+        # RM-26: shutdown stopped waiting; owe the job, never start it. The slot is
+        # written BEFORE the flag is read (shutdown: flag, then slot), so a job
+        # shutdown's slot read missed is caught here; a double owe is harmless.
+        if state.worker_abandoned:
+            _owe_in_flight(state, job)
+            state.current_job = None
+            continue
         try:
             counted = link.call(_job_runner(job, embedder, config, state, graph_syncer))
         except ReconnectAbandoned as exc:
