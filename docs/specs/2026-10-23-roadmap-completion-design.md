@@ -187,8 +187,8 @@ A ticket is done when **all** of the following hold. A reviewer checks each item
    `mock.patch` and `mocker.patch` are allowed.
 6. **Class-only failure text.** Every log line and every user-visible error for a caught exception
    uses `brain.errors.describe_failure` (the class name), never the exception message.
-   `tests/test_log_privacy.py` (G1) must stay green without a new allowlist entry, unless the ticket
-   argues for one.
+   The G1 guard (`tests/test_log_privacy_rules.py` since RM-28; rules in `tests/log_privacy_rules.py`)
+   must stay green without a new allowlist entry, unless the ticket argues for one.
 7. **Parameterized SQL, explicit timeouts.** Every new HTTP call (httpx), subprocess (`gws`, `gh`,
    `git`, `tesseract`, `whisper-cli`, `afconvert`, `osascript`, `llama-server` probes) and DB connection has an explicit
    timeout. Every external binary is found with `shutil.which` and is a soft dependency: absent, the

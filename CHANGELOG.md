@@ -22,6 +22,15 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Changed — the log-privacy guard covers its three recorded blind spots (RM-28)
+
+- The test guard that keeps exception text out of `src/brain`'s log lines now
+  also catches a value derived from an exception and logged after its `except`
+  block, an exception stored on an attribute, and a nested `def` or `lambda`
+  that logs the handler's exception. Its rules moved to
+  `tests/log_privacy_rules.py`. It found no new leak in `src/brain`; no runtime
+  behaviour changes.
+
 ### Fixed — two terminal error reports no longer quote exception text (RM-29)
 
 - **`brain vault export`** reports a file it could not write as `<path>: <class>`,

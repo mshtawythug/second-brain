@@ -105,9 +105,12 @@ built for a re-raise are not log calls, and G1 does not cover them.
   `parse_frontmatter` now re-raises a `MarkedYAMLError` with its `problem_mark` and `context_mark`
   shifted one line down. That changes the error's own text the same way.
 - **Not covered:**
-  - a value derived from an exception OUTSIDE its handler (assigned in the handler, logged after it);
-  - an exception stored on an attribute and logged elsewhere;
-  - a nested `def` or `lambda` inside a handler, which starts a fresh scope and so drops the taint;
+  - ~~a value derived from an exception OUTSIDE its handler (assigned in the handler, logged after
+    it);~~ ~~an exception stored on an attribute and logged elsewhere;~~ ~~a nested `def` or
+    `lambda` inside a handler, which starts a fresh scope and so drops the taint;~~ **covered since
+    RM-28** (rules T1-T3 in `tests/log_privacy_rules.py`; plan
+    `docs/plans/2026-10-30-rm-28-log-privacy-guard.md`). Still not covered: an exception put into a
+    container and the container logged later, and a tainted value returned from a function;
   - exception text in two terminal error reports outside vault sync. Both are recorded here,
     not changed, by the coordinator's ruling:
     - **`vault/export.py`'s `summary.errors`:** an `OSError`, so path and strerror only. That is

@@ -409,9 +409,9 @@ class JobRegistry:
         self._run_settled()
 
     def _fail(self, job: _Job, error: JobError) -> None:
-        # Outside the `except` block on purpose: an attribute write through `job`
-        # there would make tests/test_log_privacy.py's taint scan treat `job` as
-        # exception-derived, and with it the class-only failure line above.
+        # Outside the `except` block on purpose: the log-privacy guard's taint scan
+        # (tests/log_privacy_rules.py) flags an attribute write through `job` there,
+        # and treats `job`, so the class-only failure line above, as exception-derived.
         with self._lock:
             job.error = error
             self._finish_locked(job, "failed")
