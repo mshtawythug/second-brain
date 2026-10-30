@@ -26,7 +26,7 @@ from brain.ingest.pdf_image_scan import (
     ImageTooLargeError,
     scan_document_images,
 )
-from tests.test_ingest_pdf_ocr import _Engine, _setup
+from tests.test_ingest_pdf_ocr import _Engine, _image_only_pdf, _setup
 from tests.test_ingest_pdf_ocr_limits import _nested_forms_pdf, _write_pdf
 
 #: The lowered bound every refusal test passes, and the size of the image it declares.
@@ -156,6 +156,17 @@ def test_a_document_within_the_bound_still_ocrs(tmp_path: Path, build: object) -
 
     assert len(engine.calls) == 1
     assert doc.content == "[page 1]\nSYNTHETIC TEXT"
+
+
+def test_a_normal_multi_page_scan_still_ocrs_under_a_lowered_bound(tmp_path: Path) -> None:
+    """Three pages, one 384 kpx image each: 1.15 Mpx in all, over 1 Mpx, but no ONE image is."""
+    path = _image_only_pdf(tmp_path / "scan.pdf", ["PAGE ONE", "PAGE TWO", "PAGE THREE"])
+    engine = _Engine(["one", "two", "three"])
+
+    doc = extract_pdf(path, ocr=_setup(engine), max_image_pixels=LOW_BOUND)
+
+    assert len(engine.calls) == 3
+    assert doc.metadata["ocr"] == {"pages": 3, "engine": "fake-ocr"}
 
 
 def test_the_bound_is_per_image_not_per_document(tmp_path: Path) -> None:
