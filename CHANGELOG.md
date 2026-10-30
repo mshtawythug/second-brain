@@ -34,7 +34,8 @@ git tag scheme:
   with no image within the cap, is never OCR'd; a sparse one that carries an
   image is, and the OCR text replaces its text layer. A page renders to at most 70 million
   pixels, counted as pdfium rounds them, with no side over 32,767 (a page that
-  fits only below 50 dpi is skipped), and one document gets at
+  fits only below 50 dpi is skipped); a page whose embedded images hold more than
+  280 million pixels is skipped before they are decoded; and one document gets at
   most 10 minutes of OCR, so a forged page size or a long scan cannot exhaust
   memory or hold the `brain ui` job worker.
 - New knobs `BRAIN_OCR` (`auto` or `off`), `BRAIN_OCR_LANG` (default `eng`) and

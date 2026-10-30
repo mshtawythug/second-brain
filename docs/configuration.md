@@ -468,8 +468,11 @@ A PDF is untrusted input, so two more bounds are fixed in code. A page renders t
 at most 70 million pixels, counted as pdfium allocates them (each side rounded
 up), with no side longer than 32,767 pixels (tesseract's limit); A0 at 200 dpi is
 about 62 million. A larger page is rendered at a lower resolution, and one that
-would fit only below 50 dpi, or whose long side would not fit, is skipped, so a
-forged page size (a huge or a very thin MediaBox) cannot exhaust memory. One document gets at most
+would fit only below 50 dpi, whose long side would not fit, or whose short side
+would be under one pixel, is skipped, so a forged page size (a huge or a very thin
+MediaBox) cannot exhaust memory. The images embedded in a page are bounded too:
+pdfium decodes each at its own size, so a page whose images hold more than 280
+million pixels (counted from their headers, without decoding) is skipped. One document gets at most
 10 minutes of OCR in total; at the deadline OCR stops, keeps the pages read so
 far, and logs a count. This matters because `brain ui` ingests on one job worker
 that cannot be cancelled. The text is stored
