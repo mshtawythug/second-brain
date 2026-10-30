@@ -51,6 +51,20 @@ case ("its own command"), so the export reader is its own module behind its own 
    caps the pages *written* (ingested or updated) in a run; unchanged pages are free, so re-runs
    drain a large workspace. 200 new pages is about 30 hours of graph lane in the worst case.
 
+## Deviations from the spec (approved by the coordinator, 2026-10-30)
+
+1. **Database rows come from the row pages, not the CSV cells (ruling R1).** The spec says
+   database CSVs are ingested "one row per document". A CSV row carries no page id, so keying it
+   would mean keying by title or row order: a guess (AC4) that breaks in-place updates (AC2). The
+   export writes each row as its own `Row <id>.md` page, which carries a stable id, so rows come
+   from those pages behind `--with-databases` (AC3 holds). The CSVs are counted and never stored,
+   and a CSV that lists rows when the export has no row pages is reported.
+2. **The reader is its own module and command, not an `ingest/dispatch.py` entry.** The
+   spec's protocol point 1 names path (c), "an extractor registered with `ingest/dispatch.py`".
+   `.md` already belongs to the markdown extractor, dispatch maps one file to one document deduped
+   by `source_path`, and these pages must carry `source_path=None` plus a page id (spec point 3).
+   See "Why not an `ingest/dispatch.py` entry" above.
+
 ## Rulings
 
 - **R1 — database rows come from the row pages, not the CSV cells.** A CSV row carries no page id,
