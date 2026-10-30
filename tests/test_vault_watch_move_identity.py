@@ -19,6 +19,8 @@ from typing import Any
 
 import psycopg
 
+from brain.near_dup import shingles
+from brain.set_similarity import jaccard
 from brain.vault import move_identity
 from brain.vault.derived_links.fence import FENCE_END_MARKER, FENCE_START_MARKER
 from brain.vault.frontmatter import dump_frontmatter, read_frontmatter_id
@@ -484,21 +486,32 @@ def test_never_synced_id_less_rename_syncs_fresh_with_no_row_at_src(
     assert read_frontmatter_id(q) == rows[0], "the fresh sync did not write its own id back"
 
 
+def _derived_fence(links: int) -> str:
+    """A linker-shaped derived-links fence: the heading and ``links`` synthetic bullets."""
+    bullets = "".join(f"- [[partner-{i}|Partner {i}]] *(shared_thread)*\n" for i in range(links))
+    return (
+        f"{FENCE_START_MARKER}\n## Related (auto-generated, do not edit)\n\n"
+        f"{bullets}{FENCE_END_MARKER}\n"
+    )
+
+
 def test_derived_fence_on_the_destination_does_not_count_against_the_note(
     test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
 ) -> None:
     """Deviation 1: dst's body is fence-stripped, as ``documents.content`` is.
 
-    The destination is the stored body plus a linker-written derived-links
-    fence of 200 distinct words. Counted, the fence's shingles would drop the
-    Jaccard to about 36 / 236, far below 0.2; stripped, the bodies are equal.
+    aud-90's case: a 20-word note (16 shingles) loses its id on disk and gains
+    a derived-links fence of 20 links. Counted, the fence's shingles drop the
+    Jaccard to about 0.15, below 0.2; stripped, the bodies are equal (1.0).
     """
     vault = tmp_path / "vault"
     vault.mkdir()
-    body = _words("note", 40)
+    body = _words("note", 20)
     a_id, b_id = _linked_pair(test_db, fake_embedder, vault, str(uuid.uuid4()), body)
-    fence = f"{FENCE_START_MARKER}\n{_words('related', 200)}{FENCE_END_MARKER}\n"
-    _write(vault / "b.md", {"title": "B"}, f"{body}\n{fence}")  # id-less, same note + fence
+    fenced = f"{body}\n{_derived_fence(20)}"
+    raw = jaccard(shingles(body), shingles(fenced))
+    assert raw < move_identity.MIN_IDENTITY_JACCARD, f"fixture: the fence must bite ({raw:.3f})"
+    _write(vault / "b.md", {"title": "B"}, fenced)  # id-less, the same note plus a fence
 
     (vault / "b.md").rename(vault / "b2.md")
     state = _move_through_worker(test_db, fake_embedder, vault, vault / "b.md", vault / "b2.md")
