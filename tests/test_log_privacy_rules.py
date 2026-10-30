@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.log_privacy_allowlists import RAW_ALLOWLIST, STORE_ALLOWLIST
+from tests.log_privacy_allowlists import RAW_ALLOWLIST, STORE_ALLOWLIST, TRACEBACK_ALLOWLIST
 from tests.log_privacy_rules import (
     EXCEPTION_CLASS_NAMES,
     exception_class_names,
@@ -60,6 +60,17 @@ def test_every_src_exception_class_is_visible_to_the_annotation_rule() -> None:
     assert EXCEPTION_CLASS_NAMES - derived == set(), "remove these from EXCEPTION_CLASS_NAMES"
 
 
+@pytest.mark.parametrize(
+    "table",
+    [RAW_ALLOWLIST, TRACEBACK_ALLOWLIST, STORE_ALLOWLIST],
+    ids=["raw", "traceback", "store"],
+)
+def test_every_allowlist_entry_has_a_written_reason(table: dict[tuple[str, ...], str]) -> None:
+    """G4: no entry is admitted without its reason."""
+    assert table, "an empty allowlist: drop the table or its test"
+    assert all(reason.strip() for reason in table.values()), "an entry has no reason"
+
+
 def test_a_stale_allowlist_entry_is_reported() -> None:
     """S7: with no site matched, every entry of every allowlist is stale."""
     stale = stale_entries(set())
@@ -86,6 +97,7 @@ def _handler(body: str) -> str:
         "logger.exception('not on the allowlist')",
         "logger.error('x', exc_info=True)",
         "logger.log(30, 'x %s', e)",
+        "logger.warning('%s', type(e)(str(e)))",
     ],
     ids=[
         "bare",
@@ -98,6 +110,7 @@ def _handler(body: str) -> str:
         "exception",
         "exc-info",
         "log-level",
+        "type-call",
     ],
 )
 def test_the_guard_flags_every_form_that_carries_the_message(body: str) -> None:
@@ -248,7 +261,6 @@ def test_t2_store_allowlist_is_keyed_by_module_function_and_whole_statement() ->
         return f"def {name}{params}    {body}\n"
 
     assert (module, func, statement) in STORE_ALLOWLIST
-    assert all(STORE_ALLOWLIST.values()) and all(RAW_ALLOWLIST.values()), "an entry has no reason"
     assert log_privacy_violations(source(func, statement), module) == []
     assert log_privacy_violations(source(func, statement), "elsewhere.py") != [], (
         "the store allowlist is not keyed by module"
@@ -477,10 +489,9 @@ def test_s8_taint_in_one_function_does_not_reach_a_sibling() -> None:
     "body",
     [
         "logger.warning('%s', describe_failure(e, detail=str(e)))",
-        "logger.warning('%s', type(e)(str(e)))",
         "logger.warning('%s', isinstance(e, OSError) and len(e.args, str(e)))",
     ],
-    ids=["describe-keyword", "type-call", "len-second-arg"],
+    ids=["describe-keyword", "len-second-arg"],
 )
 def test_r1_a_content_free_call_exempts_only_its_first_argument(body: str) -> None:
     """R1: ``describe_failure(e, detail=str(e))`` still carries the message."""
@@ -519,3 +530,83 @@ def test_a5_a_stores_base_and_key_stay_clean(body: str) -> None:
     hits = log_privacy_violations(_handler(body))
 
     assert not any(hit.endswith(" raw") for hit in hits), hits
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "info = {}\ninfo['err'] = str(e)\nlogger.warning('%s', info)",
+        "info = {}\ninfo['a']['b'] = e.args\nlogger.warning('%s', info)",
+    ],
+    ids=["local-dict", "nested-subscript"],
+)
+def test_v1_flags_a_local_container_stored_into_by_subscript(body: str) -> None:
+    """V1: ``info['err'] = str(e)`` taints ``info`` (a regression A5 had introduced)."""
+    assert log_privacy_violations(_handler(body)) != [], f"V1 missed: {body!r}"
+
+
+def test_v1_spares_the_subscript_key() -> None:
+    """V1: the key of a tainted store stays clean."""
+    body = "d[k] = str(e)\nlogger.warning('%s', k)"
+
+    assert log_privacy_violations(_handler(body)) == []
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    ["'OSError'", "Optional['FooError']", "'OSError | None'", "'OllamaUnavailable'",
+     "'psycopg.errors.UniqueViolation'"],
+    ids=["quoted", "quoted-in-optional", "quoted-union", "quoted-known-name", "quoted-psycopg"],
+)  # fmt: skip
+def test_v2_flags_a_quoted_exception_annotation(annotation: str) -> None:
+    """V2: a string annotation is read like an unquoted one."""
+    source = f"def f(exc: {annotation}) -> None:\n    logger.warning('x %s', exc)\n"
+
+    assert log_privacy_violations(source) != [], f"V2 missed: {annotation!r}"
+
+
+def test_v2_spares_a_quoted_non_exception_annotation() -> None:
+    """V2: ``'ErrorMapper'`` still does not END with Error/Exception."""
+    source = "def f(cb: 'ErrorMapper') -> None:\n    logger.warning('x %s', cb)\n"
+
+    assert log_privacy_violations(source) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "logger.warning('%s', self.type(e))",
+        "logger.warning('%s', x.len(e))",
+        "logger.warning('%s', obj.isinstance(e))",
+    ],
+    ids=["method-type", "method-len", "method-isinstance"],
+)
+def test_v3_a_method_sharing_a_builtins_name_is_not_content_free(body: str) -> None:
+    """V3: only the bare builtins (and any ``.describe_failure``) are exempt."""
+    assert log_privacy_violations(_handler(body)) != [], f"V3 missed: {body!r}"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "self.d[k].append(str(e))",
+        "self.errors.setdefault(k, str(e))",
+        "self.recent.appendleft(e)",
+        "self.queue.put(str(e))",
+        "self.queue.put_nowait(e)",
+    ],
+    ids=["subscript-receiver", "setdefault", "appendleft", "put", "put-nowait"],
+)
+def test_v4_flags_the_remaining_store_shapes(body: str) -> None:
+    """V4: a subscript on an attribute receiver, and the queue/deque/dict store methods."""
+    assert log_privacy_violations(_handler(body)) != [], f"V4 missed: {body!r}"
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["self.queue.put(job)", "self.d[k].append(describe_failure(e))"],
+    ids=["put-clean", "subscript-receiver-describe"],
+)
+def test_v4_spares_a_clean_or_class_only_store(body: str) -> None:
+    """V4: the new shapes pass when the stored value is untainted or class-only."""
+    assert log_privacy_violations(_handler(body)) == []

@@ -11,14 +11,18 @@ three kinds of hit in ``src/brain``:
 - ``store`` (T2, RM-28): a tainted value stored where it can be logged later: an
   attribute (``obj.attr = e``), a subscript on an attribute (``self.errors[k] =
   str(e)``), ``setattr``/``object.__setattr__``, or an attribute container's
-  ``append``/``extend``/``add``/``insert``/``update`` (``report.errors.append(…)``).
+  ``append``/``appendleft``/``extend``/``add``/``insert``/``update``/``setdefault``/
+  ``put``/``put_nowait``, the receiver's subscripts peeled (``report.errors.append(…)``,
+  ``self.d[k].append(…)``).
 
 A value is *tainted* when it can hold an exception's message:
 
 - the ``except … as e`` name (``except*`` too), inside its handler;
 - a parameter annotated as an exception: an identifier in the annotation ends with
   ``Error`` or ``Exception``, is a builtin exception or one of
-  ``EXCEPTION_CLASS_NAMES``, or the annotation names ``psycopg.errors.…``;
+  ``EXCEPTION_CLASS_NAMES``, or the annotation names ``psycopg.errors.…``. A
+  quoted annotation (``'OSError'``, ``Optional['FooError']``, ``'OSError | None'``)
+  is read the same way;
 - a call that returns the current exception or its text: ``traceback.format_exc``,
   ``format_exception``, ``format_exception_only``, ``format_tb``,
   ``sys.exc_info``, ``sys.exception``, and an argument-less ``.exception()`` (a
@@ -28,32 +32,45 @@ A value is *tainted* when it can hold an exception's message:
   target, ``with … as``, or a ``match`` capture. A name bound inside a handler
   stays tainted for the WHOLE function, and the scope is flow-insensitive: inside
   a loop, "after the handler" includes the code above it. The handler's own name
-  is not carried out of the handler, because Python unbinds it there. Only NAME
-  targets are tainted; an attribute or subscript target is reported as a store
-  instead, and its base (``self``, ``job``) stays clean.
+  is not carried out of the handler, because Python unbinds it there. A NAME
+  target is tainted, and so is a local container stored into by subscript
+  (``info["err"] = str(e)`` taints ``info``, never the key). An attribute target,
+  or a subscript on one, is reported as a store instead, and its base (``self``,
+  ``job``) stays clean.
 - **(T3, RM-28)** inside a ``def`` or ``lambda``, every name tainted where it is
   defined, minus its own parameters, plus any parameter whose DEFAULT is tainted.
   Its decorators, annotations and defaults are scanned with the enclosing taint.
 
-A content-free call (``describe_failure``, ``type``, ``isinstance``, ``len``)
-exempts only its FIRST positional argument; its other arguments are still scanned. A
-comparison yields a bool, so it never taints.
+A content-free call (a bare ``describe_failure``, ``type``, ``isinstance`` or
+``len``, or ``<module>.describe_failure``) exempts only its FIRST positional
+argument; its other arguments are still scanned. A method that shares one of
+those names (``self.type(e)``) is not exempt. A comparison yields a bool, so it
+never taints.
 
 **Still not covered** (BL-28 tracks the first two classes):
 
 - ``raise X(f"…{e}")`` and ``X(str(e))``: an exception's text interpolated into a
-  new exception's message (``sync_vault``'s ``_SyncError``, the Y5 shape). About
+  new exception's message (``sync_vault``'s OLD ``_SyncError`` reason, Y5, fixed in
+  PR #58). About
   240 ``{exc}``/``str(exc)`` sites in ``src/brain`` do this; whether one reaches a
   log depends on who catches it.
-- ``print``, ``typer.echo`` and ``typer.secho(err=True)`` of exception text: their
-  stderr is the daemons' launchd log (BL-25 lists the CLI echoes already found).
+- exception text written by any non-logger writer (``print``,
+  ``typer.echo``/``secho``, ``warnings.warn``, ``sys.stderr.write``, a Rich
+  console): the daemons' stderr is their launchd log (BL-25 lists the CLI echoes
+  already found).
 - a constructor or return value built from the exception: a mapper returning
   ``JobError(code, str(exc))`` would pass, and so would any function returning a
   tainted value to a caller that logs it;
 - a local container (``errors.append(str(e))`` on a NAME) logged later;
 - an exception parameter with no annotation, or one annotated with a class from
   outside ``src/brain`` whose name does not end with ``Error``/``Exception``;
-- any logger whose receiver's name does not contain ``log``.
+- any logger whose receiver's name does not contain ``log``, and a logger method
+  passed around (``functools.partial(logger.error, e)``);
+- an aliased import of a source (``import traceback as tb``, ``from sys import
+  exc_info``), ``sys.last_value``, and ``fut.exception(timeout=…)`` (only an
+  argument-less ``.exception()`` is a source);
+- ``global``/``nonlocal`` rebinding: taint does not flow out of a nested scope, or
+  across functions through module state.
 
 Moved out of ``tests/test_log_privacy.py`` for the 800-line ceiling (RM-28). Plan:
 ``docs/plans/2026-10-30-rm-28-log-privacy-guard.md``.
@@ -63,6 +80,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import re
 from collections.abc import Iterator
 
 from tests.log_privacy_allowlists import RAW_ALLOWLIST, STORE_ALLOWLIST, TRACEBACK_ALLOWLIST
@@ -80,8 +98,19 @@ _EXCEPTION_SOURCES = {
     ("sys", "exception"),
 }
 _TRACEBACK_PRINTS = {"print_exc", "print_exception", "print_tb", "print_last"}
-_CONTAINER_METHODS = {"append", "extend", "add", "insert", "update"}
+_CONTAINER_METHODS = {
+    "append",
+    "appendleft",
+    "extend",
+    "add",
+    "insert",
+    "update",
+    "setdefault",
+    "put",
+    "put_nowait",
+}
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _BUILTIN_EXCEPTIONS = frozenset(
     name
     for name, value in vars(builtins).items()
@@ -133,6 +162,16 @@ def _is_exception_source(call: ast.Call) -> bool:
     return bare and isinstance(call.func, ast.Attribute) and call.func.attr == "exception"
 
 
+def _is_content_free(call: ast.Call) -> bool:
+    """A bare ``describe_failure``/``type``/``isinstance``/``len`` call, or
+    ``<module>.describe_failure``. A method that happens to share the name
+    (``self.type(e)``) is not the builtin (V3)."""
+    fn = call.func
+    if isinstance(fn, ast.Name):
+        return fn.id in _CONTENT_FREE_CALLS
+    return isinstance(fn, ast.Attribute) and fn.attr == "describe_failure"
+
+
 def uses(node: ast.AST, names: set[str]) -> bool:
     """True if ``node`` can carry a tainted value: one of ``names``, or an exception source."""
     if isinstance(node, ast.Name):
@@ -142,7 +181,7 @@ def uses(node: ast.AST, names: set[str]) -> bool:
     if isinstance(node, ast.Call):
         if _is_exception_source(node):
             return True
-        if _called_name(node) in _CONTENT_FREE_CALLS:
+        if _is_content_free(node):
             rest = [node.func, *node.args[1:], *(k.value for k in node.keywords)]
             return any(uses(child, names) for child in rest)
     return any(uses(child, names) for child in ast.iter_child_nodes(node))
@@ -208,7 +247,14 @@ def _bindings(node: ast.AST) -> list[tuple[ast.AST, list[ast.AST]]]:
 
 
 def _bound_names(target: ast.AST) -> set[str]:
-    """The NAMES a target binds. An attribute or subscript binds none (A5): T2 reports it."""
+    """The names a target taints.
+
+    A subscript taints its container when the container is a local NAME
+    (``info["err"] = str(e)`` taints ``info``, V1), never its key. An attribute,
+    or a subscript on one, taints nothing here: T2 reports the store (A5).
+    """
+    while isinstance(target, ast.Subscript):
+        target = target.value
     if isinstance(target, ast.Name):
         return {target.id}
     if isinstance(target, ast.Starred):
@@ -289,8 +335,14 @@ def _names_an_exception(annotation: ast.expr) -> bool:
     """
     if "psycopg.errors." in ast.unparse(annotation):
         return True
-    words = {n.id for n in ast.walk(annotation) if isinstance(n, ast.Name)}
-    words |= {n.attr for n in ast.walk(annotation) if isinstance(n, ast.Attribute)}
+    words: set[str] = set()
+    for node in ast.walk(annotation):
+        if isinstance(node, ast.Name):
+            words.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            words.add(node.attr)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            words |= set(_IDENTIFIER.findall(node.value))  # a quoted annotation (V2)
     known = EXCEPTION_CLASS_NAMES | _BUILTIN_EXCEPTIONS
     return any(w.endswith(("Error", "Exception")) or w in known for w in words)
 
@@ -326,9 +378,12 @@ def _stored_values(node: ast.AST) -> list[ast.AST]:
     if name == "setattr" or (name == "__setattr__" and _dotted(node) == ("object", "__setattr__")):
         return node.args[2:3]
     fn = node.func
-    attribute_receiver = isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Attribute)
-    if name in _CONTAINER_METHODS and attribute_receiver:
-        return [*node.args, *(k.value for k in node.keywords)]
+    if name in _CONTAINER_METHODS and isinstance(fn, ast.Attribute):
+        receiver = fn.value
+        while isinstance(receiver, ast.Subscript):
+            receiver = receiver.value  # ``self.d[k].append(...)`` (V4)
+        if isinstance(receiver, ast.Attribute):
+            return [*node.args, *(k.value for k in node.keywords)]
     return []
 
 

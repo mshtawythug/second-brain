@@ -127,5 +127,13 @@ the tally with the salvaged entities (the extraction's output, not exception tex
 `sync_vault`/`sync_one_file` append `str(e)` of a `_SyncError`, whose message is authored at its
 raise sites from fixed text, `describe_failure`, a constraint name or a count (Y5 and Y6 pin two).
 
+**Round 3 (final).** V1: a subscript store into a LOCAL container taints the container
+(`info["err"] = str(e)` taints `info`, never the key), restoring what A5 had dropped. V2: quoted
+annotations (`'OSError'`, `Optional['FooError']`, `'OSError | None'`) are read like unquoted ones.
+V3: only the bare `type`/`isinstance`/`len` builtins are content-free; `describe_failure` may also
+be called as an attribute. V4: a container store's receiver has its subscripts peeled
+(`self.d[k].append(…)`), and `setdefault`, `appendleft`, `put` and `put_nowait` are stores. G4:
+every entry of all three allowlists must carry a reason. No new `src/` hit.
+
 **Still not covered** is listed in `tests/log_privacy_rules.py`'s module docstring. The two big
 classes, raise-message interpolation and stderr echo, are backlog **BL-28**.
