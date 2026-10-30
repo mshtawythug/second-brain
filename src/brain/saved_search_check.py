@@ -34,6 +34,7 @@ from typing import Any
 
 import psycopg
 
+from .config import ConfigError
 from .errors import BrainError, PersonAmbiguous, PersonNotFound
 from .ingest import Embedder
 from .queries import resolve_person_to_keys
@@ -131,7 +132,10 @@ def _search(
     if semantic:
         try:
             embedder = matcher.embedder()
-        except BrainError as exc:
+        # Building the embedder can refuse its configuration (``ConfigError``) or its backend
+        # (``BrainError``); either way this watch cannot be checked now, and the brief must
+        # still render.
+        except (BrainError, ConfigError) as exc:
             raise _Skip(SKIP_EMBEDDER) from exc
         if not getattr(embedder, "produces_embeddings", True):
             raise _Skip(SKIP_EMBEDDER)

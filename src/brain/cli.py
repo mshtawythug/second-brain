@@ -4886,6 +4886,8 @@ register_review_extra_commands(review_app)
 
 def _print_brief(data: Any) -> None:
     """Print the daily brief to stdout (titles + todo texts only)."""
+    from .brief import watch_section_lines
+
     typer.echo(f"━━━ Brain Brief · {data.date.isoformat()} ━━━")
     typer.echo("\n📥  Recent captures")
     if data.captures:
@@ -4906,6 +4908,10 @@ def _print_brief(data: Any) -> None:
             typer.echo(f"  • {pin.title}")
     else:
         typer.echo("  (no pinned docs)")
+    if watch_lines := watch_section_lines(data):
+        typer.echo("\n👀  Watch hits")
+        for line in watch_lines:
+            typer.echo(f"  • {line}")
     if data.suggestions:
         typer.echo("\n💡  Suggested next steps")
         for i, suggestion in enumerate(data.suggestions, 1):

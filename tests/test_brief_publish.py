@@ -22,6 +22,9 @@ from brain.brief_publish import build_brief
 from brain.config import Config
 from brain.db import connect
 from brain.errors import OllamaUnavailable
+from brain.saved_search import MODE_LEXICAL, MODE_SEMANTIC, WatchFilters, WatchNote
+from brain.saved_search_check import SKIP_EMBEDDER, Matcher, add_watch
+from tests.saved_search_fakes import DownEmbedder, WordEmbedder, ingest
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -128,3 +131,165 @@ def test_build_brief_enrich_off_never_calls_the_model(
 
     assert calls == []
     assert data.suggestions == []
+
+
+# ---------------------------------------------------------------------------
+# Watches (RM-15): the brief checks first, lists, gates and marks
+# ---------------------------------------------------------------------------
+
+
+def _lexical_matcher() -> Matcher:
+    def _never() -> Any:
+        raise AssertionError("a lexical check must not build an embedder")
+
+    return Matcher(embedder=_never, vector_sim_floor=0.25, min_cosine=0.45)
+
+
+def _watch(conn: psycopg.Connection, name: str, query: str, **kwargs: Any) -> None:
+    mode = kwargs.pop("mode", MODE_LEXICAL)
+    matcher = kwargs.pop("matcher", None) or _lexical_matcher()
+    add_watch(
+        conn, name=name, query=query, filters=WatchFilters(**kwargs), mode=mode, matcher=matcher
+    )
+
+
+def _word_matcher() -> Matcher:
+    words = WordEmbedder()
+    return Matcher(embedder=lambda: words, vector_sim_floor=0.25, min_cosine=0.45)
+
+
+def _build(vault: Path, *, wiki: bool, **kwargs: Any) -> tuple[Any, Path | None]:
+    return build_brief(
+        _cfg(vault),
+        on_date=ON_DATE,
+        since_hours=24,
+        todo_since_days=7,
+        enrich=kwargs.pop("enrich", False),
+        wiki=wiki,
+        **kwargs,
+    )
+
+
+def _page_watch_lines(page: str) -> list[str]:
+    if "## Watch hits" not in page:
+        return []
+    section = page.split("## Watch hits", 1)[1].split("\n## ", 1)[0]
+    return [line for line in section.splitlines() if line.startswith("- ")]
+
+
+def test_no_watches_means_no_section(
+    test_db: psycopg.Connection, tmp_path: Path
+) -> None:
+    data, written = _build(tmp_path, wiki=True)
+
+    assert data.watch_hits == [] and data.watch_notes == []
+    assert data.to_dict()["watch_hits"] == [] and data.to_dict()["watch_notes"] == []
+    assert written is not None and _page_watch_lines(written.read_text()) == []
+
+
+def test_a_brief_checks_first_and_lists_the_new_hit(
+    test_db: psycopg.Connection, tmp_path: Path
+) -> None:
+    words = WordEmbedder()
+    _watch(test_db, "zephyr", "zephyr")
+    doc = ingest(test_db, words, title="Zephyr launch", content="zephyr launch plan")
+
+    data, _ = _build(tmp_path, wiki=False)
+
+    assert [(h.watch, h.document_id, h.notified) for h in data.watch_hits] == [
+        ("zephyr", doc, False)
+    ]
+    unmarked = test_db.execute(
+        "SELECT count(*) FROM saved_search_hits WHERE notified_at IS NULL"
+    ).fetchone()[0]
+    assert unmarked == 1
+
+
+def test_wiki_lists_five_gated_hits_marks_all_and_a_second_run_lists_none(
+    test_db: psycopg.Connection, tmp_path: Path
+) -> None:
+    words = WordEmbedder()
+    _watch(test_db, "zephyr", "zephyr")
+    for i in range(7):
+        ingest(test_db, words, title=f"Zephyr open {i}", content=f"zephyr open {i}")
+    ingest(
+        test_db, words, title="Zephyr sealed", content="zephyr sealed", sensitivity="confidential"
+    )
+
+    _, written = _build(tmp_path, wiki=True)
+    assert written is not None
+    first = _page_watch_lines(written.read_text())
+    unnotified = test_db.execute(
+        "SELECT count(*) FROM saved_search_hits WHERE notified_at IS NULL"
+    ).fetchone()[0]
+    _, rewritten = _build(tmp_path, wiki=True)
+    assert rewritten is not None
+    second = _page_watch_lines(rewritten.read_text())
+
+    hit_lines = [line for line in first if "Zephyr open" in line]
+    assert len(hit_lines) == 5
+    assert "- [zephyr] and 2 more (`brain watch hits zephyr`)" in first
+    assert not any("sealed" in line for line in first)
+    assert "Zephyr sealed" not in written.read_text()
+    assert unnotified == 0
+    assert second == []
+
+
+def test_a_hit_marked_by_wiki_still_shows_in_a_later_plain_brief(
+    test_db: psycopg.Connection, tmp_path: Path
+) -> None:
+    words = WordEmbedder()
+    _watch(test_db, "zephyr", "zephyr")
+    ingest(test_db, words, title="Zephyr open", content="zephyr open")
+    ingest(
+        test_db, words, title="Zephyr sealed", content="zephyr sealed", sensitivity="confidential"
+    )
+    _build(tmp_path, wiki=True)
+
+    data, _ = _build(tmp_path, wiki=False)
+
+    assert sorted((h.title, h.notified) for h in data.watch_hits) == [
+        ("Zephyr open", True),
+        ("Zephyr sealed", True),
+    ]
+
+
+def test_a_skipped_semantic_watch_is_named_in_both_payloads(
+    test_db: psycopg.Connection, tmp_path: Path
+) -> None:
+    _watch(test_db, "orbit", "orbital", mode=MODE_SEMANTIC, matcher=_word_matcher())
+
+    data, written = _build(tmp_path, wiki=True, embedder=DownEmbedder())
+
+    assert data.watch_notes == [WatchNote(watch="orbit", skipped=SKIP_EMBEDDER)]
+    assert written is not None
+    assert f"- [orbit] {SKIP_EMBEDDER}" in _page_watch_lines(written.read_text())
+
+
+def test_watch_hits_alone_do_not_cost_a_second_suggestion_call(
+    test_db: psycopg.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    words = WordEmbedder()
+    _watch(test_db, "zephyr", "zephyr")
+    ingest(test_db, words, title="Zephyr open", content="zephyr open")
+    _build(tmp_path, wiki=True)  # the hit is now notified: the payloads' hit sets differ
+    calls: list[object] = []
+    monkeypatch.setattr("brain.brief.suggest_next_steps", lambda b, c: calls.append(b) or ["s"])
+
+    _build(tmp_path, wiki=True, enrich=True)
+
+    assert len(calls) == 1
+
+
+@pytest.mark.fresh_schema
+def test_a_brief_without_migration_029_still_builds(
+    test_db: psycopg.Connection, seed_doc: Callable[..., str], tmp_path: Path
+) -> None:
+    test_db.execute("DROP TABLE saved_search_hits")
+    test_db.execute("DROP TABLE saved_searches")
+    seed_doc(title="Still here", content="still here body")
+
+    data, written = _build(tmp_path, wiki=True)
+
+    assert [doc.title for doc in data.captures] == ["Still here"]
+    assert data.watch_hits == [] and written is not None

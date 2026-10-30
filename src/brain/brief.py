@@ -4,7 +4,8 @@ Single responsibility: assemble :class:`BriefData` from the DB and optionally
 synthesize next-step suggestions. No CLI, no MCP, no terminal formatting — the
 callers (CLI + MCP) format the result. Reads recent captures (via
 :mod:`brain.activity`), open action items (via :mod:`brain.todo`), and pinned
-docs from the interactions log.
+docs from the interactions log, plus the saved-search ("watch") hits first seen
+inside the capture window (RM-15, :mod:`brain.saved_search`).
 
 The LLM leg goes through :func:`brain.chat.chat_json` — NOT
 :mod:`brain.enrichment` — so this module never imports the enricher (which would
@@ -14,7 +15,8 @@ texts are forwarded to the model; document bodies never leave the DB.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import shlex
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ from .activity import recent_captures
 from .config import Config
 from .errors import EnrichmentError, describe_failure
 from .queries import DocumentRow
+from .saved_search import WatchHit, WatchNote, hits_since, watch_tables_present
 from .sensitivity import not_confidential_sql
 from .todo import TodoRow, iter_action_item_docs
 from .vault.frontmatter import dump_frontmatter
@@ -67,6 +70,12 @@ class BriefData:
     open_todos: list[TodoRow]
     pinned: list[PinnedDoc]
     suggestions: list[str]
+    #: Saved-search hits (RM-15). The terminal payload holds every hit first seen in the
+    #: capture window; the published page's payload holds the unnotified ones, capped per watch
+    #: (``brief_publish.build_brief`` swaps them in).
+    watch_hits: list[WatchHit] = field(default_factory=list)
+    #: Per-watch "and N more" counts and skipped checks, for the same section.
+    watch_notes: list[WatchNote] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the wire shape shared by ``brain brief --json`` + MCP."""
@@ -103,6 +112,21 @@ class BriefData:
                 for pin in self.pinned
             ],
             "suggestions": self.suggestions,
+            "watch_hits": [
+                {
+                    "watch": hit.watch,
+                    "id": hit.document_id,
+                    "title": hit.title,
+                    "source": hit.source_kind,
+                    "first_seen_at": hit.first_seen_at.isoformat(),
+                    "notified": hit.notified,
+                }
+                for hit in self.watch_hits
+            ],
+            "watch_notes": [
+                {"watch": note.watch, "more": note.more, "skipped": note.skipped}
+                for note in self.watch_notes
+            ],
         }
 
 
@@ -122,10 +146,15 @@ def assemble_brief(
     passes today so this stays deterministic under test). Suggestions are filled
     separately by :func:`suggest_next_steps`.
 
-    ``exclude_confidential`` (F6) is threaded to ALL THREE reads below, and it
-    has to be all three: they are three independent queries against
-    ``documents`` — a time window, a body scan, and an interaction join — so
-    closing any one of them closes neither of the others. The brief names
+    ``exclude_confidential`` (F6) is threaded to ALL FOUR reads below, and it
+    has to be all four: they are independent queries against ``documents`` — a
+    time window, a body scan, an interaction join, and the watch hits — so
+    closing any one of them closes none of the others.
+
+    The watch hits are the TERMINAL set (every hit first seen in the last
+    ``since_hours``, notified or not); no check runs here, so MCP ``brain_brief``
+    only reads. They are empty when migration 029 is not applied, so a launchd
+    reinstall without ``brain init`` cannot break the morning brief. The brief names
     documents the caller never asked for (that is what a digest IS), and through
     ``iter_action_item_docs`` it republishes confidential BODY text, which
     :func:`suggest_next_steps` then puts in a prompt.
@@ -153,12 +182,18 @@ def assemble_brief(
         limit=cfg.brief_pin_limit,
         exclude_confidential=exclude_confidential,
     )
+    watch_hits = (
+        hits_since(conn, hours=since_hours, exclude_confidential=exclude_confidential)
+        if watch_tables_present(conn)
+        else []
+    )
     return BriefData(
         date=on_date,
         captures=captures,
         open_todos=open_todos,
         pinned=pinned,
         suggestions=[],
+        watch_hits=watch_hits,
     )
 
 
@@ -307,9 +342,32 @@ def _render_brief_body(brief: BriefData) -> str:
     else:
         lines.append("_No pinned docs._")
 
+    watch_lines = watch_section_lines(brief)
+    if watch_lines:
+        lines += ["", "## Watch hits", "", *[f"- {line}" for line in watch_lines]]
+
     if brief.suggestions:
         lines += ["", "## Suggested next steps", ""]
         for i, suggestion in enumerate(brief.suggestions, 1):
             lines.append(f"{i}. {suggestion}")
 
     return "\n".join(lines) + "\n"
+
+
+def watch_section_lines(brief: BriefData) -> list[str]:
+    """The watch section's lines, without bullets; empty when there is nothing to say.
+
+    Shared by the terminal (``cli._print_brief``) and the page, so the two cannot word a hit
+    differently. A watch with no hits and nothing skipped prints nothing: someone with no
+    watches never sees the section.
+    """
+    lines = [f"[{hit.watch}] {hit.title}" for hit in brief.watch_hits]
+    for note in brief.watch_notes:
+        if note.more:
+            lines.append(
+                f"[{note.watch}] and {note.more} more "
+                f"(`brain watch hits {shlex.quote(note.watch)}`)"
+            )
+        if note.skipped:
+            lines.append(f"[{note.watch}] {note.skipped}")
+    return lines
