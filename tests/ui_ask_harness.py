@@ -63,7 +63,7 @@ ENABLED: dict[str, Any] = {
 HOSTILE_ANSWER = (
     'Start <img src=x onerror="alert(1)"> then <script>alert(2)</script> and '
     '<a href="javascript:alert(3)">click</a> javascript:alert(4) cites [1], not [99], '
-    "and not [2] either."
+    "not [2], not [3] and not [4] either."
 )
 HOSTILE_SUBQUERY = '<img src=x onerror="alert(5)">'
 HOSTILE_TITLE = '<b>Bold</b> <img src=x onerror="alert(6)">'
@@ -126,6 +126,12 @@ SCRIPTS: dict[str, list[Frame]] = {
                      source_kind="<i>manual</i>"),
             # In the list, but its id is not a UUID: it must never become a link.
             citation(2, "javascript:alert(10)"),
+            # A UUID with something riding along: the check is ANCHORED.
+            citation(3, f'{OTHER_ID}?x=" onmouseover="alert(12)'),
+            # Withheld, yet still carrying an id: the client honours the flag
+            # itself rather than relying on the server's lens having nulled the id.
+            citation(4, OTHER_ID, withheld=True, title=None, snippet=None,
+                     sensitivity="confidential"),
         ],
         sub_queries=[HOSTILE_SUBQUERY, "<script>alert(11)</script>"],
         fallback="fts", fallback_reason="embed_failed", fallback_transient=True,

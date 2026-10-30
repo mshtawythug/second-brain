@@ -69,14 +69,17 @@ def test_a_hostile_answer_renders_as_text_and_builds_no_element(
     for tag in ("b", "i", "iframe"):
         assert _elements(page, tag) == 0, tag
     # Exactly two links: [1] in the answer and its "Open in Notes". [99] is not a
-    # citation, and [2]'s id is not a UUID, so both stay text.
+    # citation, [2]'s id is not a UUID, [3]'s is a UUID with more after it, and [4]
+    # is withheld (though it carries an id), so all four stay text.
     links = page.locator(f"{_PANE} a")
     assert links.count() == 2
     assert {links.nth(i).get_attribute("href") for i in range(2)} == {f"/?id={DOC_ID}"}
     cites = answer.locator("a")
     assert cites.count() == 1
     assert cites.first.inner_text() == "[1]"
-    assert "[99]" in answer.inner_text() and "[2]" in answer.inner_text()
+    for marker in ("[99]", "[2]", "[3]", "[4]"):
+        assert marker in answer.inner_text(), marker
+    assert "A confidential note (withheld on this server)" in text
     # The only attributes on a link are the ones this tab sets.
     for i in range(links.count()):
         names = links.nth(i).evaluate("a => [...a.attributes].map((x) => x.name).sort()")

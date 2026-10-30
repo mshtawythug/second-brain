@@ -131,7 +131,11 @@ def test_a_hostile_answer_arrives_verbatim_and_its_id_passes_the_js_check(
     (cited,) = result["citations"]
     assert (cited["ref"], cited["document_id"], cited["withheld"]) == (1, doc_id, False)
     pattern = _js_uuid_pattern()
-    assert pattern.fullmatch(doc_id), doc_id
+    # ``search``, not ``fullmatch``: JS ``RegExp.test`` finds a match ANYWHERE, so
+    # only the pattern's own anchors keep a UUID-plus-payload out. ``fullmatch``
+    # would add anchors the shipped pattern may not have, and pass while it lacked them.
+    assert pattern.search(doc_id), doc_id
     # And the pattern is not vacuous: what the hostile payload would put there fails.
-    for bad in ("javascript:alert(1)", f"{doc_id}?x=1", doc_id.replace("-", ""), ""):
-        assert not pattern.fullmatch(bad), bad
+    for bad in ("javascript:alert(1)", f"{doc_id}?x=1", f"x{doc_id}",
+                doc_id.replace("-", ""), ""):
+        assert not pattern.search(bad), bad
