@@ -443,6 +443,8 @@ def build_context(
         # The Agent tab (RM-18a) asks on the same worker and the same bind rule.
         ask_runtime=AskRuntime(chat=chat_json),
         ingest_enabled=loopback and not read_only,
+        # RM-23: `abs_path` in the note payload, loopback only (same verdict).
+        serve_abs_path=loopback,
         # Lazy: no directory exists until the first upload (upload_staging).
         uploads=(
             UploadStaging(clock=lambda: datetime.now(UTC))

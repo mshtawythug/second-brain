@@ -255,6 +255,9 @@ kbd.hint {
 .save-state[data-state="saving"] { color: var(--ink-muted); }
 .save-state[data-state="error"],
 .save-state[data-state="conflict"] { color: var(--flag-danger); }
+/* RM-23: "Copy path" and its status, kept together when the bar wraps. */
+.copy-path { display: inline-flex; align-items: center; gap: var(--s-2); }
+.copy-path-state { font-family: var(--font-mono); font-size: var(--t-meta); color: var(--ink-muted); }
 
 .note-body {
   font-family: var(--font-read);
