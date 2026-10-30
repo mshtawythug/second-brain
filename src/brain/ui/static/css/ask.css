@@ -1,5 +1,5 @@
 /* ask.css — the Agent tab: the question form and its turns (js/ask.js,
- * js/ask_view.js; RM-18b).
+ * js/ask_view.js; RM-18b; follow-ups RM-18c).
  *
  * A FEATURE SHEET, loaded last, layered on the shared component tier like the
  * others. index.html's <link> block and `CSS_ORDER` in
@@ -132,6 +132,23 @@
 }
 .agent-pane .agent-busy { margin: 0; font-size: var(--t-meta); color: var(--ink-muted); }
 
+/* RM-18c: the follow-up being set up. No `display` here: ask.js hides it with
+   the bare `hidden` attribute. The accent rule ties it to the Follow up button. */
+.agent-pane .agent-follow-up {
+  padding: var(--s-2) var(--s-3);
+  border-left: 3px solid var(--accent);
+  background: var(--paper-sunk);
+  font-size: var(--t-ui);
+}
+.agent-pane .agent-follow-up-text {
+  margin: 0 0 var(--s-1);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.agent-pane .agent-follow-up .ghost-btn { margin-top: var(--s-2); font-size: var(--t-meta); }
+.agent-pane .agent-follow-up .ghost-btn:focus-visible,
+.agent-pane .turn-follow-up:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 /* ----------------------------------------------------------------- turns --- */
 
 .agent-pane .agent-turns h3 {
@@ -240,6 +257,18 @@
   color: var(--ink);
 }
 .agent-pane .turn-hint { color: var(--ink-muted); font-style: italic; }
+.agent-pane .turn-context {
+  margin: var(--s-1) 0 0;
+  font-size: var(--t-meta);
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+.agent-pane .turn-context:empty { display: none; }
+.agent-pane .turn-detail .turn-follow-up {
+  margin-top: var(--s-3);
+  font-family: var(--font-ui);
+  font-size: var(--t-meta);
+}
 
 .agent-pane .turn-citations {
   margin: var(--s-3) 0 0;

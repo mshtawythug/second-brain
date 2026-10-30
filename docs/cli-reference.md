@@ -918,7 +918,14 @@ Where the server does not serve confidential bodies, an answer that draws on a
 confidential note is withheld, and the card says so with no link. The tab
 remembers the questions this browser tab asked, by id only, for as long as the
 server keeps the answer (10 minutes); after a reload a card is labelled by the
-time it was asked. On a `--read-only` or `--host` / `--lan` server the tab is
+time it was asked. **Follow up** on an answer asks the next question in context:
+the search plan sees the earlier questions and answers (at most the last three),
+so a question such as *and when?* is planned as a search for the thing you were
+asking about, while the answer itself is written only from what the searches find
+now. Those turns come from the cards on the page and are never stored, so a reload
+ends the conversation and a card restored after one offers no **Follow up**. A
+follow-up always plans, so *Quick answer* is off for it; **New question** drops
+the context. On a `--read-only` or `--host` / `--lan` server the tab is
 disabled and says why: use `brain ask` from a terminal.
 
 The tab sits on these routes. On a
@@ -956,7 +963,7 @@ discards an unsubmitted file. An upload's result also carries
 
 The Agent tab's backend asks a question as a job
 on the same worker, one at a time with ingest. `POST /api/ask` with JSON
-`{question, no_loop?}` (a question of at most 2,000 characters; `no_loop`
+`{question, no_loop?, history?}` (a question of at most 2,000 characters; `no_loop`
 defaults to false) answers 202 with a job of kind `ask`, which runs `brain ask`'s
 plan, retrieve, reflect and synthesize loop in `hybrid` mode. Poll it with
 `GET /api/jobs/{id}?after=<seq>`: each step is an event (`plan`, `retrieve`,
@@ -973,7 +980,13 @@ and a citation of a confidential or unknown-level document is withheld, with the
 answer, where it does not. Ask jobs are never listed by `GET /api/jobs`; a result
 is readable only by its id, and only for 10 minutes. `GET /api/ask/config`
 reports whether asking is available and why not (`read_only`,
-`requires_loopback` or `jobs_unavailable`), the question cap and the modes. Like
+`requires_loopback` or `jobs_unavailable`), the question cap, the follow-up turn
+cap (`max_history_turns`) and the modes. A follow-up sends `history`, a list of
+earlier `{question, answer}` turns, oldest first. Each must be non-empty, the
+question at most 2,000 characters and the answer at most 8,000 (otherwise 400
+`invalid_history` or `history_turn_too_long`), and history with `no_loop: true` is
+400 `history_requires_loop`. The server keeps the newest three turns, then the
+newest that fit in 2,000 tokens, and shows them to the plan step only. Like
 ingest, asking is refused on `--read-only` (403 `read_only`) and over `--host` /
 `--lan` (403 `ask_requires_loopback`).
 

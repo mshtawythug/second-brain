@@ -16,6 +16,18 @@
  * answer above all, reaches the page as text. `sessionStorage` holds ask ids
  * only, never a question or an answer (plan doc D3).
  *
+ * FOLLOW UP (RM-18c, A5). "Follow up" on a turn sets the next ask's `history` to
+ * that turn's own history plus its question and answer, the last
+ * `config.max_history_turns` of them. Both come from the turn records this page
+ * holds in memory, the text it is already showing: nothing is stored or
+ * re-fetched, so a reload ends the conversation and no answer outlives its page
+ * (A10, RM-18b's D3). A fresh ask sends no `history` at all, and a follow-up always
+ * plans, so Quick answer is off while one is set up. The server re-checks the shape
+ * and applies the cap itself. The context is spent by the submit that sends it,
+ * which is also the only thing that can evict the turn it quotes (track() runs
+ * after clearFollowUp(); a settled turn is no longer polled, so onGone never
+ * drops it), so no follow-up outlives its turn on the page.
+ *
  * WAITING FOR AN INGEST (A1, plan doc D4). One worker runs ingest and ask jobs,
  * from a FIFO queue. A snapshot carries no queue position, so while an ask is
  * queued the tab reads `GET /api/jobs`, which lists ingest jobs and never asks
@@ -32,7 +44,7 @@ import {
   wasSettled,
 } from "/static/js/jobs.js";
 import {
-  UUID_RE, announcement, createTurn, isSettled, updateTurn,
+  UUID_RE, announcement, canFollowUp, createTurn, isSettled, updateTurn,
 } from "/static/js/ask_view.js";
 
 const SCOPE = "ask";
@@ -48,6 +60,8 @@ const UNAVAILABLE = {
 const turns = new Map();
 let config = null;
 let loading = null;
+/* The follow-up being set up: { id, history }, or null for a fresh ask. */
+let followUp = null;
 
 function announce(text) {
   if (!text) return;
@@ -85,6 +99,7 @@ async function loadConfig() {
   $("agent-question-hint").textContent =
     `Up to ${config.max_question_chars} characters. Answers are plain text; `
     + "a number in brackets opens the note it cites.";
+  $("agent-follow-up-hint").textContent = followUpHint(config.max_history_turns);
   if (!config.enabled) {
     notice.textContent = UNAVAILABLE[config.reason] || "The agent is not available on this server.";
     notice.hidden = false;
@@ -92,6 +107,13 @@ async function loadConfig() {
   }
   notice.hidden = true;
   $("agent-fieldset").disabled = false;
+}
+
+/* The server's turn cap, never restated here (RM-18c). */
+function followUpHint(max) {
+  const seen = max === 1 ? "the last question and answer" : `the last ${max} questions and answers`;
+  return `The search plan sees ${seen}; the answer cites only what it finds now. `
+    + "A follow-up always plans, so Quick answer is off.";
 }
 
 function fromSnapshot(snapshot) {
@@ -107,10 +129,11 @@ function fromSnapshot(snapshot) {
   };
 }
 
-function newRecord(snapshot, question) {
+function newRecord(snapshot, question, history = []) {
   return {
     id: snapshot.id,
     question,
+    history,
     createdAt: snapshot.created_at,
     state: snapshot.state,
     cancellable: snapshot.cancellable,
@@ -223,6 +246,39 @@ function drop(id) {
   turns.delete(id);
 }
 
+/* The turns a follow-up of `record` sends: its own, then itself, newest last. */
+function historyAfter(record) {
+  const max = config && Number.isInteger(config.max_history_turns)
+    ? config.max_history_turns : 0;
+  if (max < 1) return [];
+  const prior = Array.isArray(record.history) ? record.history : [];
+  return [...prior, { question: record.question, answer: record.result.answer }].slice(-max);
+}
+
+function syncFollowUp() {
+  const quick = $("agent-no-loop");
+  const last = followUp ? followUp.history[followUp.history.length - 1] : null;
+  $("agent-follow-up-text").textContent = last ? `Following up on: ${last.question}` : "";
+  $("agent-follow-up").hidden = !followUp;
+  quick.disabled = Boolean(followUp);
+  if (followUp) quick.checked = false;
+}
+
+function startFollowUp(id) {
+  const entry = turns.get(id);
+  if (!entry || !canFollowUp(entry.record)) return;
+  const history = historyAfter(entry.record);
+  if (!history.length) return;
+  followUp = { id, history };
+  syncFollowUp();
+  $("agent-question").focus();
+}
+
+function clearFollowUp() {
+  followUp = null;
+  syncFollowUp();
+}
+
 function resumeRemembered() {
   for (const id of rememberedJobs(SCOPE).reverse()) {
     if (turns.has(id)) continue;
@@ -252,12 +308,15 @@ async function onSubmit(event) {
   if (message) return;
   const submit = $("agent-submit");
   submit.disabled = true;
+  /* History only after "Follow up" was pressed: a fresh ask's body is unchanged. */
+  const history = followUp ? followUp.history : null;
+  const body = { question, no_loop: $("agent-no-loop").checked };
+  if (history) body.history = history;
   try {
-    const snapshot = await submitJob(
-      "/api/ask", { question, no_loop: $("agent-no-loop").checked }, { scope: SCOPE },
-    );
+    const snapshot = await submitJob("/api/ask", body, { scope: SCOPE });
     $("agent-question").value = "";
-    track(newRecord(snapshot, question), { immediate: false });
+    clearFollowUp();
+    track(newRecord(snapshot, question, history || []), { immediate: false });
     announce(announcement(turns.get(snapshot.id).record));
   } catch (error) {
     showError(error.message);
@@ -296,6 +355,10 @@ function onTurnsClick(event) {
     onCancel(target.closest(".turn"), target);
     return;
   }
+  if (target.dataset.action === "follow-up") {
+    startFollowUp(target.closest(".turn").dataset.jobId);
+    return;
+  }
   /* A citation is a real link, so a modified click opens a new tab. */
   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
   const id = linkedId(target);
@@ -313,4 +376,8 @@ export function wireAsk() {
   document.querySelector('.tab[data-tab="agent"]').addEventListener("click", onTabShown);
   $("agent-form").addEventListener("submit", onSubmit);
   $("agent-turns").addEventListener("click", onTurnsClick);
+  $("agent-follow-up-clear").addEventListener("click", () => {
+    clearFollowUp();
+    $("agent-question").focus();
+  });
 }
