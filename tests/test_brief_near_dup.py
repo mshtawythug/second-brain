@@ -16,7 +16,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from brain import chat, cli, near_dup_store
+from brain import chat, cli, near_dup, near_dup_store
 from brain.brief import BriefData, assemble_brief, terminal_sections, write_brief_to_vault
 from brain.brief_delivery import render_delivery
 from brain.brief_publish import build_brief
@@ -72,12 +72,20 @@ def _brief(**overrides: Any) -> BriefData:
     return BriefData(**fields)
 
 
-def _seed_pairs(conn: psycopg.Connection[Any]) -> None:
-    """Three open pairs: one plain, one with a confidential end, one with a draft end."""
-    for seed, kwargs in ((1, {}), (2, {"sensitivity": "confidential"}), (3, {"draft": True})):
+def _seed_pairs(conn: psycopg.Connection[Any], *, end: int = 0) -> None:
+    """Three open pairs: one plain, one with a confidential end, one with a draft end.
+
+    The flagged document is the pair's STORED ``doc_a`` (``end=0``) or ``doc_b`` (``end=1``),
+    never an insertion-order pick, so a gate on one end only fails for one of the two.
+    """
+    flags = (None, "sensitivity = 'confidential'", "draft = TRUE")
+    for seed, flag in enumerate(flags, start=1):
         text = body(400, seed)
-        insert_doc(conn, text, **kwargs)
-        insert_doc(conn, near_copy(text))
+        first = insert_doc(conn, text)
+        second = insert_doc(conn, near_copy(text))
+        if flag is not None:
+            target = near_dup.ordered_pair(first, second)[end]
+            conn.execute(f"UPDATE documents SET {flag} WHERE id = %s", (target,))
     near_dup_store.scan(conn)
 
 
@@ -88,10 +96,11 @@ def _assemble(conn: psycopg.Connection[Any], cfg: Config, *, gated: bool) -> Bri
     )
 
 
+@pytest.mark.parametrize("end", [0, 1], ids=["doc_a", "doc_b"])
 def test_assemble_brief_counts_open_pairs_under_each_lens(
-    test_db: psycopg.Connection[Any], tmp_path: Path
+    test_db: psycopg.Connection[Any], tmp_path: Path, end: int
 ) -> None:
-    _seed_pairs(test_db)
+    _seed_pairs(test_db, end=end)
 
     assert _assemble(test_db, _cfg(tmp_path), gated=False).possible_duplicates == 3
     assert _assemble(test_db, _cfg(tmp_path), gated=True).possible_duplicates == 1

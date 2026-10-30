@@ -11,7 +11,8 @@ description: >
   their brain keeps failing to answer, or wants to be told when new
   notes match a saved search, or which notes are near-copies. Backs
   `brain brief`, `brain watch`, `brain dedup`, `brain resurface`,
-  `brain review`, `brain timeline`, `brain connect`, and `brain gaps`. To answer a specific question use `consult-brain`;
+  `brain review`, `brain timeline`, `brain connect`, and `brain gaps`.
+  To answer a specific question use `consult-brain`;
   for one composed cited answer use `brain-ask`; for themes across a
   relationship use `brain-graph`; for open action items use
   `brain-todo`; to jot a thought into the inbox use `brain-capture`.

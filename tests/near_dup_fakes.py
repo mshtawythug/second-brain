@@ -1,7 +1,7 @@
 """Synthetic documents for the near-duplicate tests (RM-19).
 
 Every body is built from a fixed word list with a seeded generator, so no test carries real
-content. ``near_copy`` changes one ten-word sentence, which keeps a 400-word body well above the
+content. ``near_copy`` changes one nine-word sentence, which keeps a 400-word body well above the
 0.85 cut; ``unrelated`` draws from a different seed.
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ def body(words: int = 400, seed: int = 1) -> str:
 
 
 def near_copy(text: str) -> str:
-    """``text`` with one ten-word sentence in the middle replaced."""
+    """``text`` with one nine-word sentence in the middle replaced."""
     tokens = text.split()
     middle = len(tokens) // 2
     return " ".join(tokens[:middle] + _REPLACEMENT + tokens[middle + len(_REPLACEMENT) :])

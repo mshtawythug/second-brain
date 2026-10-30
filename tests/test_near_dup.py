@@ -32,7 +32,7 @@ def _text(words: int, seed: int) -> str:
 
 
 def _with_sentence_changed(text: str) -> str:
-    """The same text with one ten-word sentence in the middle replaced."""
+    """The same text with one nine-word sentence in the middle replaced."""
     words = text.split()
     middle = len(words) // 2
     replacement = [

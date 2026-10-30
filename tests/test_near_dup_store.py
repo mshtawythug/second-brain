@@ -324,16 +324,24 @@ def test_list_pairs_filters_by_status_and_limit(test_db: psycopg.Connection[Any]
         near_dup_store.list_pairs(test_db, limit=0)
 
 
-def test_count_open_gated_excludes_confidential_and_draft_ends(
-    test_db: psycopg.Connection[Any],
+@pytest.mark.parametrize("end", [0, 1], ids=["doc_a", "doc_b"])
+@pytest.mark.parametrize(
+    "flag", ["sensitivity = 'confidential'", "draft = TRUE"], ids=["confidential", "draft"]
+)
+def test_count_open_gated_excludes_a_confidential_or_draft_end(
+    test_db: psycopg.Connection[Any], flag: str, end: int
 ) -> None:
-    # R4: the gated (published) count says nothing about confidential or draft pairs.
+    # R4: the gated (published) count says nothing about confidential or draft pairs. The
+    # flagged document is chosen by its STORED position (doc_a < doc_b), not by insertion
+    # order, so a gate on one end only fails on one of the two cases.
     _seed_pair(test_db, seed=1)
-    _seed_pair(test_db, seed=2, sensitivity="confidential")
-    _seed_pair(test_db, seed=3, draft=True)
+    first, second = _seed_pair(test_db, seed=2)
     near_dup_store.scan(test_db)
+    test_db.execute(
+        f"UPDATE documents SET {flag} WHERE id = %s", (_ordered(first, second)[end],)
+    )
 
-    assert near_dup_store.count_open(test_db, exclude_confidential=False) == 3
+    assert near_dup_store.count_open(test_db, exclude_confidential=False) == 2
     assert near_dup_store.count_open(test_db, exclude_confidential=True) == 1
 
 
