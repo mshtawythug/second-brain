@@ -4945,9 +4945,7 @@ def brief(
     suggestions are best-effort — skipped silently if Ollama is down or
     ``--no-enrich`` is given.
     """
-    from dataclasses import replace
-
-    from .brief import assemble_brief, suggest_next_steps, write_brief_to_vault
+    from .brief_publish import build_brief
 
     cfg = Config.load()
     since_hours = (
@@ -4968,64 +4966,16 @@ def brief(
     else:
         on_date = date_cls.today()
 
-    # F6 — same two-audience split as ``brain review weekly`` above, and for the
-    # same reason: ``data`` is the operator's terminal (and ``--json``), built
-    # permissively per ``assemble_brief``'s documented default; ``published`` is
-    # the ``<vault>/daily/<YYYY>/<date>-brief.md`` page, which carries no
-    # ``sensitivity`` frontmatter key (``brief.write_brief_to_vault``) and sits
-    # in a ``daily/`` folder absent from Quartz's ``ignorePatterns``, so Quartz
-    # publishes it. Built as a second gated payload rather than a filter of the
-    # first because ``DocumentRow`` / ``TodoRow`` / ``PinnedDoc`` do not carry
-    # ``sensitivity`` -- see the fuller note at ``review_weekly``.
-    with connect(cfg.database_url) as conn:
-        data = assemble_brief(
-            conn,
-            cfg,
-            since_hours=since_hours,
-            todo_since_days=todo_since_days,
-            on_date=on_date,
-            exclude_confidential=False,
-        )
-        published = (
-            assemble_brief(
-                conn,
-                cfg,
-                since_hours=since_hours,
-                todo_since_days=todo_since_days,
-                on_date=on_date,
-                exclude_confidential=True,
-            )
-            if wiki
-            else None
-        )
-    # Compared while BOTH still carry ``suggestions=[]``, so this is a straight
-    # question about the assembled rows. It decides only whether the published
-    # page needs its OWN LLM round-trip: ``suggest_next_steps`` feeds action-item
-    # BODY text into the prompt, so suggestions derived from the permissive
-    # payload are confidential-derived and must never be written to the page.
-    # When the two payloads are equal there is nothing to re-derive from, and
-    # reusing the one call is exact rather than an approximation. Being wrong
-    # here can only cost a second Ollama call, never a disclosure.
-    withheld = published is not None and published != data
-    if not no_enrich:
-        suggestions = suggest_next_steps(data, cfg)
-        if suggestions:
-            data = replace(data, suggestions=suggestions)
-        if published is not None:
-            published = replace(
-                published,
-                suggestions=(
-                    suggest_next_steps(published, cfg) if withheld else suggestions
-                ),
-            )
-
-    # --wiki is independent of the output format: write the vault page whether
-    # the terminal output is Rich or JSON (the write happens before the --json
-    # early-return so `--json --wiki` doesn't silently drop the page).
-    written_path = (
-        write_brief_to_vault(cfg.vault_path, on_date, published)
-        if published is not None
-        else None
+    # The F6 two-audience build (terminal payload + gated published page) lives
+    # in ``brief_publish.build_brief`` (RM-15). It writes the --wiki page before
+    # this returns, so the --json early-return below cannot drop it.
+    data, written_path = build_brief(
+        cfg,
+        on_date=on_date,
+        since_hours=since_hours,
+        todo_since_days=todo_since_days,
+        enrich=not no_enrich,
+        wiki=wiki,
     )
 
     if json_output:
