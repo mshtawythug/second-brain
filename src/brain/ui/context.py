@@ -176,6 +176,14 @@ class UiContext:
     #: Fail-closed default, like ``serve_confidential_titles``; set by
     #: ``server.build_context`` as ``loopback and not read_only``.
     ingest_enabled: bool = False
+    #: Whether ``GET /api/notes/{id}`` may add ``abs_path``, the note file's
+    #: absolute path, for the inspector's "Copy path" button (RM-23). True only
+    #: on a loopback bind: ``server.build_context`` sets it from the same
+    #: :func:`address_class` verdict as ``ingest_enabled`` (D8), because an
+    #: absolute filesystem path is information a LAN reader does not need. Not
+    #: widened by ``read_only`` or ``--include-confidential``. Fail-closed
+    #: default; elsewhere the button copies ``vault_path``.
+    serve_abs_path: bool = False
     #: Where an upload waits for its job (RM-13, Ingest spec §7.4). ``None`` makes
     #: the upload routes answer 503 ``jobs_unavailable`` and the config offer no
     #: extension. Built by ``server.build_context`` on a bind that may ingest; the

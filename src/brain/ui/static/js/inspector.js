@@ -74,6 +74,35 @@ export async function openNote(id) {
   }
 }
 
+/* RM-23: "Copy path", so the note can be opened in any editor.
+ *
+ * Copies `abs_path` when the server sent one (a loopback bind only, and never
+ * for a withheld note) and `vault_path` otherwise. Rendered only where the
+ * clipboard API exists: an `http://127.0.0.1` page is a secure context, a
+ * `--lan` `http://` page is not, so over the LAN the button is simply absent.
+ * A rejected write (a denied permission) is reported, never swallowed. Both
+ * outcomes are written with textContent. No `obsidian://` link (RM-23.D1). */
+function copyPathControl(note) {
+  const path = note.abs_path || note.vault_path;
+  if (!path || !window.isSecureContext || !navigator.clipboard) return null;
+  const wrap = el("span", "copy-path");
+  const button = el("button", "ghost-btn", "Copy path");
+  button.type = "button";
+  button.title = path;
+  const status = el("span", "copy-path-state");
+  status.setAttribute("role", "status");
+  button.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(path);
+      status.textContent = "Copied";
+    } catch (error) {
+      status.textContent = `Copy failed (${(error && error.name) || "Error"})`;
+    }
+  });
+  wrap.append(button, status);
+  return wrap;
+}
+
 /* THE HOST HAS EXACTLY TWO ROWS. READ THIS BEFORE ADDING ANYTHING TO IT.
  *
  * `.inspector` is `display: grid; grid-template-rows: auto 1fr` (layout.css),
@@ -155,6 +184,10 @@ export function renderInspector() {
   const status = el("span", "save-state", SAVE_LABELS[state.saveStatus]);
   status.dataset.state = state.saveStatus;
   bar.appendChild(status);
+
+  /* Read-only too: copying a path mutates nothing. */
+  const copy = copyPathControl(note);
+  if (copy) bar.appendChild(copy);
 
   if (!readOnly) {
     const draft = el("button", "ghost-btn", note.draft ? "○ Draft" : "Published");

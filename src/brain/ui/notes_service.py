@@ -211,6 +211,11 @@ def read_note(
     if not ctx.read_only:
         payload["body"] = body
     payload["body_hash"] = body_hash(body)
+    # RM-23: the "Copy path" button's absolute path. Loopback only
+    # (``ctx.serve_abs_path``), and AFTER the withheld return above, so a
+    # withheld note never carries it. Only for a file an editor could open.
+    if ctx.serve_abs_path and path is not None and path.is_file():
+        payload["abs_path"] = str(path.resolve())
     # ONE local, passed to BOTH walks — this hoist *is* the S4 guard, and it
     # lives here rather than inside ``extract_headings`` on purpose. Rendering
     # the stripped body while extracting headings from ``body`` would put an

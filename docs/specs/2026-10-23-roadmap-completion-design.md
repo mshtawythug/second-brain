@@ -3640,7 +3640,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-21 | Tag rename, merge, suggest-merges | S | 5 | RM-06 | DONE (#87) |
 | RM-22a | Engagement readout and gate | S | 5 | — | TODO |
 | RM-22b | Engagement ranking stage (off; built when RM-22a's gate is met) | M | 5 | RM-22a, RM-09, RM-14c | TODO |
-| RM-23 | Copy-path affordance | XS | 5 | — | TODO |
+| RM-23 | Copy-path affordance | XS | 5 | — | DONE (#89) |
 | RM-24 | `--entity` search filter (NEEDS USER CONFIRMATION) | S | 5 | RM-09 | TODO |
 | RM-25 | H-1 move identity | S | 6 | RM-19 | TODO |
 | RM-26 | H-2 + H-4 owed watcher work | S | 6 | — | TODO |

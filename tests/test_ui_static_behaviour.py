@@ -819,6 +819,47 @@ def check_resize_is_not_inert(js: str) -> None:
 # stack change that broke it while the number stayed 48.
 
 
+def check_copy_path_is_gated_and_reported(js: str) -> None:
+    """RM-23 — "Copy path" exists only where the clipboard API does, and never fails silently.
+
+    ``window.isSecureContext`` is the gate the ticket names: an ``http://127.0.0.1``
+    page is a secure context and a ``--lan`` ``http://`` page is not, so over the
+    LAN the button is simply absent. ``navigator.clipboard`` is checked as well,
+    because a secure context can still lack the API. A rejected ``writeText``
+    (a denied permission) must reach the status text (AC 3), and both outcomes
+    are written with ``textContent`` (AC 4; ``check_single_innerhtml`` holds the
+    count). ``renderInspector`` must actually call it, or none of this is
+    reachable.
+    """
+    control = _block(js, "function copyPathControl(note)", "\n}\n")
+    gate = _block(control, "if (", ") return null;")
+    assert "!window.isSecureContext" in gate, (
+        "Copy path is rendered without checking window.isSecureContext, so it "
+        "appears on a --lan http:// page where the clipboard API is unavailable"
+    )
+    assert "!navigator.clipboard" in gate, (
+        "Copy path is rendered without checking navigator.clipboard exists"
+    )
+    assert "note.abs_path || note.vault_path" in control, (
+        "Copy path does not prefer abs_path and fall back to vault_path"
+    )
+    assert "navigator.clipboard.writeText(path)" in control, (
+        "Copy path does not write the path with navigator.clipboard.writeText"
+    )
+    attempt = _block(control, "try {", "} catch (")
+    assert 'status.textContent = "Copied";' in attempt, (
+        "a successful copy is not reported in the status text"
+    )
+    failure = _block(control, "} catch (", "\n    }\n")
+    assert "status.textContent = " in failure, (
+        "a clipboard failure is not reported in the status text (RM-23 AC 3)"
+    )
+    render = _block(js, "export function renderInspector(", "\nexport async function saveNote(")
+    assert "copyPathControl(note)" in render, (
+        "renderInspector never calls copyPathControl, so the button is unreachable"
+    )
+
+
 def check_color_scheme(css: str) -> None:
     """FIX 8 — native furniture follows ``color-scheme``, not the tokens.
 
@@ -1995,6 +2036,28 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
     # innerHTML on any element in the front end.
     ("innerhtml-is-not-the-body", check_single_innerhtml, "js/*",
      "body.innerHTML = note.html;", "bodyZ.innerHTML = note.html;", 1),
+    # RM-23 AC 4: the copy status is text. Its sink moved to innerHTML makes two.
+    ("copy-path-status-not-innerhtml", check_single_innerhtml, "js/*",
+     'status.textContent = "Copied";', 'status.innerHTML = "Copied";', 1),
+    # RM-23: one row per clause of the render gate, so each is proven alone.
+    ("copy-path-needs-a-secure-context", check_copy_path_is_gated_and_reported,
+     "js/inspector.js", "!path || !window.isSecureContext || ", "!path || ", 1),
+    ("copy-path-needs-the-clipboard-api", check_copy_path_is_gated_and_reported,
+     "js/inspector.js", " || !navigator.clipboard) return null;", ") return null;", 1),
+    ("copy-path-prefers-abs-path", check_copy_path_is_gated_and_reported,
+     "js/inspector.js", "const path = note.abs_path || note.vault_path;",
+     "const path = note.vault_path;", 1),
+    ("copy-path-writes-the-clipboard", check_copy_path_is_gated_and_reported,
+     "js/inspector.js", "await navigator.clipboard.writeText(path);",
+     "await Promise.resolve(path);", 1),
+    # AC 3: the rejection branch's status write removed; the success one survives.
+    ("copy-path-reports-a-failure", check_copy_path_is_gated_and_reported,
+     "js/inspector.js", "status.textContent = `Copy failed", "void `Copy failed", 1),
+    ("copy-path-reports-a-success", check_copy_path_is_gated_and_reported,
+     "js/inspector.js", 'status.textContent = "Copied";', 'void "Copied";', 1),
+    # Reachability: the helper survives, its one call does not.
+    ("copy-path-is-rendered", check_copy_path_is_gated_and_reported,
+     "js/inspector.js", "const copy = copyPathControl(note);", "const copy = null;", 1),
     # REACHABILITY, not presence. Both entries mutate js/main.js — the file the
     # integrator owns — because "the module exists and its own tests pass" and
     # "a user can reach it" are different propositions, and this phase shipped
