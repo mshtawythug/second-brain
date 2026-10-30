@@ -34,6 +34,39 @@ git tag scheme:
 - Built on the coordinator's ruling adopting the roadmap spec's §5 U4
   recommendation; no user answer yet.
 
+### Fixed — a replacement note renamed at once no longer inherits the old note's identity (RM-25)
+
+- When a note was replaced by an unrelated file that had no frontmatter `id`,
+  and the file was renamed within one watcher debounce window, the vault
+  watcher gave it the old note's id and every backlink pointing at it (H-1,
+  the residue PR #52 recorded). An id-less rename destination is now compared
+  by content: the word 5-gram shingles of the old row's stored content and of
+  the file's body. Below a Jaccard overlap of 0.2 it is a different document,
+  so the old row is deleted and the file is indexed fresh with its own id.
+- A note with fewer than 8 shingles on either side (short or empty) keeps the
+  in-place rename, as before, because an overlap that small means nothing. A
+  file that carries an `id` is still decided by the id alone.
+- The accepted trade: a long note rewritten almost entirely and renamed within
+  one debounce window is treated as new, and loses its backlinks.
+
+### Added — the engagement readout: `brain usage --engagement` (RM-22a)
+
+- **`brain usage --engagement [--json]` says whether there is enough engagement
+  data to learn from.** It counts document opens and clicks by surface, the
+  distinct documents opened, the `rated useful` and `rated irrelevant` ratings,
+  and the share of reads that came from a search session, over `--days`. It
+  also reports the `interactions` table's rows and bytes, which the future
+  pruning ticket (RM-58) needs.
+- **The gate line is always judged over 90 days**, whatever `--days` says. It
+  needs 500 reads across 100 distinct documents and 30 explicit ratings. These
+  are named constants in `brain.engagement`, with their rationale. The
+  interactions-aware ranking stage (RM-22b) is built only once the gate is met.
+- Reads include the `opened` row `brain ask` records for each citation in an
+  answer. The search-session share tells them apart from reads after a search.
+- Counts only: no title, query, document id or agent. `brain usage` without
+  the flag is byte-identical to before (a golden test captured before the flag
+  landed). `--raw-queries` with `--engagement` exits 2.
+
 ### Added — `brain ui`: Copy path (RM-23)
 
 - **The note pane has a Copy path button**, so a note can be opened in any editor.

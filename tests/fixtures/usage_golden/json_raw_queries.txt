@@ -1,0 +1,88 @@
+{
+  "days": 30,
+  "totals": {
+    "searches": 4,
+    "sessions": 1,
+    "opens": 2,
+    "feedback": 2,
+    "documents_ingested": 2,
+    "zero_result": 1,
+    "zero_result_rate": 0.25,
+    "read_events": 6,
+    "write_events": 4,
+    "duration_p50_ms": 40.0,
+    "duration_p95_ms": 80.0,
+    "payload_tokens_total": 2200,
+    "measured_calls": 3,
+    "baseline_tokens_total": 2400,
+    "counterfactual_payload_tokens": 1800,
+    "counterfactual_calls": 2,
+    "counterfactual_savings_tokens": 600
+  },
+  "daily": [
+    {
+      "day": "<DATE>",
+      "searches": 4,
+      "sessions": 1,
+      "opens": 2,
+      "zero_result": 1
+    }
+  ],
+  "by_surface": [
+    {
+      "surface": "cli",
+      "searches": 3,
+      "opens": 1,
+      "feedback": 1
+    },
+    {
+      "surface": "mcp",
+      "searches": 1,
+      "opens": 1,
+      "feedback": 0
+    },
+    {
+      "surface": "ui",
+      "searches": 0,
+      "opens": 0,
+      "feedback": 1
+    }
+  ],
+  "by_agent": [
+    {
+      "agent_id": null,
+      "label": "(unattributed)",
+      "searches": 3,
+      "opens": 1,
+      "feedback": 2
+    },
+    {
+      "agent_id": "agent-one",
+      "label": "agent-one",
+      "searches": 1,
+      "opens": 1,
+      "feedback": 0
+    }
+  ],
+  "top_queries": [
+    {
+      "query": "synthetic roadmap planning",
+      "count": 2
+    },
+    {
+      "query": "synthetic agent lookup",
+      "count": 1
+    },
+    {
+      "query": "synthetic zero hit query",
+      "count": 1
+    }
+  ],
+  "ingested_by_source": [
+    {
+      "source_kind": null,
+      "label": "manual",
+      "count": 2
+    }
+  ]
+}

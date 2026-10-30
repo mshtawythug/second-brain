@@ -1,0 +1,38 @@
+Brain usage — last 7 day(s)
+  searches 4  ·  opens 2  ·  docs ingested 2  ·  sessions 1  ·  feedback 2  ·  zero-result 1 (25.0%)  ·  latency p50 40ms  ·  p95 80ms
+  tokens served 2,200 (measured, 3 of 4 calls) · counterfactual savings 600 over 2 brief calls (−25.0%)
+
+Activity by day (last 14 shown)                           
+┏━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━━┓
+┃ Day        ┃ Searches ┃ Sessions ┃ Opens ┃ Zero-result ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━━┩
+│ <DATE> │        4 │        1 │     2 │           1 │
+└────────────┴──────────┴──────────┴───────┴─────────────┘
+By surface                               
+┏━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━┓
+┃ Surface ┃ Searches ┃ Opens ┃ Feedback ┃
+┡━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━┩
+│ cli     │        3 │     1 │        1 │
+│ mcp     │        1 │     1 │        0 │
+│ ui      │        0 │     0 │        1 │
+└─────────┴──────────┴───────┴──────────┘
+By agent                                        
+┏━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━┓
+┃ Agent          ┃ Searches ┃ Opens ┃ Feedback ┃
+┡━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━┩
+│ (unattributed) │        3 │     1 │        2 │
+│ agent-one      │        1 │     1 │        0 │
+└────────────────┴──────────┴───────┴──────────┘
+Top queries                           
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Query                      ┃ Count ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ synthetic roadmap planning │     2 │
+│ synthetic agent lookup     │     1 │
+└────────────────────────────┴───────┘
+Ingested by source    
+┏━━━━━━━━┳━━━━━━━━━━━┓
+┃ Source ┃ Documents ┃
+┡━━━━━━━━╇━━━━━━━━━━━┩
+│ manual │         2 │
+└────────┴───────────┘
