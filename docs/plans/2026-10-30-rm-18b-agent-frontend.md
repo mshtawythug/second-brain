@@ -188,7 +188,28 @@ UUID check dropped; the citation-range check dropped; each must turn a named tes
    (`ASK_HREF_SITE`). No existing line hit any of them: `ask.js` only READS `link.href` and
    `location.href` (in `new URL(...)`), which the `=(?!=)` patterns do not match. Each pattern has
    an example that trips it alone (an isolation test), and a GUARDS row built from that example.
+   (Round 2 widened this again; see below.)
 4. `jobs.js` keeps only ids shaped like `uuid.uuid4().hex` (`JOB_ID_RE`) in the `ask` scope.
 5. D6's quoted step text corrected.
 6. A resumed placeholder no longer reads `GET /api/jobs` before its first poll.
 7. Step phases are tested with `Object.hasOwn`, so `toString` / `constructor` are never steps.
+
+## Review round 2 (rev-83, sec-83 at `da3b245`): the last widening of the sink guard
+
+Test-only; no JS changed. `ASK_FORBIDDEN_SINKS` gains, each with its own isolation example and
+generated GUARDS row:
+
+1. **An attribute allowlist.** Any `setAttribute(` whose name is not a quoted `aria-` literal, and
+   any `setAttributeNS(` whose second argument is not one. This replaces the ticket's
+   `setAttribute("on…")` pattern, which it subsumes; `ASK_ON_HANDLER_EXAMPLE` keeps a GUARDS row
+   and an isolation case for `on…`. The tab's three real calls (`aria-labelledby`,
+   `aria-describedby`, `aria-disabled`) are positive controls that must still pass.
+2. **Bracket notation:** `["href" | "src" | "srcset" | "style" | "srcdoc" | "action" |
+   "formaction" | "location"]`, and `.style[`.
+3. **Navigation and URL setters:** `open(`, `.srcset =`, `.action =` / `.formAction =`. The last
+   is scoped with `(?<!dataset)`: `ask_view.js` sets `link.dataset.action = "open"` and
+   `button.dataset.action = "cancel"` (the tab's own `data-action` markers). `open(` hit nothing.
+
+**The guard is a regression net, not a parser.** It reads source text, so an indirection can always
+slip past it. The defences are the textContent-only rule and the CSP (`script-src 'self'`, no
+`unsafe-inline`). Gaps found after this round go to the backlog, not into another widening here.

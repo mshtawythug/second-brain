@@ -326,6 +326,14 @@ def check_single_innerhtml(js: str) -> None:
 #: ``.style`` write or ``setProperty``, and ``.href =`` everywhere except the one
 #: UUID-checked site in :data:`ASK_HREF_SITE`.
 #:
+#: Round 2 adds: any ``setAttribute`` / ``setAttributeNS`` whose name is not a
+#: quoted ``aria-`` literal (an allowlist), bracket-notation writes of the URL and
+#: style names, ``.style[``, ``open(``, ``.srcset =`` and ``.action`` /
+#: ``.formAction =``. THIS IS A REGRESSION NET, NOT A PARSER: it reads source text,
+#: so a determined indirection can always slip past it. The real defences are the
+#: textContent-only rule and the CSP (no inline script); gaps found after round 2
+#: go to the backlog, not into another widening here.
+#:
 #: Matched ANYWHERE in the file, comments included, which is the ticket's wording
 #: ("contains"): a comment that needs the word can say "an HTML sink" instead.
 #: ``eval`` is a whole word, or "retrieval" would trip it. Each pattern matches its
@@ -340,8 +348,17 @@ ASK_FORBIDDEN_SINKS: tuple[tuple[str, str, str], ...] = (
     ("document.write", r"document\s*\.\s*write", "document.write(result.answer);"),
     ("eval", r"\beval\b", "eval(result.answer);"),
     ("new Function", r"\bnew\s+Function\b", "new Function(result.answer)();"),
-    ('setAttribute("on...")', r"""(?i)setAttribute\(\s*["'`]on""",
-     'answer.setAttribute("onclick", result.answer);'),
+    # An ALLOWLIST, not a list of dangerous names: any setAttribute whose name is
+    # not a quoted `aria-` literal (href, src, style, srcdoc, action, formaction,
+    # xlink:href, on…, or a name built at run time). It subsumes the ticket's
+    # `setAttribute("on…")`, which ASK_ON_HANDLER_EXAMPLE keeps proven.
+    ("setAttribute (non-aria)",
+     r"""setAttribute(?!NS)\s*\((?!\s*["'`]aria-[\w-]+["'`]\s*,)""",
+     'answer.setAttribute("href", result.answer);'),
+    # The name is the SECOND argument here.
+    ("setAttributeNS (non-aria)",
+     r"""setAttributeNS\s*\((?![^,()]*,\s*["'`]aria-[\w-]+["'`]\s*,)""",
+     'answer.setAttributeNS(null, "xlink:href", result.answer);'),
     ("createContextualFragment", r"createContextualFragment",
      "answer.append(document.createRange().createContextualFragment(result.answer));"),
     ("DOMParser", r"DOMParser",
@@ -360,6 +377,33 @@ ASK_FORBIDDEN_SINKS: tuple[tuple[str, str, str], ...] = (
     (".style.setProperty(", r"\.style\.setProperty\s*\(",
      'answer.style.setProperty("background", result.answer);'),
     (".href =", r"(?<!location)\.href\s*=(?!=)", "answer.href = result.answer;"),
+    # Round 2: the same writes through bracket notation, which no dotted pattern sees.
+    ('["href" | "src" | … ]',
+     r"""\[\s*["'`](?:href|src|srcset|style|srcdoc|action|formaction|location)["'`]\s*\]""",
+     'answer["href"] = result.answer;'),
+    (".style[", r"\.style\s*\[", 'answer.style["background"] = result.answer;'),
+    ("open(", r"\bopen\s*\(", "window.open(result.answer);"),
+    (".srcset =", r"\.srcset\s*=(?!=)", "answer.srcset = result.answer;"),
+    # `dataset.action` is excluded: it is the tab's own `data-action` marker
+    # (`link.dataset.action = "open"`, `button.dataset.action = "cancel"`), not a
+    # form's submit URL.
+    (".action / .formAction =", r"(?<!dataset)\.(?:formA|a)ction\s*=(?!=)",
+     "answer.formAction = result.answer;"),
+)
+
+#: The ticket's own rule-1 example, `setAttribute("on…")`, now caught by the
+#: allowlist pattern above rather than a pattern of its own; kept as a GUARDS row
+#: and an isolation case so folding it in cannot have dropped it.
+ASK_ON_HANDLER_EXAMPLE = 'answer.setAttribute("onclick", result.answer);'
+
+#: Calls the allowlist must keep allowing: the tab's three real aria setters and
+#: the namespaced form of one.
+ASK_ALLOWED_ATTRIBUTE_CALLS = (
+    'bar.setAttribute("aria-labelledby", `turn-${record.id}-phase`);',
+    'button.setAttribute("aria-describedby", `turn-${record.id}-phase`);',
+    'button.setAttribute("aria-disabled", "true");',
+    'node.setAttributeNS(null, "aria-hidden", "true");',
+    'link.dataset.action = "open";',
 )
 
 #: The ONE ``.href`` assignment the tab may make: ``noteLink`` in ``ask_view.js``,
@@ -1975,6 +2019,10 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
          "answer.append(...answerNodes(result.answer, result.citations));", example, 1)
         for name, _, example in ASK_FORBIDDEN_SINKS
     ],
+    # The ticket's `setAttribute("on…")`, folded into the allowlist pattern.
+    ("ask-view-sink-setattribute-on-handler", check_ask_has_no_html_sinks, "js/ask_view.js",
+     "answer.append(...answerNodes(result.answer, result.citations));",
+     ASK_ON_HANDLER_EXAMPLE, 1),
     # The ONE allowed .href site is allowed by its exact text: change it at all
     # (here, drop the encoding) and it is a forbidden `.href =` again.
     ("ask-view-href-site-changed", check_ask_has_no_html_sinks, "js/ask_view.js",
@@ -3115,6 +3163,16 @@ def test_each_forbidden_ask_sink_is_matched_by_its_own_pattern_alone(
     and the row would still look like proof.
     """
     assert ask_sinks_found(example) == [name]
+
+
+def test_the_on_handler_example_is_caught_by_the_attribute_allowlist() -> None:
+    assert ask_sinks_found(ASK_ON_HANDLER_EXAMPLE) == ["setAttribute (non-aria)"]
+
+
+@pytest.mark.parametrize("call", ASK_ALLOWED_ATTRIBUTE_CALLS)
+def test_the_attribute_allowlist_still_allows_aria_and_data_action(call: str) -> None:
+    """Positive control: the allowlist and the `dataset` exclusion are not just `[]`."""
+    assert ask_sinks_found(call) == []
 
 
 def test_the_allowed_href_site_is_the_one_in_ask_view_and_only_there() -> None:
