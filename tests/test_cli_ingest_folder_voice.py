@@ -553,7 +553,10 @@ def test_sigterm_is_a_system_exit_while_memos_are_transcribed(
     home: Path, drop: Path, vault: Path, tools: FakeTools, embedder: CountingEmbedder,
     test_db: psycopg.Connection[Any],
 ) -> None:
-    before = signal.getsignal(signal.SIGTERM)
+    def sentinel(signum: int, frame: Any) -> None:
+        raise AssertionError("not called")
+
+    previous = signal.signal(signal.SIGTERM, sentinel)  # rev-107b 4: not SIG_DFL
     seen: list[Any] = []
     original = tools._answer
 
@@ -565,13 +568,17 @@ def test_sigterm_is_a_system_exit_while_memos_are_transcribed(
     _memo(drop)
     _configure(home, drop)
 
-    result = _run("--configured", "--since", "2d")
+    try:
+        result = _run("--configured", "--since", "2d")
+        after = signal.getsignal(signal.SIGTERM)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
     assert result.exit_code == 0, result.output
-    assert seen and all(h not in (before, signal.SIG_DFL) for h in seen)
+    assert seen and all(h not in (sentinel, signal.SIG_DFL) for h in seen)
     with pytest.raises(SystemExit):
         seen[0](signal.SIGTERM, None)
-    assert signal.getsignal(signal.SIGTERM) == before
+    assert after is sentinel
 
 
 # --- review round 2 (PR #107): the ledger is best-effort (sec-107b N3) ----------------------
@@ -638,3 +645,24 @@ def test_the_count_is_cleared_only_after_the_ingest_succeeds(
     assert result.exit_code == 1
     assert src.is_file()
     assert _ledger(home) == {digest: 2}
+
+
+def test_a_memo_that_cannot_be_hashed_still_moves_back(
+    home: Path, drop: Path, vault: Path, tools: FakeTools, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ledger's own read of the memo (its digest) is best-effort too."""
+    src = _memo(drop)
+    _configure(home, drop)
+    tools.whisper = CappedRun(b"", 3, False, False)
+
+    def unreadable(memo: Path) -> str:
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr("brain.ingest.voice_failures._digest", unreadable)
+
+    result = _run("--configured", "--since", "2d")
+
+    assert result.exit_code == 1
+    assert src.is_file()
+    assert "the voice-failure count was not updated (PermissionError[EACCES])" in result.output

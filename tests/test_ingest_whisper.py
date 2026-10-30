@@ -290,9 +290,7 @@ def test_a_model_owned_by_another_user_is_refused(tmp_path: Path) -> None:
 
 def test_a_root_owned_model_is_accepted(tmp_path: Path) -> None:
     """``/usr/local`` installs are root's; only root could change them."""
-    model = Path("/usr/bin/afinfo")
-    if not model.is_file():  # pragma: no cover — macOS only
-        pytest.skip("needs a root-owned regular file")
+    model = Path("/bin/sh").resolve()  # root-owned on macOS and Linux
 
     assert model_file_problem(model, drop_folders=_no_folders) is None
 
@@ -377,7 +375,7 @@ def test_run_audio_tool_forwards_the_fd_and_the_file_size_limit() -> None:
 # --- review round 2 (PR #107): the directories above the model (sec-107b N1) ----------
 
 
-@pytest.mark.parametrize("mode", [0o775, 0o757, 0o1777])
+@pytest.mark.parametrize("mode", [0o775, 0o757, 0o777])
 def test_a_model_in_a_directory_others_can_write_is_refused(tmp_path: Path, mode: int) -> None:
     """Whisper opens the model by path later; whoever can write its directory can swap it."""
     model = _model(tmp_path)
@@ -407,9 +405,7 @@ def test_a_model_directory_owned_by_another_user_is_refused(tmp_path: Path) -> N
     """A root-owned file reached through a directory the checking uid does not own."""
     import os
 
-    root_owned = Path("/usr/bin/afinfo")
-    if not root_owned.is_file():  # pragma: no cover — macOS only
-        pytest.skip("needs a root-owned regular file")
+    root_owned = Path("/bin/sh").resolve()  # root-owned on macOS and Linux
     link = tmp_path / "ggml.bin"
     link.symlink_to(root_owned)
 
@@ -462,3 +458,26 @@ def test_an_unreadable_directory_above_the_model_is_unsafe(tmp_path: Path) -> No
     from brain.ingest.whisper import _dirs_safe
 
     assert _dirs_safe([tmp_path / "gone"], (0, 0)) is False
+
+
+def test_a_sticky_shared_directory_above_the_model_is_accepted(tmp_path: Path) -> None:
+    """Like ``/tmp``: others write there, but cannot rename or remove this user's entries."""
+    model = tmp_path / "sticky" / "mine" / "ggml.bin"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"synthetic model")
+    model.parent.parent.chmod(0o1777)
+    try:
+        problem = model_file_problem(model, drop_folders=_no_folders)
+    finally:
+        model.parent.parent.chmod(0o755)
+
+    assert problem is None
+
+
+def test_a_fifo_named_as_the_model_is_missing_without_blocking(tmp_path: Path) -> None:
+    import os
+
+    fifo = tmp_path / "ggml.bin"
+    os.mkfifo(fifo)
+
+    assert model_file_problem(fifo, drop_folders=_no_folders) == HINT_MISSING_MODEL

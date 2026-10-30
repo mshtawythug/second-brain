@@ -248,16 +248,24 @@ round's items are all LOW.
 - Homebrew's build flags could not be confirmed here (no install, no formula fetched), and
   users can build whisper with Core ML themselves.
 
-So `model_file_problem` now does two things:
+So the coordinator ruled for the fallback, and `model_file_problem` now does two things.
+It runs inside `resolve_whisper`, and so also in `brain doctor`.
 
-- It resolves the model strictly and `lstat`s the file: regular, owned by this uid or root,
-  no group or other write bit.
-- It requires every directory above it to be owned by this uid or root with no group or
-  other write bit. That covers the directories above the path as given and above the file
-  it resolves to. A sticky `/tmp` is refused as well.
+- It resolves the model strictly, then opens it `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` and
+  checks it with `fstat`: regular, owned by this uid or root, no group or other write bit.
+  A FIFO is "missing" and never blocks.
+- It requires every directory up to `/` to be owned by this uid or root and writable by
+  no one else. That covers the directories above the path as given and above the file it
+  resolves to. A sticky directory (`/tmp`, `1777`) is the exception: others cannot rename
+  or remove this user's entries in it.
 
-Then only this user or root can swap the model between the check and whisper's open. The
-new hint is `HINT_MODEL_DIR_UNSAFE`.
+Whisper is still given the path, so a window remains between the check and whisper's
+open. The directory rule closes it to everyone but this user and root. The new hint is
+`HINT_MODEL_DIR_UNSAFE`.
+
+`O_NOFOLLOW` on that open is defence in depth. It comes after `resolve(strict=True)`, so
+the last component is already not a symlink unless it was swapped in between, which no
+deterministic test can stage. It is the one new guard left unmutated.
 
 **N2.** `sweep_stale_tempdirs` skips an entry whose `lstat` raises `OSError` (another run
 removed it after the listing). Before, that aborted the run.
@@ -275,10 +283,23 @@ memo transcribed but not stored keeps its count.
 - The `afconvert` behaviour reads "exits 0 with the file truncated, or is killed by SIGXFSZ,
   depending on the build; both are handled".
 
+**rev-107b's last two items.**
+
+- **4.** `sigterm_as_system_exit`'s restore of `previous or SIG_DFL` was untested, because
+  pytest's SIGTERM handler is already `SIG_DFL`. A sentinel Python handler is now installed
+  first, and the tests assert it is the one restored, at the unit level and through the
+  CLI.
+- **6.** The root-owned-model tests use `/bin/sh` (resolved), which is root-owned on macOS
+  and Linux, so CI covers that branch.
+- `_digest`'s `OSError` sits inside the same best-effort guard. A CLI test has it raise, and
+  the memo still goes back.
+
 **Proof.**
 
-- New tests were red first: N1 (six cases, plus an unreadable directory), N2 (an entry
-  removed between the listing and the `stat`) and N3 (an unwritable ledger on a failure, an
-  unwritable ledger on a success, and an ingest failure after a good transcription).
-- 9 mutations, all killed.
+- New tests were red first:
+  - N1: the directory cases, a sticky parent, a FIFO model and an unreadable directory.
+  - N2: an entry removed between the listing and the `stat`.
+  - N3: an unwritable ledger on a failure, an unwritable ledger on a success, an ingest
+    failure after a good transcription, and an unreadable digest.
+- 13 mutations, all killed (9, then 4 for the coordinator's and rev-107b's follow-ups).
 - Coverage stays at 100% line and branch on the six modules.

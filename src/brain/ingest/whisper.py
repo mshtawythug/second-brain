@@ -12,11 +12,13 @@ need four things, checked in this order, and the first one missing is the hint:
 **The model is code-adjacent input** (sec-107 F6): whisper loads it into its process, so
 a model file someone else can replace is refused. It must be a regular file owned by
 this user (or root), with no group or world write bit, and not inside a configured drop
-folder (``$BRAIN_HOME/drop-folders.toml``), where files arrive from elsewhere. Whisper
-opens it by path, after this check, so **every directory above it** (above the path as
-given and above the file it resolves to) must also be owned by this user or root and
-have no group or world write bit (sec-107b N1): then nobody else can swap the file in
-between. Passing whisper an fd (``-m /dev/fd/N``) was ruled out: whisper.cpp builds with
+folder (``$BRAIN_HOME/drop-folders.toml``), where files arrive from elsewhere. The file
+is checked through an ``O_NOFOLLOW`` open and ``fstat``. Whisper opens it by path, after
+this check, so **every directory above it, up to** ``/`` (above the path as given and
+above the file it resolves to) must also be owned by this user or root and be writable
+by no one else, a sticky directory such as ``/tmp`` excepted (sec-107b N1). The window
+between the check and whisper's open remains, but only this user or root can use it.
+Passing whisper an fd (``-m /dev/fd/N``) was ruled out: whisper.cpp builds with
 Core ML derive the encoder's path from the model's (``…/ggml-base.en-encoder.mlmodelc``),
 so every memo would fail on such a build. **A
 relative ``whisper-cli``** (``shutil.which`` returns one for a relative ``PATH`` entry,
@@ -167,7 +169,7 @@ def model_file_problem(
     owners = (os.getuid() if uid is None else uid, 0)
     try:
         resolved = path.resolve(strict=True)
-        st = os.lstat(resolved)
+        st = _fstat_nofollow(resolved)
     except OSError:
         return HINT_MISSING_MODEL
     if not stat.S_ISREG(st.st_mode):
@@ -183,18 +185,29 @@ def model_file_problem(
     return None
 
 
-def _dirs_safe(dirs: Sequence[Path], owners: tuple[int, int]) -> bool:
-    """Every directory owned by one of ``owners`` with no group or world write bit.
+def _fstat_nofollow(path: Path) -> os.stat_result:
+    """``fstat`` of ``path`` opened ``O_NOFOLLOW | O_NONBLOCK`` (a FIFO never blocks)."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        return os.fstat(fd)
+    finally:
+        os.close(fd)
 
-    A sticky world-writable directory (``/tmp``) is refused too: its other users cannot
-    replace the model, but they can create the names around it first.
+
+def _dirs_safe(dirs: Sequence[Path], owners: tuple[int, int]) -> bool:
+    """Every directory owned by one of ``owners``, and writable by no one else.
+
+    A sticky directory (``/tmp``, mode ``1777``) is the exception: others can write in it,
+    but cannot rename or remove an entry they do not own, so they cannot swap a directory
+    or file of this user's below it.
     """
     for directory in dirs:
         try:
             st = os.stat(directory)
         except OSError:
             return False
-        if st.st_uid not in owners or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        shared = st.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not st.st_mode & stat.S_ISVTX
+        if st.st_uid not in owners or shared:
             return False
     return True
 

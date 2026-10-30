@@ -69,7 +69,8 @@ git tag scheme:
   - `whisper-cli` found through a relative `PATH` entry is refused.
   - The model file must be owned by you (or root), not group- or world-writable, and not
     inside a drop folder. Every directory above it must also be owned by you or root and
-    not group- or world-writable, since whisper opens it by path after the check.
+    not group- or world-writable (a sticky one such as `/tmp` is fine), since whisper
+    opens it by path after the check.
     Otherwise voice memos are off, and `brain doctor` says why.
   - In `brain ingest-folder`, stopping a run (Ctrl-C, or SIGTERM from `launchctl bootout`)
     kills whisper's whole process group and deletes the temporary WAV. The Apple Notes

@@ -364,3 +364,24 @@ def test_the_hook_does_not_rely_on_popen_restoring_signals(tmp_path: Path) -> No
     run = _run([tool, str(out)], max_file_bytes=1000, popen=popen)
 
     assert run.stdout == b"153"  # killed by SIGXFSZ (128 + 25), not an EFBIG exit 1
+
+
+def test_the_context_restores_the_python_handler_it_replaced() -> None:
+    """rev-107b 4: pytest's own SIGTERM handler is SIG_DFL, which a constant would match."""
+    import signal
+
+    from brain.ingest.capped_process import sigterm_as_system_exit
+
+    def sentinel(signum: int, frame: Any) -> None:
+        raise AssertionError("not called")
+
+    original = signal.signal(signal.SIGTERM, sentinel)
+    try:
+        with sigterm_as_system_exit():
+            inside = signal.getsignal(signal.SIGTERM)
+        after = signal.getsignal(signal.SIGTERM)
+    finally:
+        signal.signal(signal.SIGTERM, original)
+
+    assert inside is not sentinel
+    assert after is sentinel

@@ -114,8 +114,8 @@ brain doctor                    # the `voice memos` line should be OK
 whisper loads the model into its own process, so the model file has to be yours: owned by
 you (or root), not writable by your group or by everyone (`chmod go-w` it), and not inside
 a drop folder. The same goes for every directory above it (owned by you or root, not
-group- or world-writable), because whisper opens the file by path after the check, so
-`/tmp` and shared folders are out. Otherwise voice memos stay off and `brain doctor` says
+group- or world-writable; a sticky directory such as `/tmp` is fine), because whisper
+opens the file by path after the check, so a shared folder is out. Otherwise voice memos stay off and `brain doctor` says
 which rule failed.
 `whisper-cli` must be found through an absolute `PATH` entry.
 
