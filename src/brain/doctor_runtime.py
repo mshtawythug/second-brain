@@ -18,6 +18,8 @@ process:
 ``daemon code``
     Do the daemons import the same ``brain`` package this CLI does? If not,
     every other check describes the CLI's install rather than the daemons'.
+``brief delivery``
+    Composed in from :mod:`brain.doctor_delivery` (RM-16): the brief's delivery channel.
 ``vault watcher`` / ``retired daemon``
     Composed in from :mod:`brain.doctor_watcher` (wiki-to-ui phase 8): is the
     vault-sync watcher installed or running (A9), and is the retired
@@ -90,7 +92,8 @@ def runtime_doctor_checks(
     feeds the off-macOS watcher scan, the same seam
     ``maintenance.ingest_in_flight`` has.
     """
-    # Deferred: doctor_watcher imports this module's _check.
+    # Deferred: doctor_watcher and doctor_delivery import this module's _check.
+    from .doctor_delivery import brief_delivery_doctor_check
     from .doctor_watcher import retired_daemon_doctor_check, watcher_doctor_check
 
     resolved_dir = launchd_dir if launchd_dir is not None else _default_launchd_dir()
@@ -110,6 +113,7 @@ def runtime_doctor_checks(
         *daemon_code_doctor_check(
             launchd_dir=resolved_dir, platform=resolved_platform
         ),
+        *brief_delivery_doctor_check(),
     ]
 
 

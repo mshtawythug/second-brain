@@ -91,6 +91,9 @@ The suggestions leg is best-effort — it is skipped silently when Ollama
 is down or `--no-enrich` is passed. A brief with no suggestions is not
 an error.
 
+**Delivery** (opt-in, `BRAIN_BRIEF_DELIVERY=email|slack`) sends the page's titles to you, never
+to a shared channel; detail in `docs/configuration.md` (`BRAIN_BRIEF_DELIVERY`).
+
 ## Saved searches — `brain watch`
 
 A saved query; every brief checks the enabled ones and lists documents
