@@ -215,6 +215,62 @@ exit 0/5 refused, `-m browser` for the browser rows, the copy deleted after each
 Plus the two static-guard entries in `tests/test_ui_static_behaviour.py` (the `.ingest-group` and
 `.ingest-staged` `[hidden]` rules deleted), which `test_every_guard_can_fail` runs on every suite.
 
+## Review round 1: the security review (sec-77, at `973870a`)
+
+Two MEDIUM and three LOW findings, none critical or high, fixed in `6c01fb6`.
+
+1. **MEDIUM, a startup DoS and a cross-user sweep.** A planted `brain-ui-ingest-9999999999-x` made
+   `os.kill` raise `OverflowError` and stopped `brain ui` from starting; a matching name in a shared
+   temp directory could be another user's. Now: the pid is at most seven digits and at most 2²²;
+   `pid_alive` treats `OverflowError` / `ValueError` / `OSError` as alive and never calls `os.kill`
+   with pid ≤ 0; an entry is judged by `lstat` (a symlink is never followed) and skipped unless this
+   uid owns it; `UploadStaging.sweep` logs a failure by class and returns `[]`, so startup never
+   depends on it.
+2. **MEDIUM, a 500 that logged the filename.** The cap was 120 characters, not bytes, and
+   `NAME_MAX` is 255 bytes, so a long multibyte name failed `open` with `ENAMETOOLONG` and the
+   unhandled-error handler logged the staged path. Now the name is also capped at 200 UTF-8 bytes on a
+   character boundary, and any `OSError` while staging is 503 `staging_failed`, fixed message, logged
+   by class. Checked: the only path from a staging error to `_unhandled_error_handler` was that one;
+   extraction errors become `UnreadableFile` (class-only in the registry's log), and every removal logs
+   by class.
+3. **LOW, no upload count cap.** `MAX_STAGED_UPLOADS = 16` (429 `too_many_uploads`), and every upload
+   is charged in whole `STAGING_BLOCK_BYTES` (4 KiB) blocks, at least one. **Ruling: no per-chunk
+   idle timeout in this PR.** Residual risk: a client that sends a little and stalls holds a slot until
+   it disconnects; bounded by the 16-slot cap and loopback-only ingest. Backlog BL-19.
+4. **LOW, unbounded PDF parsing and vulnerable floors.** `pypdf>=6.14` (stricter than the suggested
+   6.1.3: 6.1.3 would still admit CVE-2026-59937, fixed in 6.14.0) and `pdfminer.six>=20251230`
+   (CVE-2025-64512 and its successor CVE-2025-70559), with the evidence block in `pyproject.toml`.
+   Measured: pypdf 6.21.4, pdfminer.six 20260107 and pdfplumber 0.11.10 resolve, and pdfplumber
+   pins `pdfminer.six==20260107`, so neither floor adds a wheel. **Ruling: no subprocess sandbox.**
+   Residual risk, in Ingest spec §7.4: a hostile PDF can exhaust memory or wedge the one job worker;
+   the user uploads their own file over loopback. Backlog BL-18.
+5. **LOW, blocking I/O on the loop and a late member-count check.** The open, every write and the
+   sniff run in `anyio.to_thread`, behind injectable `opener` / `sniffer` seams. Cleanup on failure
+   stays synchronous on purpose: on a cancelled task (a client disconnect) an `await` in the
+   `except` or `finally` would itself be cancelled and leave the partial file. A `.docx`'s declared
+   entry count is read from its end-of-central-directory record (the last 64 KiB) and refused over
+   `DOCX_MAX_MEMBERS` (or at the zip64 marker) before `zipfile` parses anything.
+
+**Mutation proofs for the round: 14 of 14 killed** (same harness, same rules):
+
+| Mutation | Killed by |
+|---|---|
+| pid range check dropped | `test_a_huge_or_out_of_range_pid_is_left_alone_and_does_not_raise` |
+| pid digits widened to 10 and the range to 2⁶⁴ | the same test (its 7-digit out-of-range case) |
+| `OverflowError` not caught in `pid_alive` | `test_pid_alive_treats_a_pid_the_os_cannot_look_up_as_alive` |
+| uid check dropped | `test_the_sweep_skips_a_root_this_user_does_not_own` |
+| `lstat` replaced by `stat` (symlink followed) | `test_the_sweep_skips_a_symlinked_or_file_entry_whatever_it_points_at` |
+| a failing sweep escapes | `test_a_failing_startup_sweep_does_not_stop_the_server` |
+| byte cap dropped | `test_a_long_multibyte_name_is_cut_to_the_byte_cap_on_a_character_boundary` |
+| staging `OSError` not mapped | `test_a_filesystem_refusal_is_503_and_no_log_names_the_file` |
+| upload count cap dropped | `test_the_number_of_staged_uploads_is_capped` |
+| block charge dropped | `test_a_tiny_upload_is_charged_one_block_and_a_big_one_whole_blocks` |
+| end-record member check dropped | `test_a_declared_member_count_over_the_bound_is_refused_from_the_end_record` |
+| sniff / write / open back on the loop (three mutations) | `test_opening_writing_and_sniffing_run_off_the_event_loop_thread` |
+
+The regex's seven-digit bound is redundant with the 2²² range check (every eight-digit pid is out
+of range); each layer that is not redundant is proven on its own.
+
 ## End-to-end
 
 A real `brain ui` against a scratch DB on 5434 (`second_brain_test_rm13_e2e`), a scratch `BRAIN_HOME` and a
