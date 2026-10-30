@@ -1,7 +1,7 @@
 # =============================================================================
 # Retrieval eval gate — golden-corpus ranking harness CI (Task 5.5)
 # -----------------------------------------------------------------------------
-# Design decisions (CLAUDE.md "Eval gate (CI)"; plan
+# Design decisions (docs/eval-gate.md, summarised in CLAUDE.md "Eval gate (CI)"; plan
 # docs/plans/2026-07-12-second-brain-overhaul.md Task 5.5):
 #
 #   * DEDICATED workflow, mirroring the benchmark-gate precedent. The `eval`

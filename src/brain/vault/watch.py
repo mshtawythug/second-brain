@@ -44,7 +44,7 @@ Concurrency invariants worth restating:
   syncs); ``WATCHER_CONNECT_TIMEOUT_S`` keeps a shutdown-time connect inside the
   shutdown windows.
   These are the 2026-10-22 race fixes, reasoned at ``_fire``,
-  ``_supersede_pending`` and the drain; CLAUDE.md's ceiling table records them.
+  ``_supersede_pending`` and the drain; docs/ceiling-table.md records them.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
   spamming events can't OOM the process; on overflow we trigger an
   immediate full sync and clear the buffer.

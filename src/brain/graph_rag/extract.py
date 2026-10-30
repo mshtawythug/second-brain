@@ -67,7 +67,7 @@ constructed by the G2-c reconcile from this same property.
 module is dormant until G2-c wires it behind that flag. G2-b builds and
 unit-tests the extractor in isolation only.
 
-**Over the 800-line ceiling** (885 at the branch base, CLAUDE.md table). The
+**Over the 800-line ceiling** (885 at the branch base, docs/ceiling-table.md). The
 first growth since: ``make_extractor`` threads ``BRAIN_OLLAMA_NUM_CTX`` into its
 enricher, and the chunk constants are bound from ``brain.ollama_budget`` (where
 ``num_ctx`` is validated against them) instead of restated (perf/ollama-num-ctx,

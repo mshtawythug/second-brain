@@ -31,7 +31,7 @@ Derived-edge semantics:
 - Wiki-link edges keep ``rule=None``, ``weight=None``,
   ``evidence=None``; derived edges populate all three.
 
-**File-size ceiling (CLAUDE.md): this module CROSSED 800 in the 2026-09-02
+**File-size ceiling (docs/ceiling-table.md): this module CROSSED 800 in the 2026-09-02
 merge, and it now has a row in that table.** No live count here on purpose --
 re-derive with ``wc -l src/brain/vault/graph.py``. What cannot rot is the pair
 of trails, which are siblings from one base rather than a sequence: 620
@@ -40,7 +40,7 @@ of trails, which are siblings from one base rather than a sequence: 620
 lines UNDER; and 620 (``f8c76c0``) -> 740 (``f495f66``) on ``master``, also
 under. Neither branch needed a row and neither was wrong to omit one. The
 merge is the union of two independent growths in this one file and the union
-is over -- which is the by-omission failure CLAUDE.md's own residue section
+is over -- which is the by-omission failure docs/ceiling-table.md's residue section
 describes, caught by re-deriving the row set instead of inheriting it.
 
 What grew, from each side, with the reason inline at each point of growth:

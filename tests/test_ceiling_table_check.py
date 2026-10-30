@@ -23,7 +23,10 @@ pytestmark = pytest.mark.nodb
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "scripts" / "check_ceiling_table.py"
+# The table moved out of CLAUDE.md on 2026-10-29; CLAUDE.md keeps only the rule.
+REAL_TABLE_DOC = REPO_ROOT / "docs" / "ceiling-table.md"
 REAL_CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
+TABLE_DOC_REL = Path("docs") / "ceiling-table.md"
 REAL_SRC_ROOT = REPO_ROOT / "src" / "brain"
 
 HEADER = "| File | Lines | Why it is not being split |"
@@ -50,9 +53,9 @@ def _row(path: str, lines_path: str | None = None, why: str = "One algorithm.") 
     return f"| `{path}` | **re-derive: `wc -l src/brain/{named}`** | {why} |"
 
 
-def _claude_md(*rows: str, tail: str = "\nProse after the table.\n") -> str:
+def _table_doc(*rows: str, tail: str = "\nProse after the table.\n") -> str:
     body = "\n".join([HEADER, SEPARATOR, *rows])
-    return f"# CLAUDE.md\n\nSome prose.\n\n{body}\n{tail}"
+    return f"# Ceiling table\n\nSome prose.\n\n{body}\n{tail}"
 
 
 def _write_py(src_root: Path, rel: str, lines: int) -> Path:
@@ -62,13 +65,19 @@ def _write_py(src_root: Path, rel: str, lines: int) -> Path:
     return path
 
 
-def _repo(tmp_path: Path, claude_md: str | None, files: dict[str, int]) -> Path:
+def _write_table_doc(repo: Path, text: str) -> None:
+    target = repo / TABLE_DOC_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+
+
+def _repo(tmp_path: Path, table_doc: str | None, files: dict[str, int]) -> Path:
     src_root = tmp_path / "src" / "brain"
     src_root.mkdir(parents=True)
     for rel, lines in files.items():
         _write_py(src_root, rel, lines)
-    if claude_md is not None:
-        (tmp_path / "CLAUDE.md").write_text(claude_md, encoding="utf-8")
+    if table_doc is not None:
+        _write_table_doc(tmp_path, table_doc)
     return tmp_path
 
 
@@ -109,7 +118,7 @@ def test_parser_reads_every_real_row(ceiling: ModuleType) -> None:
     The expected count is re-derived by an independent line scan, not
     written down, because a digit here would rot like the table's own did.
     """
-    text = REAL_CLAUDE_MD.read_text(encoding="utf-8")
+    text = REAL_TABLE_DOC.read_text(encoding="utf-8")
     lines = text.splitlines()
     start = lines.index(HEADER)
     independent = []
@@ -127,7 +136,7 @@ def test_parser_reads_every_real_row(ceiling: ModuleType) -> None:
 
 
 def test_real_row_set_equals_real_over_ceiling_set(ceiling: ModuleType) -> None:
-    rows = ceiling.table_rows(REAL_CLAUDE_MD.read_text(encoding="utf-8"))
+    rows = ceiling.table_rows(REAL_TABLE_DOC.read_text(encoding="utf-8"))
     over = ceiling.over_ceiling(REAL_SRC_ROOT)
 
     assert {row.path for row in rows} == set(over)
@@ -141,7 +150,7 @@ def test_real_row_set_equals_real_over_ceiling_set(ceiling: ModuleType) -> None:
 def test_801_line_file_without_row_fails_and_names_it(
     ceiling: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    repo = _repo(tmp_path, _claude_md(_row("big.py")), {"big.py": 900, "new/grown.py": 801})
+    repo = _repo(tmp_path, _table_doc(_row("big.py")), {"big.py": 900, "new/grown.py": 801})
 
     status = _run(ceiling, repo)
 
@@ -156,7 +165,7 @@ def test_801_line_file_without_row_fails_and_names_it(
 def test_800_line_file_is_not_over(
     ceiling: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    repo = _repo(tmp_path, _claude_md(_row("big.py")), {"big.py": 801, "edge.py": 800})
+    repo = _repo(tmp_path, _table_doc(_row("big.py")), {"big.py": 801, "edge.py": 800})
 
     assert "edge.py" not in ceiling.over_ceiling(repo / "src" / "brain")
     assert _run(ceiling, repo) == 0
@@ -166,7 +175,7 @@ def test_800_line_file_is_not_over(
 def test_row_for_800_line_file_is_stale(
     ceiling: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    repo = _repo(tmp_path, _claude_md(_row("edge.py")), {"edge.py": 800})
+    repo = _repo(tmp_path, _table_doc(_row("edge.py")), {"edge.py": 800})
 
     status = _run(ceiling, repo)
 
@@ -183,7 +192,7 @@ def test_row_for_deleted_file_fails(
     ceiling: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repo = _repo(
-        tmp_path, _claude_md(_row("big.py"), _row("wiki/gone.py")), {"big.py": 900}
+        tmp_path, _table_doc(_row("big.py"), _row("wiki/gone.py")), {"big.py": 900}
     )
 
     status = _run(ceiling, repo)
@@ -199,7 +208,7 @@ def test_row_for_799_line_file_fails(
     ceiling: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repo = _repo(
-        tmp_path, _claude_md(_row("big.py"), _row("shrunk.py")), {"big.py": 900, "shrunk.py": 799}
+        tmp_path, _table_doc(_row("big.py"), _row("shrunk.py")), {"big.py": 900, "shrunk.py": 799}
     )
 
     status = _run(ceiling, repo)
@@ -221,7 +230,7 @@ def test_lines_cell_naming_another_path_fails(
 ) -> None:
     repo = _repo(
         tmp_path,
-        _claude_md(_row("big.py"), _row("other.py", lines_path="big.py")),
+        _table_doc(_row("big.py"), _row("other.py", lines_path="big.py")),
         {"big.py": 900, "other.py": 900},
     )
 
@@ -234,7 +243,7 @@ def test_lines_cell_naming_another_path_fails(
 
 
 def test_lines_cell_without_wc_command_is_mismatched(ceiling: ModuleType) -> None:
-    rows = ceiling.table_rows(_claude_md("| `big.py` | 900 | One algorithm. |"))
+    rows = ceiling.table_rows(_table_doc("| `big.py` | 900 | One algorithm. |"))
 
     report = ceiling.compare({"big.py": 900}, rows)
 
@@ -244,7 +253,7 @@ def test_lines_cell_without_wc_command_is_mismatched(ceiling: ModuleType) -> Non
 
 def test_first_cell_without_backticks_is_mismatched(ceiling: ModuleType) -> None:
     rows = ceiling.table_rows(
-        _claude_md("| big.py | **re-derive: `wc -l src/brain/big.py`** | Why. |")
+        _table_doc("| big.py | **re-derive: `wc -l src/brain/big.py`** | Why. |")
     )
 
     report = ceiling.compare({"big.py": 900}, rows)
@@ -255,7 +264,7 @@ def test_first_cell_without_backticks_is_mismatched(ceiling: ModuleType) -> None
 
 def test_row_without_lines_cell_is_mismatched(ceiling: ModuleType) -> None:
     """A table line with fewer than two cell separators has no Lines cell."""
-    rows = ceiling.table_rows(_claude_md("| `big.py`"))
+    rows = ceiling.table_rows(_table_doc("| `big.py`"))
 
     report = ceiling.compare({"big.py": 900}, rows)
 
@@ -267,7 +276,7 @@ def test_row_without_lines_cell_is_mismatched(ceiling: ModuleType) -> None:
 
 
 def test_row_without_lines_cell_or_path_is_mismatched(ceiling: ModuleType) -> None:
-    rows = ceiling.table_rows(_claude_md("| not a path"))
+    rows = ceiling.table_rows(_table_doc("| not a path"))
 
     report = ceiling.compare({}, rows)
 
@@ -275,7 +284,7 @@ def test_row_without_lines_cell_or_path_is_mismatched(ceiling: ModuleType) -> No
 
 
 def test_duplicate_row_is_mismatched(ceiling: ModuleType) -> None:
-    rows = ceiling.table_rows(_claude_md(_row("big.py"), _row("big.py")))
+    rows = ceiling.table_rows(_table_doc(_row("big.py"), _row("big.py")))
 
     report = ceiling.compare({"big.py": 900}, rows)
 
@@ -291,7 +300,7 @@ def test_duplicate_row_is_mismatched(ceiling: ModuleType) -> None:
 def test_claude_md_without_header_exits_2(
     ceiling: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    repo = _repo(tmp_path, "# CLAUDE.md\n\nNo table at all.\n", {"big.py": 900})
+    repo = _repo(tmp_path, "# Ceiling table\n\nNo table at all.\n", {"big.py": 900})
 
     status = _run(ceiling, repo)
 
@@ -302,26 +311,55 @@ def test_claude_md_without_header_exits_2(
 def test_reworded_header_exits_2(
     ceiling: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    text = _claude_md(_row("big.py")).replace(HEADER, "| File | Lines | Why not split |")
+    text = _table_doc(_row("big.py")).replace(HEADER, "| File | Lines | Why not split |")
     repo = _repo(tmp_path, text, {"big.py": 900})
 
     assert _run(ceiling, repo) == 2
     capsys.readouterr()
 
 
-def test_missing_claude_md_exits_2(
+def test_missing_table_doc_exits_2(
     ceiling: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repo = _repo(tmp_path, None, {"big.py": 900})
 
     assert _run(ceiling, repo) == 2
-    assert "CLAUDE.md" in capsys.readouterr().err
+    assert "docs/ceiling-table.md" in capsys.readouterr().err
+
+
+def test_table_in_claude_md_is_not_read(
+    ceiling: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression (2026-10-29): the table moved to docs/ceiling-table.md.
+
+    A complete table left in CLAUDE.md must not satisfy the check; only the
+    table in docs/ceiling-table.md counts, and a row missing there is caught.
+    """
+    repo = _repo(tmp_path, _table_doc(_row("big.py")), {"big.py": 900, "grown.py": 900})
+    (repo / "CLAUDE.md").write_text(
+        _table_doc(_row("big.py"), _row("grown.py")), encoding="utf-8"
+    )
+
+    status = _run(ceiling, repo)
+
+    err = capsys.readouterr().err
+    assert status == 1
+    assert "grown.py" in err
+    assert "docs/ceiling-table.md" in err
+
+
+def test_real_claude_md_carries_no_ceiling_table() -> None:
+    """CLAUDE.md keeps the rule only; a second copy of the table would drift unchecked."""
+    lines = REAL_CLAUDE_MD.read_text(encoding="utf-8").splitlines()
+
+    assert HEADER not in [line.rstrip() for line in lines]
+    assert "docs/ceiling-table.md" in REAL_CLAUDE_MD.read_text(encoding="utf-8")
 
 
 def test_missing_src_root_exits_2(
     ceiling: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    (tmp_path / "CLAUDE.md").write_text(_claude_md(_row("big.py")), encoding="utf-8")
+    _write_table_doc(tmp_path, _table_doc(_row("big.py")))
 
     assert _run(ceiling, tmp_path) == 2
     assert "src/brain" in capsys.readouterr().err
@@ -330,7 +368,7 @@ def test_missing_src_root_exits_2(
 def test_duplicate_header_line_exits_2(
     ceiling: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    text = _claude_md(_row("big.py")) + "\n" + "\n".join([HEADER, SEPARATOR, _row("x.py")]) + "\n"
+    text = _table_doc(_row("big.py")) + "\n" + "\n".join([HEADER, SEPARATOR, _row("x.py")]) + "\n"
     repo = _repo(tmp_path, text, {"big.py": 900})
 
     assert _run(ceiling, repo) == 2
@@ -338,8 +376,8 @@ def test_duplicate_header_line_exits_2(
 
 
 def test_header_quoted_mid_line_is_not_an_anchor(ceiling: ModuleType) -> None:
-    """Prose that quotes the header in backticks (CLAUDE.md does) is not a second table."""
-    text = _claude_md(_row("big.py"), tail=f"\nThe header is `{HEADER}` exactly.\n")
+    """Prose that quotes the header in backticks (the table doc does) is not a table."""
+    text = _table_doc(_row("big.py"), tail=f"\nThe header is `{HEADER}` exactly.\n")
 
     assert [row.path for row in ceiling.table_rows(text)] == ["big.py"]
 
@@ -356,7 +394,7 @@ def test_table_rows_raises_table_not_found(ceiling: ModuleType) -> None:
 
 
 def _real_row_lines() -> list[str]:
-    lines = REAL_CLAUDE_MD.read_text(encoding="utf-8").splitlines()
+    lines = REAL_TABLE_DOC.read_text(encoding="utf-8").splitlines()
     start = lines.index(HEADER)
     rows = []
     for line in lines[start + 2 :]:
@@ -372,7 +410,7 @@ def _real_row_lines() -> list[str]:
     ids=lambda line: re.match(r"\| `([^`]+)`", line).group(1),  # type: ignore[union-attr]
 )
 def test_deleting_any_real_row_is_caught(ceiling: ModuleType, row_line: str) -> None:
-    text = REAL_CLAUDE_MD.read_text(encoding="utf-8")
+    text = REAL_TABLE_DOC.read_text(encoding="utf-8")
     mutated = text.replace(row_line + "\n", "", 1)
     assert mutated != text, "mutation did not apply"
     deleted = re.match(r"\| `([^`]+)`", row_line).group(1)  # type: ignore[union-attr]
@@ -389,7 +427,7 @@ def test_deleting_any_real_row_is_caught(ceiling: ModuleType, row_line: str) -> 
 
 
 def test_parser_stops_at_first_non_table_line(ceiling: ModuleType) -> None:
-    text = _claude_md(
+    text = _table_doc(
         _row("big.py"),
         tail="\nProse.\n\n| `later.py` | **re-derive: `wc -l src/brain/later.py`** | x |\n",
     )
@@ -398,7 +436,7 @@ def test_parser_stops_at_first_non_table_line(ceiling: ModuleType) -> None:
 
 
 def test_parser_ignores_pipes_inside_the_why_cell(ceiling: ModuleType) -> None:
-    rows = ceiling.table_rows(_claude_md(_row("big.py", why="a | b | c")))
+    rows = ceiling.table_rows(_table_doc(_row("big.py", why="a | b | c")))
 
     assert [row.path for row in rows] == ["big.py"]
     assert "wc -l src/brain/big.py" in rows[0].lines_cell
@@ -406,13 +444,13 @@ def test_parser_ignores_pipes_inside_the_why_cell(ceiling: ModuleType) -> None:
 
 def test_table_at_end_of_file_is_read(ceiling: ModuleType) -> None:
     """No line after the table: the row loop ends without its break."""
-    text = "\n".join(["# CLAUDE.md", "", HEADER, SEPARATOR, _row("a.py"), _row("b/c.py")])
+    text = "\n".join(["# Ceiling table", "", HEADER, SEPARATOR, _row("a.py"), _row("b/c.py")])
 
     assert [row.path for row in ceiling.table_rows(text)] == ["a.py", "b/c.py"]
 
 
 def test_header_with_trailing_whitespace_still_anchors(ceiling: ModuleType) -> None:
-    text = _claude_md(_row("big.py")).replace(HEADER, HEADER + "  ")
+    text = _table_doc(_row("big.py")).replace(HEADER, HEADER + "  ")
 
     assert [row.path for row in ceiling.table_rows(text)] == ["big.py"]
 
@@ -455,7 +493,7 @@ def test_success_summary_reports_the_count(
     ceiling: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repo = _repo(
-        tmp_path, _claude_md(_row("a.py"), _row("b/c.py")), {"a.py": 801, "b/c.py": 900}
+        tmp_path, _table_doc(_row("a.py"), _row("b/c.py")), {"a.py": 801, "b/c.py": 900}
     )
 
     assert _run(ceiling, repo) == 0
