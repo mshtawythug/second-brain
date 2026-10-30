@@ -3011,9 +3011,9 @@ def brain_brief(
     empty).
 
     F6: confidential documents are excluded from captures, open todos, pins,
-    ``watch_hits`` (this tool checks no watch) and ``new_entities`` unless
-    ``include_confidential=true``. Bridge: ``exclude_confidential=not
-    include_confidential``. See :func:`_confidential_lens`.
+    ``watch_hits`` (this tool checks no watch), ``new_entities`` and the
+    ``possible_duplicates`` count unless ``include_confidential=true``. Bridge:
+    ``exclude_confidential=not include_confidential``. See :func:`_confidential_lens`.
 
     A CORRECTION TO WHAT THIS DOCSTRING USED TO CLAIM. It read "surfaces titles +
     todo texts only — never document bodies", and that sentence is what made the

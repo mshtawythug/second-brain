@@ -36,6 +36,7 @@ from collections.abc import Callable
 
 import typer
 
+from .cli_dedup import register as register_dedup
 from .cli_docs import register_lifecycle, register_list
 from .cli_ingest import register as register_ingest
 from .cli_note import register as register_note
@@ -80,6 +81,7 @@ REGISTRARS: tuple[tuple[str, Registrar], ...] = (
 #: command module needs.
 EXTENSION_REGISTRARS: tuple[tuple[str, Registrar], ...] = (
     ("watch", register_watch),  # RM-15, saved searches
+    ("dedup", register_dedup),  # RM-19, near-duplicate detection
 )
 
 #: Registrars that attach to a SUB-APP rather than the root ``app``, and so

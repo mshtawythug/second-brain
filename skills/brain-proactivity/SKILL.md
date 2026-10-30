@@ -9,9 +9,9 @@ description: >
   what they should look at, what happened recently, what they should
   revisit, what has gone stale, which notes should be linked, or what
   their brain keeps failing to answer, or wants to be told when new
-  notes match a saved search. Backs `brain brief`, `brain watch`,
-  `brain resurface`, `brain review`, `brain timeline`, `brain connect`,
-  and `brain gaps`. To answer a specific question use `consult-brain`;
+  notes match a saved search, or which notes are near-copies. Backs
+  `brain brief`, `brain watch`, `brain dedup`, `brain resurface`,
+  `brain review`, `brain timeline`, `brain connect`, and `brain gaps`. To answer a specific question use `consult-brain`;
   for one composed cited answer use `brain-ask`; for themes across a
   relationship use `brain-graph`; for open action items use
   `brain-todo`; to jot a thought into the inbox use `brain-capture`.
@@ -23,32 +23,23 @@ description: >
   notes, snooze this finding, timeline of, how did it change over time,
   evolution over time, suggest links, what should be linked, related
   notes I haven't linked, failed searches, what am I not finding,
-  searches that came up empty.
+  searches that came up empty, duplicate notes, near-duplicates.
 ---
 
 # Brain Proactivity
 
 Hybrid search and GraphRAG are **reactive** — the user asks, the brain
-answers. This skill is the **proactive** half: six commands that surface
-things the user did not think to ask for.
+answers. This skill is the **proactive** half: commands that surface
+things the user did not think to ask for. All run from any directory and
+are read-only unless "Safety rules" below says otherwise.
 
-All of these run from any working directory and are read-only unless
-noted. The commands that write (`brain review weekly` emits a vault
-page, `brain connect accept --write` appends a wikilink, `review
-snooze` / `resolve` / `dismiss` move queue state) are called out in
-"Safety rules" below.
-
-For answering a specific question, quotes, or voice writing, use
-`consult-brain`; when the deliverable is one composed cited answer, use
-`brain-ask`. For themes / patterns / connections across a relationship,
-use `brain-graph`. For open action items, use `brain-todo`. For jotting
-a thought into the inbox or triaging it later, use `brain-capture`. For
-ingesting existing content (a file, an email, a transcript), use
-`ingest-brain`; for authoring a deliberate titled note, use
-`brain-authoring`. **Boundary with `brain-memory`:** that skill owns
-what *you the agent* record and recall about the user across sessions —
-this skill only reads and triages what the *user* already put in their
-corpus.
+For a specific question, quotes, or voice writing, use `consult-brain`; for one
+composed cited answer, `brain-ask`; for themes across a relationship, `brain-graph`;
+for open action items, `brain-todo`; for jotting or triaging a thought, `brain-capture`;
+for ingesting existing content, `ingest-brain`; for a deliberate titled note,
+`brain-authoring`. **Boundary with `brain-memory`:** that skill owns what *you the
+agent* record about the user across sessions — this skill only reads and triages what
+the *user* already put in their corpus.
 
 ## Which command answers which question
 
@@ -56,6 +47,7 @@ corpus.
 |---|---|
 | "What should I look at today?" / "Catch me up" | `brain brief` |
 | "Tell me when something new about X lands" / "Watch for X" | `brain watch add` |
+| "Do I have duplicate notes?" | `brain dedup list` |
 | "What am I forgetting?" / "Show me old notes worth rereading" | `brain resurface` |
 | "How did my week go?" / "Synthesize last week" | `brain review weekly` |
 | "What in my notes contradicts itself / has gone stale?" | `brain review scan` → `review list` |
@@ -87,10 +79,6 @@ brain brief --date 2026-06-09 --json
 | `--wiki` / `--no-wiki` | Write `<vault>/daily/<YYYY>/<date>-brief.md` (default `--no-wiki`). |
 | `--json` | Machine-readable instead of the table. |
 
-The suggestions leg is best-effort — it is skipped silently when Ollama
-is down or `--no-enrich` is passed. A brief with no suggestions is not
-an error.
-
 **Delivery** (opt-in, `BRAIN_BRIEF_DELIVERY=email|slack`) sends the page's titles to you, never
 to a shared channel; detail in `docs/configuration.md` (`BRAIN_BRIEF_DELIVERY`).
 
@@ -107,6 +95,21 @@ brain watch list | check [NAME] [--peek] | hits [NAME] --since 7d | pause | resu
 
 `check` RECORDS what it finds; to look without consuming the brief's
 notifications use `--peek` (MCP `brain_watch_check` always peeks).
+
+## Near-duplicates — `brain dedup`
+
+Pairs of near-copies (a forwarded email, a re-sent draft, one file ingested twice),
+recorded at an estimated word-5-gram similarity of 0.85 or more; documents under 50 words
+and two of one Gmail thread never pair. **Flags only**: it never merges or deletes. The
+brief job scans nightly and the brief shows a "Possible duplicates (N)" count.
+
+```bash
+brain dedup list [--status open|dismissed|confirmed] [--json]   # MCP: brain_dedup_list
+brain dedup scan [--all] [--limit N] | dismiss A B | confirm A B   # A B: id prefixes
+```
+
+`dismiss` and `confirm` are the user's labels: a dismissed pair is never re-opened, so
+ask before labelling, and deleting one of a pair stays `brain rm`.
 
 ## Spaced repetition — `brain resurface`
 
@@ -252,9 +255,6 @@ observation. For "what do I know but have never written down", that is
 tacit-knowledge elicitation: use `elicit-brain` instead. `gaps push`
 feeds the same `elicitation_gaps` queue, which is where the two meet.
 
-On a database predating migration 019 (`search_queries`), `brain gaps`
-prints a clean warning to run `brain init` and searches keep working.
-
 ## Prerequisites and graceful degradation
 
 | Command | Needs | Without it |
@@ -266,6 +266,7 @@ prints a clean warning to run `brain init` and searches keep working.
 | `brain timeline` | `BRAIN_GRAPH_ENABLED` + `brain graphrag build` | Unknown entity → friendly note, exit 0. |
 | `brain connect refresh` | Embeddings; graph leg optional | Score leans on the embedding leg. |
 | `brain gaps` | Migration 019 (`search_queries`) | Warning to run `brain init`; search unaffected. |
+| `brain dedup` | Migration 030 | Exit 1 naming `brain init`; the brief counts 0. |
 | `brain review snooze` / `resolve` | Nothing beyond Postgres | — |
 
 If a command errors outright rather than degrading, route to
@@ -292,9 +293,7 @@ If a command errors outright rather than degrading, route to
   one, fetch it explicitly — `brain recall "<topic>" --budget 2000 --json`
   when they want the substance, `brain show <id> --json` for a single
   named document. Never `brain show` every item the brief listed; that is
-  unbounded — one whole body per item, with no ceiling. See the
-  cost-ordered table
-  in `consult-brain`.
+  unbounded — one whole body per item. See the cost-ordered table in `consult-brain`.
 - **Exit 0 with an empty result is a valid answer.** An empty brief,
   zero resurfaced docs, or an unresolved timeline entity means "nothing
   to surface" — say so rather than broadening until something appears.
