@@ -444,6 +444,31 @@ It lives in the feature settings leaf `brain/settings/watch.py`. A value outside
 0 to 1 is a `ConfigError` naming the variable, raised only when a semantic watch is
 checked: it skips those watches and never stops `brain brief`.
 
+### `BRAIN_OCR` — OCR for image-only PDFs
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BRAIN_OCR` | `auto` | `auto` OCRs an image-only PDF when the `tesseract` binary is on `PATH`; `off` never does. Roadmap ticket RM-32. |
+| `BRAIN_OCR_LANG` | `eng` | tesseract's `-l` argument: one or more language codes joined by `+` (`eng+deu`). Each code is letters, digits and underscores, so the value can never be read as an option. Codes other than `eng` and `osd` need `brew install tesseract-lang`. |
+| `BRAIN_OCR_MAX_PAGES` | `50` | How many pages of one PDF are rendered and recognised, 1 to 1,000. Later pages are not read. |
+
+They live in the feature settings leaf `brain/settings/ocr.py`. A PDF is OCR'd
+only when its text layer averages under 25 characters a page **and** a page
+carries an image, so a born-digital PDF is never OCR'd and never reads these
+knobs. Each page is rendered at 200 dpi (`pypdfium2`, PNG via Pillow) and passed
+to `tesseract stdin stdout -l <lang>`, with a 60-second limit per page; a page
+that times out or fails is skipped with a class-only warning. The text is stored
+as `[page N]` blocks, and the document's `metadata.ocr` records
+`{"pages": n, "engine": "tesseract"}`. OCR runs locally, and the secret guard
+scans the recognised text like any other body.
+
+Without `tesseract`, an image-only PDF still ingests as an empty document
+(`skipped (empty document)`) and one warning says how to install it. `brain
+doctor`'s `ocr` line reports the tesseract version and checks that every
+`BRAIN_OCR_LANG` language is installed; a missing binary is OK, not a warning,
+because OCR is optional. Measured with tesseract 5.5.3 (leptonica 1.87.0) from
+Homebrew on 2026-10-30.
+
 ### `BRAIN_BRIEF_DELIVERY` — send the daily brief to yourself
 
 | Env var | Default | Purpose |

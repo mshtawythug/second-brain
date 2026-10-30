@@ -555,10 +555,11 @@ def test_all_healthy_yields_no_failures(
     # R3 (phase 9): the dormant wiki's "wiki build" check is gone from the set.
     # RM-16 adds "brief delivery", off (ok) under tests/delivery_isolation_plugin.py.
     # RM-14b adds "reranker", not configured (ok) under tests/rerank_isolation_plugin.py.
+    # RM-32 adds "ocr", off (ok) under tests/ocr_isolation_plugin.py.
     assert [c.check for c in checks] == [
-        "config", "daemons", "vault watcher", "brief delivery", "reranker"
+        "config", "daemons", "vault watcher", "brief delivery", "reranker", "ocr"
     ]
-    assert [c.status for c in checks] == ["ok", "ok", "ok", "ok", "ok"]
+    assert [c.status for c in checks] == ["ok", "ok", "ok", "ok", "ok", "ok"]
 
 
 def test_every_failing_check_names_a_remedy(

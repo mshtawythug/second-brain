@@ -347,3 +347,24 @@ def test_starlette_floor_excludes_the_release_that_breaks_ipv6_hosts() -> None:
         f"`{requirement}` excludes {STARLETTE_FIRST_WORKING}, the release the "
         "evidence block measured green"
     )
+
+
+# `pypdfium2` and `Pillow` are RUNTIME pins too (RM-32): `brain.ingest.pdf`
+# imports them for OCR, so they are declared rather than left to pdfplumber's
+# requirements. The floors are the versions the RM-32 tests ran on (evidence
+# block beside the pins in pyproject.toml).
+OCR_MEASURED_VERSIONS = {"pypdfium2": "5.14.0", "pillow": "13.0.0"}
+
+
+@pytest.mark.parametrize("name", sorted(OCR_MEASURED_VERSIONS))
+def test_ocr_dependencies_are_declared_and_admit_the_measured_version(name: str) -> None:
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    by_name = {
+        canonicalize_name(Requirement(raw).name): Requirement(raw)
+        for raw in data["project"]["dependencies"]
+    }
+
+    requirement = by_name.get(name)
+
+    assert requirement is not None, f"`{name}` is not a declared runtime dependency"
+    assert requirement.specifier.contains(OCR_MEASURED_VERSIONS[name])

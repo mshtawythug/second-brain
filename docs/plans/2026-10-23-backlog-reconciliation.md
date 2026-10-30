@@ -94,7 +94,7 @@ three other series:
 | 3.2 | Auto-tags | **SHIPPED** | `brain tag <id> --auto [--accept-all]` (`3ed57d0`). |
 | 3.3 | Entity extraction (people, projects, organisations) | **SHIPPED (reshaped)** | Built as GraphRAG on Apache AGE (`15a69e1`, G0–G4; `src/brain/graph_rag/`). People and concepts are stored in `graph_entities` / `graph_entity_mentions`. Surfaces: `brain graphrag entity/entities/themes/search`, `brain timeline` (Plan 05), and the `brain_graphrag_*` MCP tools. The roadmap's "filter by entity" leg is **SHIPPED** as `brain search --entity` / `brain_search(entity=…)` (#91, RM-24). |
 | 3.4 | Near-duplicate detection | **SHIPPED (#86, RM-19)** | Word 5-gram MinHash (`near_dup.py`, `near_dup_store.py`, migration 030), verified at Jaccard ≥ 0.85; `brain dedup scan/list/dismiss/confirm`, MCP `brain_dedup_list`, the brief's "Possible duplicates (N)", the Ingest tab's `possible_duplicates`. Flags only. ~~No MinHash or near-dup code.~~ Gmail thread assembly and content-hash dedup still catch their own cases. See §3, rank 11. |
-| 3.5 | PDF image OCR | **NOT STARTED** | No OCR code. An image-only PDF ingests as an empty document (`document_id=None`, "skipped (empty document)" in `cli_ingest._ingest_outcome_verb`). |
+| 3.5 | PDF image OCR | **SHIPPED** | Roadmap ticket RM-32 (PR #PR): `brain.ingest.ocr` (`OcrEngine`, `TesseractOcr`) and the fallback in `ingest/pdf.py`, which OCRs a PDF whose text averages under 25 characters a page and that carries an image, up to `BRAIN_OCR_MAX_PAGES` pages. Knobs in `brain/settings/ocr.py`; `brain doctor` `ocr` line. Without the `tesseract` binary an image-only PDF is still "skipped (empty document)", with a hint. Images outside PDFs are RM-33. |
 | 3.6 | Document-level embeddings | **NOT STARTED** | There is no `documents.embedding` column. The two non-chunk vector columns are `graph_entities.embedding` (`embedding_targets.py:20`) and `graph_communities.summary_embedding` (`:21`). Neither is per-document. Wave Q1-D reserved `documents.summary` for this. |
 | 3.7 | Contradiction / change detection | **SHIPPED** | `brain review scan / list / dismiss / snooze / resolve` and `brain_review_scan` / `brain_review_findings_list` (Plan 03, `9762a26`, `e1950b9`). They detect contradiction and staleness over entities, as the roadmap required. |
 
@@ -118,7 +118,7 @@ Section 5 heading is multi-modal (5.1–5.3). Both are listed.
 | 5 | Cross-encoder reranker (pluggable `Reranker` Protocol) | **IN PROGRESS: built, off** | Roadmap ticket RM-14a (PR #76) built the stage (`brain/rerank.py`, `brain/rerank_backends.py`, `brain/settings/rerank.py`), wired it into `search_pipeline.build_stages` and `brain eval`, and ships it **off** (`BRAIN_RERANKER=none`). When on, it fills `SearchExplanation.reranker_score` (the `search.py:104` comment still reads "today always None", which holds while it is off). The local runtime is RM-14b; the eval measurement and the adoption decision are RM-14c. See BL-5. |
 | 5.1 | Screenshot watch folder + OCR | **NOT STARTED** | No code (the only `screenshot` hits are a demo-corpus manifest and an extractor stopword). |
 | 5.2 | Voice-memo ingestion (local transcription) | **NOT STARTED** | No transcription code. `brain audio` goes the other way: it *generates* a two-host script from graph themes, plus optional TTS. |
-| 5.3 | PDF image OCR | (duplicate) | Same item as 3.5. |
+| 5.3 | PDF image OCR | (duplicate) | Same item as 3.5: **SHIPPED** (RM-32). |
 
 ### 1.6 Section 6 — operations
 

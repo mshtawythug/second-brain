@@ -22,6 +22,22 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — image-only PDFs are OCR'd (RM-32)
+
+- A scanned PDF or a photographed receipt used to ingest as an empty document
+  ("skipped (empty document)"). When a PDF's text layer averages under 25
+  characters a page and a page carries an image, `brain` now renders up to
+  `BRAIN_OCR_MAX_PAGES` (default 50) pages at 200 dpi and reads them with the
+  local `tesseract` binary, 60 seconds at most per page. The text is stored as
+  `[page N]` blocks, and `metadata.ocr` records the page count and engine.
+  Born-digital PDFs are never OCR'd.
+- New knobs `BRAIN_OCR` (`auto` or `off`), `BRAIN_OCR_LANG` (default `eng`) and
+  `BRAIN_OCR_MAX_PAGES`, in `brain/settings/ocr.py`; `brain doctor` gains an
+  `ocr` line. Without `tesseract` (`brew install tesseract`), an image-only PDF
+  is still skipped as empty, with a one-line hint.
+- `pypdfium2` and `Pillow` are now explicit base dependencies. `pdfplumber`
+  already required both, so no new package is installed.
+
 ### Fixed — the vault watcher no longer loses a delete across a shutdown or a lost connection (RM-26)
 
 - A file deleted (or renamed away) just as the watcher shut down, or while it

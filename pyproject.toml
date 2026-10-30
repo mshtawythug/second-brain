@@ -118,6 +118,28 @@ dependencies = [
   "pypdf>=6.14",
   "pdfplumber>=0.11",
   "pdfminer.six>=20251230",
+  # EXPLICIT because `brain` now imports them directly (RM-32, OCR for
+  # image-only PDFs: `brain.ingest.pdf` renders pages with pypdfium2 and encodes
+  # them as PNG with Pillow). Both were already installed by every resolve that
+  # installs pdfplumber, so declaring them adds ZERO wheels: pdfplumber 0.11.10
+  # (the resolved version) requires `pypdfium2>=5.9.0` and `Pillow>=12.2.0`,
+  # read from its own metadata (`importlib.metadata.requires('pdfplumber')`).
+  # Measured 2026-10-30 in the RM-32 venv (uv, Python 3.11): pypdfium2 5.14.0 and
+  # Pillow 13.0.0 resolved (the roadmap spec's 2026-10-23 measure was 5.13.0 /
+  # 12.3.0; both moved since), and the RM-32 tests were green on exactly those.
+  # - pypdfium2 >= 5.14: the floor is the version the tests ran on, not guessed.
+  #   Surface used: `PdfDocument`, page iteration and indexing,
+  #   `PdfPage.get_objects(filter=(FPDF_PAGEOBJ_IMAGE,))`, `PdfPage.render(scale=)`
+  #   `.to_pil()`, `PdfiumError`. Not exercised: anything between 5.9 and 5.14.
+  # - Pillow >= 13.0: same rule. Surface used: `Image.save(format="PNG")`; the
+  #   tests also use `ImageDraw` and `ImageFont.load_default(size=)`, which needs
+  #   10.1+. Not exercised: anything between 12.2 and 13.0.
+  # Unbounded above, for the extractor reasoning given above. No `[ocr]` extra
+  # (RM-32.D2): it would install nothing these two lines do not. The OCR engine
+  # itself, the `tesseract` binary, is a soft dependency found on PATH and
+  # reported by `brain doctor`.
+  "pypdfium2>=5.14",
+  "Pillow>=13.0",
   "python-docx>=1.1",
   # The `[plugins]` extra pulls `mdit-py-plugins`, which `brain ui` uses for
   # ONE thing: GFM task lists (`mdit_py_plugins.tasklists`). §2.1 waiver granted
@@ -817,6 +839,10 @@ markers = [
   # G2's perf gate opts IN via ``pytest -m benchmark``. The default suite
   # exercises the SAME generator via the tiny ≈50-entity smoke instead.
   "benchmark: GraphRAG full-scale perf gate; requires explicit -m benchmark invocation",
+  # RM-32 — the one OCR test that runs the real `tesseract` binary on a
+  # synthetic image-only PDF. NOT deselected: it skips itself when `tesseract`
+  # is not on PATH, so it runs wherever the binary exists.
+  "live_ocr: runs the real tesseract binary; skips when it is not installed",
   # brain-rebuild advisory-lock + real-DB tests. These need the test Postgres
   # container (port 5434) to be up but do NOT require Ollama. Included in the
   # default suite (not excluded by the addopts -m filter) because the test DB
@@ -890,7 +916,7 @@ strict = true
 # sites (`get_lexer_by_name`, `HtmlFormatter`) whose return values are used only
 # as `str`. `_highlight_code` annotates its own signature, so the typed surface
 # this project owns is unchanged.
-module = ["pgvector.*", "pdfplumber.*", "pypdf.*", "markdown_it.*", "docx.*", "tiktoken.*", "reportlab.*", "voyageai.*", "watchdog.*", "networkx.*", "pygments.*"]
+module = ["pgvector.*", "pdfplumber.*", "pypdf.*", "pypdfium2.*", "markdown_it.*", "docx.*", "tiktoken.*", "reportlab.*", "voyageai.*", "watchdog.*", "networkx.*", "pygments.*"]
 ignore_missing_imports = true
 
 # numpy (transitive via networkx) ships PEP 695 `type X = ...` aliases in its
