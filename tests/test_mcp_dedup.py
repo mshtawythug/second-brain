@@ -80,14 +80,18 @@ def test_lists_a_normal_pair_with_both_titles(
     assert pair["similarity"] >= near_dup.JACCARD_CUT
 
 
-@pytest.mark.parametrize(
-    ("first", "second"), [("confidential", "normal"), ("normal", "confidential")]
-)
+@pytest.mark.parametrize("end", [0, 1], ids=["doc_a", "doc_b"])
 def test_a_confidential_end_withholds_the_whole_pair_by_default(
-    mcp_state: mcp_server._State, test_db: psycopg.Connection[Any], first: str, second: str
+    mcp_state: mcp_server._State, test_db: psycopg.Connection[Any], end: int
 ) -> None:
-    _seed(test_db, 2, first=first, second=second)
+    # The confidential document is chosen by its stored position (doc_a < doc_b), not by
+    # insertion order, so a lens on one end only fails on one of the two cases.
+    first, second = _seed(test_db, 2)
     near_dup_store.scan(test_db)
+    test_db.execute(
+        "UPDATE documents SET sensitivity = 'confidential' WHERE id = %s",
+        (near_dup.ordered_pair(first, second)[end],),
+    )
 
     gated = tools.brain_dedup_list()
     opted_in = tools.brain_dedup_list(include_confidential=True)

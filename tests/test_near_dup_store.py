@@ -291,19 +291,21 @@ def test_list_pairs_returns_both_titles(test_db: psycopg.Connection[Any]) -> Non
     assert row.similarity >= near_dup.JACCARD_CUT
 
 
-@pytest.mark.parametrize("end", ["first", "second"])
+@pytest.mark.parametrize("end", [0, 1], ids=["doc_a", "doc_b"])
 def test_the_lens_drops_a_pair_with_a_confidential_end(
-    test_db: psycopg.Connection[Any], end: str
+    test_db: psycopg.Connection[Any], end: int
 ) -> None:
-    # Both ends are gated: whichever is confidential, the pair is withheld.
-    text = body(400, 12)
-    insert_doc(test_db, text, sensitivity="confidential" if end == "first" else "normal")
-    insert_doc(
-        test_db, near_copy(text), sensitivity="confidential" if end == "second" else "normal"
-    )
+    # Both ends are gated. The confidential document is chosen by its STORED position
+    # (doc_a < doc_b), not by insertion order, so a one-ended lens fails on one of the two.
+    first, second = _seed_pair(test_db)
     near_dup_store.scan(test_db)
+    test_db.execute(
+        "UPDATE documents SET sensitivity = 'confidential' WHERE id = %s",
+        (_ordered(first, second)[end],),
+    )
 
     assert near_dup_store.list_pairs(test_db, exclude_confidential=True) == []
+    assert near_dup_store.count_open(test_db, exclude_confidential=True) == 0
     assert len(near_dup_store.list_pairs(test_db, exclude_confidential=False)) == 1
 
 
