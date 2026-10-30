@@ -295,6 +295,38 @@ def test_a_rerun_is_a_no_op_that_fetches_nothing_per_item(
     assert embedder.embed_calls == embeds
 
 
+def test_a_repo_that_turns_private_is_reingested_confidential(
+    gh: fx.FakeGh, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    """The short-circuit must not hold a document at ``normal`` once its repo is private."""
+    gh.prs, gh.issues = [fx.pr_hit()], []
+    _run("--repo", fx.PUBLIC_REPO, *SINCE, "--no-readmes")
+    assert _docs(test_db)[PR_ID]["sensitivity"] == "normal"
+    gh.api[f"repos/{fx.PUBLIC_REPO}"] = json.dumps(fx.repo(fx.PUBLIC_REPO, private=True))
+
+    result = _run("--repo", fx.PUBLIC_REPO, *SINCE, "--no-readmes")  # same updatedAt
+
+    assert "1 updated" in result.output
+    doc = _docs(test_db)[PR_ID]
+    assert doc["sensitivity"] == "confidential"
+    assert "Visibility: private" in doc["content"]
+    assert doc["metadata"]["repo_private"] is True
+
+
+def test_a_repo_whose_visibility_can_no_longer_be_read_is_reingested_confidential(
+    gh: fx.FakeGh, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    gh.prs, gh.issues = [fx.pr_hit()], []
+    _run("--repo", fx.PUBLIC_REPO, *SINCE, "--no-readmes")
+    assert _docs(test_db)[PR_ID]["sensitivity"] == "normal"
+    gh.fail = {f"repos/{fx.PUBLIC_REPO}": GithubError("`gh api` failed (exit 1)")}
+
+    result = _run("--repo", fx.PUBLIC_REPO, *SINCE, "--no-readmes")  # same updatedAt
+
+    assert "its documents are stored confidential" in result.output
+    assert _docs(test_db)[PR_ID]["sensitivity"] == "confidential"
+
+
 def test_a_state_change_touches_metadata_only(
     gh: fx.FakeGh, embedder: CountingEmbedder, test_db: psycopg.Connection
 ) -> None:
