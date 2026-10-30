@@ -144,7 +144,9 @@
   `INVALID_PARAMS`, naming the variable, never the value), and a semantic check reports the skip.
 - **D14, the fetch limit is reported** (the risk above). `CheckResult.unrecorded` / `capped`,
   `saved_search_check.limit_note`, `WatchNote.limit`. The published page gives the line without
-  its count, because the count is taken over both tiers (the F6 membership oracle).
+  its count, because the count is taken over both tiers (the F6 membership oracle); the coordinator accepted
+  this. No `ConfigError` handler was added to the CLI or MCP: with the knob lazy it would be
+  unreachable (ruling).
 - **D13 revised, the seed marker is a column.** Migration 029 (unshipped, never applied to prod,
   confirmed by the coordinator) gains `saved_search_hits.seeded BOOLEAN NOT NULL DEFAULT FALSE`,
   written by `add`'s seed; `NOT_SEED_SQL` is `NOT h.seeded`. The earlier marker

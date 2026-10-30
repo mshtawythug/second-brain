@@ -367,3 +367,20 @@ def test_a_check_over_the_limit_is_noted_with_its_count_only_in_the_terminal(
     lines = _page_watch_lines(written.read_text())
     assert f"- [zephyr] {page}" in lines
     assert not any("2 more" in line for line in lines)
+
+
+def test_enrich_without_wiki_calls_the_model_once_and_keeps_empty_suggestions(
+    test_db: psycopg.Connection,  # noqa: ARG001 — schema reset
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two enrich branches with no page: an empty answer leaves ``suggestions`` empty, and
+    no second call is made for a published payload that does not exist (aud-78)."""
+    calls: list[object] = []
+    monkeypatch.setattr("brain.brief.suggest_next_steps", lambda b, c: calls.append(b) or [])
+
+    data, written = _build(tmp_path, wiki=False, enrich=True)
+
+    assert len(calls) == 1
+    assert data.suggestions == []
+    assert written is None
