@@ -470,16 +470,20 @@ up), with no side longer than 32,767 pixels (tesseract's limit); A0 at 200 dpi i
 about 62 million. A larger page is rendered at a lower resolution, and one that
 would fit only below 50 dpi, whose long side would not fit, or whose short side
 would be under one pixel, is skipped, so a forged page size (a huge or a very thin
-MediaBox) cannot exhaust memory. The images embedded in a page are bounded too:
-pdfium decodes each at its own size, so a page whose images hold more than 280
-million pixels (counted from their headers, without decoding, through nested
-forms) is skipped. Annotations and form fields are not drawn.
+MediaBox) cannot exhaust memory. Embedded images are bounded too, because pdfium
+decodes each at its own size. Before the file reaches pdfium, every image stream in
+the document is sized from its header, without decoding: masks, annotation
+appearances, patterns and Type3 glyphs included. If any one image declares more
+than 280 million pixels, or one cannot be sized, the document is not OCR'd, with
+one warning. The bound is per image, so a long scan with one page-sized image a
+page is unaffected. Each page's drawn images are also summed against the same
+bound, and annotations and form fields are not drawn.
 
-**Known residuals.** Three image sources are not page objects, so they are not
-counted: images inside tiling patterns, soft masks (`/SMask`), and Type3 glyph
-images. A PDF built around one of them can still make pdfium decode a large
-image while OCR runs. The systemic fix is a process-level memory guard (backlog
-BL-32). One document gets at most
+**Known residuals.** An inline image (`BI ... EI`) is not a stream object, so the
+document scan does not see it. On a page, pdfium counts it; inside a Type3 glyph or
+a tiling pattern it is in neither count. A `/JPXDecode` codestream carries its own
+size, which pdfium may decode instead of the declared one; that was not measured.
+The systemic fix is a process-level memory guard (backlog BL-32). One document gets at most
 10 minutes of OCR in total; at the deadline OCR stops, keeps the pages read so
 far, and logs a count. This matters because `brain ui` ingests on one job worker
 that cannot be cancelled. The text is stored

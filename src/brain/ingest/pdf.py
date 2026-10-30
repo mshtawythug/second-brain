@@ -1,14 +1,19 @@
 """PDF extractor — pypdf primary, pdfplumber fallback, OCR for image-only pages (RM-32).
 
-**Known residuals of the OCR memory bounds.** The page bitmap is capped (``MAX_PIXELS``,
-``MAX_SIDE_PX``), and so are the image objects pdfium decodes to draw it
-(``MAX_IMAGE_PIXELS``, counted through Form XObjects to ``MAX_FORM_DEPTH``). Annotations and
-form fields are not drawn. Three image sources are not page objects, so they are NOT
-counted: images inside tiling patterns, soft masks (``/SMask``), and Type3 glyph images. A
-PDF built around one of them can still make pdfium decode a large image. The systemic fix is
-a process-level memory guard (backlog BL-32), not more counting here.
+**The OCR memory bounds**, from the outside in:
+
+1. :func:`brain.ingest.pdf_image_scan.scan_document_images`, the primary guard, refuses the
+   whole document before pdfium opens it when any one image stream declares more than
+   ``MAX_IMAGE_PIXELS``. That covers masks, annotation appearances, patterns and Type3 glyphs,
+   which the page-level count cannot see. What it does not cover is in that module's docstring
+   (inline images outside a page's own content, and JPX codestream sizes) and in BL-32.
+2. Per page, the image objects pdfium will draw are summed (:func:`embedded_image_pixels`,
+   through Form XObjects to ``MAX_FORM_DEPTH``, failing closed on a Form whose contents the
+   walk did not reach), and annotations and form fields are not drawn.
+3. The page bitmap itself is capped (``MAX_PIXELS``, ``MAX_SIDE_PX``).
 """
 import ctypes
+import functools
 import io
 import logging
 import math
@@ -27,6 +32,7 @@ from brain.errors import describe_failure
 
 from . import ExtractedDoc
 from .ocr import PAGE_TIMEOUT_S, RENDER_DPI, OcrEngine, OcrError, OcrSetup, resolve_ocr
+from .pdf_image_scan import MAX_IMAGE_PIXELS, ImageTooLargeError, scan_document_images
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +55,8 @@ MAX_PIXELS = 70_000_000
 #: The longest side, in pixels, a bitmap may have: tesseract's own limit. A thin page
 #: (0.01 x 3.5e8 pt) is small in area but rounds up to a 1 x 972,222,223 px bitmap.
 MAX_SIDE_PX = 32_767
-#: The most native pixels the embedded images of one page may hold. pdfium decodes each
-#: image XObject at its own size to draw the page, whatever the page size: rev-99 measured
-#: a 30,000 px square flate image (an 875 KB file) peaking at 1.11 GB. 4x MAX_PIXELS leaves
-#: headroom for a real scan, which embeds about one page-sized image.
-MAX_IMAGE_PIXELS = 4 * MAX_PIXELS
+# MAX_IMAGE_PIXELS (280 Mpx, 4x MAX_PIXELS) lives in brain.ingest.pdf_image_scan: the
+# document pre-scan bounds each image by it, and embedded_image_pixels bounds each page's sum.
 #: How deep the image count descends into nested Form XObjects. pypdfium2's own default (15)
 #: is shallower than pdfium draws, so a deeper image went uncounted. pdfium's parser itself
 #: stops loading forms at level 40 (measured, pypdfium2 5.14; pinned by a test), so 64 covers
@@ -129,14 +132,14 @@ def embedded_image_pixels(page: pypdfium2.PdfPage) -> int:
     cannot be counted, and the page is refused rather than assumed to hold nothing.
     """
     total = 0
-    kinds = (pdfium_c.FPDF_PAGEOBJ_IMAGE, pdfium_c.FPDF_PAGEOBJ_FORM)
-    for obj in page.get_objects(filter=kinds, max_depth=MAX_FORM_DEPTH):
+    # No type filter, an explicit depth: every object is visited, Forms included.
+    for obj in page.get_objects(max_depth=MAX_FORM_DEPTH):
         if obj.type == pdfium_c.FPDF_PAGEOBJ_FORM:
-            if obj.level >= MAX_FORM_DEPTH - 1:  # get_objects descends only below this level
+            if obj.level == MAX_FORM_DEPTH - 1:  # get_objects does not descend into this one
                 raise PageTooLargeError("form nesting too deep to count its images")
-            continue
-        width, height = obj.get_px_size()
-        total += width * height
+        elif obj.type == pdfium_c.FPDF_PAGEOBJ_IMAGE:
+            width, height = obj.get_px_size()
+            total += width * height
     return total
 
 
@@ -191,9 +194,10 @@ def extract_pdf(
     path: Path,
     *,
     ocr: OcrSetup | None = None,
-    render: PageRenderer = render_page_png,
+    render: PageRenderer | None = None,
     open_pdfium: PdfiumOpener = _open_pdfium,
     clock: Clock = time.monotonic,
+    max_image_pixels: int = MAX_IMAGE_PIXELS,
 ) -> ExtractedDoc:
     """Extract an :class:`ExtractedDoc` from a PDF file on disk.
 
@@ -205,7 +209,10 @@ def extract_pdf(
     page within the cap carries an image, the pages are OCR'd (:func:`_ocr_pages`).
     ``ocr`` is resolved from ``os.environ`` only then, so a PDF with a real text layer
     never reads the ``BRAIN_OCR*`` knobs, and with ``BRAIN_OCR=off`` pdfium never
-    opens the file. ``ocr``, ``render``, ``open_pdfium`` and ``clock`` are test seams.
+    opens the file. Before pdfium opens it, :func:`scan_document_images` refuses a document
+    declaring an image over ``max_image_pixels``, which also bounds the default renderer's
+    per-page sum. ``ocr``, ``render``, ``open_pdfium``, ``clock`` and ``max_image_pixels`` are
+    test seams.
     """
     reader = PdfReader(str(path))
     pages_text: list[str] = []
@@ -222,8 +229,15 @@ def extract_pdf(
     content = full_text.strip()
     metadata: dict[str, Any] = {"page_count": page_count}
     if len(content) < MIN_CHARS_PER_PAGE * max(page_count, 1):
+        renderer = render or functools.partial(render_page_png, max_image_pixels=max_image_pixels)
         recognised = _ocr_fallback(
-            path, ocr, render=render, open_pdfium=open_pdfium, clock=clock
+            path,
+            reader,
+            ocr,
+            render=renderer,
+            open_pdfium=open_pdfium,
+            clock=clock,
+            max_image_pixels=max_image_pixels,
         )
         if recognised is not None:
             content, metadata["ocr"] = recognised
@@ -239,16 +253,24 @@ def extract_pdf(
 
 def _ocr_fallback(
     path: Path,
+    reader: PdfReader,
     ocr: OcrSetup | None,
     *,
     render: PageRenderer,
     open_pdfium: PdfiumOpener,
     clock: Clock,
+    max_image_pixels: int,
 ) -> tuple[str, dict[str, Any]] | None:
     """OCR an image-bearing PDF: ``(text, metadata.ocr)``, or ``None`` when nothing was read."""
     setup = ocr if ocr is not None else resolve_ocr(os.environ)
     if not setup.settings.enabled:
         # Before pdfium: with OCR off, the untrusted file is never handed to a second parser.
+        return None
+    try:
+        # The primary memory guard, before pdfium sees the file (pdf_image_scan's docstring).
+        scan_document_images(reader, max_image_pixels=max_image_pixels)
+    except ImageTooLargeError as exc:
+        logger.warning("OCR skipped a PDF: %s", describe_failure(exc))
         return None
     try:
         document = open_pdfium(path)

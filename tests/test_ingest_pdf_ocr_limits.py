@@ -394,7 +394,9 @@ class _PageWithUnreadableImage:
     def get_size(self) -> tuple[float, float]:
         return (612.0, 792.0)
 
-    def get_objects(self, filter: tuple[int, ...], max_depth: int) -> Iterator[_UnreadableImage]:
+    def get_objects(
+        self, filter: tuple[int, ...] | None = None, max_depth: int = 15
+    ) -> Iterator[_UnreadableImage]:
         yield _UnreadableImage()
 
     def render(self, **_: object) -> object:
@@ -412,8 +414,11 @@ def test_an_unreadable_image_size_fails_closed() -> None:
     assert describe_failure(caught.value) == "PageTooLargeError from PdfiumError"
 
 
-def _nested_forms_pdf(path: Path, depth: int) -> Path:
-    """A letter page drawing ``depth`` Form XObjects nested in a chain, a 40 x 30 px image last."""
+def _nested_forms_pdf(path: Path, depth: int, *, image_side: int | None = None) -> Path:
+    """A letter page drawing ``depth`` Form XObjects nested in a chain, an image last.
+
+    The image is 40 x 30 px, or ``image_side`` square (aud-99's probe used 100).
+    """
     first_form = 6
     image_number = first_form + depth
     draw = b"q /F Do Q"
@@ -435,10 +440,11 @@ def _nested_forms_pdf(path: Path, depth: int) -> Path:
             + body
             + b"\nendstream"
         )
-    pixels = b"\xff" * (40 * 30)
+    width, height = (40, 30) if image_side is None else (image_side, image_side)
+    pixels = b"\xff" * (width * height)
     objects.append(
-        f"<< /Type /XObject /Subtype /Image /Width 40 /Height 30 /ColorSpace /DeviceGray "
-        f"/BitsPerComponent 8 /Length {len(pixels)} >>\nstream\n".encode()
+        f"<< /Type /XObject /Subtype /Image /Width {width} /Height {height} "
+        f"/ColorSpace /DeviceGray /BitsPerComponent 8 /Length {len(pixels)} >>\nstream\n".encode()
         + pixels
         + b"\nendstream"
     )
@@ -504,7 +510,9 @@ class _PageWithNestedForms:
         self.depth = depth
         self.asked_depth: int | None = None
 
-    def get_objects(self, filter: tuple[int, ...], max_depth: int) -> Iterator[_FormObject]:
+    def get_objects(
+        self, filter: tuple[int, ...] | None = None, max_depth: int = 15
+    ) -> Iterator[_FormObject]:
         self.asked_depth = max_depth
         return (_FormObject(level) for level in range(min(self.depth, max_depth)))
 
@@ -534,7 +542,9 @@ class _RecordingPage:
     def get_size(self) -> tuple[float, float]:
         return (612.0, 792.0)
 
-    def get_objects(self, filter: tuple[int, ...], max_depth: int) -> Iterator[object]:
+    def get_objects(
+        self, filter: tuple[int, ...] | None = None, max_depth: int = 15
+    ) -> Iterator[object]:
         return iter(())
 
     def render(self, **kwargs: object) -> _RecordingPage:
