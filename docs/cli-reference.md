@@ -545,6 +545,13 @@ brain tags suggest-merges [--limit 50] [--json]      # ranked, with evidence
   running it again finishes the rest, and a run with nothing left to do is a
   no-op. Only documents carrying a mapped tag are touched. `updated_at` is not
   bumped: tag maintenance is not new knowledge.
+- **A file that cannot be rewritten** (unreadable, broken frontmatter, or a
+  `vault_path` outside the vault) does not stop the run: it is reported on
+  stderr by error class, with the tags it should have, the summary counts it
+  (`N file(s) failed`), and the command exits 1 once everything else is done.
+  Its database row is already updated, so **a re-run will not retry that
+  file**: fix the file by hand. `brain backfill normalize-tags` behaves the
+  same way.
 - **`merge`** keeps one copy of the merged tag per document, in first-seen
   order. `--into` may be one of the sources (`merge a b --into a`).
 - **`suggest-merges`** reports pairs whose spelling is close (`difflib` ratio

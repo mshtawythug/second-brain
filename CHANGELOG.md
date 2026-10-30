@@ -34,6 +34,12 @@ git tag scheme:
   `without_tag` filters. It runs per document, like
   `brain backfill normalize-tags`, so a re-run finishes an interrupted one and
   is otherwise a no-op. `updated_at` is not bumped.
+- A vault file that cannot be rewritten (unreadable, broken frontmatter, or a
+  path outside the vault) no longer stops the run, in `brain tags` and in
+  `brain backfill normalize-tags` alike: it is reported by error class, counted
+  in the summary, and the command exits 1 after finishing everything else. The
+  database row is already updated, so a re-run does not retry the file: fix it
+  by hand. Every `vault_path` is checked to stay inside the vault first.
 - `suggest-merges` ranks pairs by close spelling, singular/plural and
   co-occurrence on the same documents, each with its evidence.
 - MCP: `brain_tags_list` and `brain_tags_suggest_merges`, read-only, with
