@@ -136,7 +136,7 @@ Section 5 heading is multi-modal (5.1–5.3). Both are listed.
 | 7.1 | Interactive picker for `brain search` | **NOT STARTED** | No picker code. `brain ui` now meets most of the underlying need: a live result ledger, keyboard selection and a preview. |
 | 7.2 | `brain examples` | **NOT STARTED** | No such command. `docs/cli-reference.md` and the README examples are the current answer. |
 | 7.3 | Code-aware chunker | **NOT STARTED** | No code chunker. Only needed if 2.6 happens. |
-| 7.4 | Tag taxonomy tools (merge, rename, suggest merges) | **PARTIAL** | Canonical normalization is enforced at every write boundary (`tags.py`), and `brain backfill normalize-tags` exists (`6dd973e`). **Missing:** merge, rename and suggest-merges. See §3, rank 13. |
+| 7.4 | Tag taxonomy tools (merge, rename, suggest merges) | **SHIPPED** (roadmap ticket RM-21, PR #87) | Canonical normalization is enforced at every write boundary (`tags.py`), and `brain backfill normalize-tags` exists (`6dd973e`). `brain tags list / rename / merge / suggest-merges` (`cli_tags.py`) run the same per-document engine as normalize-tags, now in `brain/tag_mapping.py`, and rewrite saved searches' tag filters; MCP `brain_tags_list` / `brain_tags_suggest_merges` (`mcp_tools/tags.py`) are read-only. ~~**Missing:** merge, rename and suggest-merges. See §3, rank 13.~~ |
 | 7.5 | Opt-in query rewriting | **NOT STARTED** | No `--rewrite`. `brain ask`'s plan step writes its own sub-queries, which meets the "vague question" use case without touching search. |
 
 ### 1.8 Wave-plan deferrals not tied to a roadmap number
@@ -254,7 +254,7 @@ eval only now that the eval has just been re-judged.
 | 10 | **4.1 delivery: brief to Slack or email** | S | SHIPPED (#82, RM-16): a setting, `BRAIN_BRIEF_DELIVERY`, default `none`. ~~Small once the owner picks a channel, which is a product decision.~~ |
 | 11 | **3.4: near-duplicate detection** | M | It grows in value as more uploads arrive through the Ingest tab (cross-surface duplicates, spec §5.2 and §11 R4). |
 | 12 | **3.6: document-level embeddings** | M | It needs a migration and an eval run. Re-evaluate after the reranker, which may take most of the gain. |
-| 13 | **7.4: tag merge / rename** | S | Housekeeping. Normalization already prevents new drift. |
+| 13 | **7.4: tag merge / rename** | S | SHIPPED (#87, RM-21). ~~Housekeeping. Normalization already prevents new drift.~~ |
 | 14 | **1.3 phase 2: interactions-aware ranking** | M | Only worth doing once `brain usage` shows enough opens to learn from. Gate it on the data. |
 | 15 | **BL-4: copy-path / external-editor affordance** | XS | Small. Its default was already decided. |
 | 16 | **H-1 to H-6, BL-12: watcher / graph / log residues, and the stale ingest docstring** | XS–S each | Each has a known repair, and none loses data. Take them when their module is next opened (Scout rule). |
