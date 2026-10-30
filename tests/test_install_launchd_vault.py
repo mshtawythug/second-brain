@@ -57,7 +57,7 @@ def test_install_main_takes_vault_from_brain_home_dotenv(fenced: Path, tmp_path:
     custom = tmp_path / "custom-vault"
     (fenced / ".env").write_text(f"BRAIN_VAULT_PATH={custom}\n", encoding="utf-8")
 
-    install_main()
+    install_main([])
 
     assert _baked_vaults(tmp_path) == dict.fromkeys(_INSTALLED_LABELS, str(custom))
 
@@ -70,7 +70,7 @@ def test_install_main_process_env_beats_brain_home_dotenv(
     from_env = tmp_path / "from-env"
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(from_env))
 
-    install_main()
+    install_main([])
 
     assert _baked_vaults(tmp_path) == dict.fromkeys(_INSTALLED_LABELS, str(from_env))
 
@@ -79,7 +79,7 @@ def test_install_main_without_any_vault_config_uses_the_default(
     fenced: Path, tmp_path: Path
 ) -> None:
     """No env and no ``.env`` value: the default vault, as before."""
-    install_main()
+    install_main([])
 
     assert _baked_vaults(tmp_path) == dict.fromkeys(
         _INSTALLED_LABELS, str(tmp_path / "default-vault")
@@ -122,7 +122,7 @@ def test_a_tilde_vault_is_expanded_before_it_reaches_the_plist(
     else:
         monkeypatch.setenv("BRAIN_VAULT_PATH", "~/custom-vault")
 
-    install_main()
+    install_main([])
 
     expected = str(tmp_path / "home" / "custom-vault")
     assert _baked_vaults(tmp_path) == dict.fromkeys(_INSTALLED_LABELS, expected)
