@@ -16,6 +16,8 @@ from brain.settings.drop_folders import (
     DEFAULT_EXTENSIONS,
     DEFAULT_KIND,
     DEFAULT_SENSITIVITY,
+    KIND_EXTENSIONS,
+    VOICE_EXTENSIONS,
     config_path,
     load_drop_folders,
 )
@@ -273,3 +275,49 @@ def test_an_unreadable_file_is_a_config_error(home: Path) -> None:
 
     with pytest.raises(ConfigError, match="drop-folders.toml"):
         load_drop_folders(home)
+
+
+# --- RM-38.D2: a folder's default extensions follow its kind -------------------------
+
+
+def test_a_voice_folder_without_extensions_takes_audio(home: Path, drop: Path) -> None:
+    _write(home, f'[[folder]]\npath = "{drop}"\nkind = "voice"\n')
+
+    (folder,) = load_drop_folders(home).folders
+
+    assert folder.kind == "voice"
+    assert folder.extensions == VOICE_EXTENSIONS == frozenset({".m4a", ".mp3", ".wav"})
+    assert folder.sensitivity == "confidential"
+
+
+def test_a_screenshot_folder_without_extensions_takes_images(home: Path, drop: Path) -> None:
+    _write(home, f'[[folder]]\npath = "{drop}"\nkind = "screenshot"\n')
+
+    assert load_drop_folders(home).folders[0].extensions == DEFAULT_EXTENSIONS
+
+
+def test_any_other_kind_without_extensions_takes_images(home: Path, drop: Path) -> None:
+    _write(home, f'[[folder]]\npath = "{drop}"\nkind = "manual"\n')
+
+    assert load_drop_folders(home).folders[0].extensions == DEFAULT_EXTENSIONS
+
+
+def test_a_voice_folder_keeps_the_extensions_it_lists(home: Path, drop: Path) -> None:
+    _write(home, f'[[folder]]\npath = "{drop}"\nkind = "voice"\nextensions = [".m4a"]\n')
+
+    assert load_drop_folders(home).folders[0].extensions == frozenset({".m4a"})
+
+
+def test_a_voice_folder_can_override_its_sensitivity(home: Path, drop: Path) -> None:
+    _write(home, f'[[folder]]\npath = "{drop}"\nkind = "voice"\nsensitivity = "normal"\n')
+
+    assert load_drop_folders(home).folders[0].sensitivity == "normal"
+
+
+def test_the_voice_defaults_are_what_the_voice_extractor_serves() -> None:
+    from brain.ingest import dispatch
+
+    for ext in VOICE_EXTENSIONS:
+        spec = dispatch.spec_for(Path(f"memo{ext}"))
+        assert spec is not None and spec.name == "voice"
+    assert KIND_EXTENSIONS == {"voice": VOICE_EXTENSIONS}

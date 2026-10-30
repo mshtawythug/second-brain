@@ -185,9 +185,17 @@ def _load_image() -> ExtractorFn:
     return extract_image
 
 
+def _load_voice() -> ExtractorFn:
+    from .voice import extract_voice
+
+    return extract_voice
+
+
 #: The built-in extractors, in the order ``supported_extensions()`` lists them.
-#: ``image`` (RM-33) stays out of directory walks: drop folders and an explicit
-#: ``--ext`` reach it, so an existing ``brain ingest-dir`` run is unchanged.
+#: ``image`` (RM-33) and ``voice`` (RM-38) stay out of directory walks: drop folders
+#: and an explicit ``--ext`` reach them, so an existing ``brain ingest-dir`` run is
+#: unchanged. Both are ``confidential`` by default: a screenshot can show anything, and
+#: a voice memo is private by nature.
 BUILTIN_EXTRACTORS: tuple[ExtractorSpec, ...] = (
     ExtractorSpec(name="text", extensions=(".txt",), load=_load_text),
     ExtractorSpec(name="markdown", extensions=(".md", ".markdown"), load=_load_markdown),
@@ -199,6 +207,13 @@ BUILTIN_EXTRACTORS: tuple[ExtractorSpec, ...] = (
         name="image",
         extensions=(".png", ".jpg", ".jpeg"),
         load=_load_image,
+        in_directory_walks=False,
+        default_sensitivity=CONFIDENTIAL,
+    ),
+    ExtractorSpec(
+        name="voice",
+        extensions=(".m4a", ".mp3", ".wav"),
+        load=_load_voice,
         in_directory_walks=False,
         default_sensitivity=CONFIDENTIAL,
     ),

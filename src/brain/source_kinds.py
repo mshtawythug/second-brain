@@ -50,10 +50,11 @@ class InvalidSourceKind(BrainError):
 #: ``applenotes`` (RM-36): ``brain ingest-apple-notes`` (``osascript``, macOS).
 #: ``notion`` (RM-35): pages from a Notion export, ``brain ingest-notion``.
 #: ``screenshot`` (RM-33): OCR'd images from a drop folder, ``brain ingest-folder``.
+#: ``voice`` (RM-38): voice memos transcribed locally, from a drop folder.
 VALID_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         "manual", "krisp", "gmail", "slack", "calendar", "jira", "github", "applenotes",
-        "notion", "screenshot",
+        "notion", "screenshot", "voice",
     }
 )
 
