@@ -220,7 +220,8 @@ def test_repo_scope_never_ingests_another_persons_item(
     reviewed = fx.search_hit(fx.PUBLIC_REPO, 6, "A change the owner reviewed", author=fx.OTHER)
     gh.prs, gh.issues = [fx.pr_hit(), theirs, reviewed], []
     gh.reviewed = {f"{fx.PUBLIC_REPO}#6"}
-    for n in (6,):
+    # #5 is fully readable, so if a search ever returned it, it WOULD be ingested.
+    for n in (5, 6):
         base = f"repos/{fx.PUBLIC_REPO}"
         gh.api[f"{base}/pulls/{n}"] = json.dumps(fx.pr_detail())
         for path in (f"{base}/pulls/{n}/reviews", f"{base}/pulls/{n}/comments",
@@ -231,7 +232,9 @@ def test_repo_scope_never_ingests_another_persons_item(
 
     assert result.exit_code == 0, result.output
     assert set(_docs(test_db)) == {PR_ID, f"{fx.PUBLIC_REPO}#6"}
-    assert "Their unrelated change" not in result.output
+    assert f"{fx.PUBLIC_REPO}#5" not in result.output
+    assert "0 failed" in result.output
+    assert f"repos/{fx.PUBLIC_REPO}/pulls/5" not in gh.api_calls()
 
 
 def test_no_readmes_and_a_repo_without_one(
