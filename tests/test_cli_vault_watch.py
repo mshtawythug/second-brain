@@ -45,6 +45,16 @@ def _reset_fake_observers_for_cli() -> None:
     _FakeObserver.instances.clear()
 
 
+@pytest.fixture(autouse=True)
+def _own_brain_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """RM-26: ``--watch`` journals owed work under ``$BRAIN_HOME/state``.
+
+    The session ``BRAIN_HOME`` is shared by every test, so one test's journal
+    would be replayed by the next watcher; each test gets its own.
+    """
+    monkeypatch.setenv("BRAIN_HOME", str(tmp_path / "brain_home"))
+
+
 def test_watch_and_dry_run_are_mutually_exclusive(
     test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path, patch_embedder: Any
 ) -> None:
@@ -216,3 +226,31 @@ def test_watch_connects_with_the_watcher_connect_timeout(
     assert connect.call_args.kwargs.get("connect_timeout") == WATCHER_CONNECT_TIMEOUT_S, (
         f"the watcher's connections are not bounded: {connect.call_args!r}"
     )
+
+
+def test_watch_keeps_the_owed_work_journal_under_brain_home(
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    tmp_path: Path,
+    patch_embedder: Any,
+    mocker: Any,
+) -> None:
+    """RM-26: the daemon opts in to the owed-work journal at its default path."""
+    from brain.vault.sync import SyncReport
+
+    patch_embedder(fake_embedder)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    seen: list[dict[str, Any]] = []
+
+    def _capture(_conn_factory: Any, **kwargs: Any) -> SyncReport:
+        seen.append(kwargs)
+        return SyncReport()
+
+    mocker.patch("brain.cli.run_watcher", _capture)
+    result = CliRunner().invoke(
+        app, ["vault", "sync", "--vault", str(vault), "--watch"], catch_exceptions=False
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert seen[0]["owed_journal"] == tmp_path / "brain_home" / "state" / "watcher-owed.jsonl"

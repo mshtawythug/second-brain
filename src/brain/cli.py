@@ -344,6 +344,7 @@ from .vault.note_builder import (
     _build_embedder,
     _build_note_text,
 )
+from .vault.owed_work import default_journal_path
 from .vault.slug import slugify
 from .vault.sync import SyncReport, sync_one_file, sync_vault
 from .vault.sync_summaries import sync_summaries
@@ -6353,10 +6354,9 @@ def vault_sync(
                 owner_participants=cfg.owner_participants,
             ),
             graph_syncer=graph_syncer,
-            # This is the real long-lived daemon (launchd runs it via
-            # _brain-watcher-fg), so it opts in to keeping its own launchd
-            # logs size-capped while it is up.
+            # The real launchd daemon: it caps its logs and owes work across restarts (RM-26).
             enable_log_rotation=True,
+            owed_journal=default_journal_path(),
         )
         typer.echo(f"vault path:     {target}")
         deletion_phrase = (
