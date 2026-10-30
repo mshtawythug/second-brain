@@ -514,7 +514,9 @@ class _PageWithNestedForms:
         self, filter: tuple[int, ...] | None = None, max_depth: int = 15
     ) -> Iterator[_FormObject]:
         self.asked_depth = max_depth
-        return (_FormObject(level) for level in range(min(self.depth, max_depth)))
+        forms = (_FormObject(level) for level in range(min(self.depth, max_depth)))
+        # Honour ``filter`` as pypdfium2 does, so a walk filtered to images sees no Form.
+        return (form for form in forms if not filter or form.type in filter)
 
 
 def test_a_form_at_the_last_countable_level_is_refused() -> None:

@@ -221,7 +221,6 @@ class _BrokenReader:
     """A reader whose cross-reference lists one object that cannot be read."""
 
     xref = {0: {1: 0}}
-    xref_objStm: dict[int, tuple[int, int]] = {}
 
     def get_object(self, ref: object) -> object:
         raise PdfReadError("synthetic unreadable object")

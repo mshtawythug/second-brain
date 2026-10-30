@@ -60,13 +60,17 @@ def _dimension(stream: StreamObject, key: str) -> float:
 
 
 def _object_refs(reader: PdfReader, max_objects: int) -> list[IndirectObject]:
-    """Every object number pypdf's cross-reference lists, refused past ``max_objects``."""
+    """Every object pypdf's cross-reference places in the file, refused past ``max_objects``.
+
+    Objects compressed into an object stream (``reader.xref_objStm``) are left out: a stream
+    may not live inside an object stream (PDF 1.7, 7.5.7), so no image can be there. An image's
+    indirect ``/Width`` that does live there is still read, through :func:`_resolved`.
+    """
     refs = [
         IndirectObject(number, generation, reader)
         for generation, entries in reader.xref.items()
         for number in entries
     ]
-    refs.extend(IndirectObject(number, 0, reader) for number in reader.xref_objStm)
     if len(refs) > max_objects:
         raise ImageTooLargeError("too many objects to scan")
     return refs
