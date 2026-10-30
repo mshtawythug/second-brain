@@ -57,7 +57,7 @@ from .ingest import Embedder, ExtractedDoc, ingest_document
 from .ingest import apple_notes as an
 from .ingest.apple_notes import AppleNotesError, NotesBatch, NotesRequest
 from .ingest.text_safety import one_line
-from .ingest.volatile_patch import refresh_volatile, stored_document
+from .ingest.volatile_patch import settle, stored_document
 from .sensitivity import CONFIDENTIAL
 from .tags import normalize_tags
 
@@ -279,29 +279,24 @@ def _write(conn: psycopg.Connection[Any], note_id: str, doc: ExtractedDoc, run: 
     )
     _emit_secret_notice(result.secret_notice)
     _emit_egress_notice(result.egress_notice)
-    if result.created or result.body_changed:
-        return "ingested" if result.created else "updated"
-    if result.document_id is None:
-        # Nothing to chunk, so no document (ingest_document's insert path). The
-        # pre-check in _ingest_note catches an empty body first; this is the backstop.
-        return "empty"
-    if stored is None or result.document_id != stored[0]:
-        # The returned row is not this note's (applenotes, id) document: with no row
-        # of its own, ingest_document fell back to its content-hash match and found
-        # ANOTHER note's document with this exact body (two copies of one template).
-        # That row's metadata is not patched, and force would replace it; the note
-        # is reported instead. Unchanged/refreshed only ever describe the note's own row.
-        typer.secho(f"  same body as another note: {note_id}", fg="yellow", err=True)
-        return "same_body"
-    return refresh_volatile(
+    # The one rule (volatile_patch.settle, BL-34): unchanged/refreshed only ever
+    # describe this note's own (applenotes, id) row. A returned row that is not it is
+    # ANOTHER note's document with this exact body (two copies of one template),
+    # found by ingest_document's content-hash fallback; it is never patched, and
+    # force would replace it. An empty result (nothing to chunk) is "empty": the
+    # pre-check in _ingest_note catches an empty body first, this is the backstop.
+    outcome = settle(
         conn,
-        document_id=result.document_id,
-        stored=stored[1],
+        result,
+        stored=stored,
         metadata=doc.metadata,
         keys=an.VOLATILE_KEYS,
         vault_root=run.cfg.vault_path,
         graph_syncer=run.graph_syncer,
     )
+    if outcome == "same_body":
+        typer.secho(f"  same body as another note: {note_id}", fg="yellow", err=True)
+    return outcome
 
 
 def register(app: typer.Typer) -> None:

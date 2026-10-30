@@ -17,6 +17,7 @@ import psycopg
 import pytest
 from typer.testing import CliRunner, Result
 
+from brain import cli_ingest_calendar as calendar_cli
 from brain.cli import app
 from brain.enrichment import SummaryResult
 from brain.errors import DirectoryRefreshError
@@ -294,8 +295,14 @@ def test_a_changed_description_updates_in_place(
 def test_new_occurrences_change_only_the_metadata_without_re_chunking(
     test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
 ) -> None:
-    """Criterion 2, and the test plan's "a metadata-only re-run does not call the embedder"."""
+    """Criterion 2, and the test plan's "a metadata-only re-run does not call the embedder".
+
+    BL-34 (aud-106 F1): an occurrences-only refresh records no attendee again, so no
+    directory count moves. Before BL-34 that call sat inside the write branch; it is now
+    a string condition on settle's outcome, and this pins its exclusion of "refreshed".
+    """
     assert _run().exit_code == 0
+    counts = _directory_counts(test_db)
     before = _calendar_docs(test_db)[fx.SERIES_ID]
     chunks = _chunk_ids(test_db, before["id"])
     embed_calls = embedder.embed_calls
@@ -318,6 +325,41 @@ def test_new_occurrences_change_only_the_metadata_without_re_chunking(
     assert after["sent_at"] == datetime(2026, 11, 3, 16, 0, tzinfo=UTC)
     assert _chunk_ids(test_db, before["id"]) == chunks
     assert embedder.embed_calls == embed_calls
+    assert _directory_counts(test_db) == counts
+
+
+def _directory_counts(conn: psycopg.Connection[Any]) -> dict[str, int]:
+    rows = conn.execute(
+        "SELECT email, occurrence_count FROM directory_entries WHERE source = 'calendar'"
+    ).fetchall()
+    return {str(r[0]): int(r[1]) for r in rows}
+
+
+def test_a_same_body_result_for_a_stored_event_records_no_attendee_again(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BL-34 (aud-106 F1): a stored event whose ingest returns another row is same_body,
+    and records nothing. The residual D2 case (an event with NO row of its own) records
+    before ingest by design; this is the one with a row, where the exclusion is the guard.
+    """
+    from brain.ingest import IngestResult
+
+    assert _run().exit_code == 0
+    counts = _directory_counts(test_db)
+    real = calendar_cli.ingest_document
+
+    def double(conn: psycopg.Connection[Any], **kwargs: Any) -> Any:
+        if kwargs["source_external_id"] == fx.SERIES_ID:
+            return IngestResult(document_id="00000000-0000-4000-8000-0000000000bb", created=False)
+        return real(conn, **kwargs)
+
+    monkeypatch.setattr("brain.cli_ingest_calendar.ingest_document", double)
+
+    result = _run()
+
+    assert f"same body as another event: {fx.SERIES_ID}" in result.output
+    assert _directory_counts(test_db) == counts
 
 
 def test_an_event_turning_private_becomes_confidential(
@@ -711,3 +753,129 @@ def test_a_renamed_attendee_reaches_the_directory(
     )
     assert search.exit_code == 0, search.output
     assert fx.SERIES_TITLE in [hit["title"] for hit in json.loads(search.stdout)]
+
+
+# --- BL-34: a same-body event never touches another event's row ------------------------
+
+
+DUPLICATE_ID = "evtsingle002"
+
+
+def _duplicate_invite() -> dict[str, Any]:
+    """The same meeting under a second id (a duplicated invite): an identical body."""
+    return {**fx.single(), "id": DUPLICATE_ID}
+
+
+def test_a_same_body_event_is_reported_and_never_patches_the_other_row(
+    test_db: psycopg.Connection[Any], embedder: CountingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BL-34: the second id fell through ingest_document's content-hash fallback onto the
+    first event's row, which was then patched (occurrences, date, participants) and
+    reported refreshed, and the second event was never stored.
+    """
+    fake = fx.FakeGws([fx.single(), _duplicate_invite()])
+    monkeypatch.setattr("brain.cli_ingest_calendar.calendar_gws_runner", fake)
+
+    first = _run()
+    stored = _calendar_docs(test_db)
+    second = _run()
+
+    for result in (first, second):
+        assert result.exit_code == 0, result.output
+        assert f"same body as another event: {DUPLICATE_ID}" in result.output
+        assert result.output.rstrip().endswith(", 1 same body as another event")
+    assert "1 ingested" in first.output
+    assert "0 ingested, 0 updated, 0 occurrences refreshed, 1 unchanged, 0 failed" in (
+        second.output
+    )
+    assert set(_calendar_docs(test_db)) == {fx.SINGLE_ID}
+    assert _calendar_docs(test_db) == stored  # the first event's row is untouched
+
+
+DUPLICATE_SERIES_ID = "evtseries002"
+
+
+def _duplicate_series() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """A second series whose master renders the SAME body (same title, rule, time, names,
+    description) but whose volatile metadata differs from the first's: its instances fall
+    on other days (occurrences, date), and one attendee shares a display name but not an
+    address (participants). A wrongful patch would therefore be visible.
+    """
+    other_avery = (fx.AVERY[0], "avery.other@example.com")
+    attendees = [fx.owner(), fx.attendee(other_avery), fx.attendee(fx.BLAKE)]
+    master = fx.series_master(id=DUPLICATE_SERIES_ID, attendees=attendees)
+    instances = [
+        {
+            **fx.series_instance(day),
+            "id": f"{DUPLICATE_SERIES_ID}_{day.replace('-', '')}",
+            "recurringEventId": DUPLICATE_SERIES_ID,
+            "attendees": attendees,
+        }
+        for day in ("2026-09-08", "2026-09-22")
+    ]
+    return master, instances
+
+
+def test_a_same_body_series_never_overwrites_the_other_series_volatile_metadata(
+    test_db: psycopg.Connection[Any], embedder: CountingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BL-34 (aud-106): the second series carries different occurrences, date and
+    participants. On master its refresh landed on the first series' row and replaced all
+    three; now that row keeps its own values on every run.
+    """
+    dup_master, dup_instances = _duplicate_series()
+    fake = fx.FakeGws(
+        [*fx.series_instances(), *dup_instances],
+        masters={fx.SERIES_ID: fx.series_master(), DUPLICATE_SERIES_ID: dup_master},
+    )
+    monkeypatch.setattr("brain.cli_ingest_calendar.calendar_gws_runner", fake)
+
+    first = _run()
+    own = _calendar_docs(test_db)[fx.SERIES_ID]
+    second = _run()
+
+    for result in (first, second):
+        assert result.exit_code == 0, result.output
+        assert f"same body as another event: {DUPLICATE_SERIES_ID}" in result.output
+    docs = _calendar_docs(test_db)
+    assert set(docs) == {fx.SERIES_ID}
+    meta = docs[fx.SERIES_ID]["metadata"]
+    assert meta == own["metadata"]
+    assert meta["date"].startswith("2026-10-27")  # the first series' own last occurrence
+    assert not any(start.startswith("2026-09") for start in meta["occurrences"]["last"])
+    assert "avery.other@example.com" not in meta["participants"]
+    assert fx.AVERY[1] in meta["participants"]
+
+
+def test_a_run_without_rare_outcomes_prints_the_summary_unchanged(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
+) -> None:
+    """BL-34 D1: the new counts appear only when non-zero."""
+    result = _run()
+
+    [summary] = [line for line in result.output.splitlines() if "occurrences refreshed" in line]
+    assert summary.endswith(" failed")
+    assert "same body" not in result.output and "empty" not in summary
+
+
+def test_no_document_from_ingest_is_empty_not_an_assertion(
+    test_db: psycopg.Connection[Any], embedder: CountingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BL-34: ``document_id=None`` (nothing to chunk) used to hit an assert."""
+    from brain.ingest import IngestResult
+
+    fake = fx.FakeGws([fx.single()])
+    monkeypatch.setattr("brain.cli_ingest_calendar.calendar_gws_runner", fake)
+    monkeypatch.setattr(
+        "brain.cli_ingest_calendar.ingest_document",
+        lambda *_a, **_k: IngestResult(document_id=None, created=False),
+    )
+
+    result = _run()
+
+    assert result.exit_code == 0, result.output
+    assert f"  empty {fx.SINGLE_ID}" in result.output
+    assert result.output.rstrip().endswith("0 failed, 1 empty")
