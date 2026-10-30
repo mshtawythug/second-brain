@@ -1,6 +1,6 @@
 """Task 5.5 — the ``brain eval --fail-below`` regression gate.
 
-Contract (verbatim from CLAUDE.md / the overhaul plan):
+Contract (verbatim from docs/eval-gate.md, moved from CLAUDE.md / the overhaul plan):
 - ``--fail-below`` requires ``--diff`` (else exit 2, BadParameter).
 - Exits **3** when any mean metric (nDCG@5, MRR, Recall@20) regresses by more
   than ``1e-4``, comparing the 4-decimal-ROUNDED delta so the boundary at

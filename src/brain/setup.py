@@ -1,6 +1,6 @@
 """brain setup — interactive one-command installer for the second-brain runtime.
 
-Over the 800-line ceiling (CLAUDE.md table). Phase-7 growth, reasoned inline in
+Over the 800-line ceiling (docs/ceiling-table.md). Phase-7 growth, reasoned inline in
 ``_print_final_report``: the closing report names ``brain ui`` as the reading
 surface (spec R1); the legacy wiki URL it used to follow was deleted with the
 wiki at R3 (phase 9), which shrank this file. 2026-10-16: a re-run honours
