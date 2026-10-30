@@ -101,3 +101,23 @@ Notes in the Apple Notes folders the owner names become searchable, read through
 6. Front end, skill, docs, memory.
 7. `ruff check && mypy src/`, named tests under the lock, `test_log_privacy_rules.py`; mutation
    probes in a `git archive` copy.
+
+## Review round (#103)
+
+- **Security (sec-103):** the converter is bounded. Indent and quote depth stop at
+  `MAX_NESTING` (8). Links and emphasis are tracked to `MAX_OPEN_INLINE` (64) and cleared at
+  each line end. Output stops at `MAX_OUTPUT_CHARS`, cut and marked. A timing-free work
+  counter pins linear growth. A note is converted inside the per-note guard. Charrefs of 16+
+  digits become U+FFFD before parsing. A body over `MAX_BODY_CHARS` is skipped and counted.
+  The reader runs `/usr/bin/osascript` and never searches `PATH`.
+- **Audit (aud-103):**
+  - F1: the script tests are structural. Assignments, increments and pushes may touch only
+    locals, calls must be known reads, and no element constructors are allowed. A sha256 pin
+    covers the script, and eleven inserted-write mutants must each fail a guard.
+  - F2: each malformed scope gets its own precise message.
+  - F3: `ingest/volatile_patch.py` is shared by calendar, github and apple notes.
+  - F4: link escapes.
+- **Review (rev-103):**
+  - rev 1: the `<img>` strip is attribute-aware, and `data:` payloads are dropped in the
+    converter.
+  - rev 2: `one_line` lives in `ingest/text_safety.py`.

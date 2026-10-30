@@ -186,7 +186,11 @@ class _Run:
     allow_secrets: bool
     counts: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(
-            ("ingested", "updated", "refreshed", "unchanged", "empty", "skipped", "failed"), 0
+            (
+                "ingested", "updated", "refreshed", "unchanged",
+                "empty", "skipped", "same_body", "failed",
+            ),
+            0,
         )
     )
 
@@ -214,7 +218,7 @@ def _ingest_all(
     typer.echo(
         f"{c['ingested']} ingested, {c['updated']} updated, {c['refreshed']} refreshed, "
         f"{c['unchanged']} unchanged, {c['empty']} empty, {c['skipped']} skipped, "
-        f"{c['failed']} failed"
+        f"{c['same_body']} same body as another note, {c['failed']} failed"
     )
 
 
@@ -232,7 +236,7 @@ def _guarded(note_id: str, run: _Run, step: Any) -> None:
         typer.secho(f"  failed {note_id}: {describe_failure(exc)}", fg="red", err=True)
         outcome = "failed"
     run.counts[outcome] += 1
-    if outcome not in ("unchanged", "empty", "skipped", "failed"):
+    if outcome not in ("unchanged", "empty", "skipped", "same_body", "failed"):
         typer.echo(f"  {outcome} {note_id}")
 
 
@@ -252,7 +256,7 @@ def _ingest_note(conn: psycopg.Connection[Any], note: an.Note, run: _Run) -> str
 
 
 def _write(conn: psycopg.Connection[Any], note_id: str, doc: ExtractedDoc, run: _Run) -> str:
-    """Ingest one note; return ``ingested|updated|refreshed|unchanged``."""
+    """Ingest one note; return ``ingested|updated|refreshed|unchanged|same_body``."""
     stored = stored_document(conn, an.SOURCE_KIND, note_id)
     result = ingest_document(
         conn,
@@ -275,6 +279,13 @@ def _write(conn: psycopg.Connection[Any], note_id: str, doc: ExtractedDoc, run: 
     _emit_egress_notice(result.egress_notice)
     if result.created or result.body_changed:
         return "ingested" if result.created else "updated"
+    if stored is None:
+        # No (applenotes, id) row, yet nothing was written: ingest_document fell back
+        # to its content-hash match and found ANOTHER note's document with this exact
+        # body (two empty or template notes). Its row is not this note's, so its
+        # metadata is not patched, and force would replace it; the note is reported.
+        typer.secho(f"  same body as another note: {note_id}", fg="yellow", err=True)
+        return "same_body"
     assert result.document_id is not None  # every non-replace path returns the row id
     return refresh_volatile(
         conn,

@@ -222,9 +222,10 @@ def test_notes_land_confidential_and_locked_notes_are_counted(
 
     assert result.exit_code == 0, result.output
     assert "2 locked note(s) skipped (locked notes cannot be read)" in result.output
-    assert "2 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 0 skipped, 0 failed" in (
-        result.output
-    )
+    assert (
+        "2 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 0 skipped, "
+        "0 same body as another note, 0 failed"
+    ) in result.output
     docs = _docs(test_db)
     assert set(docs) == {fx.note_id(1), fx.note_id(2)}
     first = docs[fx.note_id(1)]
@@ -294,9 +295,10 @@ def test_an_empty_note_is_counted_and_not_stored(
 
     result = _run(*FOLDER)
 
-    assert "1 ingested, 0 updated, 0 refreshed, 0 unchanged, 1 empty, 0 skipped, 0 failed" in (
-        result.output
-    )
+    assert (
+        "1 ingested, 0 updated, 0 refreshed, 0 unchanged, 1 empty, 0 skipped, "
+        "0 same body as another note, 0 failed"
+    ) in result.output
     assert set(_docs(test_db)) == {fx.note_id(2)}
 
 
@@ -327,9 +329,10 @@ def test_a_database_error_is_reported_by_class(
     assert result.exit_code == 0, result.output
     assert f"failed {fx.note_id(1)}: CheckViolation" in result.output
     assert "SECRETROW" not in result.output
-    assert "0 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 0 skipped, 2 failed" in (
-        result.output
-    )
+    assert (
+        "0 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 0 skipped, "
+        "0 same body as another note, 2 failed"
+    ) in result.output
 
 
 def test_the_secret_guard_runs_on_every_note(
@@ -365,9 +368,10 @@ def test_a_conversion_failure_costs_one_note_not_the_run(
     assert result.exit_code == 0, result.output
     assert f"failed {fx.note_id(2)}: ValueError" in result.output
     assert "SECRETBODY" not in result.output
-    assert "1 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 0 skipped, 1 failed" in (
-        result.output
-    )
+    assert (
+        "1 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 0 skipped, "
+        "0 same body as another note, 1 failed"
+    ) in result.output
     assert set(_docs(test_db)) == {fx.note_id(1)}
 
 
@@ -395,9 +399,10 @@ def test_an_oversized_body_is_skipped_and_counted(
 
     assert result.exit_code == 0, result.output
     assert f"  skipped {fx.note_id(1)}: body over 100 characters" in result.output
-    assert "1 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 1 skipped, 0 failed" in (
-        result.output
-    )
+    assert (
+        "1 ingested, 0 updated, 0 refreshed, 0 unchanged, 0 empty, 1 skipped, "
+        "0 same body as another note, 0 failed"
+    ) in result.output
     assert set(_docs(test_db)) == {fx.note_id(2)}
 
 
@@ -414,6 +419,36 @@ def test_a_body_at_the_cap_is_converted(
 
 def test_the_body_cap_is_two_million_characters() -> None:
     assert an.MAX_BODY_CHARS == 2_000_000
+
+
+def test_two_notes_with_one_body_never_share_a_row(
+    notes: fx.FakeOsascript, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    """Regression (#103, rev-104's Notion finding): a new note whose body equals a stored
+    note's matched that document through ingest_document's content-hash fallback. It was
+    reported ``unchanged`` and never stored, and its folder was patched onto the OTHER
+    note's row. Now it is reported by id, and the other row is left alone.
+    """
+    body = "<div><h1>Weekly template</h1></div><div>Goals:</div>"
+    notes.notes = [
+        fx.note(1, body=body, folder=fx.FOLDER),
+        fx.note(2, body=body, folder=fx.OTHER_FOLDER, modified="2026-10-25T00:00:00Z"),
+    ]
+    args = ("--folder", fx.FOLDER, "--folder", fx.OTHER_FOLDER)
+
+    first = _run(*args)
+    second = _run(*args)
+
+    for result, kept in ((first, "1 ingested"), (second, "1 unchanged")):
+        assert result.exit_code == 0, result.output
+        assert kept in result.output
+        assert f"same body as another note: {fx.note_id(2)}" in result.output
+        assert "0 refreshed" in result.output
+        assert "1 same body as another note, 0 failed" in result.output
+    docs = _docs(test_db)
+    assert set(docs) == {fx.note_id(1)}  # never stored under note 2's id, never replaced
+    meta = docs[fx.note_id(1)]["metadata"]
+    assert (meta["folder"], meta["modified"]) == (fx.FOLDER, fx.MODIFIED)  # not note 2's
 
 
 # --- the cap (AC5) ------------------------------------------------------------------------------

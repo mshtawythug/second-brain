@@ -23,7 +23,7 @@ def _seed(conn: psycopg.Connection[Any], embedder: CountingEmbedder) -> str:
         embedder=embedder,
         doc=ExtractedDoc(
             title="Synthetic", content="A synthetic body.", content_type="note",
-            source_path=None, metadata={"state": "open", "kept": 1},
+            source_path=None, metadata={"state": "open", "kept": 1, "absent": "stays"},
         ),
         source_kind=KIND,
         source_external_id=EXTERNAL_ID,
@@ -44,7 +44,9 @@ def test_stored_document_finds_the_row_by_kind_and_external_id(
 ) -> None:
     doc_id = _seed(test_db, counting_embedder)
 
-    assert stored_document(test_db, KIND, EXTERNAL_ID) == (doc_id, {"state": "open", "kept": 1})
+    assert stored_document(test_db, KIND, EXTERNAL_ID) == (
+        doc_id, {"state": "open", "kept": 1, "absent": "stays"}
+    )
     assert stored_document(test_db, KIND, "missing") is None
     assert stored_document(test_db, "github", EXTERNAL_ID) is None
 
@@ -59,7 +61,7 @@ def test_only_changed_keys_present_in_the_new_metadata_are_patched(
     outcome = refresh_volatile(
         test_db,
         document_id=doc_id,
-        stored={"state": "open", "kept": 1},
+        stored={"state": "open", "kept": 1, "absent": "stays"},
         metadata={"state": "closed", "kept": 1, "ignored": "x"},
         keys=("state", "kept", "absent"),
         vault_root=None,
@@ -67,8 +69,9 @@ def test_only_changed_keys_present_in_the_new_metadata_are_patched(
     )
 
     assert outcome == "refreshed"
+    # "absent" is not in the new metadata, so it is left alone, never patched to null.
     assert stored_document(test_db, KIND, EXTERNAL_ID) == (
-        doc_id, {"state": "closed", "kept": 1}
+        doc_id, {"state": "closed", "kept": 1, "absent": "stays"}
     )
     assert _chunks(test_db, doc_id) == chunks  # metadata only: no re-chunk
     assert counting_embedder.embed_calls == embeds  # and no embed
