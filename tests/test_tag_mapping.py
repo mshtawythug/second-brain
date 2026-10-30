@@ -229,8 +229,10 @@ def test_co_occurrence_equals_the_brute_force_rule_on_a_random_corpus(seed: int)
                 if rng.random() < strength:
                     tags.add(f"{lead}-partner")
             elif rng.random() < 0.02:
-                # A partner without its lead: the two document sets are NOT nested, so the
-                # union is larger than either set and |A| + |B| - shared is actually tested.
+                # A partner without its lead puts a document in P (partner) that is not in L
+                # (lead), so P is not a subset of L. A strength below 1.0 leaves lead-only
+                # documents, so L is not a subset of P. With both, neither set contains the
+                # other, the union is larger than either, and |A| + |B| - shared is tested.
                 tags.add(f"{lead}-partner")
         doc_tags[f"d{d:03d}"] = sorted(tags)
 
@@ -246,11 +248,14 @@ def test_co_occurrence_equals_the_brute_force_rule_on_a_random_corpus(seed: int)
     for doc_id, tags in doc_tags.items():
         for tag in tags:
             docs_by_tag.setdefault(tag, set()).add(doc_id)
-    # ... and so its partner/lead sets are NOT nested, where |A| + |B| - shared != max(|A|, |B|).
+    # ... and so at least one partner/lead pair is non-nested: NEITHER set is a subset of the
+    # other, which is exactly when |A| + |B| - shared differs from max(|A|, |B|).
     assert any(
-        not docs_by_tag[f"{lead}-partner"] <= docs_by_tag[f"{lead}-lead"]
-        for lead in strengths
-        if f"{lead}-partner" in docs_by_tag
+        not (partner <= lead_docs or lead_docs <= partner)
+        for partner, lead_docs in (
+            (docs_by_tag.get(f"{lead}-partner", set()), docs_by_tag.get(f"{lead}-lead", set()))
+            for lead in strengths
+        )
     )
     assert got.keys() == expected.keys()
     for pair, (overlap, shared) in expected.items():
