@@ -30,6 +30,7 @@ from brain.brief_delivery import (
     make_channel,
     render_delivery,
     run_gws,
+    without_drafts,
 )
 from brain.queries import DocumentRow
 from brain.saved_search import WatchHit, WatchNote
@@ -510,3 +511,27 @@ def test_run_gws_survives_output_that_is_not_utf8(tmp_path: Path) -> None:
     out = run_gws(["gws", "gmail", "+send"], which=lambda _name: str(gws))
 
     assert "not utf-8" in out
+
+
+# --- review round 2 ---------------------------------------------------------------------------
+
+
+def test_a_draft_todo_drops_the_suggestions_derived_from_it() -> None:
+    # rev-82 / sec-82 R2-1: suggestions come from ALL todos and cannot be attributed to one, so a
+    # removed draft todo takes them with it (no re-derivation: no LLM call on the delivery path).
+    brief = _brief()  # its one todo belongs to d1
+
+    _, body = render_delivery(without_drafts(brief, {"d1"}), include_todos=True)
+
+    assert "todo body text one" not in body
+    assert "suggestion derived from todo text" not in body
+    assert "Suggested next steps" not in body
+
+
+def test_a_brief_without_draft_todos_keeps_its_suggestions() -> None:
+    brief = _brief()
+
+    _, body = render_delivery(without_drafts(brief, {"d3", "d4"}), include_todos=True)
+
+    assert "1. suggestion derived from todo text" in body
+    assert "- [ ] todo body text one" in body

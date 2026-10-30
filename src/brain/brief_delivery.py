@@ -231,15 +231,21 @@ def make_channel(
 
 
 def without_drafts(brief: BriefData, draft_ids: Collection[str]) -> BriefData:
-    """``brief`` without any capture, pin, todo or watch hit from a draft document (plan D13)."""
+    """``brief`` without any capture, pin, todo or watch hit from a draft document (plan D13).
+
+    The suggestions were derived from every todo and cannot be traced to one, so when a draft's
+    todo is removed they go too; re-deriving them would put an LLM call on the delivery path.
+    """
     if not draft_ids:
         return brief
+    todos = [row for row in brief.open_todos if row.document_id not in draft_ids]
     return replace(
         brief,
         captures=[doc for doc in brief.captures if doc.id not in draft_ids],
         pinned=[pin for pin in brief.pinned if pin.document_id not in draft_ids],
-        open_todos=[row for row in brief.open_todos if row.document_id not in draft_ids],
+        open_todos=todos,
         watch_hits=[hit for hit in brief.watch_hits if hit.document_id not in draft_ids],
+        suggestions=brief.suggestions if len(todos) == len(brief.open_todos) else [],
     )
 
 
