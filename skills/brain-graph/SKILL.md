@@ -47,6 +47,7 @@ user between sessions; this one queries the entity graph built from the
 | "Find docs about X" / a quote / a fact from one doc | `consult-brain` → `brain search --brief` (then `brain recall` to read) |
 | **Themes/patterns in conversations with a person** | `brain graphrag themes --person "X"` |
 | **Overall themes/clusters across the whole brain** | `brain graphrag search "<q>" --mode global` or `brain graphrag communities` |
+| Docs about Q that **mention entity X** (a hybrid search narrowed by the graph) | `brain search "<q>" --entity "X" [--entity-type …]` (MCP `brain_search(entity=…)`) |
 | A single entity's neighbourhood ("what links to X") | `brain graphrag entity "X"` (or `--mode local`) |
 | **Enumerate what's in the graph** ("what orgs/projects/topics are in my brain", "list all projects") | `brain graphrag entities [--type …]` |
 | **Size up the graph** ("how big is it / what's in it") | `brain graphrag stats` |
