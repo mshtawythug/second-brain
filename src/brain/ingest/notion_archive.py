@@ -278,7 +278,9 @@ def _central_directory(path: Path) -> tuple[int, int]:
 
     Read the way ``zipfile`` reads them: the last end-of-central-directory
     signature in the final 64 KiB, and for ZIP64 the record just before its
-    locator. A missing or truncated record is :data:`_CORRUPT`.
+    locator. A missing or truncated record, or a locator whose record is not
+    one, is :data:`_CORRUPT`; maximal values with no locator are taken as they
+    are.
     """
     with path.open("rb") as fh:
         size = fh.seek(0, os.SEEK_END)
@@ -291,19 +293,25 @@ def _central_directory(path: Path) -> tuple[int, int]:
         _sig, _disk, _cd_disk, _here, entries, cd_size, cd_offset, _note = _EOCD.unpack_from(
             tail, at
         )
+        plain = (entries, cd_size)
         if entries != 0xFFFF and 0xFFFFFFFF not in (cd_size, cd_offset):
-            return entries, cd_size
+            return plain
+        # A field at its maximum is a ZIP64 marker only when a locator precedes the
+        # record; without one, a plain archive simply has 65,535 entries (or a
+        # 4 GiB directory), and its own values stand, as in ``zipfile``.
         locator_at = tail_start + at - _ZIP64_LOCATOR.size
+        if locator_at < 0:
+            return plain
+        fh.seek(locator_at)
+        if fh.read(len(_ZIP64_LOCATOR_SIG)) != _ZIP64_LOCATOR_SIG:
+            return plain
         record_at = locator_at - _ZIP64_EOCD.size
         if record_at < 0:
             raise NotionExportError(_CORRUPT)
         fh.seek(record_at)
-        record = fh.read(_ZIP64_EOCD.size + _ZIP64_LOCATOR.size)
-    if (
-        record[: len(_ZIP64_EOCD_SIG)] != _ZIP64_EOCD_SIG
-        or record[_ZIP64_EOCD.size :][: len(_ZIP64_LOCATOR_SIG)] != _ZIP64_LOCATOR_SIG
-    ):
-        raise NotionExportError(_CORRUPT)
+        record = fh.read(_ZIP64_EOCD.size)
+    if record[: len(_ZIP64_EOCD_SIG)] != _ZIP64_EOCD_SIG:
+        raise NotionExportError(_CORRUPT)  # a locator that points at garbage
     fields = _ZIP64_EOCD.unpack_from(record)
     return fields[7], fields[8]  # total entries, central-directory size
 

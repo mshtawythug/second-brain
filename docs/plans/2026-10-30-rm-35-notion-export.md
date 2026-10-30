@@ -143,6 +143,8 @@ case ("its own command"), so the export reader is its own module behind its own 
 - After review round 2, 48 mutations: 45 killed (round 2 adds the own-document check, the
   empty/same-text split, the past-cap empty, taken-text and own-hash rules and skip lines, the
   LZMA mapping and the `utf-8-sig` decode) and the same 3 equivalents.
+- After the rev-104 re-review (L1), 49 mutations: 46 killed (the ZIP64 record signature and
+  the two "no locator: use the plain record" rules) and the same 3 equivalents.
 - `tests/test_skills_token_routing.py::test_skills_sync_is_not_drifted` fails locally until
   `bin/brain-skills-sync` runs after merge, because SKILL.md gained the Notion row (CI skips it).
 
@@ -163,6 +165,13 @@ case ("its own command"), so the export reader is its own module behind its own 
 - A corrupt LZMA member maps to the corrupt sentence; files are decoded `utf-8-sig`;
   `NotionPage.has_last_edited` and `last_edited()`'s bool are gone; the naive last-edited time
   stored as UTC is documented (ruling). The shared run loop is BL-33 (ruling: not in this PR).
+
+## Re-review (rev-104 L1)
+
+A plain archive with exactly 65,535 entries, or a 0xFFFFFFFF size or offset, carries maximal
+values without being ZIP64. Like `zipfile`'s `_EndRecData64`, the end-record check now reads
+ZIP64 only when a `PK\x06\x07` locator sits in the 20 bytes before the record; otherwise the
+plain record's own values stand. A locator whose record is missing or garbage stays corrupt.
 
 ## Risks
 

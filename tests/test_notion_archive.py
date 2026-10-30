@@ -558,28 +558,51 @@ def test_a_zip64_archive_is_sized_from_its_zip64_record(
     _refused(archive, "more files than the cap", ExportLimits(max_files=3))
 
 
-@pytest.mark.parametrize("signature", [b"PK\x06\x07", b"PK\x06\x06"], ids=["locator", "record"])
-def test_a_zip64_archive_with_a_damaged_end_record_is_refused_as_corrupt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signature: bytes
+def test_a_zip64_locator_pointing_at_garbage_is_refused_as_corrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     archive = _zip64(tmp_path / "e.zip", 4, monkeypatch)
     data = bytearray(archive.read_bytes())
-    at = data.rfind(signature)
-    data[at + 3] ^= 0xFF
+    data[data.rfind(b"PK\x06\x06") + 3] ^= 0xFF  # the ZIP64 record's signature
     archive.write_bytes(bytes(data))
     _no_zipfile(monkeypatch)
 
     _refused(archive, "not a readable zip")
 
 
-def test_a_zip64_marker_with_no_room_for_its_record_is_refused_as_corrupt(
+def test_a_locator_with_no_room_for_its_record_is_refused_as_corrupt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "e.zip"
-    path.write_bytes(struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 0, 0, 0))
+    locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, 0, 1)
+    eocd = struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 0, 0, 0)
+    path.write_bytes(locator + eocd)
     _no_zipfile(monkeypatch)
 
     _refused(path, "not a readable zip")
+
+
+def test_maximal_values_without_a_locator_are_the_plain_record_s_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ZIP64 archive whose locator is damaged reads as a plain 65,535-entry one."""
+    archive = _zip64(tmp_path / "e.zip", 4, monkeypatch)
+    data = bytearray(archive.read_bytes())
+    data[data.rfind(b"PK\x06\x07") + 3] ^= 0xFF  # no locator any more
+    archive.write_bytes(bytes(data))
+    _no_zipfile(monkeypatch)
+
+    _refused(archive, "more files than the cap", ExportLimits(max_files=0xFFFF - 1))
+
+
+def test_a_plain_archive_with_exactly_65535_entries_is_accepted(tmp_path: Path) -> None:
+    archive = _zip_with(tmp_path / "e.zip", *[(f"{i}.png", b"") for i in range(0xFFFF)])
+    data = archive.read_bytes()
+    assert data.rfind(b"PK\x06\x07") == -1  # zipfile wrote no ZIP64 records
+    assert data[_eocd_offset(data) + 10 : _eocd_offset(data) + 12] == b"\xff\xff"
+
+    with open_export(archive) as export:
+        assert len(export.files) == 0xFFFF
 
 
 def test_a_sane_end_record_over_a_broken_directory_is_refused_as_corrupt(tmp_path: Path) -> None:
@@ -617,3 +640,13 @@ def test_a_byte_order_mark_is_dropped(tmp_path: Path, zipped: bool) -> None:
 
     with open_export(path) as export:
         assert export.read_text(export.files[0]) == PAGE_TEXT
+
+
+def test_maximal_values_with_no_room_for_a_locator_are_the_plain_record_s_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "e.zip"
+    path.write_bytes(struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 0, 0, 0))
+    _no_zipfile(monkeypatch)
+
+    _refused(path, "more files than the cap", ExportLimits(max_files=10))
