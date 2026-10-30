@@ -22,7 +22,7 @@ git tag scheme:
 
 ## [Unreleased]
 
-### Added — a code-aware chunker for the `code` content type (RM-42)
+### Added — a code-aware chunker for the `code` content type (RM-42, PR #109)
 
 - Documents with `content_type="code"` are chunked at definition boundaries,
   one definition per chunk. Python is split with the stdlib `ast` module at
