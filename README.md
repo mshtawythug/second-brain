@@ -211,6 +211,7 @@ brain list --sensitivity confidential
 brain backup --label pre-upgrade    # checksummed DB + vault archive, with a manifest
 brain restore <archive> --db-only   # y/N confirmed; the pre-flight checks are not skippable
 brain usage --days 30               # searches, opens, ingests, and search latency p50/p95
+brain usage --engagement            # opens and ratings, and whether the ranking gate is met
 brain doctor                        # environment, database, embedder, daemons, mirror drift
 ```
 
