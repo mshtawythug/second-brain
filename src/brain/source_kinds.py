@@ -42,9 +42,13 @@ class InvalidSourceKind(BrainError):
 #: enum to change.) A new kind is added here and nowhere else in Python (RM-07).
 #: The front end keeps its own per-kind glyph tables (``SOURCE_ICONS`` in
 #: ``ui/static/js/results.js`` and ``discovery.js``), which a new kind also needs.
+#: ``jira`` (RM-34) has no ingest code: the ``ingest-brain`` skill pipes issues
+#: from the Atlassian MCP connector into ``brain ingest-stdin --source jira``.
 #: ``github`` (RM-31): ``brain ingest-github`` (``gh``), or the ``ingest-brain``
 #: skill's recipe through the GitHub MCP connector into ``brain ingest-stdin``.
-VALID_SOURCE_KINDS: frozenset[str] = frozenset({"manual", "krisp", "gmail", "slack", "github"})
+VALID_SOURCE_KINDS: frozenset[str] = frozenset(
+    {"manual", "krisp", "gmail", "slack", "jira", "github"}
+)
 
 
 def source_kinds_hint() -> str:

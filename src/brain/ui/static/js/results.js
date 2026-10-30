@@ -16,6 +16,7 @@ import { pagerModel } from "/static/js/pager.js";
    not sufficient: a source-specific chip style would need the same entry. */
 const SOURCE_ICONS = {
   krisp: "🎙️", slack: "💬", gmail: "📧", manual: "✍️", vault: "🌱",
+  jira: "🎫",
   github: "🔀",
 };
 
