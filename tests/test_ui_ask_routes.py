@@ -412,3 +412,11 @@ def test_build_context_wires_the_ask_runtime_and_its_retention(
     assert context.jobs.retention(ASK_KIND) == timedelta(minutes=10)
     assert context.jobs.retention("ingest.paste") == RETAIN_FOR
     assert (ask_unavailable_reason(context) is None) is enabled
+
+
+def test_the_offered_mode_is_asks_hybrid_mode() -> None:
+    # ask_service spells it to keep brain.ask (and httpx) out of brain.ui.app's imports.
+    from brain.ask import HYBRID_MODE
+    from brain.ui.ask_service import ASK_MODES
+
+    assert (HYBRID_MODE,) == ASK_MODES

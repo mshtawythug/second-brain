@@ -31,7 +31,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import psycopg
 
-from ..ask import HYBRID_MODE, AskResult, ChatJson, ask
 from ..ask_errors import describe_ask_failure
 from ..errors import (
     BrainError,
@@ -48,6 +47,7 @@ from .jobs import JobError, JobHandle, JobRegistry, JobSnapshot
 from .telemetry import record_ui_open
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
+    from ..ask import AskResult, ChatJson
     from ..config import Config
     from .context import UiContext
 
@@ -65,8 +65,10 @@ MAX_QUESTION_CHARS = 2_000
 #: Chat calls per iteration the deadline allows for: plan, reflect, synthesize.
 _CHAT_CALLS_PER_ITERATION = 3
 
-#: The one mode v1 offers (A9, RM-18a.D1).
-ASK_MODES: tuple[str, ...] = (HYBRID_MODE,)
+#: The one mode v1 offers (A9, RM-18a.D1): ``brain.ask.HYBRID_MODE``, spelled here
+#: because importing ``brain.ask`` loads ``brain.chat`` and with it ``httpx``, which
+#: ``brain.ui.app`` must not (``tests/test_import_cycles.py``). A test pins the two equal.
+ASK_MODES: tuple[str, ...] = ("hybrid",)
 
 _TIMEOUT_MESSAGE = (
     "The question took longer than the agent's time limit. Ask a narrower question, "
@@ -288,6 +290,9 @@ def _ask_and_record(
     on_step: Callable[[str, int], None],
 ) -> tuple[AskResult, dict[str, str]]:
     """Run the ask, read the cited levels back, then (past the last cancel point) record."""
+    # Here, not at module level: see ASK_MODES.
+    from ..ask import HYBRID_MODE, ask
+
     with ctx.connect() as conn:
         result = ask(
             conn,

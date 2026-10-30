@@ -213,3 +213,15 @@ as above. All of them went red, and the restored copy passed 69.
 | R2 | `_GuardedChat` drops `timeout` | `test_the_guarded_chat_forwards_every_keyword_on_every_call` |
 | R3 | `search_with_fts_fallback` catches `BrainError` | `test_a_guard_at_the_second_query_embed_propagates_and_never_falls_back` (both params) |
 | A1 | the citation level is hard-coded `"normal"` | the `[True]` confidential route test, and `test_a_cited_document_deleted_before_the_read_back_has_no_level_and_is_withheld` |
+
+### CI at `4052646`: one import-weight failure, fixed
+
+CI's full suite ran 1 failed and 10,158 passed. The failure was
+`tests/test_import_cycles.py::test_search_fallback_keeps_embeddings_out_of_light_imports[brain.ui.app]`:
+importing `brain.ui.app` loaded `httpx`, because `ui/ask_service.py` imported `brain.ask`
+(which imports `brain.chat`) at module level. The fix moves that import into the runner and
+keeps the types under `TYPE_CHECKING`. `ASK_MODES` spells `"hybrid"`, and
+`test_the_offered_mode_is_asks_hybrid_mode` pins it to `brain.ask.HYBRID_MODE`. The import
+test was red at `4052646` and is green after the fix, which is its own proof. My local
+targeted set had not included `tests/test_import_cycles.py`; it is now in every targeted run
+for this ticket.
