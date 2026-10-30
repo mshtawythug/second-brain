@@ -143,8 +143,13 @@ case ("its own command"), so the export reader is its own module behind its own 
 - After review round 2, 48 mutations: 45 killed (round 2 adds the own-document check, the
   empty/same-text split, the past-cap empty, taken-text and own-hash rules and skip lines, the
   LZMA mapping and the `utf-8-sig` decode) and the same 3 equivalents.
-- After the rev-104 re-review (L1), 49 mutations: 46 killed (the ZIP64 record signature and
-  the two "no locator: use the plain record" rules) and the same 3 equivalents.
+- After the sec-104 L3 rework, 54 mutations: 52 killed, including the walk's cap, signature and
+  short-header checks, the locator followed whatever the plain record says, the locator-first
+  read, the prepended-data fallback, the locator and record consistency checks, the
+  directory-before-the-file check, the size cap, the guard call and the reason mapping. 2 are
+  equivalent on APFS, where the harness runs: `O_NOFOLLOW` (a link swapped in is another inode)
+  and the read-time `S_ISREG`, which on ext4 is what refuses a FIFO or folder that reused the
+  inode number. The ZIP64 "room" mutant is gone with the code it mutated.
 - `tests/test_skills_token_routing.py::test_skills_sync_is_not_drifted` fails locally until
   `bin/brain-skills-sync` runs after merge, because SKILL.md gained the Notion row (CI skips it).
 
@@ -166,12 +171,32 @@ case ("its own command"), so the export reader is its own module behind its own 
   `NotionPage.has_last_edited` and `last_edited()`'s bool are gone; the naive last-edited time
   stored as UTC is documented (ruling). The shared run loop is BL-33 (ruling: not in this PR).
 
-## Re-review (rev-104 L1)
+## Re-review (rev-104 L1, sec-104 L3 rework)
 
-A plain archive with exactly 65,535 entries, or a 0xFFFFFFFF size or offset, carries maximal
-values without being ZIP64. Like `zipfile`'s `_EndRecData64`, the end-record check now reads
-ZIP64 only when a `PK\x06\x07` locator sits in the 20 bytes before the record; otherwise the
-plain record's own values stand. A locator whose record is missing or garbage stays corrupt.
+The first end-record check could be steered apart from `zipfile` (sec-104, proven with 300k-entry
+archives at about 186 MB peak): (a) it read ZIP64 only on a `0xFFFF`/`0xFFFFFFFF` sentinel, while
+`zipfile._EndRecData64` follows any locator; (b) it trusted the declared count, which `zipfile`
+ignores (it parses the declared size); (c) it read the ZIP64 record just before the locator, while
+`zipfile` reads it at the locator's offset first. And it refused a plain 65,535-entry archive
+(rev-104 L1). The new leaf `ingest/zip_directory.py` replaces it:
+
+- `locate` copies `_EndRecData`/`_EndRecData64`: the exact tail, else the last end-record
+  signature in the final 64 KiB; any locator is followed, its record read at the locator's
+  offset, then just before the locator (prepended data); disk, offset and size checks as
+  `zipfile`'s; with no locator the plain values stand, maximal or not. The directory starts where
+  `zipfile` puts it (the record's location minus its size); a size larger than what precedes the
+  record is corrupt.
+- `count_entries` walks that directory one 46-byte header at a time for its declared size,
+  requiring `PK\x01\x02`, skipping name, extra and comment, refusing at `max_files + 1`.
+- `open_export` runs both, plus the directory-size cap, before calling `zipfile`; tests prove it
+  through an injected `open_zip` factory that fails if called. `ZipExport`'s own count check was
+  removed: it could no longer fire.
+
+**Inode reuse (found by CI on Linux).** ext4 reuses a freed inode number at once, so an
+unlink-then-create at the same path can carry the listed `(st_dev, st_ino)`. A regular file
+recreated that way is read, as the export's own content inside the root; a FIFO or folder is
+refused by `S_ISREG`, which is therefore not redundant there. The test now renames another file
+over the path (two inodes exist at once), which is the swap the identity check is for.
 
 ## Risks
 

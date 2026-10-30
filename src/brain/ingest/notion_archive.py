@@ -23,17 +23,20 @@ without ever trusting a name, a link or a size:
   ``(st_dev, st_ino)`` is recorded. A read re-checks that the path still
   resolves inside the root, opens it with ``O_NOFOLLOW | O_NONBLOCK`` (a FIFO
   swapped in cannot block the run), and requires the open file to be a regular
-  file with the recorded identity, so a file, a parent folder or a hard link
-  swapped in between listing and reading is refused rather than read.
-- **The central directory is sized before it is parsed.** ``zipfile`` parses
-  the whole central directory when it opens an archive, so the end record (and
-  its ZIP64 form) is read from the file's tail first, and an archive declaring
-  more than :data:`MAX_EXPORT_FILES` entries, or a central directory larger
-  than that many entries can honestly need, is refused before ``zipfile``
-  sees it.
-
-Every :class:`NotionExportError` message is a fixed sentence: no member name,
-path or ``zipfile`` text is echoed, since all of them come from the export.
+  file with the recorded identity, so a link, FIFO, folder, hard link or file
+  renamed over it between listing and reading is refused rather than read.
+  The identity is an inode number, which a filesystem may reuse at once after
+  an unlink (ext4 does): a FIFO or folder created in its place is still
+  refused by ``S_ISREG``, and a regular file recreated at the same path inside
+  the root is read, as the export's own content.
+- **The central directory is bounded before it is parsed.** ``zipfile`` reads
+  the whole central directory into memory when it opens an archive, trusting
+  the declared size and ignoring the declared count. So
+  :mod:`brain.ingest.zip_directory` first finds the directory exactly as
+  ``zipfile`` will (end record, ZIP64 locator and record), refuses a declared
+  size larger than :data:`MAX_EXPORT_FILES` entries can honestly need, and
+  walks its headers in constant memory, refusing at ``MAX_EXPORT_FILES + 1``.
+  Only then is ``zipfile`` called, so it never parses a refused archive.
 """
 from __future__ import annotations
 
@@ -41,16 +44,16 @@ import lzma
 import os
 import re
 import stat
-import struct
 import zipfile
 import zlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from ..errors import BrainError
+from . import zip_directory
 from .notion_export import PAGE_SUFFIX, TABLE_SUFFIX, ExportFile
 
 MAX_EXPORT_FILES = 100_000
@@ -70,14 +73,6 @@ _ENCRYPTED_FLAG = 0x1
 _DRIVE_RE = re.compile(r"^[A-Za-z]:[/\\]")
 _OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
-#: The end-of-central-directory record, the ZIP64 locator and the ZIP64 record.
-_EOCD = struct.Struct("<4s4H2LH")
-_EOCD_SIG = b"PK\x05\x06"
-_ZIP64_LOCATOR = struct.Struct("<4sLQL")
-_ZIP64_LOCATOR_SIG = b"PK\x06\x07"
-_ZIP64_EOCD = struct.Struct("<4sQ2H2L4Q")
-_ZIP64_EOCD_SIG = b"PK\x06\x06"
-_MAX_ZIP_COMMENT = 0xFFFF
 #: A central-directory entry is 46 fixed bytes plus its name, extra field and
 #: comment; about 1 KiB of those per entry is more than an honest export needs.
 _CD_BYTES_PER_ENTRY = 46 + 1024
@@ -202,8 +197,8 @@ class FolderExport:
             raise NotionExportError(_UNREADABLE) from exc
         try:
             info = os.fstat(fd)
-            # The identity alone refuses every swap (a link, FIFO or folder is another
-            # inode); ``O_NOFOLLOW`` and ``S_ISREG`` are kept as defence in depth.
+            # The identity refuses a swap to another existing inode. ``S_ISREG`` is what
+            # refuses a FIFO or folder that reused the freed inode number (ext4).
             if (
                 not stat.S_ISREG(info.st_mode)
                 or (info.st_dev, info.st_ino) != self._identity[file.path]
@@ -240,9 +235,9 @@ class ZipExport:
     def __init__(self, archive: zipfile.ZipFile, limits: ExportLimits) -> None:
         self._zip = archive
         self._budget = _Budget(limits)
+        # ``open_export`` walked the same headers before ``zipfile`` parsed them, so
+        # ``infos`` holds at most ``limits.max_files`` entries.
         infos = archive.infolist()
-        if len(infos) > limits.max_files:
-            raise NotionExportError(_TOO_MANY)
         self._members: dict[PurePosixPath, zipfile.ZipInfo] = {}
         listed: list[ExportFile] = []
         for info in infos:
@@ -273,58 +268,31 @@ class ZipExport:
         return self._budget.charge(data)
 
 
-def _central_directory(path: Path) -> tuple[int, int]:
-    """``(entries, central-directory bytes)`` from the end records in the file's tail.
-
-    Read the way ``zipfile`` reads them: the last end-of-central-directory
-    signature in the final 64 KiB, and for ZIP64 the record just before its
-    locator. A missing or truncated record, or a locator whose record is not
-    one, is :data:`_CORRUPT`; maximal values with no locator are taken as they
-    are.
-    """
-    with path.open("rb") as fh:
-        size = fh.seek(0, os.SEEK_END)
-        tail_start = max(0, size - _EOCD.size - _MAX_ZIP_COMMENT)
-        fh.seek(tail_start)
-        tail = fh.read()
-        at = tail.rfind(_EOCD_SIG)
-        if at < 0 or len(tail) - at < _EOCD.size:
-            raise NotionExportError(_CORRUPT)
-        _sig, _disk, _cd_disk, _here, entries, cd_size, cd_offset, _note = _EOCD.unpack_from(
-            tail, at
-        )
-        plain = (entries, cd_size)
-        if entries != 0xFFFF and 0xFFFFFFFF not in (cd_size, cd_offset):
-            return plain
-        # A field at its maximum is a ZIP64 marker only when a locator precedes the
-        # record; without one, a plain archive simply has 65,535 entries (or a
-        # 4 GiB directory), and its own values stand, as in ``zipfile``.
-        locator_at = tail_start + at - _ZIP64_LOCATOR.size
-        if locator_at < 0:
-            return plain
-        fh.seek(locator_at)
-        if fh.read(len(_ZIP64_LOCATOR_SIG)) != _ZIP64_LOCATOR_SIG:
-            return plain
-        record_at = locator_at - _ZIP64_EOCD.size
-        if record_at < 0:
-            raise NotionExportError(_CORRUPT)
-        fh.seek(record_at)
-        record = fh.read(_ZIP64_EOCD.size)
-    if record[: len(_ZIP64_EOCD_SIG)] != _ZIP64_EOCD_SIG:
-        raise NotionExportError(_CORRUPT)  # a locator that points at garbage
-    fields = _ZIP64_EOCD.unpack_from(record)
-    return fields[7], fields[8]  # total entries, central-directory size
-
-
 def _check_central_directory(path: Path, limits: ExportLimits) -> None:
-    entries, cd_size = _central_directory(path)
-    if entries > limits.max_files or cd_size > limits.max_files * _CD_BYTES_PER_ENTRY:
-        raise NotionExportError(_TOO_MANY)
+    """Bound the directory ``zipfile`` will read, before it reads it (sec-104 L3)."""
+    try:
+        with path.open("rb") as fh:
+            directory = zip_directory.locate(fh)
+            if directory.size > limits.max_files * _CD_BYTES_PER_ENTRY:
+                raise NotionExportError(_TOO_MANY)
+            zip_directory.count_entries(fh, directory, limits.max_files)
+    except zip_directory.ZipDirectoryError as exc:
+        reason = _TOO_MANY if exc.reason == zip_directory.TOO_MANY else _CORRUPT
+        raise NotionExportError(reason) from exc
 
 
 @contextmanager
-def open_export(path: Path, *, limits: ExportLimits | None = None) -> Iterator[ExportReader]:
-    """Open ``path`` (a folder or a ``.zip``) for listing and reading; refuse anything else."""
+def open_export(
+    path: Path,
+    *,
+    limits: ExportLimits | None = None,
+    open_zip: Callable[[Path], zipfile.ZipFile] = zipfile.ZipFile,
+) -> Iterator[ExportReader]:
+    """Open ``path`` (a folder or a ``.zip``) for listing and reading; refuse anything else.
+
+    ``open_zip`` is the seam tests use to prove an archive was refused before
+    ``zipfile`` was asked to parse it.
+    """
     caps = limits or ExportLimits()
     if path.is_dir():
         yield FolderExport(path, caps)
@@ -333,7 +301,7 @@ def open_export(path: Path, *, limits: ExportLimits | None = None) -> Iterator[E
         raise NotionExportError(_NOT_AN_EXPORT)
     try:
         _check_central_directory(path, caps)
-        archive = zipfile.ZipFile(path)
+        archive = open_zip(path)
     except (zipfile.BadZipFile, OSError, EOFError, ValueError) as exc:
         raise NotionExportError(_CORRUPT) from exc
     with archive:
