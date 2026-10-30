@@ -135,7 +135,7 @@ def test_install_main_lands_on_the_env_stub(
     env_before, path_before = len(_calls(_env_stub())), len(_calls(_path_stub()))
 
     with pytest.raises(LaunchdError, match="bootstrap failed"):
-        install_main()
+        install_main([])
 
     _assert_only_the_env_stub_was_called(env_before, path_before, str(launchd_dir))
 

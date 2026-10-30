@@ -20,6 +20,8 @@ process:
     every other check describes the CLI's install rather than the daemons'.
 ``brief delivery``
     Composed in from :mod:`brain.doctor_delivery` (RM-16): the brief's delivery channel.
+``reranker``
+    Composed in from :mod:`brain.doctor_reranker` (RM-14b): is the local ``llama-server`` up?
 ``vault watcher`` / ``retired daemon``
     Composed in from :mod:`brain.doctor_watcher` (wiki-to-ui phase 8): is the
     vault-sync watcher installed or running (A9), and is the retired
@@ -44,12 +46,16 @@ from typing import TYPE_CHECKING
 
 from dotenv import dotenv_values
 
-from .bin.launchd import _INSTALLED_LABELS as DAEMON_LABELS
-from .bin.launchd import resolve_launchctl
+from .bin.launchd import _INSTALLED_LABELS, _OPTIONAL_LABELS, resolve_launchctl
 from .config import _brain_home_dotenv, _brain_home_root, dotenv_chain
 
 if TYPE_CHECKING:  # pragma: no cover — typing only; the real import is deferred
     from .cli import _DoctorCheck
+
+#: The agents the ``daemons`` and ``daemon code`` rows inspect, each only when its plist
+#: exists. The opt-in ones (RM-14b's ``com.brain.reranker``) are included because that
+#: is-file filter already makes "never installed" mean "not checked".
+DAEMON_LABELS = _INSTALLED_LABELS + _OPTIONAL_LABELS
 
 #: Keys `$BRAIN_HOME/.env` must define for the launchd daemons to start.
 #: ``DATABASE_URL`` is the one value :meth:`Config.load` hard-requires; a shell
@@ -94,6 +100,7 @@ def runtime_doctor_checks(
     """
     # Deferred: doctor_watcher and doctor_delivery import this module's _check.
     from .doctor_delivery import brief_delivery_doctor_check
+    from .doctor_reranker import reranker_doctor_check
     from .doctor_watcher import retired_daemon_doctor_check, watcher_doctor_check
 
     resolved_dir = launchd_dir if launchd_dir is not None else _default_launchd_dir()
@@ -114,6 +121,7 @@ def runtime_doctor_checks(
             launchd_dir=resolved_dir, platform=resolved_platform
         ),
         *brief_delivery_doctor_check(),
+        *reranker_doctor_check(),
     ]
 
 

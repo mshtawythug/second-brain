@@ -39,6 +39,43 @@ git tag scheme:
 - **`brain ingest-stdin --help` lists the accepted kinds from the one definition.** It had listed
   four kinds as a literal, so it would have called `jira` invalid.
 
+### Fixed — the vault watcher no longer loses a delete across a shutdown or a lost connection (RM-26)
+
+- A file deleted (or renamed away) just as the watcher shut down, or while it
+  could not reach the database, kept its row until `brain vault sync --prune`:
+  the startup sync never prunes. The watcher now writes each such delete to
+  `$BRAIN_HOME/state/watcher-owed.jsonl` and applies it at its next start,
+  after the startup sync. A path whose file is back on disk is never deleted.
+- A delete whose database write landed just before the connection dropped no
+  longer leaves the document's graph vertex behind (it used to need
+  `brain graphrag remove`). Graph removes the watcher could not apply at
+  shutdown are written to the same journal and applied at the next start.
+- The journal is mode 0600 and holds vault-relative paths and document ids,
+  never content. A line it cannot read is skipped with a warning; the rest is
+  applied. Only `brain vault sync --watch` keeps it.
+
+### Added — the local reranker runtime: a guide, a doctor line and an opt-in launchd job (RM-14b)
+
+- **`docs/guides/local-reranker.md`** installs `llama-server` (llama.cpp 0.7.0, from Homebrew)
+  and the `bge-reranker-v2-m3` Q8_0 GGUF (635,676,416 bytes, with its sha256). It measured the
+  server's resident memory at about 804 MiB, and it covers port 8081 already being in use.
+- **`brain-install-launchd --with-reranker`** installs `com.brain.reranker`, a `KeepAlive`
+  LaunchAgent that runs `llama-server --embedding --pooling rank --reranking` on
+  `127.0.0.1`. Its arguments are fixed in the template; only the model path
+  (`BRAIN_RERANK_GGUF`) and the port vary. The port is `BRAIN_RERANK_URL`'s, so the job listens
+  where searches look: 8081 by default. The host is always `127.0.0.1`. The flag fails before
+  touching anything when the model path is relative or names no file, or when
+  `BRAIN_RERANK_URL` is not `http://127.0.0.1:PORT` / `http://localhost:PORT` with PORT in
+  1024–65535. On `brain-up`'s flagless run, a value that has since gone bad leaves the installed
+  job as it was. That run prints one WARNING naming the variable and installs the other jobs. The agent stays installed: the flagless install `brain-up` runs re-renders it and
+  never removes it, and `brain-uninstall-launchd` removes it.
+- **`brain doctor`** gains a `reranker` line. With `BRAIN_RERANKER=llamacpp` it calls
+  `GET {BRAIN_RERANK_URL}/health` with a 2 s timeout, and it reports `not running` or
+  `not ready` as a WARN, never a FAIL. The `daemons` line checks the reranker agent only when
+  it is installed.
+- Nothing changes until you opt in: `BRAIN_RERANKER` still defaults to `none`, and `brain
+  setup` does not offer the reranker.
+
 ### Changed — the log-privacy guard covers its three recorded blind spots (RM-28)
 
 - The test guard that keeps exception text out of `src/brain`'s log lines now

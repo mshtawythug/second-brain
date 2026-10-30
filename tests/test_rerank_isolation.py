@@ -34,6 +34,7 @@ EXPORTED = {
     "BRAIN_RERANK_URL": "http://127.0.0.1:8081",
     "BRAIN_RERANK_MODEL": "synthetic-reranker",
     "BRAIN_RERANK_MAX_CHARS": "300",
+    "BRAIN_RERANK_GGUF": "/synthetic/models/reranker.gguf",
 }
 
 
