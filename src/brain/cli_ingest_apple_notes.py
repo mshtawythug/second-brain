@@ -53,10 +53,11 @@ from .cli_ingest import (
 from .config import Config
 from .db import connect
 from .errors import SecretGuardError, describe_failure
-from .ingest import Embedder, ExtractedDoc, ingest_document, update_document
+from .ingest import Embedder, ExtractedDoc, ingest_document
 from .ingest import apple_notes as an
 from .ingest.apple_notes import AppleNotesError, NotesBatch, NotesRequest
-from .ingest.github_docs import one_line
+from .ingest.text_safety import one_line
+from .ingest.volatile_patch import refresh_volatile, stored_document
 from .sensitivity import CONFIDENTIAL
 from .tags import normalize_tags
 
@@ -66,6 +67,7 @@ if TYPE_CHECKING:
 
 DEFAULT_MAX = 200
 SCOPE_REFUSAL = 'ingest-apple-notes requires --folder NAME (repeatable); "all notes" is not offered'
+_COMMAND = "ingest-apple-notes"
 NOT_MACOS = "ingest-apple-notes needs macOS: Apple Notes is read through osascript"
 
 #: The production runner; tests swap it for a fake (``monkeypatch.setattr``).
@@ -133,16 +135,16 @@ def _request_or_exit(
     if not names:
         _refuse(SCOPE_REFUSAL)
     if any(not name.strip() for name in names):
-        _refuse(f"{SCOPE_REFUSAL}: --folder must not be blank")
+        _refuse(f"{_COMMAND}: --folder must not be blank")
     first: date | None = None
     if since is not None:
         try:
             first = date.fromisoformat(since)
         except ValueError:
-            _refuse(f"{SCOPE_REFUSAL}: --since must be YYYY-MM-DD")
+            _refuse(f"{_COMMAND}: --since must be YYYY-MM-DD")
         assert first is not None  # _refuse exits
         if first > today:
-            _refuse(f"{SCOPE_REFUSAL}: --since is in the future")
+            _refuse(f"{_COMMAND}: --since is in the future")
     return NotesRequest(folders=names, since=first, limit=limit)
 
 
@@ -251,7 +253,7 @@ def _ingest_note(conn: psycopg.Connection[Any], note: an.Note, run: _Run) -> str
 
 def _write(conn: psycopg.Connection[Any], note_id: str, doc: ExtractedDoc, run: _Run) -> str:
     """Ingest one note; return ``ingested|updated|refreshed|unchanged``."""
-    stored = _stored_metadata(conn, note_id)
+    stored = stored_document(conn, an.SOURCE_KIND, note_id)
     result = ingest_document(
         conn,
         embedder=run.embedder,
@@ -274,33 +276,15 @@ def _write(conn: psycopg.Connection[Any], note_id: str, doc: ExtractedDoc, run: 
     if result.created or result.body_changed:
         return "ingested" if result.created else "updated"
     assert result.document_id is not None  # every non-replace path returns the row id
-    stored_meta = stored or {}
-    patch = {
-        key: doc.metadata[key]
-        for key in an.VOLATILE_KEYS
-        if stored_meta.get(key) != doc.metadata[key]
-    }
-    if not patch:
-        return "unchanged"
-    # Metadata only: no new_content and no embedder, so no re-chunk and no embed.
-    update_document(
+    return refresh_volatile(
         conn,
         document_id=result.document_id,
-        metadata_patch=patch,
+        stored=stored[1] if stored is not None else {},
+        metadata=doc.metadata,
+        keys=an.VOLATILE_KEYS,
         vault_root=run.cfg.vault_path,
         graph_syncer=run.graph_syncer,
     )
-    return "refreshed"
-
-
-def _stored_metadata(conn: psycopg.Connection[Any], note_id: str) -> dict[str, Any] | None:
-    """The stored note's metadata, or ``None`` when it was never ingested."""
-    row = conn.execute(
-        "SELECT d.metadata FROM documents d JOIN sources s ON s.id = d.source_id "
-        "WHERE s.kind = %s AND s.external_id = %s",
-        (an.SOURCE_KIND, note_id),
-    ).fetchone()
-    return None if row is None else (row[0] or {})
 
 
 def register(app: typer.Typer) -> None:

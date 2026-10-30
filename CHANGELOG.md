@@ -42,6 +42,11 @@ git tag scheme:
 - `brain.ingest.capped_process` holds the timeout-and-stdout-cap runner that
   `gh` (RM-31) used, now shared with the `osascript` reader; `gh`'s behaviour
   and messages are unchanged.
+- Shared leaves, behaviour unchanged: `brain.ingest.volatile_patch` (the
+  stored-row lookup and the metadata-only refresh that `ingest-calendar`,
+  `ingest-github` and `ingest-apple-notes` each carried) and
+  `brain.ingest.text_safety.one_line` (moved from `github_docs`, which
+  re-exports it).
 
 ### Changed — the `ingest-brain` skill keeps its per-source recipes in `sources/`
 

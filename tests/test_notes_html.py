@@ -342,3 +342,35 @@ def test_a_huge_character_reference_in_an_attribute_is_harmless() -> None:
     body = f'<a href="https://e.x/&#{"9" * 5000};">t</a>'
 
     assert html_to_markdown(body) == "[t](https://e.x/�)"
+
+
+# --- link escapes and data: payloads (#103 review: aud F4, rev 1) -------------------------------
+
+
+@pytest.mark.parametrize(
+    ("anchor", "expected"),
+    [
+        ('<a href="https://e.x/a>b"></a>', "<https://e.x/a%3Eb>"),  # cannot close the autolink
+        ('<a href="https://e.x/<x>">t</a>', "[t](https://e.x/%3Cx%3E)"),
+        ('<a href="https://e.x">see [1] here</a>', "[see \\[1\\] here](https://e.x)"),
+        ('<a href="https://e.x">a](javascript:x)</a>', "[a\\](javascript:x)](https://e.x)"),
+    ],
+)
+def test_link_text_and_targets_cannot_close_their_own_markup(
+    anchor: str, expected: str
+) -> None:
+    assert html_to_markdown(f"<div>{anchor}</div>") == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('a b" src="data:image/png;base64,QUJD+/=">c', 'a b" src="">c'),  # a leaked img tail
+        ("x data:text/plain;charset=utf-8,hello y", "x  y"),
+        ("DATA:IMAGE/PNG;BASE64,QUJD", ""),
+        ("metadata:keep, data: alone, data:nope", "metadata:keep, data: alone, data:nope"),
+    ],
+)
+def test_data_payloads_never_reach_the_output(text: str, expected: str) -> None:
+    assert html_to_markdown(f"<div>{text}</div>") == expected
+    assert html_to_markdown(f"<pre>{text}</pre>") == f"```\n{expected}\n```"

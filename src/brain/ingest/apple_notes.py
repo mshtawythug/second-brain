@@ -20,7 +20,10 @@ it for an option.
 name, in every account): its id, name, folder, creation and modification times,
 and for the newest ``limit`` unlocked notes only, the HTML body with every
 ``<img>`` removed (attachments are out of scope, and inline image data would
-dominate the output). A locked note (``passwordProtected``) is counted and its
+dominate the output). The pattern skips quoted attribute values, so a ``>``
+inside one (``alt="a>b"``) does not end the tag early and leak the rest
+(#103 review); :mod:`brain.ingest.notes_html` drops any ``data:`` payload that
+still arrives. A locked note (``passwordProtected``) is counted and its
 body never requested. The newest-first sort and the cap run inside the script,
 because Notes scripting is slow per note and a body is the slow part.
 
@@ -41,8 +44,8 @@ from typing import Any
 
 from . import ExtractedDoc
 from .capped_process import run_capped
-from .github_docs import one_line
 from .notes_html import html_to_markdown
+from .text_safety import one_line
 
 SOURCE_KIND = "applenotes"
 CONTENT_TYPE = "apple_note"
@@ -106,7 +109,7 @@ function run(argv) {
     var body = p.notes.byId(p.id).body();
     out.push({
       id: p.id, name: p.name, folder: p.folder, created: p.created, modified: p.modified,
-      body: body.replace(/<img\b[^>]*>/gi, "")
+      body: body.replace(/<img\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, "")
     });
   }
   var missing = wanted.filter(function (w) { return !matched[w]; });

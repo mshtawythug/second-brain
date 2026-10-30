@@ -54,9 +54,10 @@ from .cli_ingest import (
 from .config import Config
 from .db import connect
 from .errors import SecretGuardError, describe_failure
-from .ingest import Embedder, ingest_document, update_document
+from .ingest import Embedder, ingest_document
 from .ingest import calendar as calendar_ingest
 from .ingest.calendar import CalendarDoc, CalendarError
+from .ingest.volatile_patch import refresh_volatile, stored_document
 from .sensitivity import CONFIDENTIAL, DEFAULT_SENSITIVITY
 from .tags import normalize_tags
 from .vault.derived_links import real_gws_runner
@@ -244,7 +245,7 @@ def _ingest_all(
 
 def _ingest_one(conn: psycopg.Connection[Any], cd: CalendarDoc, run: _Run) -> str:
     """Ingest one document; return ``ingested|updated|refreshed|unchanged``."""
-    stored = _stored_document(conn, cd.external_id)
+    stored = stored_document(conn, calendar_ingest.SOURCE_KIND, cd.external_id)
     stored_meta = stored[1] if stored is not None else {}
     # An earlier window must not move a series backwards, and an occurrence the
     # window no longer holds is dropped (calendar.merge_volatile).
@@ -290,18 +291,6 @@ def _ingest_one(conn: psycopg.Connection[Any], cd: CalendarDoc, run: _Run) -> st
     return _refresh_metadata(conn, result.document_id, stored_meta, metadata, run)
 
 
-def _stored_document(
-    conn: psycopg.Connection[Any], external_id: str
-) -> tuple[str, dict[str, Any]] | None:
-    """``(document id, metadata)`` of the stored calendar document, or ``None``."""
-    row = conn.execute(
-        "SELECT d.id::text, d.metadata FROM documents d JOIN sources s ON s.id = d.source_id "
-        "WHERE s.kind = %s AND s.external_id = %s",
-        (calendar_ingest.SOURCE_KIND, external_id),
-    ).fetchone()
-    return None if row is None else (str(row[0]), row[1] or {})
-
-
 def _refresh_metadata(
     conn: psycopg.Connection[Any],
     document_id: str,
@@ -309,24 +298,19 @@ def _refresh_metadata(
     metadata: dict[str, Any],
     run: _Run,
 ) -> str:
-    """Apply the volatile keys that differ from ``stored``; ``refreshed`` or ``unchanged``."""
-    patch = {
-        key: metadata[key]
-        for key in _VOLATILE_KEYS
-        if key in metadata and stored.get(key) != metadata[key]
-    }
-    if not patch:
-        return "unchanged"
-    # Metadata only: no new_content and no embedder, so no re-chunk and no embed.
-    # The graph syncer goes along, so a participants change re-indexes the people.
-    update_document(
+    """Apply the volatile keys that differ from ``stored``; ``refreshed`` or ``unchanged``.
+
+    The graph syncer goes along, so a participants change re-indexes the people.
+    """
+    return refresh_volatile(
         conn,
         document_id=document_id,
-        metadata_patch=patch,
+        stored=stored,
+        metadata=metadata,
+        keys=_VOLATILE_KEYS,
         vault_root=run.cfg.vault_path,
         graph_syncer=run.graph_syncer,
     )
-    return "refreshed"
 
 
 def _record_attendees(conn: psycopg.Connection[Any], cd: CalendarDoc) -> None:

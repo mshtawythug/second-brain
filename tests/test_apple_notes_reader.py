@@ -5,6 +5,7 @@ The real ``osascript`` is never run: runner tests use a throwaway script named
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -71,19 +72,141 @@ def test_the_script_never_interpolates_and_reads_its_input_only_through_json_par
     assert not re.search(r"\beval\b|Function\(|\$\{|`", JXA_SCRIPT)
 
 
+# The script's own locals: the only names an assignment, an increment or a push may touch.
+_LOCAL_TARGET = re.compile(r"(?:for \()?var \w+|matched\[folderName\]|seen\[ids\[i\]\]")
+_ASSIGNMENT = re.compile(r"(?<![=!<>+\-*/%&|^])=(?!=)")
+_COMPOUND = re.compile(r"[+\-*/%&|^]=")
+_COUNTERS = {"f", "i", "k", "locked"}
+_LOCAL_ARRAYS = {"picked", "out"}
+#: Every method the script calls. A new one (a JXA write such as ``make``, ``delete``,
+#: ``move``, ``duplicate``, ``save``, ``close``, ``set``) fails the test.
+_READ_CALLS = {
+    "parse", "folders", "name", "id", "creationDate", "modificationDate",
+    "passwordProtected", "indexOf", "push", "toISOString", "getTime", "sort", "byId",
+    "body", "replace", "filter", "stringify",
+}
+#: The script as reviewed. Any edit fails here, so it gets a test change and a re-review.
+JXA_SCRIPT_SHA256 = "a5b26d291aed3eeba6bde9937224c12b83e089325c8e9274908ef93601a8dee6"
+
+
+def _bad_assignments(script: str) -> list[str]:
+    """Assignment targets that are not script locals (a JXA property write is one)."""
+    bad = []
+    for line in script.splitlines():
+        for match in _ASSIGNMENT.finditer(line):
+            target = line[: match.start()].strip()
+            if not _LOCAL_TARGET.fullmatch(target):
+                bad.append(target)
+        bad += [line.strip()] if _COMPOUND.search(line) else []
+    return bad
+
+
+def _mutations_of_locals_only(script: str) -> bool:
+    increments = set(re.findall(r"([\w.\[\]]+)\s*(?:\+\+|--)", script))
+    pushes = set(re.findall(r"([\w.\[\]]+)\.push\(", script))
+    return increments == _COUNTERS and pushes == _LOCAL_ARRAYS
+
+
+def _calls_are_reads(script: str) -> bool:
+    return (
+        set(re.findall(r"\.(\w+)\s*\(", script)) <= _READ_CALLS
+        and not re.search(r"\.[A-Z]\w*\s*\(", script)  # no element constructor
+        and set(re.findall(r"\bnew\s+(\w+)", script)) == {"Date"}
+        and re.findall(r"Application\([^)]*\)[.\w()]*", script)
+        == ['Application("Notes").folders()']
+    )
+
+
+def test_every_assignment_targets_a_local() -> None:
+    """aud F1 (#103): ``folders[f].name = "renamed";`` is a JXA write and was not caught."""
+    assert _bad_assignments(JXA_SCRIPT) == []
+
+
+def test_increments_and_pushes_touch_only_locals() -> None:
+    assert _mutations_of_locals_only(JXA_SCRIPT)
+
+
+def test_the_script_calls_only_reads() -> None:
+    assert _calls_are_reads(JXA_SCRIPT)
+
+
+@pytest.mark.parametrize(
+    "mutant",
+    [
+        'folders[f].name = "renamed";',  # aud F1's m2b, which survived the verb list
+        "notes.name = 'x';",
+        "p.notes.byId(p.id).body = '';",
+        'folders[f].notes.push(Application("Notes").Note({name: "x"}));',
+        'Application("Notes").delete(folders[f]);',
+        "folders[f].name.set('x');",
+        "locked += 1;",
+        "out.length = 0;",
+        "matched[folderName] = 1; folders[f].name = 'y';",
+        "names[0]++;",
+        "var x = new Function('return 1');",
+    ],
+)
+def test_the_guards_reject_a_write_inserted_into_the_script(mutant: str) -> None:
+    """Each mutant fails at least one structural guard, so the guards are not vacuous."""
+    mutated = JXA_SCRIPT.replace(
+        "    matched[folderName] = true;\n", f"    matched[folderName] = true;\n    {mutant}\n"
+    )
+    assert mutated != JXA_SCRIPT
+
+    assert (
+        _bad_assignments(mutated)
+        or not _mutations_of_locals_only(mutated)
+        or not _calls_are_reads(mutated)
+    ), mutant
+
+
 @pytest.mark.parametrize(
     "verb",
     ["make", "delete", "move", "save", "duplicate", "close", "doShellScript",
      "includeStandardAdditions", "currentApplication", "set(", ".write", "openForAccess"],
 )
-def test_the_script_only_reads(verb: str) -> None:
+def test_the_script_names_no_write_verb(verb: str) -> None:
     assert verb not in JXA_SCRIPT
 
 
-def test_the_script_skips_locked_bodies_and_strips_images() -> None:
+def test_the_script_is_the_reviewed_one() -> None:
+    """A pin: any edit to the script fails here, which forces a test change and a re-review."""
+    assert hashlib.sha256(JXA_SCRIPT.encode("utf-8")).hexdigest() == JXA_SCRIPT_SHA256
+
+
+def test_the_script_skips_locked_bodies() -> None:
     assert "passwordProtected()" in JXA_SCRIPT
     assert "if (isLocked[i]) { locked++; continue; }" in JXA_SCRIPT
-    assert 'body.replace(/<img\\b[^>]*>/gi, "")' in JXA_SCRIPT
+
+
+def _img_pattern(script: str) -> re.Pattern[str]:
+    """The script's ``<img>`` regex, compiled in Python (this syntax means the same in JS)."""
+    match = re.search(r'body\.replace\(/(?P<re>.*)/gi, ""\)', script)
+    assert match, "the script has no <img> strip"
+    return re.compile(match.group("re"), re.IGNORECASE)
+
+
+IMG_WITH_QUOTED_GT = (
+    '<div>a<img alt="a>b" title=\'c>d\' src="data:image/png;base64,QUJDRA==">z</div>'
+)
+
+
+def test_the_img_strip_skips_a_gt_inside_quoted_attributes() -> None:
+    """rev 1 (#103): ``[^>]*`` stopped at the ``>`` in ``alt="a>b"`` and leaked the base64."""
+    assert _img_pattern(JXA_SCRIPT).sub("", IMG_WITH_QUOTED_GT) == "<div>az</div>"
+    old = _img_pattern(r'body.replace(/<img\b[^>]*>/gi, "")')
+    assert "base64" in old.sub("", IMG_WITH_QUOTED_GT)  # the fixture does catch the old one
+
+
+@pytest.mark.parametrize(
+    "tag", ['<IMG SRC="x">', "<img>", "<img/>", "<img src=\"a\" alt='b'>", "<img\nsrc='x'\n>"]
+)
+def test_the_img_strip_removes_every_img_form(tag: str) -> None:
+    assert _img_pattern(JXA_SCRIPT).sub("", f"a{tag}b") == "ab"
+
+
+def test_the_img_strip_leaves_other_tags() -> None:
+    assert _img_pattern(JXA_SCRIPT).sub("", "<imgx>a<image>") == "<imgx>a<image>"
 
 
 def test_no_since_is_null() -> None:

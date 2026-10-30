@@ -74,6 +74,13 @@ _SKIPPED = frozenset(
 )
 _EMPHASIS = {"b": "**", "strong": "**", "i": "*", "em": "*", "tt": "`", "code": "`"}
 _SAFE_SCHEMES = ("http://", "https://", "mailto:")
+_TARGET_ESCAPES = str.maketrans(
+    {" ": "%20", "(": "%28", ")": "%29", "<": "%3C", ">": "%3E"}
+)
+#: An inline ``data:`` payload (an image's base64), dropped from any output line:
+#: attachments are out of scope, and the JXA script's own ``<img>`` strip is the
+#: first line of defence, not the only one (#103 review).
+_DATA_URI = re.compile(r"\bdata:[\w.+-]+/[\w.+-]+(?:;[\w.+=-]+)*,[^\s\"'<>]*", re.IGNORECASE)
 _SPACES = re.compile(r"[ \t\r\n\f\v ]+")
 _BLANK_RUN = re.compile(r"\n{3,}")
 
@@ -122,6 +129,7 @@ class _Converter(HTMLParser):
         """Append one output line, or stop for good once :data:`MAX_OUTPUT_CHARS` is passed."""
         if self.truncated:
             return
+        line = _DATA_URI.sub("", line)
         room = MAX_OUTPUT_CHARS - self.size
         if len(line) + 1 > room:
             self.truncated = True
@@ -258,8 +266,10 @@ class _Converter(HTMLParser):
         text = _SPACES.sub(" ", self._join(self.inline[start:])).strip()
         if href is None:
             return  # an unsafe or missing target: the text stays, the target goes
-        target = href.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
-        self.inline[start:] = [f"[{text}]({target})" if text else f"<{target}>"]
+        # A target never closes its own ``(…)`` or ``<…>``, and the text never its ``[…]``.
+        target = href.translate(_TARGET_ESCAPES)
+        label = text.replace("[", "\\[").replace("]", "\\]")
+        self.inline[start:] = [f"[{label}]({target})" if label else f"<{target}>"]
 
     def _end_mark(self, tag: str) -> None:
         for i in range(len(self.marks) - 1, -1, -1):

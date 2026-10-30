@@ -99,7 +99,8 @@ def test_a_malformed_scope_is_refused(
     result = _run(*args)
 
     assert result.exit_code == 2
-    assert f"{SCOPE_REFUSAL}: {reason}" in result.output
+    assert f"ingest-apple-notes: {reason}" in result.output
+    assert SCOPE_REFUSAL not in result.output  # a folder was given: the precise reason only
     assert notes.calls == []
 
 
@@ -109,7 +110,8 @@ def test_a_future_since_is_refused(notes: fx.FakeOsascript) -> None:
     result = _run(*FOLDER, "--since", tomorrow)
 
     assert result.exit_code == 2
-    assert "--since is in the future" in result.output
+    assert "ingest-apple-notes: --since is in the future" in result.output
+    assert SCOPE_REFUSAL not in result.output
     assert notes.calls == []
 
 
