@@ -264,7 +264,8 @@ def test_reading_docs_name_no_removed_wiki_surface(doc: Path) -> None:
 )
 def test_skills_name_no_removed_wiki_surface(skill: Path) -> None:
     text = skill.read_text(encoding="utf-8")
-    assert not _removed_surfaces_in(text), (skill.parent.name, _removed_surfaces_in(text))
+    where = skill.relative_to(REPO_ROOT).as_posix()
+    assert not _removed_surfaces_in(text), (where, _removed_surfaces_in(text))
 
 
 def test_cli_reference_setup_and_doctor_name_no_wiki_dependency() -> None:
