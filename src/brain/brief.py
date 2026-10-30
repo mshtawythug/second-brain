@@ -28,7 +28,13 @@ from .activity import recent_captures
 from .config import Config
 from .errors import EnrichmentError, describe_failure
 from .queries import DocumentRow
-from .saved_search import WatchHit, WatchNote, hits_since, watch_tables_present
+from .saved_search import (
+    WatchHit,
+    WatchNote,
+    hits_since,
+    inline_code,
+    watch_tables_present,
+)
 from .sensitivity import not_confidential_sql
 from .todo import TodoRow, iter_action_item_docs
 from .vault.frontmatter import dump_frontmatter
@@ -371,7 +377,7 @@ def watch_section_lines(brief: BriefData) -> list[str]:
         if note.more:
             lines.append(
                 f"[{note.watch}] and {note.more} more "
-                f"(`brain watch hits {shlex.quote(note.watch)}`)"
+                f"({inline_code(f'brain watch hits {shlex.quote(note.watch)}')})"
             )
         if note.skipped:
             lines.append(f"[{note.watch}] {note.skipped}")

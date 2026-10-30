@@ -17,6 +17,7 @@ and MCP are outside the trust boundary, the terminal is not.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from datetime import datetime
@@ -137,6 +138,19 @@ def _row(row: tuple[Any, ...]) -> SavedSearch:
         created_at=row[6],
         last_checked_at=row[7],
     )
+
+
+def inline_code(text: str) -> str:
+    """``text`` as a Markdown inline code span that its own backticks cannot break.
+
+    The fence is one backtick longer than the longest backtick run inside, and a space pads a
+    text that starts or ends with a backtick (CommonMark's rule for code spans). Without a
+    backtick in ``text`` this is the plain single-backtick span.
+    """
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
 
 
 def validate_name(name: str) -> str:

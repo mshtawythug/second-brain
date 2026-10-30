@@ -48,6 +48,7 @@ from .saved_search import (
     WatchFilters,
     create_watch,
     get_watch,
+    inline_code,
     list_watches,
     lock_watch,
 )
@@ -168,7 +169,7 @@ def limit_note(result: CheckResult) -> str | None:
     if result.unrecorded:
         return (
             f"{result.unrecorded} more matched than a check can record "
-            f"(`brain search {shlex.quote(result.query)}` lists them)"
+            f"({inline_code(f'brain search {shlex.quote(result.query)}')} lists them)"
         )
     if result.capped:
         return f"{CHECK_LIMIT} checked, more may exist"

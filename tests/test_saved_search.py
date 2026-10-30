@@ -279,3 +279,74 @@ def test_seeds_are_not_in_the_terminal_set(test_db: psycopg.Connection[Any]) -> 
     _hit(test_db, watch.id, hit, notified=True)
 
     assert [h.title for h in hits_since(test_db, hours=24)] == ["Hit"]
+
+
+# --- code spans that a backtick in a watch name or query cannot break (rev-78) ---
+
+
+@pytest.mark.nodb
+@pytest.mark.parametrize(
+    ("text", "span"),
+    [
+        ("brain watch hits w", "`brain watch hits w`"),
+        ("a`b", "``a`b``"),
+        ("a``b", "```a``b```"),
+        ("`a", "`` `a ``"),
+        ("a`", "`` a` ``"),
+    ],
+)
+def test_inline_code_fences_past_every_backtick_run(text: str, span: str) -> None:
+    from brain.saved_search import inline_code
+
+    assert inline_code(text) == span
+
+
+@pytest.mark.nodb
+def test_the_and_n_more_line_survives_a_backtick_in_the_watch_name() -> None:
+    from datetime import date
+
+    from brain.brief import BriefData, watch_section_lines
+
+    brief = BriefData(
+        date=date(2026, 6, 9),
+        captures=[],
+        open_todos=[],
+        pinned=[],
+        suggestions=[],
+        watch_notes=[WatchNote(watch="say `hi`", more=2)],
+    )
+
+    assert watch_section_lines(brief) == [
+        "[say `hi`] and 2 more (``brain watch hits 'say `hi`'``)"
+    ]
+
+
+@pytest.mark.nodb
+def test_the_terminal_limit_line_survives_a_backtick_in_the_query() -> None:
+    from brain.saved_search_check import CheckResult, limit_note
+
+    result = CheckResult(
+        watch="w", mode="lexical", matches=[], query="run `make`", unrecorded=2
+    )
+
+    assert limit_note(result) == (
+        "2 more matched than a check can record (``brain search 'run `make`'`` lists them)"
+    )
+
+
+@pytest.mark.nodb
+def test_the_terminal_brief_renders_a_limit_note() -> None:
+    from datetime import date
+
+    from brain.brief import BriefData, watch_section_lines
+
+    brief = BriefData(
+        date=date(2026, 6, 9),
+        captures=[],
+        open_todos=[],
+        pinned=[],
+        suggestions=[],
+        watch_notes=[WatchNote(watch="w", limit="2 more matched than a check can record")],
+    )
+
+    assert watch_section_lines(brief) == ["[w] 2 more matched than a check can record"]
