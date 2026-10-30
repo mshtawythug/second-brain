@@ -247,14 +247,14 @@ def test_dry_run_lists_the_deleted_file_and_deletes_nothing(
     test_db: psycopg.Connection[Any], env: tuple[Path, Path]
 ) -> None:
     root, _ = env
-    ids = _import(root, "keep.md", "sub/gone.md")
+    ids = _import(root, "keep.md", "sub/gone.md", "sub/other.md")
     (root / "sub" / "gone.md").unlink()
 
     result = _invoke(str(root), "--sync")
 
     assert result.exit_code == 0, result.output
     assert f"would delete: {ids['sub/gone.md'][:8]}  sub/gone.md" in result.output
-    assert "1 of 2 documents under" in result.output
+    assert "1 of 3 documents under" in result.output
     assert "--apply" in result.output
     assert _exists(ids["sub/gone.md"]) and _exists(ids["keep.md"])
 
@@ -266,6 +266,7 @@ def test_apply_removes_the_deleted_file_and_keeps_the_rest(
     ids = _import(root, "keep.md", "sub/gone.md")
     mirrors_before = sorted(p.name for p in vault.rglob("*.md"))
     (root / "sub" / "gone.md").unlink()
+    (root / "sub").rmdir()
 
     result = _invoke(str(root), "--sync", "--apply")
 
@@ -439,4 +440,43 @@ def test_apply_rechecks_the_mass_delete_guard_after_the_walk(
             run.prune(conn, graph_syncer=None)
 
     assert exited.value.exit_code == 1
+    assert all(_exists(i) for i in ids.values())
+
+
+def test_apply_reports_a_changed_row_as_kept(
+    test_db: psycopg.Connection[Any], env: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _ = env
+    ids = _import(root, "keep.md", "moved.md")
+    (root / "moved.md").unlink()
+    from brain.ingest import import_sync
+
+    real_apply = import_sync.apply_prune
+
+    def apply_after_change(conn: Any, plan: Any, **kwargs: Any) -> Any:
+        conn.execute("UPDATE documents SET kind='vault' WHERE id=%s", (ids["moved.md"],))
+        return real_apply(conn, plan, **kwargs)
+
+    monkeypatch.setattr("brain.cli_import_sync.apply_prune", apply_after_change)
+
+    result = _invoke(str(root), "--sync", "--apply")
+
+    assert result.exit_code == 0, result.output
+    assert f"kept (row changed): {ids['moved.md'][:8]}  moved.md" in result.output
+    assert _exists(ids["moved.md"])
+
+
+def test_a_folder_emptied_in_place_is_kept_and_counted(
+    test_db: psycopg.Connection[Any], env: tuple[Path, Path]
+) -> None:
+    # A dropped network mount leaves its empty mount point behind (review round, M1).
+    root, _ = env
+    ids = _import(root, "keep.md", "nas/a.md", "nas/b.md")
+    (root / "nas" / "a.md").unlink()
+    (root / "nas" / "b.md").unlink()
+
+    result = _invoke(str(root), "--sync", "--apply")
+
+    assert result.exit_code == 0, result.output
+    assert "could not check 2 document(s); kept" in result.output
     assert all(_exists(i) for i in ids.values())

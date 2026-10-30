@@ -9,7 +9,9 @@ path every surface shares. It imports no CLI and no Typer; ``brain.cli_import_sy
 A prune deletes, so what it may touch is narrow, and every rule fails toward keeping a row:
 
 - **Candidates** are ``documents.kind = 'ingested'`` rows whose source is ``manual`` (the only
-  kind ``ingest-dir`` writes, so a drop-folder or Notion row is never this import's to prune),
+  kind ``ingest-dir`` writes, so a drop-folder row of its default kind, ``screenshot`` or
+  ``voice``, and a Notion row are never candidates; a drop folder configured with
+  ``kind = "manual"`` stores manual rows, and pruning one prunes the owner's own deleted file),
   with a ``source_path`` that is absolute, under the resolved root by path COMPONENTS (so
   ``/a/notes`` never matches ``/a/notes-old/…``), not under a brain vault nested inside the
   root, and with a suffix in this run's extension set. A vault-tier row is excluded in SQL and
@@ -17,7 +19,19 @@ A prune deletes, so what it may touch is narrow, and every rule fails toward kee
 - **Gone** means ``lstat`` raised ``FileNotFoundError`` or ``NotADirectoryError``. Any other
   ``OSError`` (an unreadable parent, ``ELOOP``, ``EIO``, a stalled network volume) means the
   row cannot be checked: it is kept and counted. A file that exists but cannot be read is
-  therefore never deleted. ``--apply`` checks each candidate again just before its delete.
+  therefore never deleted. ``--apply`` checks each candidate again just before its delete, and
+  skips it as ``changed`` when its row no longer matches the plan (another kind, another
+  ``source_path``).
+- **A missing file on a missing volume is not a deleted file.** For each gone file, take its
+  nearest existing ancestor ``A`` at or below the root. The row is kept and counted as
+  uncheckable when (a) ``A``, or a directory between ``A`` and the root, is a mount point;
+  (b) ``A`` is on another device than the root; (c) ``A`` is below the root and is an empty
+  directory (a dropped network mount leaves its empty mount point behind); or (d) ``A`` holds a
+  mount point (``/Volumes`` with one volume unplugged: the missing child may be the unmounted
+  volume). A folder deleted outright is gone entirely and still prunes; a folder emptied in place
+  is kept, the safe direction. Arm (d) was added in the review round because arms (a)–(c) all
+  miss a volume unplugged directly under the root. To prune files on a nested mount, run
+  ``--sync`` on that mount.
 - **Refusals:** a root that does not exist or is not a directory (R1a) and a root inside the
   brain vault, which the vault watcher owns (R2), in :func:`resolve_sync_root`; an empty walk
   while the database holds documents under the root (R1b: an unmounted drive must not prune a
@@ -37,6 +51,7 @@ not widen.
 from __future__ import annotations
 
 import os
+import stat
 import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -50,6 +65,7 @@ from ..vault.delete import DeleteReport, DocumentGraphSyncer, delete_document
 
 __all__ = [
     "MASS_DELETE_MIN",
+    "FsOps",
     "ImportSyncRefused",
     "PruneCandidate",
     "PruneOutcome",
@@ -84,6 +100,23 @@ ORDER BY d.source_path, d.id
 LstatFn = Callable[[str], os.stat_result]
 SamefileFn = Callable[[Any, Any], bool]
 DeleteFn = Callable[..., DeleteReport]
+
+# Re-read right before each delete (L2): the row must still be the one the plan saw.
+_ROW_NOW_SQL = """
+SELECT d.kind, s.kind, d.source_path
+FROM documents d
+LEFT JOIN sources s ON s.id = d.source_id
+WHERE d.id = %s
+"""
+
+
+@dataclass(frozen=True)
+class FsOps:
+    """The file-system calls a prune makes; injectable so a test can stage a mount or a device."""
+
+    lstat: LstatFn = os.lstat
+    ismount: Callable[[str], bool] = os.path.ismount
+    listdir: Callable[[str], list[str]] = os.listdir
 
 
 class ImportSyncRefused(BrainError):
@@ -122,7 +155,8 @@ class PruneOutcome:
     candidate: PruneCandidate
     action: str
     """``deleted``, ``kept`` (back on disk), ``unchecked`` (no longer checkable; kept),
-    ``missing`` (the row was already deleted) or ``failed``."""
+    ``changed`` (the row no longer matches the plan; kept), ``missing`` (the row was already
+    deleted) or ``failed``."""
     detail: str | None = None
     """For ``failed``: the exception by class only (:func:`brain.errors.describe_failure`)."""
 
@@ -207,13 +241,62 @@ def _probe(path: str, lstat: LstatFn) -> str:
     return "present"
 
 
+class _Classifier:
+    """``present`` / ``gone`` / ``unknown`` for files under one root, volume-aware (docstring)."""
+
+    def __init__(self, root: Path, fs: FsOps) -> None:
+        self._root = root
+        self._fs = fs
+        self._root_dev: int | None = None
+        self._holds_mount: dict[str, bool] = {}
+
+    def __call__(self, stored: str) -> str:
+        state = _probe(stored, self._fs.lstat)
+        if state == "gone" and self._maybe_unmounted(stored):
+            return "unknown"
+        return state
+
+    def _maybe_unmounted(self, stored: str) -> bool:
+        fs, parts, n = self._fs, PurePath(stored).parts, len(self._root.parts)
+        for k in range(len(parts) - 1, n - 1, -1):
+            ancestor = str(PurePath(*parts[:k]))
+            try:
+                found = fs.lstat(ancestor)
+            except _GONE_ERRORS:
+                continue
+            except OSError:
+                return True
+            break
+        else:
+            return True  # not even the root is there any more
+        if any(fs.ismount(str(PurePath(*parts[:j]))) for j in range(k, n, -1)):
+            return True  # (a)
+        try:
+            if self._root_dev is None:
+                self._root_dev = fs.lstat(str(self._root)).st_dev
+            if found.st_dev != self._root_dev:
+                return True  # (b)
+            if not stat.S_ISDIR(found.st_mode):
+                return False
+            children = fs.listdir(ancestor)
+        except OSError:
+            return True
+        if k > n and not children:
+            return True  # (c)
+        if ancestor not in self._holds_mount:
+            self._holds_mount[ancestor] = any(
+                fs.ismount(os.path.join(ancestor, child)) for child in children
+            )
+        return self._holds_mount[ancestor]  # (d)
+
+
 def plan_prune(
     conn: psycopg.Connection[Any],
     *,
     root: Path,
     vault_root: Path,
     extensions: Iterable[str],
-    lstat: LstatFn = os.lstat,
+    fs: FsOps | None = None,
 ) -> PrunePlan:
     """Read which documents under ``root`` a prune would delete. Writes nothing.
 
@@ -222,6 +305,7 @@ def plan_prune(
     """
     wanted = {e.lower() for e in extensions}
     vault = vault_root.resolve()
+    classify = _Classifier(root, fs or FsOps())
     in_scope = unverifiable = under_vault = 0
     candidates: list[PruneCandidate] = []
     for document_id, title, source_path in conn.execute(_CANDIDATE_SQL).fetchall():
@@ -231,7 +315,7 @@ def plan_prune(
             under_vault += 1
             continue
         in_scope += 1
-        state = _probe(source_path, lstat)
+        state = classify(source_path)
         if state == "unknown":
             unverifiable += 1
         elif state == "gone":
@@ -283,7 +367,7 @@ def apply_prune(
     *,
     vault_root: Path,
     graph_syncer: DocumentGraphSyncer | None,
-    lstat: LstatFn = os.lstat,
+    fs: FsOps | None = None,
     delete: DeleteFn | None = None,
 ) -> PruneReport:
     """Delete each candidate whose file is still gone; one failure does not stop the rest.
@@ -292,12 +376,20 @@ def apply_prune(
     :func:`brain.vault.delete.delete_document`, resolved at call time.
     """
     delete_fn = delete if delete is not None else delete_document
+    classify = _Classifier(plan.root, fs or FsOps())
     outcomes: list[PruneOutcome] = []
     for candidate in plan.candidates:
-        state = _probe(candidate.source_path, lstat)
+        state = classify(candidate.source_path)
         if state != "gone":
             action = "kept" if state == "present" else "unchecked"
             outcomes.append(PruneOutcome(candidate=candidate, action=action))
+            continue
+        row = conn.execute(_ROW_NOW_SQL, (candidate.document_id,)).fetchone()
+        if row is None:
+            outcomes.append(PruneOutcome(candidate=candidate, action="missing"))
+            continue
+        if tuple(row) != ("ingested", "manual", candidate.source_path):
+            outcomes.append(PruneOutcome(candidate=candidate, action="changed"))
             continue
         try:
             delete_fn(

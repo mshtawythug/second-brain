@@ -46,6 +46,7 @@ _OUTCOME_LABELS = {
     "deleted": "deleted",
     "kept": "kept (back on disk)",
     "unchecked": "kept (cannot check)",
+    "changed": "kept (row changed)",
     "missing": "already gone",
     "failed": "failed",
 }

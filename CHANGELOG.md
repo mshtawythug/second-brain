@@ -31,6 +31,10 @@ git tag scheme:
   vault notes and stdin documents never are, documents under a nested brain vault are skipped,
   and a file that cannot be checked is kept. On a case- or normalization-insensitive volume a
   case-variant `<dir>` matches only when the file system confirms it is the same directory.
+- A file whose folder may be on an unmounted volume is kept, not pruned: its nearest existing
+  folder is (or sits below) a mount point, is on another device, is an empty folder below
+  `<dir>`, or holds a mount point. `--apply` re-reads each row and skips one that changed since
+  the listing (`kept (row changed)`).
 - Refusals (exit 1, nothing written): a missing `<dir>`, a `<dir>` inside the brain vault, an
   empty walk while documents were imported from `<dir>`, and, with `--apply`, more than half of
   the documents under `<dir>` and more than 5. `--allow-empty` overrides the last two. The

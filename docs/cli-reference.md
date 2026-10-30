@@ -105,6 +105,15 @@ is this run's extensions (`--ext`). A file that exists but cannot be checked (an
 folder, an I/O error) is kept and counted, never deleted. Vault notes and stdin documents are
 never candidates, and documents under a brain vault nested inside `<dir>` are skipped.
 
+A missing file on a missing volume is not a deleted file. For each gone file, `--sync` looks at
+its nearest folder that still exists, at or below `<dir>`, and keeps the document (counted as
+"could not check") when that folder, or one between it and `<dir>`, is a mount point; when it is
+on another disk than `<dir>`; when it is an empty folder below `<dir>` (a dropped network mount
+leaves an empty mount point); or when it holds a mount point (`/Volumes` with one drive
+unplugged). A folder you deleted outright still prunes; a folder you emptied but kept does not.
+To prune files on a nested mount, run `--sync` on the mount itself. `--apply` also skips, as
+`kept (row changed)`, a document whose row changed since the listing.
+
 `--sync` refuses, exit 1, before anything is written:
 
 - when `<dir>` does not exist or is not a directory;

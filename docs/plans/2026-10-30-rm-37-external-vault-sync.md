@@ -138,8 +138,11 @@ All against `second_brain_test_rm37` on 5434 and `tmp_path` trees only.
 ## Decisions (approved 2026-10-30: D1–D4 yes, as recommended)
 
 - **D1** Restrict candidates to `sources.kind = 'manual'` as well as `documents.kind='ingested'`?
-  **Recommend yes**: `ingest-dir` only writes `manual`, and a drop-folder (`screenshot`, RM-33) row
-  whose `imported/` copy lies under `<dir>` is not this import's to prune.
+  **Recommend yes**: `ingest-dir` only writes `manual`, so a drop-folder row of its default kind
+  (`screenshot` or `voice`, RM-33/RM-38) whose `imported/` copy lies under `<dir>` is never a
+  candidate. *(Qualified in review round 1, L1: a drop folder configured with `kind = "manual"`
+  stores manual rows, so those are candidates; a prune of one removes the owner's own deleted
+  file, which is what `--sync` is for.)*
 - **D2** Restrict candidates to this run's extension set (`--ext`, default the walk's
   supported set)? **Recommend yes**: `--ext pdf --sync` prunes only PDFs, so the scope of a prune
   is exactly what the run would re-ingest. (R1b counts in-scope rows with the same filter.)
@@ -164,3 +167,29 @@ All against `second_brain_test_rm37` on 5434 and `tmp_path` trees only.
   not end in `Error`); no allowlist entry.
 - `tests/test_skills_token_routing.py::test_installed_skills_are_in_sync` reports drift locally
   until `bin/brain-skills-sync` runs after merge (the `ingest-brain` skill changed); it skips in CI.
+
+## Review round 1 (rev-108, at `5f981b2`)
+
+- **M1 (partial unmount below the root).** R1b catches only a fully empty walk and the mass guard
+  only more than half and more than 5, so a minority of files on a dropped mount would prune. For
+  each gone file, `plan_prune` (and `apply_prune`, again) now takes its nearest existing ancestor
+  `A` at or below the root and keeps the row, counted as "could not check", when:
+  (a) `A`, or a directory between `A` and the root, is a mount point (the root itself may be one);
+  (b) `A` is on another device than the root;
+  (c) `A` is below the root and is an empty directory (a dropped SMB/autofs mount leaves its empty
+  mount point; an empty ROOT is R1b's case, which `--allow-empty` overrides);
+  (d) `A` holds a mount point. **(d) goes beyond rev's three arms**: `/Volumes` with one volume
+  unplugged has `A = /Volumes = root`, so (a)–(c) all miss it, and that is scenario 1 of the
+  finding. Any error checking an ancestor, the root's device or `A`'s listing also keeps the row.
+  A folder deleted outright still prunes; a folder emptied in place is kept (the safe direction),
+  and a file on a nested mount is pruned only by running `--sync` on that mount.
+  The seam is `FsOps(lstat, ismount, listdir)` on both functions (no monkey-patching).
+- **L1.** D1's wording, and the module docstring, are qualified (above).
+- **L2.** `apply_prune` re-reads each row right before `delete_document` and skips it as
+  `changed` (printed `kept (row changed)`) unless it is still `ingested` / `manual` with the
+  planned `source_path`.
+- Tests: one per arm and per error path, both sides where a control exists (the same layout
+  without the staged mount prunes), and the L2 cases (moved `source_path`, vault tier, another
+  source kind). 101 tests; 100% line + branch coverage on both modules. Mutation, batches ≤ 5:
+  12 of 12 killed (each arm, arm (a)'s root exclusion, arm (c)'s root exclusion, the three
+  error paths, the L2 match, and both classifier call sites).

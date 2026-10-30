@@ -25,6 +25,7 @@ from brain.ingest import ingest_document
 from brain.ingest.dispatch import extract_path, supported_extensions
 from brain.ingest.import_sync import (
     MASS_DELETE_MIN,
+    FsOps,
     ImportSyncRefused,
     PrunePlan,
     apply_prune,
@@ -301,6 +302,7 @@ def test_plan_lists_a_deleted_file_and_keeps_a_present_one(
     gone = ingest_file(root / "sub" / "gone.md", vault_root=vault)
     kept = ingest_file(root / "kept.md", vault_root=vault)
     (root / "sub" / "gone.md").unlink()
+    (root / "sub").rmdir()  # the folder deleted outright: gone entirely, so it prunes
 
     plan = _plan(test_db, root, vault)
 
@@ -536,7 +538,7 @@ def test_plan_keeps_a_file_whose_check_fails_otherwise(
     def failing_lstat(path: Any) -> os.stat_result:
         raise OSError(code, os.strerror(code))
 
-    plan = _plan(test_db, root, vault, lstat=failing_lstat)
+    plan = _plan(test_db, root, vault, fs=FsOps(lstat=failing_lstat))
 
     assert plan.candidates == ()
     assert plan.unverifiable == 1
@@ -712,7 +714,9 @@ def test_apply_keeps_a_file_it_can_no_longer_check(
     def failing_lstat(path: Any) -> os.stat_result:
         raise OSError(errno.EIO, "io")
 
-    report = apply_prune(test_db, plan, vault_root=vault, graph_syncer=None, lstat=failing_lstat)
+    report = apply_prune(
+        test_db, plan, vault_root=vault, graph_syncer=None, fs=FsOps(lstat=failing_lstat)
+    )
 
     assert [o.action for o in report.outcomes] == ["unchecked"]
     assert _row_exists(test_db, doc)
@@ -778,3 +782,264 @@ def test_candidates_are_ordered_by_path(
 
     assert [c.relative_path for c in plan.candidates] == ["a.md", "b.md", "c.md"]
     assert all(PurePath(c.source_path).is_absolute() for c in plan.candidates)
+
+
+# ---------------------------------------------------------------------------
+# A missing file on a missing volume is kept (review round, M1)
+# ---------------------------------------------------------------------------
+
+
+def _resolved(path: Path) -> str:
+    return str(path.resolve())
+
+
+def _mounts(*paths: Path) -> Callable[[str], bool]:
+    mounted = {_resolved(p) for p in paths}
+    return lambda candidate: candidate in mounted
+
+
+def _with_dev(st: os.stat_result, dev: int) -> os.stat_result:
+    fields = list(st[:10])
+    fields[2] = dev
+    return os.stat_result(fields)
+
+
+def _gone_in(
+    ingest_file: Callable[..., str], directory: Path, vault: Path, *, keep_sibling: bool
+) -> str:
+    """Ingest ``directory/x.md``, delete it, and keep or remove ``directory`` itself."""
+    doc = ingest_file(directory / "x.md", vault_root=vault)
+    if keep_sibling:
+        (directory / "keep.txt").write_text("still here", encoding="utf-8")
+    (directory / "x.md").unlink()
+    return doc
+
+
+def test_arm_a_keeps_a_file_whose_nearest_ancestor_is_a_mount_point(
+    test_db: psycopg.Connection[Any], ingest_file: Callable[..., str], layout: tuple[Path, Path]
+) -> None:
+    root, vault = layout
+    doc = _gone_in(ingest_file, root / "mnt", vault, keep_sibling=True)
+
+    mounted = _plan(test_db, root, vault, fs=FsOps(ismount=_mounts(root / "mnt")))
+    plain = _plan(test_db, root, vault)
+
+    assert mounted.candidates == () and mounted.unverifiable == 1
+    assert _ids(plain) == {doc}
+
+
+def test_arm_a_keeps_a_file_below_a_mount_point_between_it_and_the_root(
+    test_db: psycopg.Connection[Any], ingest_file: Callable[..., str], layout: tuple[Path, Path]
+) -> None:
+    root, vault = layout
+    deep = root / "mnt" / "deep"
+    ingest_file(deep / "sub" / "x.md", vault_root=vault)
+    (deep / "keep.txt").write_text("still here", encoding="utf-8")
+    (deep / "sub" / "x.md").unlink()
+    (deep / "sub").rmdir()
+
+    plan = _plan(test_db, root, vault, fs=FsOps(ismount=_mounts(root / "mnt")))
+
+    assert plan.candidates == () and plan.unverifiable == 1
+
+
+def test_arm_a_ignores_the_root_being_a_mount_point(
+    test_db: psycopg.Connection[Any], ingest_file: Callable[..., str], layout: tuple[Path, Path]
+) -> None:
+    root, vault = layout
+    doc = _gone_in(ingest_file, root / "sub", vault, keep_sibling=True)
+
+    plan = _plan(test_db, root, vault, fs=FsOps(ismount=_mounts(root)))
+
+    assert _ids(plan) == {doc}
+
+
+def test_arm_b_keeps_a_file_whose_nearest_ancestor_is_on_another_device(
+    test_db: psycopg.Connection[Any], ingest_file: Callable[..., str], layout: tuple[Path, Path]
+) -> None:
+    root, vault = layout
+    other = root / "other"
+    _gone_in(ingest_file, other, vault, keep_sibling=True)
+    other_key = _resolved(other)
+
+    def lstat(path: str) -> os.stat_result:
+        st = os.lstat(path)
+        return _with_dev(st, st.st_dev + 1) if path == other_key else st
+
+    plan = _plan(test_db, root, vault, fs=FsOps(lstat=lstat))
+
+    assert plan.candidates == () and plan.unverifiable == 1
+
+
+def test_arm_c_keeps_a_file_whose_folder_is_left_empty(
+    test_db: psycopg.Connection[Any], ingest_file: Callable[..., str], layout: tuple[Path, Path]
+) -> None:
+    root, vault = layout
+    doc = _gone_in(ingest_file, root / "nas", vault, keep_sibling=False)
+
+    empty = _plan(test_db, root, vault)
+    (root / "nas").rmdir()
+    removed = _plan(test_db, root, vault)
+
+    assert empty.candidates == () and empty.unverifiable == 1
+    assert _ids(removed) == {doc}
+
+
+def test_arm_c_does_not_apply_to_an_empty_root(
+    test_db: psycopg.Connection[Any], ingest_file: Callable[..., str], layout: tuple[Path, Path]
+) -> None:
+    # An empty root is refusal R1b's case, which --allow-empty overrides on purpose.
+    root, vault = layout
+    doc = ingest_file(root / "only.md", vault_root=vault)
+    (root / "only.md").unlink()
+
+    plan = _plan(test_db, root, vault)
+
+    assert _ids(plan) == {doc}
+
+
+def test_arm_d_keeps_a_file_whose_ancestor_holds_a_mount_point(
+    test_db: psycopg.Connection[Any], ingest_file: Callable[..., str], layout: tuple[Path, Path]
+) -> None:
+    # `/Volumes` with one volume unplugged: vol-a vanished, vol-b is still mounted.
+    root, vault = layout
+    doc = ingest_file(root / "vol-a" / "x.md", vault_root=vault)
+    (root / "vol-a" / "x.md").unlink()
+    (root / "vol-a").rmdir()
+    (root / "vol-b").mkdir()
+
+    mounted = _plan(test_db, root, vault, fs=FsOps(ismount=_mounts(root / "vol-b")))
+    plain = _plan(test_db, root, vault)
+
+    assert mounted.candidates == () and mounted.unverifiable == 1
+    assert _ids(plain) == {doc}
+
+
+def test_an_ancestor_that_cannot_be_checked_keeps_the_file(
+    test_db: psycopg.Connection[Any], ingest_file: Callable[..., str], layout: tuple[Path, Path]
+) -> None:
+    root, vault = layout
+    sub = root / "sub"
+    _gone_in(ingest_file, sub, vault, keep_sibling=True)
+    sub_key = _resolved(sub)
+
+    def lstat(path: str) -> os.stat_result:
+        if path == sub_key:
+            raise OSError(errno.EIO, "io")
+        return os.lstat(path)
+
+    plan = _plan(test_db, root, vault, fs=FsOps(lstat=lstat))
+
+    assert plan.candidates == () and plan.unverifiable == 1
+
+
+def test_a_root_that_cannot_be_checked_keeps_the_file(
+    test_db: psycopg.Connection[Any], ingest_file: Callable[..., str], layout: tuple[Path, Path]
+) -> None:
+    root, vault = layout
+    _gone_in(ingest_file, root / "sub", vault, keep_sibling=True)
+    root_key = _resolved(root)
+
+    def lstat(path: str) -> os.stat_result:
+        if path == root_key:
+            raise OSError(errno.EIO, "io")
+        return os.lstat(path)
+
+    plan = _plan(test_db, root, vault, fs=FsOps(lstat=lstat))
+
+    assert plan.candidates == () and plan.unverifiable == 1
+
+
+def test_a_root_gone_mid_run_keeps_the_file(
+    test_db: psycopg.Connection[Any], ingest_file: Callable[..., str], layout: tuple[Path, Path]
+) -> None:
+    root, vault = layout
+    ingest_file(root / "x.md", vault_root=vault)
+
+    def nothing_exists(path: str) -> os.stat_result:
+        raise FileNotFoundError(errno.ENOENT, "gone")
+
+    plan = _plan(test_db, root, vault, fs=FsOps(lstat=nothing_exists))
+
+    assert plan.candidates == () and plan.unverifiable == 1
+
+
+def test_an_ancestor_that_cannot_be_listed_keeps_the_file(
+    test_db: psycopg.Connection[Any], ingest_file: Callable[..., str], layout: tuple[Path, Path]
+) -> None:
+    root, vault = layout
+    _gone_in(ingest_file, root / "sub", vault, keep_sibling=True)
+
+    def listdir(path: str) -> list[str]:
+        raise PermissionError(errno.EACCES, "no")
+
+    plan = _plan(test_db, root, vault, fs=FsOps(listdir=listdir))
+
+    assert plan.candidates == () and plan.unverifiable == 1
+
+
+def test_apply_rechecks_the_volume(
+    test_db: psycopg.Connection[Any], ingest_file: Callable[..., str], layout: tuple[Path, Path]
+) -> None:
+    root, vault = layout
+    doc = _gone_in(ingest_file, root / "mnt", vault, keep_sibling=True)
+    plan = _plan(test_db, root, vault)
+
+    report = apply_prune(
+        test_db,
+        plan,
+        vault_root=vault,
+        graph_syncer=None,
+        fs=FsOps(ismount=_mounts(root / "mnt")),
+    )
+
+    assert [o.action for o in report.outcomes] == ["unchecked"]
+    assert _row_exists(test_db, doc)
+
+
+# ---------------------------------------------------------------------------
+# apply_prune re-reads the row before deleting it (review round, L2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "UPDATE documents SET source_path = source_path || '.moved' WHERE id=%s",
+        "UPDATE documents SET kind = 'vault' WHERE id=%s",
+        "UPDATE sources SET kind = 'notion' "
+        "WHERE id = (SELECT source_id FROM documents WHERE id=%s)",
+    ],
+)
+def test_apply_skips_a_row_that_changed_since_the_plan(
+    test_db: psycopg.Connection[Any],
+    ingest_file: Callable[..., str],
+    layout: tuple[Path, Path],
+    change: str,
+) -> None:
+    root, vault = layout
+    doc = ingest_file(root / "gone.md", vault_root=vault)
+    (root / "gone.md").unlink()
+    plan = _plan(test_db, root, vault)
+    test_db.execute(change, (doc,))
+
+    report = apply_prune(test_db, plan, vault_root=vault, graph_syncer=None)
+
+    assert [o.action for o in report.outcomes] == ["changed"]
+    assert _row_exists(test_db, doc)
+
+
+def test_apply_reports_a_row_deleted_during_the_delete(
+    test_db: psycopg.Connection[Any], ingest_file: Callable[..., str], layout: tuple[Path, Path]
+) -> None:
+    root, vault = layout
+    ingest_file(root / "gone.md", vault_root=vault)
+    (root / "gone.md").unlink()
+    plan = _plan(test_db, root, vault)
+
+    def raced_delete(conn: Any, *, document_id: str, vault_root: Path, graph_syncer: Any) -> Any:
+        raise ValueError(f"document not found: {document_id}")
+
+    report = apply_prune(test_db, plan, vault_root=vault, graph_syncer=None, delete=raced_delete)
+
+    assert [o.action for o in report.outcomes] == ["missing"]
