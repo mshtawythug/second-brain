@@ -138,3 +138,28 @@ journaled, replay keeps the journal on a DB error, no journal means no-op.
 | L3: a torn or short line could swallow the next entry. | A short `os.write` is a failure (`TornJournalWrite`, logged by class). A file that does not end in a newline gets one before the next line. A new journal's directory is fsynced. |
 | L4: a worker alive past its join never reached its queued jobs. | `_take_queued` drains the queue without blocking (the sentinel is put back), and its delete/move jobs are owed. A race only duplicates an entry, and the replay is idempotent. |
 | L5, L6 | A blank line in a replay test's journal; the closed-watcher comment no longer says deletes need prune. |
+
+## Round 3 (PR #95 review)
+
+The job IN FLIGHT when the worker outlives its join was owed by nobody. A delete
+stuck on a hung socket died with the daemon worker; one that finished after
+`lane.close()` had its graph remove dropped by the closing lane while its capture
+recorded it as handed.
+
+Owing the in-flight path alone does not cover the second case: once the delete
+commits, the replay finds no row at the path and so no id. So:
+
+* The worker records `state.current_job` (set before the job, cleared in its
+  `finally`).
+* Past the join, shutdown sets `state.worker_abandoned` FIRST, then owes the
+  in-flight job's path (delete/move only) and EVERY id it captured, handed or
+  not (`_owe_in_flight`), then the queued jobs.
+* A job the worker finishes after `worker_abandoned` owes its own captured ids
+  (in its `finally`, after clearing `current_job`). That covers a job still
+  inside its id capture when shutdown looked, which had no id to owe yet.
+
+Ordering: shutdown writes the flag before reading the slot; the worker clears
+the slot before reading the flag. A job that finished before the flag was set
+handed its removes before `lane.close()` (which runs after this branch), so the
+lane drains or reports them. Every other interleaving owes the id at least once,
+and the replay de-duplicates and checks for a live row.
