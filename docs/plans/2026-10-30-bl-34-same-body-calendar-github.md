@@ -69,9 +69,9 @@ construction, so it is unchanged.
 
 ## Decisions for approval
 
-- **D1, summary format:** append the counts only when non-zero, as above, rather than
+- **D1 (APPROVED; pinned by a test), summary format:** append the counts only when non-zero, as above, rather than
   always (Apple Notes always prints its counts; its line stays as it is).
-- **D2, calendar attendee recording:** for an event with no row of its own,
+- **D2 (APPROVED as a recorded residual), calendar attendee recording:** for an event with no row of its own,
   attendees are recorded in the people directory BEFORE `ingest_document` (so
   the graph reconcile resolves them). A same-body event therefore still records
   its attendees, and because it never gets a row, every re-run records them again
@@ -80,7 +80,7 @@ construction, so it is unchanged.
   BL-34 row as a residual, and do not reorder the record in this fix ("behaviour
   otherwise identical"). The alternative, recording after the write and only
   for `ingested`, changes when a new event's attendees resolve in the graph.
-- **D3, the backlog row:** master has rows through BL-32 and no BL-34. I add a
+- **D3 (APPROVED), the backlog row:** #104 also adds BL-33 and BL-34; whichever lands second keeps ONE BL-34 row, marked SHIPPED. master has rows through BL-32 and no BL-34. I add a
   `BL-34` row (marked SHIPPED) after BL-32. If #104 adds BL-33, this is a
   one-line union at merge.
 

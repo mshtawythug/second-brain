@@ -22,6 +22,21 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Fixed — a duplicated calendar invite no longer rewrites the other event (BL-34)
+
+- `brain ingest-calendar` and `brain ingest-github`: a new event or item whose
+  text was identical to an already-stored document (the same meeting on two
+  calendars, a duplicated invite) matched that document through the ingest
+  pipeline's content-hash dedup. The run then overwrote the OTHER document's
+  occurrences, date and attendees (GitHub: state, labels and times), reported
+  it "refreshed", and never stored the new one. Now only an item's own row is
+  ever refreshed: the new one is reported as `same body as another event: <id>`
+  (`… another item: <id>` for GitHub) and counted, and the other document is
+  left untouched. A result with no document is reported `empty <id>` instead of
+  failing an assertion. The summary line gains these counts only when they are
+  non-zero. One rule, `brain.ingest.volatile_patch.settle`, now serves calendar,
+  GitHub and Apple Notes.
+
 ### Added — `brain ingest-apple-notes`: named Apple Notes folders (RM-36)
 
 - `brain ingest-apple-notes --folder NAME` (repeatable, required; macOS only)
