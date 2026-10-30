@@ -70,11 +70,27 @@ def test_runner_returns_stdout_with_a_quiet_environment(tmp_path: Path) -> None:
     assert out == "1:1:1:api user"
 
 
-def test_runner_gives_gh_no_stdin(tmp_path: Path) -> None:
-    """``gh`` reads stdin for some prompts; it must see end of file, never wait on a terminal."""
-    gh = _script(tmp_path, "cat; printf done")
+def test_gh_gets_no_stdin_no_stderr_pipe_and_its_own_session(tmp_path: Path) -> None:
+    """Closed stdin (a prompt can never wait on a terminal), stderr never read, and its
+    own process group (so a kill reaches its children). Recorded at the ``popen`` seam,
+    because pytest's own capture already points fd 0 at /dev/null.
+    """
+    import subprocess
 
-    assert github.gh_runner(["gh", "api", "user"], which=lambda _n: gh, timeout=5) == "done"
+    gh = _script(tmp_path, "printf done")
+    seen: dict[str, Any] = {}
+
+    def popen(argv: list[str], **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return subprocess.Popen(argv, **kwargs)
+
+    out = github.gh_runner(["gh", "api", "user"], which=lambda _n: gh, popen=popen)
+
+    assert out == "done"
+    assert seen["stdin"] is subprocess.DEVNULL
+    assert seen["stderr"] is subprocess.DEVNULL
+    assert seen["stdout"] is subprocess.PIPE
+    assert seen["start_new_session"] is True
 
 
 def test_runner_without_gh_on_path_names_the_install() -> None:
