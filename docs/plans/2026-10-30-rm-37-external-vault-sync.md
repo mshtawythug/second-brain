@@ -97,7 +97,7 @@ counts, mirror files and a recording graph-syncer fake are untouched.
 ## Types (leaf)
 
 - `ImportSyncRefused(BrainError)` — refusal with a user-facing, path-free-of-content message.
-- `PruneCandidate(document_id, title, source_path)` — frozen.
+- `PruneCandidate(document_id, source_path, relative_path)` — frozen (no title: the prune never prints one; `title` was dropped as dead in review round 1).
 - `PrunePlan(root, in_scope, candidates: tuple[PruneCandidate, ...], unverifiable: int)` — frozen.
 - `PruneReport(deleted: tuple[str, ...], restored: int, missing_rows: int, failed: int)` — frozen.
 - `resolve_sync_root(directory, *, vault_root) -> Path` (R1a, R2);

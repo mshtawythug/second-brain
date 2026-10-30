@@ -5,7 +5,7 @@ command: a usage error (exit 2) for ``--apply`` / ``--allow-empty`` without ``--
 ``--apply`` with ``--dry-run``, a red refusal and exit 1 before anything is written, then one line
 per document. A leaf of its own because ``cli_ingest.py`` is over the 800-line ceiling.
 
-Paths and titles reach the terminal through :func:`~brain.ingest.text_safety.one_line`, and a
+Paths reach the terminal (never titles) through :func:`~brain.ingest.text_safety.one_line`, and a
 failed delete is reported by class only (:func:`~brain.errors.describe_failure`).
 """
 from __future__ import annotations

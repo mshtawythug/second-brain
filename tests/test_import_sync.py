@@ -586,7 +586,6 @@ def _counts_plan(*, candidates: int, in_scope: int) -> PrunePlan:
         candidates=tuple(
             PruneCandidate(
                 document_id=f"00000000-0000-0000-0000-{i:012d}",
-                title=f"Note {i}",
                 source_path=f"/srv/notes/{i}.md",
                 relative_path=f"{i}.md",
             )

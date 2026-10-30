@@ -88,7 +88,7 @@ _GONE_ERRORS = (FileNotFoundError, NotADirectoryError)
 # Python. ``sources.kind = 'manual'`` is decision D1. Containment, the vault exclusion and the
 # extension filter are path rules, applied in Python by :func:`plan_prune`.
 _CANDIDATE_SQL = """
-SELECT d.id::text, d.title, d.source_path
+SELECT d.id::text, d.source_path
 FROM documents d
 JOIN sources s ON s.id = d.source_id
 WHERE d.kind = 'ingested'
@@ -128,7 +128,6 @@ class PruneCandidate:
     """A document whose file is gone from under the root."""
 
     document_id: str
-    title: str
     source_path: str
     relative_path: str
     """``source_path`` relative to the root, for display."""
@@ -308,7 +307,7 @@ def plan_prune(
     classify = _Classifier(root, fs or FsOps())
     in_scope = unverifiable = under_vault = 0
     candidates: list[PruneCandidate] = []
-    for document_id, title, source_path in conn.execute(_CANDIDATE_SQL).fetchall():
+    for document_id, source_path in conn.execute(_CANDIDATE_SQL).fetchall():
         if not is_under(source_path, root) or PurePath(source_path).suffix.lower() not in wanted:
             continue
         if is_under(source_path, vault):
@@ -323,7 +322,6 @@ def plan_prune(
             candidates.append(
                 PruneCandidate(
                     document_id=document_id,
-                    title=title,
                     source_path=source_path,
                     relative_path=relative.as_posix(),
                 )
