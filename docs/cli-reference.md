@@ -782,7 +782,10 @@ brain ingest-apple-notes --folder Recipes --sensitivity normal --tag cooking
 - **What the body holds:** the note converted from Notes' HTML to Markdown
   (headings, lists, checklists as `- [ ]` / `- [x]`, links). Attachments are
   not ingested, and **locked notes are never read**: the command counts them.
-  A note with no text left is counted as `empty` and not stored.
+  A note with no text left is counted as `empty` and not stored. A note whose
+  converted body is identical to another stored note's (two copies of one
+  template) is reported by id as `same body as another note` and not stored;
+  the other note's document is left untouched.
 - **Sensitivity.** `confidential` by default (personal notes are private by
   nature); `--sensitivity normal` overrides it.
 - **Cap and cost.** At most `--max` notes a run (default 200), newest

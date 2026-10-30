@@ -67,6 +67,8 @@ yourself, from the app you granted.
   does not ask for it. The command counts them: `2 locked note(s) skipped`.
 - **Sensitivity.** Notes are stored as `confidential` unless you pass `--sensitivity normal`,
   because personal notes are private by nature.
+- **Identical notes.** Two notes with exactly the same text (two copies of one template) are
+  stored once: the second is reported as `same body as another note: <id>` and counted.
 - **Re-runs.** A note is identified by its Notes id. An edited note is updated in place, and a
   note moved to another folder only has its metadata updated.
 
