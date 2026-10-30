@@ -3643,7 +3643,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-23 | Copy-path affordance | XS | 5 | — | DONE (#89) |
 | RM-24 | `--entity` search filter (NEEDS USER CONFIRMATION) | S | 5 | RM-09 | DONE (#91) |
 | RM-25 | H-1 move identity | S | 6 | RM-19 | DONE (#90) |
-| RM-26 | H-2 + H-4 owed watcher work | S | 6 | — | TODO |
+| RM-26 | H-2 + H-4 owed watcher work | S | 6 | — | DONE (#95) |
 | RM-27 | H-3 graph-lock residuals | S | 6 | — | DONE (#93) |
 | RM-28 | H-5 log-privacy guard | S | 6 | — | DONE (#94) |
 | RM-29 | H-6 class-only error reports | XS | 6 | — | DONE (#92) |

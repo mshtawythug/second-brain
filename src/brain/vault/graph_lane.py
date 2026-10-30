@@ -97,6 +97,8 @@ class GraphLane:
         # reach ``_abandon`` and clear its queue before the caller asks (audit F1).
         self._caller_reports = False
         self._handed_off: list[str] = []
+        # Removes ``_abandon`` dropped, so the watcher can journal them (RM-26).
+        self._abandoned: list[str] = []
         self._thread = threading.Thread(
             target=self._run, name="brain-vault-watcher-graph", daemon=True
         )
@@ -152,11 +154,13 @@ class GraphLane:
         cannot come back empty because the lane gave up (and cleared its queue)
         before the caller asked. It may over-report a remove the lane later
         finished, which the caller's warning words as "may not be applied".
+        After the lane gave up on its own (``_abandon``), it is the removes that
+        dropped, which ``_abandon`` also logged (RM-26: the watcher journals them).
         """
         with self._cond:
             if self._caller_reports:
                 return list(self._handed_off)
-            return self._unapplied_removes()
+            return self._abandoned + self._unapplied_removes()
 
     def _unapplied_removes(self) -> list[str]:
         """Caller holds ``_cond``."""
@@ -211,6 +215,8 @@ class GraphLane:
             self._pending.clear()
             self._inflight = None
             reported = self._caller_reports
+            if not reported:
+                self._abandoned = dropped
         if reported:
             logger.debug("vault watcher: graph lane gave up; its caller reported the removes")
             return

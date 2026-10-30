@@ -583,3 +583,24 @@ def test_a_handed_off_remove_survives_the_lane_giving_up_first(
     )
     again = [r.getMessage() for r in caplog.records if "not applied" in r.getMessage()]
     assert again == [], f"the lane logged removes its caller had already reported: {again!r}"
+
+
+def test_removes_the_lane_gave_up_on_are_still_named_after_a_clean_close() -> None:
+    """RM-26: ``_abandon`` cleared its queue, so the watcher could not journal them.
+
+    The lane cannot connect at all; ``close`` wakes its backoff, the next attempt
+    is refused while closing, and the lane gives up and EXITS, so ``close``
+    returns True. The dropped remove must still be named for the owed journal.
+    """
+
+    def _refuse() -> Any:
+        raise psycopg.OperationalError("synthetic: the server is down")
+
+    lane = GraphLane(_Syncer(), _refuse)
+    lane.start()
+    lane.remove(None, "owed")  # type: ignore[arg-type]
+
+    exited = lane.close(WAIT_FOR_BACKSTOP_S)
+
+    assert exited, "fixture: the lane did not give up and exit"
+    assert lane.undrained_removes() == ["owed"]
