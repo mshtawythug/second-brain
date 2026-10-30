@@ -20,6 +20,7 @@ from typing import Any
 import psycopg
 
 from brain.vault import move_identity
+from brain.vault.derived_links.fence import FENCE_END_MARKER, FENCE_START_MARKER
 from brain.vault.frontmatter import dump_frontmatter, read_frontmatter_id
 from brain.vault.move_identity import is_another_document
 from brain.vault.sync import sync_vault
@@ -458,3 +459,50 @@ def test_id_bearing_different_id_with_identical_content_is_another_document(
     _write(dst, {"id": str(uuid.uuid4()), "title": "Q"}, body)
 
     assert is_another_document(test_db, "p.md", dst) is True
+
+
+def test_never_synced_id_less_rename_syncs_fresh_with_no_row_at_src(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """An id-less note that was never synced has no row at src: nothing to compare.
+
+    ``is_another_document`` is False (there is no row to protect or delete),
+    and the worker syncs dst as a new document with its own id, without error.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    p, q = vault / "p.md", vault / "q.md"
+    _write(p, {"title": "Never synced"}, _words("fresh", 40))
+    p.rename(q)
+
+    assert is_another_document(test_db, "p.md", q) is False
+    state = _move_through_worker(test_db, fake_embedder, vault, p, q)
+
+    assert state.errors == 0
+    rows = _rows_at(test_db, "q.md")
+    assert len(rows) == 1, "the never-synced note was not indexed at its destination"
+    assert read_frontmatter_id(q) == rows[0], "the fresh sync did not write its own id back"
+
+
+def test_derived_fence_on_the_destination_does_not_count_against_the_note(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """Deviation 1: dst's body is fence-stripped, as ``documents.content`` is.
+
+    The destination is the stored body plus a linker-written derived-links
+    fence of 200 distinct words. Counted, the fence's shingles would drop the
+    Jaccard to about 36 / 236, far below 0.2; stripped, the bodies are equal.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    body = _words("note", 40)
+    a_id, b_id = _linked_pair(test_db, fake_embedder, vault, str(uuid.uuid4()), body)
+    fence = f"{FENCE_START_MARKER}\n{_words('related', 200)}{FENCE_END_MARKER}\n"
+    _write(vault / "b.md", {"title": "B"}, f"{body}\n{fence}")  # id-less, same note + fence
+
+    (vault / "b.md").rename(vault / "b2.md")
+    state = _move_through_worker(test_db, fake_embedder, vault, vault / "b.md", vault / "b2.md")
+
+    assert state.errors == 0
+    assert _rows_at(test_db, "b2.md") == [b_id], "the derived fence made the note look new"
+    assert _incoming(test_db, a_id, b_id) == 1, "the derived fence cost the note its backlink"
