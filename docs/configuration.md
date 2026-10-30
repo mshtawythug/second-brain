@@ -472,10 +472,12 @@ would fit only below 50 dpi, whose long side would not fit, or whose short side
 would be under one pixel, is skipped, so a forged page size (a huge or a very thin
 MediaBox) cannot exhaust memory. Embedded images are bounded too, because pdfium
 decodes each at its own size. Before the file reaches pdfium, every image stream in
-the document is sized from its header, without decoding: masks, annotation
-appearances, patterns and Type3 glyphs included. If any one image declares more
-than 280 million pixels, or one cannot be sized, the document is not OCR'd, with
-one warning. The bound is per image, so a long scan with one page-sized image a
+the document is sized from its header, without decoding: masks (with or without
+`/Subtype /Image`), annotation appearances, patterns and Type3 glyphs included.
+If any one image declares more than 280 million pixels, or one cannot be sized,
+the document is not OCR'd, with one warning. The scan itself is bounded: a
+cross-reference whose entries alias one file offset is refused, and so is a walk
+past 100,000 objects, 512 MiB of objects or 10 seconds. The bound is per image, so a long scan with one page-sized image a
 page is unaffected. Each page's drawn images are also summed against the same
 bound, and annotations and form fields are not drawn.
 
@@ -483,7 +485,9 @@ bound, and annotations and form fields are not drawn.
 document scan does not see it. On a page, pdfium counts it; inside a Type3 glyph or
 a tiling pattern it is in neither count. A `/JPXDecode` codestream carries its own
 size, which pdfium may decode instead of the declared one; that was not measured.
-The systemic fix is a process-level memory guard (backlog BL-32). One document gets at most
+And pypdf's own parse of a hostile file (deep arrays, for one) is not bounded by
+any of this; it predates OCR. The systemic fix is a process-level memory and time
+guard (backlog BL-32). One document gets at most
 10 minutes of OCR in total; at the deadline OCR stops, keeps the pages read so
 far, and logs a count. This matters because `brain ui` ingests on one job worker
 that cannot be cancelled. The text is stored

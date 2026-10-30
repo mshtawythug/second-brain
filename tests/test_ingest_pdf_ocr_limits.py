@@ -326,12 +326,18 @@ def _declared_image_pdf(path: Path, side_px: int, *, nested: bool) -> Path:
     return _write_pdf(path, objects)
 
 
-def _write_pdf(path: Path, objects: list[bytes]) -> Path:
+def _write_pdf(
+    path: Path, objects: list[bytes], *, aliases: dict[int, int] | None = None
+) -> Path:
+    """Write ``objects`` as numbers 1.. with a classic xref; ``aliases`` maps an object
+    number to another whose file offset its xref entry reuses (a forged cross-reference)."""
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
     for number, body in enumerate(objects, start=1):
         offsets.append(len(out))
         out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+    for number, target in (aliases or {}).items():
+        offsets[number - 1] = offsets[target - 1]
     xref = len(out)
     out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
     out += b"".join(f"{offset:010d} 00000 n \n".encode() for offset in offsets)

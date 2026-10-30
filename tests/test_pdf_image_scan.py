@@ -22,6 +22,8 @@ from brain.errors import describe_failure
 from brain.ingest.pdf import PageTooLargeError, extract_pdf, render_page_png
 from brain.ingest.pdf_image_scan import (
     MAX_IMAGE_PIXELS,
+    MAX_SCAN_BYTES,
+    MAX_SCAN_SECONDS,
     MAX_SCANNED_OBJECTS,
     ImageTooLargeError,
     scan_document_images,
@@ -38,8 +40,13 @@ PAGE = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XOb
 HEAD = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"]
 
 
-def _gray_image(width: int, height: int, extra: bytes = b"") -> bytes:
-    """An image XObject of ``width`` x ``height`` gray pixels, compressed in 1 MB pieces."""
+def _gray_image(
+    width: int, height: int, extra: bytes = b"", *, subtype: bytes = b"/Subtype /Image "
+) -> bytes:
+    """An image stream of ``width`` x ``height`` gray pixels, compressed in 1 MB pieces.
+
+    ``subtype=b""`` leaves out ``/Subtype /Image``, which pdfium does not need for a mask.
+    """
     compressor = zlib.compressobj(9)
     zeros = b"\0" * (1 << 20)
     remaining = width * height
@@ -50,25 +57,27 @@ def _gray_image(width: int, height: int, extra: bytes = b"") -> bytes:
         remaining -= count
     data = b"".join([*parts, compressor.flush()])
     return (
-        f"<< /Type /XObject /Subtype /Image /Width {width} /Height {height} "
-        f"/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode "
-    ).encode() + extra + f" /Length {len(data)} >>\nstream\n".encode() + data + b"\nendstream"
+        b"<< /Type /XObject " + subtype + f"/Width {width} /Height {height} "
+        f"/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode ".encode()
+    ) + extra + f" /Length {len(data)} >>\nstream\n".encode() + data + b"\nendstream"
 
 
 def _stream(body: bytes, extra: bytes = b"") -> bytes:
     return f"<< /Length {len(body)} ".encode() + extra + b" >>\nstream\n" + body + b"\nendstream"
 
 
-def _smask_pdf(path: Path, mask_side: int) -> Path:
-    """A 1x1 image whose ``/SMask`` is ``mask_side`` square: the page count sees 1 px."""
+def _smask_pdf(
+    path: Path, mask_side: int, *, key: bytes = b"/SMask", mask_subtype: bytes = b"/Subtype /Image "
+) -> Path:
+    """A 1x1 image whose ``key`` mask is ``mask_side`` square: the page count sees 1 px."""
     return _write_pdf(
         path,
         [
             *HEAD,
             PAGE + b"/Im0 4 0 R >> >> /Contents 5 0 R >>",
-            _gray_image(1, 1, b"/SMask 6 0 R"),
+            _gray_image(1, 1, key + b" 6 0 R"),
             _stream(b"q 100 0 0 100 0 0 cm /Im0 Do Q"),
-            _gray_image(mask_side, mask_side),
+            _gray_image(mask_side, mask_side, subtype=mask_subtype),
         ],
     )
 
@@ -232,6 +241,7 @@ class _BrokenReader:
     """A reader whose cross-reference lists one object that cannot be read."""
 
     xref = {0: {1: 0}}
+    resolved_objects: dict[tuple[int, int], object] = {}
 
     def get_object(self, ref: object) -> object:
         raise PdfReadError("synthetic unreadable object")
@@ -242,6 +252,103 @@ def test_a_walk_that_raises_fails_closed() -> None:
         scan_document_images(_BrokenReader())  # type: ignore[arg-type]
 
     assert describe_failure(caught.value) == "ImageTooLargeError from PdfReadError"
+
+
+# ---------------------------------------------------------------------------
+# sec-99b H1: a mask without /Subtype, and a followed mask with no size
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("key", [b"/SMask", b"/Mask"], ids=["smask", "stencil-mask"])
+def test_a_mask_without_a_subtype_is_still_sized(tmp_path: Path, key: bytes) -> None:
+    """pdfium decodes a mask stream with or without ``/Subtype /Image``."""
+    path = _smask_pdf(tmp_path / "doc.pdf", BIG_SIDE, key=key, mask_subtype=b"")
+    engine = _Engine([])
+    spy = _RenderSpy()
+
+    doc = extract_pdf(path, ocr=_setup(engine), render=spy, max_image_pixels=LOW_BOUND)
+
+    assert (spy.calls, engine.calls, doc.content) == (0, [], "")
+
+
+def test_a_followed_mask_that_declares_no_size_fails_closed(tmp_path: Path) -> None:
+    """The xref walk skips a stream with no size and no subtype; following the SMask does not."""
+    unsized = _stream(b"\0", b"/Type /XObject /Filter /FlateDecode")
+    path = _write_pdf(
+        tmp_path / "doc.pdf",
+        [
+            *HEAD,
+            PAGE + b"/Im0 4 0 R >> >> /Contents 5 0 R >>",
+            _gray_image(1, 1, b"/SMask 6 0 R"),
+            _stream(b"q 100 0 0 100 0 0 cm /Im0 Do Q"),
+            unsized,
+        ],
+    )
+
+    with pytest.raises(ImageTooLargeError, match="Width"):
+        scan_document_images(PdfReader(str(path)))
+
+
+def test_a_colour_key_mask_array_is_not_an_image(tmp_path: Path) -> None:
+    path = _write_pdf(
+        tmp_path / "doc.pdf",
+        [
+            *HEAD,
+            PAGE + b"/Im0 4 0 R >> >> /Contents 5 0 R >>",
+            _gray_image(1, 1, b"/Mask [0 10]"),
+            _stream(b"/Im0 Do"),
+        ],
+    )
+
+    scan_document_images(PdfReader(str(path)), max_image_pixels=LOW_BOUND)
+
+
+# ---------------------------------------------------------------------------
+# sec-99b H2: the walk's own cost
+# ---------------------------------------------------------------------------
+
+
+def test_xref_entries_aliasing_one_offset_are_refused_before_any_parse(tmp_path: Path) -> None:
+    """sec-99b: 401 entries at one 40 KB object cost pypdf 11.3 s and 638 MB."""
+    page = PAGE + b">> >> /Contents 4 0 R >>"
+    objects = [*HEAD, page, _stream(b""), _stream(b"x"), _stream(b"y")]
+    path = _write_pdf(tmp_path / "alias.pdf", objects, aliases={5: 4, 6: 4})
+    reader = PdfReader(str(path))
+    cached = len(reader.resolved_objects)
+
+    with pytest.raises(ImageTooLargeError, match="alias"):
+        scan_document_images(reader)
+
+    assert len(reader.resolved_objects) == cached
+
+
+def test_the_scan_stops_at_its_time_budget(tmp_path: Path) -> None:
+    path = _smask_pdf(tmp_path / "doc.pdf", SMALL_SIDE)  # 6 objects
+    readings = iter([0.0, 0.0, 0.5, 10.5])  # deadline at 10, then before objects 1, 2, 3
+
+    with pytest.raises(ImageTooLargeError, match="out of time"):
+        scan_document_images(PdfReader(str(path)), clock=lambda: next(readings))
+
+
+def test_the_scan_stops_at_its_byte_budget(tmp_path: Path) -> None:
+    path = _smask_pdf(tmp_path / "doc.pdf", SMALL_SIDE)
+
+    with pytest.raises(ImageTooLargeError, match="bytes"):
+        scan_document_images(PdfReader(str(path)), max_bytes=100)
+
+
+def test_the_scan_leaves_pypdfs_cache_as_it_found_it(tmp_path: Path) -> None:
+    path = _smask_pdf(tmp_path / "doc.pdf", SMALL_SIDE)
+    reader = PdfReader(str(path))
+    before = dict(reader.resolved_objects)
+
+    scan_document_images(reader)
+
+    assert reader.resolved_objects == before
+
+
+def test_the_scan_budgets_have_their_documented_defaults() -> None:
+    assert (MAX_SCAN_BYTES, MAX_SCAN_SECONDS) == (512 * 1024 * 1024, 10.0)
 
 
 # ---------------------------------------------------------------------------
