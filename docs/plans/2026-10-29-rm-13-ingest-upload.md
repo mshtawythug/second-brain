@@ -354,6 +354,23 @@ All five first-round findings confirmed fixed; one LOW, fixed in `645d056`.
   **Mutation proof:** the size check dropped is killed by that test; the count check dropped
   (re-anchored) is killed by the forged-count test; both other docx checks still killed.
 
+## Review round 2, continued: the code re-review (rev-77, at `97eedaf`)
+
+R1–R4 and the merge confirmed clean; two more, fixed in `fb8cd40`.
+
+- **R5 (MEDIUM), the same bypass as S1 by another door.** With a zip64 end-of-central-directory
+  LOCATOR (`PK\x06\x07`, the 20 bytes before the end record) present, zipfile takes size_cd and the
+  count from the zip64 record, so the 32-bit fields S1 bounds prove nothing. A locator is now
+  refused before the zip is opened (no `.docx` under 25 MiB needs zip64), and the comment names
+  size_cd as the bound that matters. Test: a valid `.docx` shape with a valid zip64 record and
+  locator inserted, which zipfile itself opens and which passes every later check (asserted, with
+  the same archive minus the locator as the control), is refused with the same message.
+  **Mutation proof:** the locator check dropped is killed by that test.
+- **R6 (LOW).** `import anyio.to_thread` imported an undeclared dependency. The three calls go through
+  `starlette.concurrency.run_in_threadpool` (`routes_meta`'s precedent), which waits for the thread
+  rather than abandoning it, so the synchronous-cleanup argument holds. The off-the-loop test still
+  passes, and the three off-the-loop mutations, re-anchored, are still killed.
+
 ## End-to-end
 
 A real `brain ui` against a scratch DB on 5434 (`second_brain_test_rm13_e2e`), a scratch `BRAIN_HOME` and a
