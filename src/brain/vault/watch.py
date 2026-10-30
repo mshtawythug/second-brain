@@ -45,9 +45,9 @@ Concurrency invariants worth restating:
   shutdown windows. A delete (or a move's source) dropped after close or left
   unapplied at shutdown, a delete's id lost with its connection, and a graph
   remove the lane could not apply are journaled and replayed at the next start
-  (``owed_work``, RM-26), as are the lane's removes after a setup failure and the
-  jobs a worker past its join never reached; every job settles its captured ids
-  (``settle_capture``). CLAUDE.md's ceiling table records that wiring.
+  (``owed_work``, RM-26), as are the lane's removes after a setup failure and a
+  worker past its join's queue and in-flight job; every job settles its captured
+  ids (``settle_capture``). CLAUDE.md's ceiling table records that wiring.
   These are the 2026-10-22 race fixes, reasoned at ``_fire``,
   ``_supersede_pending`` and the drain; CLAUDE.md's ceiling table records them.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
@@ -226,6 +226,10 @@ class _WatcherState:
     closed: bool = False
     dropped_after_close: int = 0
     owed: OwedJournal | None = None  # RM-26: work a shutdown would lose
+    # The job the worker is running, and whether shutdown stopped waiting for it
+    # (RM-26): past its join, a finished job's graph removes meet a closed lane.
+    current_job: _Job | None = None
+    worker_abandoned: bool = False
     # The graph lane run_watcher built, if any (tests barrier on it).
     graph_lane: GraphLane | None = None
     # ``processed`` and ``errors`` accumulate over the watcher's lifetime
@@ -452,7 +456,11 @@ def run_watcher(
                 "or reconnecting to the DB); leaving its connection to it, not racing a close",
                 _WORKER_JOIN_TIMEOUT_S,
             )
-            _owe(state, _take_queued(state))  # RM-26: it may never reach them
+            # RM-26: it may never reach the queue, nor finish (or hand on) its job.
+            state.worker_abandoned = True  # set BEFORE reading current_job
+            if (in_flight := state.current_job) is not None:
+                _owe_in_flight(state, in_flight)
+            _owe(state, _take_queued(state))
         else:
             try:
                 # The CURRENT connection: a reconnect may have replaced worker_conn.
@@ -900,6 +908,7 @@ def _worker_loop(
         job = state.jobs.get()
         if job is None:
             return
+        state.current_job = job
         try:
             counted = link.call(_job_runner(job, embedder, config, state, graph_syncer))
         except ReconnectAbandoned as exc:
@@ -913,6 +922,10 @@ def _worker_loop(
                 job.abs_path,
             )
             continue
+        finally:
+            state.current_job = None  # cleared BEFORE reading worker_abandoned
+            if state.worker_abandoned and state.owed is not None:
+                state.owed.owe_graph_removes(job.capture.ids)  # the lane is closed
         if counted:
             state.processed += 1
 
@@ -947,6 +960,19 @@ def _take_queued(state: _WatcherState) -> list[_Job]:
                 taken.append(job)
     state.jobs.put(None)
     return taken
+
+
+def _owe_in_flight(state: _WatcherState, job: _Job) -> None:
+    """The job a worker past its join is running: owe its path and EVERY captured id.
+
+    A handed id is owed too: a remove the worker hands on after ``lane.close``
+    is dropped by the lane, and the path alone replays to no row once the
+    delete has committed.
+    """
+    if state.owed is not None:
+        if job.action != "upsert":
+            state.owed.owe_deletes([job.abs_path])
+        state.owed.owe_graph_removes(job.capture.ids)
 
 
 def _owe(state: _WatcherState, jobs: list[_Job]) -> None:

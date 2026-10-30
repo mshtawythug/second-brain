@@ -552,3 +552,89 @@ def test_a_worker_past_its_join_owes_its_queued_deletes(
         factory.close_all()
 
     assert {"action": "delete", "path": "queued.md"} in entries, entries
+
+
+class _BlocksInTheDelete:
+    """A real connection whose ``DELETE FROM documents`` waits for ``release`` (a hung socket)."""
+
+    def __init__(self, inner: psycopg.Connection[Any]) -> None:
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "entered", threading.Event())
+        object.__setattr__(self, "release", threading.Event())
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._inner, name, value)  # e.g. run_watcher's ``autocommit = True``
+
+    def execute(self, query: Any, params: Any = None) -> Any:
+        if str(query).startswith("DELETE FROM documents"):
+            self.entered.set()
+            self.release.wait(WAIT_FOR_BACKSTOP_S * 3)
+        return self._inner.execute(query, params)
+
+
+class _WorkerBlocksInTheDelete(_Factory):
+    """The second connection (the worker's) blocks in its DELETE; the rest are real."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.blocking: _BlocksInTheDelete | None = None
+
+    def __call__(self) -> psycopg.Connection[Any]:
+        conn = super().__call__()
+        if self.calls == 2:
+            self.blocking = _BlocksInTheDelete(conn)
+            return self.blocking  # type: ignore[return-value]
+        return conn
+
+
+def test_a_worker_past_its_join_owes_its_in_flight_delete_and_its_id(
+    test_db: psycopg.Connection[Any],
+    fake_embedder: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 3: the delete IN FLIGHT when the join times out is owed, path and id.
+
+    It is blocked inside its DELETE, after the id capture. Released after
+    shutdown, the DELETE commits and its remove meets a closed lane, which drops
+    it; so the path alone would replay to no row. The id must be owed too, and
+    the next start must hand it to the graph.
+    """
+    monkeypatch.setattr("brain.vault.watch._WORKER_JOIN_TIMEOUT_S", 0.05)
+    vault, journal = tmp_path / "vault", tmp_path / "state" / JOURNAL_NAME
+    doc_id = str(uuid.uuid4())
+    _write(vault / "gone.md", "Gone", doc_id=doc_id)
+    factory = _WorkerBlocksInTheDelete()
+    before = set(threading.enumerate())
+    worker: threading.Thread | None = None
+    try:
+        first = _Watcher(vault, journal, fake_embedder, factory, graph_syncer=_Remover())
+        worker = next(
+            t for t in threading.enumerate()
+            if t.name == "brain-vault-watcher-worker" and t not in before
+        )
+        assert factory.blocking is not None and _row_at(test_db, "gone.md") == doc_id
+        (vault / "gone.md").unlink()
+        first.observer.handler.on_any_event(FileDeletedEvent(str(vault / "gone.md")))
+        assert factory.blocking.entered.wait(WAIT_FOR_BACKSTOP_S), "fixture: never blocked"
+        first.stop()
+        owed = _journal_entries(journal) if journal.exists() else []
+        factory.blocking.release.set()
+        wait_for(lambda: not worker.is_alive())
+
+        graph = _Remover()
+        _Watcher(vault, journal, fake_embedder, factory, graph_syncer=graph).stop()
+    finally:
+        if factory.blocking is not None:
+            factory.blocking.release.set()
+        if worker is not None:
+            wait_for(lambda: not worker.is_alive())
+        factory.close_all()
+
+    assert {"action": "delete", "path": "gone.md"} in owed, owed
+    assert {"action": "graph_remove", "id": doc_id} in owed, owed
+    assert _row_at(test_db, "gone.md") is None
+    assert doc_id in graph.removed, "the next start did not hand the dropped remove to the graph"
