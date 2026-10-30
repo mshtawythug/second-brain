@@ -190,7 +190,11 @@ def test_the_search_session_check_is_hashed_not_correlated(
         str(row[0])
         for row in test_db.execute(
             "EXPLAIN (VERBOSE) " + engagement._TOTALS_SQL,
-            {"days": 30, "reads": list(READ_ACTIONS)},
+            {
+                "days": 30,
+                "reads": list(READ_ACTIONS),
+                "ratings": list(RATING_ACTIONS),
+            },
         ).fetchall()
     )
 
@@ -272,7 +276,25 @@ def test_the_default_window_is_the_gate_window(
 def test_read_actions_are_the_ones_brain_usage_counts_as_opens() -> None:
     """One meaning of "opens" across `brain usage` and its --engagement readout."""
     assert set(READ_ACTIONS) == set(usage._READ_ACTIONS)
-    assert set(RATING_ACTIONS) == {"rated_useful", "rated_irrelevant"}
+
+
+def test_the_ratings_count_is_driven_by_rating_actions(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """One definition of a rating: the count reads RATING_ACTIONS, not a copy.
+
+    One row of every feedback action. The count must be exactly the rows whose
+    action is in RATING_ACTIONS, so adding ``pinned`` (or dropping an action)
+    there changes this number and turns this red.
+    """
+    (doc,) = _docs(test_db, 1)
+    for action in ("rated_useful", "rated_irrelevant", "pinned"):
+        record_interaction(test_db, document_id=doc, action=action, source="cli")
+
+    stats = engagement_stats(test_db, days=30)
+
+    assert stats.ratings == 2, "a pin is not an explicit rating"
+    assert stats.ratings == stats.rated_useful + stats.rated_irrelevant
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +333,7 @@ def _stats(*, reads: int, documents: int, ratings: int, days: int = 90) -> Engag
         documents_opened=documents,
         rated_useful=ratings,
         rated_irrelevant=0,
+        ratings=ratings,
         search_session_reads=0,
         by_surface=(),
         interactions_rows=0,
@@ -344,7 +367,7 @@ def test_one_short_on_any_threshold_is_not_met(
 def test_clicks_count_toward_the_open_threshold() -> None:
     stats = EngagementStats(
         days=90, opens=499, clicks=1, documents_opened=100, rated_useful=15,
-        rated_irrelevant=15, search_session_reads=0, by_surface=(),
+        rated_irrelevant=15, ratings=30, search_session_reads=0, by_surface=(),
         interactions_rows=0, interactions_bytes=0,
     )
 

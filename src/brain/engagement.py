@@ -66,7 +66,9 @@ GATE_MIN_RATINGS = 30
 #: counts as opens (``tests/test_engagement.py`` pins the two together).
 READ_ACTIONS: tuple[str, ...] = ("opened", "clicked")
 
-#: Explicit judgements. ``pinned`` is a bookmark, not a rating.
+#: Explicit judgements: the ONE definition of a rating. ``ratings`` (and so
+#: the gate) counts exactly these actions in SQL. ``pinned`` is a bookmark, not
+#: a judgement about a document's relevance, so it is not a rating.
 RATING_ACTIONS: tuple[str, ...] = ("rated_useful", "rated_irrelevant")
 
 
@@ -93,6 +95,8 @@ class EngagementStats:
     documents_opened: int
     rated_useful: int
     rated_irrelevant: int
+    #: Explicit ratings: rows whose action is in :data:`RATING_ACTIONS`.
+    ratings: int
     #: Read events whose ``session_id`` names a logged search.
     search_session_reads: int
     #: Busiest surface first, then by name.
@@ -106,11 +110,6 @@ class EngagementStats:
     def reads(self) -> int:
         """Read events: opens plus clicks. The gate's "opens"."""
         return self.opens + self.clicks
-
-    @property
-    def ratings(self) -> int:
-        """Explicit ratings: useful plus irrelevant."""
-        return self.rated_useful + self.rated_irrelevant
 
     @property
     def search_session_share(self) -> float | None:
@@ -174,6 +173,7 @@ _TOTALS_SQL = """
         COUNT(DISTINCT i.document_id) FILTER (WHERE i.action = ANY(%(reads)s)),
         COUNT(*) FILTER (WHERE i.action = 'rated_useful'),
         COUNT(*) FILTER (WHERE i.action = 'rated_irrelevant'),
+        COUNT(*) FILTER (WHERE i.action = ANY(%(ratings)s)),
         -- An uncorrelated IN, so Postgres builds one hashed SubPlan. A
         -- correlated EXISTS here runs once per read row, because a sub-select
         -- inside an aggregate FILTER cannot become a join: 23 s against 46 ms
@@ -221,13 +221,17 @@ def engagement_stats(
     """
     if days < 1:
         raise ValueError(f"days must be at least 1, got {days}")
-    params = {"days": days, "reads": list(READ_ACTIONS)}
+    params = {
+        "days": days,
+        "reads": list(READ_ACTIONS),
+        "ratings": list(RATING_ACTIONS),
+    }
     totals = conn.execute(_TOTALS_SQL, params).fetchone()
     assert totals is not None  # an aggregate always returns one row
     surfaces = conn.execute(_BY_SURFACE_SQL, params).fetchall()
     size = conn.execute(_TABLE_SIZE_SQL).fetchone()
     assert size is not None
-    opens, clicks, documents, useful, irrelevant, from_search = totals
+    opens, clicks, documents, useful, irrelevant, ratings, from_search = totals
     return EngagementStats(
         days=days,
         opens=int(opens),
@@ -235,6 +239,7 @@ def engagement_stats(
         documents_opened=int(documents),
         rated_useful=int(useful),
         rated_irrelevant=int(irrelevant),
+        ratings=int(ratings),
         search_session_reads=int(from_search),
         by_surface=tuple(
             SurfaceEngagement(surface=str(r[0]), opens=int(r[1]), clicks=int(r[2]))
