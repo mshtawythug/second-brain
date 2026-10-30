@@ -155,4 +155,6 @@ The source is deleted only after the vault file exists.
 - **3b:** a share whose only text is inside a closed `---` block keeps the whole text as
   its body.
 - **4:** the AC6 test's real location is named above.
+- **5:** `create_vault_note` does not take `extra_frontmatter` (no production caller
+  passed it); only `write_vault_note` does, which is what `import_file` calls.
 

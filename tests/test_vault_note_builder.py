@@ -408,14 +408,11 @@ def test_extra_frontmatter_lands_but_never_overrides_brain_managed_fields(
     _init_vault(vault)
 
     # Act
-    doc_id = create_vault_note(
-        test_db,
-        cfg=Config.load(),
+    target, doc_id = write_vault_note(
         vault_path=vault,
         title="With extras",
         body="content",
         tags=["inbox"],
-        embedder=fake_embedder,
         extra_frontmatter={
             "sensitivity": "confidential",
             "capture_import": "abc123",
@@ -424,6 +421,9 @@ def test_extra_frontmatter_lands_but_never_overrides_brain_managed_fields(
             "kind": "ingested",
             "tags": ["forged"],
         },
+    )
+    index_vault_note(
+        test_db, cfg=Config.load(), vault_path=vault, target=target, embedder=fake_embedder
     )
 
     # Assert

@@ -162,7 +162,6 @@ def create_vault_note(
     template: str = "note",
     folder: str = "",
     embedder: Embedder | None = None,
-    extra_frontmatter: Mapping[str, str] | None = None,
 ) -> str:
     """Author a vault-tier note: render, write to disk, sync, return its id.
 
@@ -206,7 +205,6 @@ def create_vault_note(
         tags=tags,
         template=template,
         folder=folder,
-        extra_frontmatter=extra_frontmatter,
     )
     index_vault_note(
         conn, cfg=cfg, vault_path=vault_path, target=target, embedder=embedder

@@ -75,8 +75,8 @@ git tag scheme:
   The guide states that shares pass through Apple's iCloud and recommends Advanced Data
   Protection.
 - `brain.vault.note_builder.create_vault_note` is now `write_vault_note` followed by
-  `index_vault_note`, with no change in behaviour. Both take an `extra_frontmatter` mapping,
-  which can never set a brain-managed field. The note file is now created exclusively
+  `index_vault_note`, with no change in behaviour. `write_vault_note` takes an
+  `extra_frontmatter` mapping, which can never set a brain-managed field. The note file is now created exclusively
   (`O_EXCL`, retrying `-2`, `-3`… on a taken name), so two concurrent writers can no longer
   overwrite each other, and a failed write leaves no partial file.
 
