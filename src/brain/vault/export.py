@@ -21,6 +21,7 @@ from typing import Any
 import psycopg
 import yaml
 
+from ..errors import describe_failure
 from ..sensitivity import DEFAULT_SENSITIVITY
 from . import init_vault
 from ._atomic import atomic_write_text
@@ -681,7 +682,7 @@ def export_vault(
                 doc, vault_path=vault_path, relative=relative
             )
         except OSError as e:
-            summary.errors.append(f"{relative}: {e}")
+            summary.errors.append(f"{relative}: {describe_failure(e)}")
             continue
         if written:
             summary.written += 1
