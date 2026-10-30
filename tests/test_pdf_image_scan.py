@@ -271,6 +271,28 @@ def test_a_mask_without_a_subtype_is_still_sized(tmp_path: Path, key: bytes) -> 
     assert (spy.calls, engine.calls, doc.content) == (0, [], "")
 
 
+@pytest.mark.parametrize("declared", [b"/Width 3000", b"/Height 3000"], ids=["width", "height"])
+def test_a_stream_declaring_one_dimension_fails_closed_on_its_partner(
+    tmp_path: Path, declared: bytes
+) -> None:
+    """No /Subtype, referenced by nothing: only the walk's own size test reaches it."""
+    lone = _stream(b"\0", b"/Type /XObject " + declared)
+    path = _write_pdf(
+        tmp_path / "doc.pdf",
+        [
+            *HEAD,
+            PAGE + b"/Im0 4 0 R >> >> /Contents 5 0 R >>",
+            _gray_image(1, 1),
+            _stream(b"/Im0 Do"),
+            lone,
+        ],
+    )
+    partner = "Height" if b"Width" in declared else "Width"
+
+    with pytest.raises(ImageTooLargeError, match=partner):
+        scan_document_images(PdfReader(str(path)))
+
+
 def test_a_followed_mask_that_declares_no_size_fails_closed(tmp_path: Path) -> None:
     """The xref walk skips a stream with no size and no subtype; following the SMask does not."""
     unsized = _stream(b"\0", b"/Type /XObject /Filter /FlateDecode")
