@@ -52,7 +52,8 @@ def _resolved(value: Any) -> Any:
 def _dimension(stream: StreamObject, key: str) -> float:
     """A declared image dimension, refused unless it is a positive finite number."""
     value = _resolved(stream.get(key))
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    # pypdf's NumberObject / FloatObject subclass int / float; its BooleanObject does not.
+    if not isinstance(value, (int, float)):
         raise ImageTooLargeError(f"image {key} missing or not a number")
     if not (math.isfinite(value) and value > 0):
         raise ImageTooLargeError(f"image {key} not a positive size")
