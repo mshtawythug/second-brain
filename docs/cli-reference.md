@@ -779,7 +779,12 @@ brain ingest-notion ~/Downloads/Export-abc123.zip --max 50 --tag notion
   `Last edited time` dates it. If a database's CSV lists rows but the export has no row pages,
   the command says so.
 - **`--since YYYY-MM-DD`** keeps pages last edited on or after that day. Pages with no readable
-  last-edited property (ordinary pages have none) are kept and counted.
+  last-edited property (ordinary pages have none) are kept and counted. Notion writes that time
+  in your local zone with no offset and it is stored as if it were UTC, so it serves ordering and
+  the `--since` day window only and may be off by your UTC offset.
+- **Not stored, and said so:** a new page whose text is identical to an existing document's
+  (`skipped <id>: same text as an existing document`) and an empty page (`skipped <id>: empty`).
+  Neither counts as unchanged or toward what remains under `--max`.
 - **Cap and cost.** `--max` (default 200) caps the pages written a run; when it stops, it prints
   how many still need writing, and re-running continues, since unchanged pages are free. Every new
   page gets a summary (`--no-enrich` skips it), and with the graph on, concept extraction takes

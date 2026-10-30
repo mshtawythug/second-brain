@@ -37,6 +37,7 @@ path or ``zipfile`` text is echoed, since all of them come from the export.
 """
 from __future__ import annotations
 
+import lzma
 import os
 import re
 import stat
@@ -114,7 +115,7 @@ class ExportReader(Protocol):
     skipped: dict[str, int]
 
     def read_text(self, file: ExportFile) -> str:
-        """``file`` decoded as UTF-8 (invalid bytes replaced)."""
+        """``file`` decoded as UTF-8, a leading BOM dropped (invalid bytes replaced)."""
 
 
 def is_readable(file: ExportFile) -> bool:
@@ -151,7 +152,8 @@ class _Budget:
         self.read += len(data)
         if self.read > self.limits.max_read_bytes:
             raise NotionExportError(_TOO_BIG)
-        return data.decode("utf-8", errors="replace")
+        # ``utf-8-sig``: a byte-order mark would otherwise lead the title line.
+        return data.decode("utf-8-sig", errors="replace")
 
 
 def _require_readable(file: ExportFile) -> None:
@@ -264,7 +266,9 @@ class ZipExport:
                 # ``zipfile`` never returns more than the declared size; a header that
                 # understates it fails the CRC check on the shortened content.
                 data = fh.read(self._budget.limits.max_file_bytes + 1)
-        except (zipfile.BadZipFile, zlib.error, EOFError, OSError, NotImplementedError) as exc:
+        except (
+            zipfile.BadZipFile, zlib.error, lzma.LZMAError, EOFError, OSError, NotImplementedError
+        ) as exc:
             raise NotionExportError(_CORRUPT) from exc
         return self._budget.charge(data)
 

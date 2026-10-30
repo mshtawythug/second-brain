@@ -406,3 +406,108 @@ def test_a_write_failure_is_printed_by_class_and_counted(
     assert f"failed {fx.ONBOARDING_ID}: ValueError" in result.output
     assert fx.ONBOARDING_TITLE not in result.output
     assert "1 ingested, 0 updated, 0 unchanged, 1 failed" in result.output
+
+
+# --- pages that are not stored (rev-104 HIGH, aud-104 F1) ------------------------------
+
+SHARED_BODY = "# Meeting notes\n\nAgenda: the synthetic quarterly sync.\n"
+
+
+def _twins_and_an_empty(tmp_path: Path, name: str) -> Path:
+    return fx.write_tree(
+        tmp_path / name,
+        {
+            f"Meeting notes {fx.BOOK_ONE_ID}.md": SHARED_BODY,
+            f"Meeting notes {fx.BOOK_TWO_ID}.md": SHARED_BODY,
+            f"Untitled {fx.LEDGER_ID}.md": "  \n\n ",
+        },
+    )
+
+
+def test_same_text_and_empty_pages_are_reported_by_id_never_as_unchanged(
+    tmp_path: Path, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    root = _twins_and_an_empty(tmp_path, "export-1")
+
+    first = _run(root)
+    second = _run(_twins_and_an_empty(tmp_path, "export-2"))
+
+    for result in (first, second):
+        assert result.exit_code == 0, result.output
+        assert f"skipped {fx.BOOK_TWO_ID}: same text as an existing document" in result.output
+        assert f"skipped {fx.LEDGER_ID}: empty" in result.output
+        assert "1 page(s) not stored: same text as an existing document" in result.output
+        assert "1 page(s) not stored: empty" in result.output
+    assert "1 ingested, 0 updated, 0 unchanged, 0 failed" in first.output
+    assert "0 ingested, 0 updated, 1 unchanged, 0 failed" in second.output
+    assert set(_docs(test_db)) == {fx.BOOK_ONE_ID}
+
+
+def test_same_text_and_empty_pages_never_count_as_remaining(
+    tmp_path: Path, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    files = {
+        f"Meeting notes {fx.BOOK_ONE_ID}.md": SHARED_BODY,
+        f"Meeting notes {fx.BOOK_TWO_ID}.md": SHARED_BODY,
+        f"Untitled {fx.LEDGER_ID}.md": "",
+        f"Zeta {fx.ONBOARDING_ID}.md": "# Zeta\n\nA page of its own.\n",
+    }
+    root = fx.write_tree(tmp_path / "e", files)
+
+    first = _run(root, "--max", "1")
+    second = _run(root, "--max", "1")
+    third = _run(root, "--max", "1")
+
+    assert "stopped at --max 1: 1 page(s) remain" in first.output
+    for past_the_cap in (f"skipped {fx.BOOK_TWO_ID}: same text", f"skipped {fx.LEDGER_ID}: empty"):
+        assert past_the_cap in first.output
+    assert "1 page(s) not stored: empty" in first.output
+    assert "1 ingested" in second.output and "remain" not in second.output
+    assert "0 ingested, 0 updated, 2 unchanged" in third.output
+    assert "remain" not in third.output
+    assert set(_docs(test_db)) == {fx.BOOK_ONE_ID, fx.ONBOARDING_ID}
+
+
+def test_a_corrupt_lzma_member_exits_1_through_the_cli(
+    tmp_path: Path, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    archive = tmp_path / "e.zip"
+    name = f"Ledger {fx.LEDGER_ID}.md"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_LZMA) as zf:
+        zf.writestr(name, "# Ledger\n\n" + "synthetic ledger line\n" * 60)
+    data = bytearray(archive.read_bytes())
+    at = data.find(name.encode()) + len(name) + 9
+    data[at : at + 24] = bytes(b ^ 0xFF for b in data[at : at + 24])
+    archive.write_bytes(bytes(data))
+
+    result = _run(archive)
+
+    assert result.exit_code == 1
+    assert "ingest-notion: the archive is not a readable zip, or a member is corrupt" in (
+        result.output
+    )
+    assert _docs(test_db) == {}
+
+
+def test_a_byte_order_mark_does_not_reach_the_title(
+    tmp_path: Path, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    root = fx.write_tree(tmp_path / "e", {f"Bom {fx.LEDGER_ID}.md": "﻿# Bom page\n\nbody\n"})
+
+    assert _run(root).exit_code == 0
+
+    stored = _docs(test_db)[fx.LEDGER_ID]
+    assert stored["title"] == "Bom page"
+    assert not stored["content"].startswith("﻿")
+
+
+def test_an_unchanged_page_past_the_cap_is_not_remaining(
+    tmp_path: Path, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    assert _run(_tree(tmp_path, "export-1")).exit_code == 0
+    edited = {fx.HANDBOOK_PATH: fx.HANDBOOK_MD + "\nedit\n"}  # sorts first; onboarding is unchanged
+
+    result = _run(_tree(tmp_path, "export-2", **edited), "--max", "1")
+
+    assert "0 ingested, 1 updated, 1 unchanged" in result.output  # counted, though past the cap
+    assert "remain" not in result.output

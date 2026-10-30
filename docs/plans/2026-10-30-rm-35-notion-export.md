@@ -87,10 +87,14 @@ case ("its own command"), so the export reader is its own module behind its own 
 - **R5 — the untrusted archive.** A zip is opened with `zipfile` and each member is read in place,
   streamed with a bounded `read`. Nothing is extracted to disk. The whole archive is refused
   (exit 1, class-only message, no member name echoed) when: it holds more than
-  `MAX_EXPORT_FILES` members; a member name is absolute, has a drive letter, a backslash, an empty
-  or `..` component; a member is a symbolic link (Unix mode in `external_attr`); two members share
-  a name; a member is encrypted; a member read yields more bytes than its header declared; the
-  bytes read in one run pass `MAX_READ_BYTES`; or `zipfile` reports corruption. Only `.md` and
+  `MAX_EXPORT_FILES` members; a member name is absolute or drive-absolute (`C:/`, `C:\`), or has
+  an empty, `.` or `..` segment, with `\` read as a separator as well as `/` (so `a\b.md` is
+  kept, and `..\x.md` is refused: a backslash alone is not refused); a member is a symbolic link
+  (Unix mode in `external_attr`); two members share a name; a member is encrypted; the bytes read
+  in one run pass `MAX_READ_BYTES`; or `zipfile` reports corruption, which includes a header
+  that understates a member's size once the CRC of the shortened content mismatches (a read
+  never returns more than the declared size). *(Corrected for aud-104 F3: this sentence said a
+  backslash was refused and that an over-long read was refused; neither is what the code does.)* Only `.md` and
   `.csv` members are ever decompressed, so attachments cannot be a bomb. A folder is walked with
   `os.walk(followlinks=False)`; symlinked files and directories are skipped and counted, and each
   file is opened with `O_NOFOLLOW` so a swap between listing and reading cannot follow a link.
@@ -136,8 +140,29 @@ case ("its own command"), so the export reader is its own module behind its own 
   another inode), and removing the ZIP64 record's room check is still refused as corrupt
   because a negative seek raises `OSError`, which maps to the same sentence. Both read-time
   checks stay as defence in depth.
+- After review round 2, 48 mutations: 45 killed (round 2 adds the own-document check, the
+  empty/same-text split, the past-cap empty, taken-text and own-hash rules and skip lines, the
+  LZMA mapping and the `utf-8-sig` decode) and the same 3 equivalents.
 - `tests/test_skills_token_routing.py::test_skills_sync_is_not_drifted` fails locally until
   `bin/brain-skills-sync` runs after merge, because SKILL.md gained the Notion row (CI skips it).
+
+## Review round 2 (rev-104, aud-104)
+
+- **Pages that are not stored.** A new page whose text equals another stdin document's falls
+  through `ingest_document`'s content-hash dedup and comes back with THAT document's id; an
+  empty page has no chunks and comes back with none. Both used to be reported `unchanged` and
+  counted in `--max`'s remainder forever. A page is now `unchanged` only when the returned
+  document is the one keyed to `(notion, <page id>)`; otherwise it prints
+  `skipped <id>: same text as an existing document` or `skipped <id>: empty`, the summary
+  counts each, and the remainder leaves both out. Pages past the `--max` cap are classified the
+  same way without writing (unchanged, empty, same text, or remaining), so the summary counts
+  every page. Nothing is forced (`--force` would replace
+  the other document). A stored page re-exported with another page's text fails loudly
+  (`failed <id>: UniqueViolation`, the stdin content-hash index) and keeps its old body;
+  the calendar and GitHub commands share the first shape and are worse there (BL-34).
+- A corrupt LZMA member maps to the corrupt sentence; files are decoded `utf-8-sig`;
+  `NotionPage.has_last_edited` and `last_edited()`'s bool are gone; the naive last-edited time
+  stored as UTC is documented (ruling). The shared run loop is BL-33 (ruling: not in this PR).
 
 ## Risks
 

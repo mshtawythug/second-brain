@@ -45,6 +45,9 @@ git tag scheme:
   are read from the archive's end record (ZIP64 included) before the directory is parsed. A
   folder is walked without following links; hard-linked files are skipped, and a file replaced
   between listing and reading (by a link, a FIFO, a folder or another file) is refused.
+- A new page whose text matches an existing document's, and an empty page, are reported by id
+  and counted as not stored, never as unchanged or as remaining under `--max`. Files are read
+  as UTF-8 with a leading byte-order mark dropped.
 - Titles have control and format characters removed and are cut at 300 characters. Output names
   pages by id, never by title, including the secret guard's notices (`refused <id>: N
   finding(s)`).

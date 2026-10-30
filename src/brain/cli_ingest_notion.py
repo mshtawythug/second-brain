@@ -11,7 +11,10 @@ last-edited property is on or after that day; a page without one is kept and
 counted. No Notion API is called and nothing needs a credential.
 
 **Dedup (protocol point 3).** Each page is ``(notion, <page id>)`` with
-``source_path=None``, so a re-export to a new folder updates in place.
+``source_path=None``, so a re-export to a new folder updates in place. A page
+is ``unchanged`` only when ``ingest_document`` returns the document keyed to
+it: a new page with another stdin document's exact text, and an empty page,
+are reported by id as not stored, and never count toward the remainder.
 
 **The cap (protocol point 9, ruling R6).** ``--max`` (default
 :data:`DEFAULT_MAX`) counts pages *written*; an unchanged page is free, so
@@ -64,6 +67,14 @@ if TYPE_CHECKING:
 
 DEFAULT_MAX = 200
 USAGE = "ingest-notion"
+
+#: Outcomes of a page that is neither written nor its own unchanged document.
+EMPTY = "empty"
+SAME_TEXT = "same_text"
+_NOT_STORED = {
+    SAME_TEXT: "same text as an existing document",
+    EMPTY: "empty",
+}
 
 #: The reader's caps; tests swap in small ones (``monkeypatch.setattr``).
 notion_export_limits = na.ExportLimits()
@@ -206,9 +217,11 @@ def _ingest_all(export: na.ExportReader, plan: ne.ExportPlan, run: _Run) -> None
                 if not _in_window(page, run):
                     continue
                 if run.written >= run.max_pages:
-                    run.counts["remaining"] += _is_due(conn, page)
-                    continue
-                run.counts[_guarded(conn, page, run)] += 1
+                    outcome = _past_cap(conn, page)
+                    _echo_not_stored(outcome, page)
+                else:
+                    outcome = _guarded(conn, page, run)
+                run.counts[outcome] += 1
         finally:
             _report_run(run)
 
@@ -239,9 +252,16 @@ def _guarded(conn: psycopg.Connection[Any], page: ne.NotionPage, run: _Run) -> s
     except (psycopg.Error, ValueError, BrainError) as exc:
         typer.secho(f"  failed {page.page_id}: {describe_failure(exc)}", fg="red", err=True)
         return "failed"
-    if outcome != "unchanged":
+    if outcome in _NOT_STORED:
+        _echo_not_stored(outcome, page)
+    elif outcome != "unchanged":
         typer.echo(f"  {outcome} {page.page_id}")
     return outcome
+
+
+def _echo_not_stored(outcome: str, page: ne.NotionPage) -> None:
+    if outcome in _NOT_STORED:
+        typer.echo(f"  skipped {page.page_id}: {_NOT_STORED[outcome]}")
 
 
 def _write(conn: psycopg.Connection[Any], page: ne.NotionPage, run: _Run) -> str:
@@ -269,23 +289,51 @@ def _write(conn: psycopg.Connection[Any], page: ne.NotionPage, run: _Run) -> str
     _emit_egress_notice(result.egress_notice)
     if result.created:
         return "ingested"
-    return "updated" if result.body_changed else "unchanged"
+    if result.body_changed:
+        return "updated"
+    # Not written. It is "unchanged" only when the document returned is the one
+    # keyed to this page. A new page whose text equals another stdin document's
+    # falls through to the content-hash dedup, which returns THAT document; an
+    # empty page has no chunks and returns none. Neither is this page, and
+    # neither is forced: --force would replace the other page's document.
+    own = _own_row(conn, page.page_id)
+    if own is not None and own[0] == result.document_id:
+        return "unchanged"
+    return EMPTY if result.document_id is None else SAME_TEXT
 
 
-def _is_due(conn: psycopg.Connection[Any], page: ne.NotionPage) -> bool:
-    """Whether a page past the cap would still be written: new, or its body changed.
-
-    The hash is ``ingest_document``'s (SHA-256 of the body). A body the secret
-    guard redacts is stored hashed after redaction, so such a page is counted
-    as due every time: the remainder is an upper bound, never an undercount.
-    """
+def _own_row(conn: psycopg.Connection[Any], page_id: str) -> tuple[str, str] | None:
+    """``(document id, content hash)`` of the document keyed to ``(notion, page_id)``."""
     row = conn.execute(
-        "SELECT d.content_hash FROM documents d JOIN sources s ON s.id = d.source_id "
-        "WHERE s.kind = %s AND s.external_id = %s",
-        (ne.SOURCE_KIND, page.page_id),
+        "SELECT d.id::text, d.content_hash FROM documents d "
+        "JOIN sources s ON s.id = d.source_id WHERE s.kind = %s AND s.external_id = %s",
+        (ne.SOURCE_KIND, page_id),
     ).fetchone()
+    return None if row is None else (str(row[0]), str(row[1]))
+
+
+def _past_cap(conn: psycopg.Connection[Any], page: ne.NotionPage) -> str:
+    """What :func:`_write` would report for a page past the cap, without writing it.
+
+    Its own document: ``remaining`` when the body changed, else ``unchanged``.
+    No document: :data:`EMPTY` for an empty page, :data:`SAME_TEXT` when another
+    stdin document already has its text, else ``remaining``. The hash is
+    ``ingest_document``'s (SHA-256 of the body). A body the secret guard
+    redacts is stored hashed after redaction, so such a page counts as
+    remaining every time: the remainder is an upper bound, never an undercount.
+    """
     digest = hashlib.sha256(page.doc.content.encode("utf-8")).hexdigest()
-    return row is None or row[0] != digest
+    own = _own_row(conn, page.page_id)
+    if own is not None:
+        return "remaining" if own[1] != digest else "unchanged"
+    if not page.doc.content:
+        return EMPTY
+    taken = conn.execute(
+        "SELECT 1 FROM documents WHERE content_hash = %s AND kind = 'ingested' "
+        "AND source_path IS NULL",
+        (digest,),
+    ).fetchone()
+    return "remaining" if taken is None else SAME_TEXT
 
 
 def _report_run(run: _Run) -> None:
@@ -294,6 +342,9 @@ def _report_run(run: _Run) -> None:
         f"{c['ingested']} ingested, {c['updated']} updated, {c['unchanged']} unchanged, "
         f"{c['failed']} failed"
     )
+    for outcome, reason in _NOT_STORED.items():
+        if c[outcome]:
+            typer.echo(f"{c[outcome]} page(s) not stored: {reason}")
     if c["older"]:
         typer.echo(f"{c['older']} page(s) last edited before --since skipped")
     if c["undated"]:

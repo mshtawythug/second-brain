@@ -200,7 +200,7 @@ def test_build_page_uses_the_heading_title_and_keeps_the_body() -> None:
         "notion_parent_id": fx.HANDBOOK_ID,
     }
     assert page.page_id == fx.ONBOARDING_ID
-    assert page.last_edited is None and page.has_last_edited is False
+    assert page.last_edited is None
 
 
 def test_build_page_falls_back_to_the_name_without_its_id() -> None:
@@ -276,32 +276,30 @@ def test_a_row_page_carries_its_database_and_last_edited_date() -> None:
     ],
 )
 def test_last_edited_formats(line: str, expected: datetime) -> None:
-    assert ne.last_edited(f"# T\n\nCreated: x\n{line}\n\nbody") == (True, expected)
+    assert ne.last_edited(f"# T\n\nCreated: x\n{line}\n\nbody") == expected
 
 
 @pytest.mark.parametrize(
-    ("text", "expected"),
+    "text",
     [
-        ("# T\n\nLast edited time: sometime soon\n", (True, None)),
-        ("# T\n\nStatus: Done\n", (False, None)),
-        ("# T\n\nBody first.\nLast edited time: October 20, 2026\n", (False, None)),
-        ("# T\n\nStatus: Done\n\nLast edited time: October 20, 2026\n", (False, None)),
-        ("No heading\nLast edited time: October 20, 2026\n", (False, None)),
-        ("# T", (False, None)),
+        "# T\n\nLast edited time: sometime soon\n",
+        "# T\n\nStatus: Done\n",
+        "# T\n\nBody first.\nLast edited time: October 20, 2026\n",
+        "# T\n\nStatus: Done\n\nLast edited time: October 20, 2026\n",
+        "No heading\nLast edited time: October 20, 2026\n",
+        "# T",
     ],
 )
-def test_last_edited_reads_only_the_property_block(
-    text: str, expected: tuple[bool, datetime | None]
-) -> None:
-    assert ne.last_edited(text) == expected
+def test_last_edited_reads_only_the_property_block(text: str) -> None:
+    assert ne.last_edited(text) is None
 
 
-def test_an_unparseable_last_edited_is_present_but_undated() -> None:
+def test_an_unparseable_last_edited_leaves_the_page_undated() -> None:
     ref = _ref(_plan({f"Row {fx.LEDGER_ID}.md": "x"}), fx.LEDGER_ID)
 
     page = ne.build_page(ref, "# Row\n\nLast edited time: soon\n")
 
-    assert (page.has_last_edited, page.last_edited) == (True, None)
+    assert page.last_edited is None
     assert "date" not in page.doc.metadata
 
 

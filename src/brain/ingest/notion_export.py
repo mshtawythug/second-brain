@@ -22,6 +22,9 @@ file name without its id (AC1), else :data:`UNTITLED`; control and format
 characters are removed and it is cut at :data:`MAX_TITLE_CHARS`. The body is the text as
 exported, NULs removed. A database row's ``Last edited time`` property, when it
 parses, becomes ``metadata.last_edited`` and ``metadata.date`` (``sent_at``).
+Notion writes that time in the exporter's local zone with no offset; it is
+stored as if it were UTC (ruled acceptable in review), so it serves ordering and
+the ``--since`` day window only and may be off by the UTC offset.
 """
 from __future__ import annotations
 
@@ -108,7 +111,6 @@ class NotionPage:
 
     page_id: str
     doc: ExtractedDoc
-    has_last_edited: bool
     last_edited: datetime | None
 
 
@@ -218,15 +220,16 @@ def _parse_date(value: str) -> datetime | None:
     return parsed
 
 
-def last_edited(text: str) -> tuple[bool, datetime | None]:
-    """Whether the property block under the title has a last-edited line, and its value.
+def last_edited(text: str) -> datetime | None:
+    """The last-edited value of the property block under the title, or ``None``.
 
     The block is the run of ``Key: value`` lines after the ``# `` title and its
-    blank lines; a value that does not parse is ``(True, None)``.
+    blank lines. ``None`` covers both "no such line" and "a value that does not
+    parse": either way the page is undated, and the command keeps it.
     """
     lines = text.strip().splitlines()
     if _first_line_title(lines) is None:
-        return False, None
+        return None
     rest = lines[1:]
     while rest and not rest[0].strip():
         rest = rest[1:]
@@ -235,8 +238,8 @@ def last_edited(text: str) -> tuple[bool, datetime | None]:
         if match is None:
             break
         if match["key"].strip().lower() in _LAST_EDITED_KEYS:
-            return True, _parse_date(match["value"].strip())
-    return False, None
+            return _parse_date(match["value"].strip())
+    return None
 
 
 def _clean_title(raw: str) -> str:
@@ -253,7 +256,7 @@ def build_page(ref: PageRef, text: str) -> NotionPage:
     body = text.replace("\x00", "").strip()
     heading = _first_line_title(body.splitlines()) or ""
     title = _clean_title(heading) or _clean_title(ref.name_title) or UNTITLED
-    has_edited, edited = last_edited(body)
+    edited = last_edited(body)
     metadata: dict[str, str] = {"notion_page_id": ref.page_id}
     if ref.parent_id is not None:
         metadata["notion_parent_id"] = ref.parent_id
@@ -268,7 +271,7 @@ def build_page(ref: PageRef, text: str) -> NotionPage:
         source_path=None,
         metadata=metadata,
     )
-    return NotionPage(ref.page_id, doc, has_edited, edited)
+    return NotionPage(ref.page_id, doc, edited)
 
 
 def csv_row_count(text: str) -> int | None:

@@ -590,3 +590,30 @@ def test_a_sane_end_record_over_a_broken_directory_is_refused_as_corrupt(tmp_pat
     archive.write_bytes(bytes(data))
 
     _refused(archive, "not a readable zip")
+
+
+# --- review round 2 (rev-104) -----------------------------------------------------------
+
+
+def test_a_corrupt_lzma_member_is_refused_as_corrupt(tmp_path: Path) -> None:
+    archive = tmp_path / "e.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_LZMA) as zf:
+        zf.writestr(PAGE, PAGE_TEXT * 40)
+    data = bytearray(archive.read_bytes())
+    at = data.find(PAGE.encode()) + len(PAGE) + 9  # past the name and LZMA's 4-byte prefix
+    data[at : at + 24] = bytes(b ^ 0xFF for b in data[at : at + 24])
+    archive.write_bytes(bytes(data))
+
+    with open_export(archive) as export, pytest.raises(NotionExportError, match="corrupt"):
+        export.read_text(export.files[0])
+
+
+@pytest.mark.parametrize("zipped", [False, True], ids=["folder", "zip"])
+def test_a_byte_order_mark_is_dropped(tmp_path: Path, zipped: bool) -> None:
+    files = {PAGE: "\ufeff" + PAGE_TEXT}
+    path = (
+        fx.write_zip(tmp_path / "e.zip", files) if zipped else fx.write_tree(tmp_path / "e", files)
+    )
+
+    with open_export(path) as export:
+        assert export.read_text(export.files[0]) == PAGE_TEXT
