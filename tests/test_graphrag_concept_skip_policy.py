@@ -135,8 +135,9 @@ def test_plan_for_another_type_is_not_skipped(test_db: psycopg.Connection[Any]) 
 def test_backfill_reconciles_a_calendar_event_once_then_skips_it(
     test_db: psycopg.Connection[Any],
 ) -> None:
-    """Criterion 6, through ``build_graph``."""
+    """Criterion 6, through ``build_graph``: people indexed, concepts skipped by policy."""
     backend = _backend(test_db)
+    _seed_directory(test_db, _PEOPLE)
     doc = _seed_calendar_doc(test_db, external_id="evt-1")
     extractor = _ExtractorThatMustNotRun()
 
@@ -145,6 +146,11 @@ def test_backfill_reconciles_a_calendar_event_once_then_skips_it(
     )
 
     assert (first.reconciled, first.skipped) == (1, 0)
+    # The attendees in metadata.participants resolve through the directory
+    # (people._doc_participant_keys' calendar branch).
+    assert _person_keys(test_db, _TENANT) == {"avery sample", "blake sample"}
+    assert _mention_count(test_db, _TENANT) == 2
+    assert _concept_mention_count(test_db, _TENANT) == 0
     inputs_hash, extractor_ver = extract_policy.skip_watermark("calendar_event") or ("", "")
     stored = index_state(test_db, _TENANT, doc, CONCEPTS_ASPECT)
     assert stored is not None
@@ -233,3 +239,41 @@ def test_a_policy_bump_strips_earlier_concepts_and_keeps_people(
     stored = index_state(test_db, _TENANT, doc, CONCEPTS_ASPECT)
     assert stored is not None
     assert stored[1:3] == ("skip:email:v-test-bump", "skipped-by-policy")
+
+
+def test_a_suppress_ver_change_re_plans_a_skipped_doc_without_extracting(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """rev-96 R4. ``sver`` is part of every watermark, the skip watermark included.
+
+    So a weighting change makes a skipped document stale like any other, and it
+    is reconciled again: with the policy pair and the new ``sver``, and still
+    without an extractor call or a body read.
+    """
+    backend = _backend(test_db)
+    doc = _seed_calendar_doc(test_db, external_id="evt-sver")
+    extractor = _ExtractorThatMustNotRun()
+    build_graph(test_db, [doc], backend=backend, config=_ccfg(), extractor=extractor)
+    old_sver = (index_state(test_db, _TENANT, doc, CONCEPTS_ASPECT) or ("",) * 4)[3]
+
+    result = build_graph(
+        test_db,
+        [doc],
+        backend=backend,
+        config=_ccfg(generic_df_ratio=0.5),
+        extractor=extractor,
+    )
+
+    assert result.reconciled == 1
+    stored = index_state(test_db, _TENANT, doc, CONCEPTS_ASPECT)
+    assert stored is not None
+    assert stored[1:3] == extract_policy.skip_watermark("calendar_event")
+    assert stored[3] != old_sver
+    again = build_graph(
+        test_db,
+        [doc],
+        backend=backend,
+        config=_ccfg(generic_df_ratio=0.5),
+        extractor=extractor,
+    )
+    assert (again.reconciled, again.skipped) == (0, 1)

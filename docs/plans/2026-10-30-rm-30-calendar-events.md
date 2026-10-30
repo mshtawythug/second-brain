@@ -47,13 +47,19 @@ explained below.
    event still has a time and attendees. A display name the cleaner empties is dropped.
 3. **Series.** Instances come from `singleEvents=true`; the series document reads title,
    description, location, attendees and visibility from the **master** (`events get`), so the
-   body does not depend on the run's window. If the master cannot be read, it falls back to the
-   series' earliest instance in the window. Instances the owner declined are dropped from the
+   body does not depend on the run's window. If the master cannot be read, a NEW series falls
+   back to its earliest instance in the window; a series already stored keeps its stored body and
+   gets only its metadata refreshed, so one failed `events get` does not re-chunk and re-embed it
+   (rev-96 R3). `CalendarBatch.fallbacks` counts these, and the CLI prints the count. Instances the owner declined are dropped from the
    occurrences. A series with no remaining instances, or whose master the owner declined, is
    skipped.
-4. **`metadata.occurrences`** = `{"count": <instances in this run's window>, "last": [the last ten
-   start times, ISO, ascending]}`. `sent_at` comes from `metadata.date`: the event's start time for
-   a single event, and for a series the start of the latest occurrence in the window. On a
+4. **`metadata.occurrences`** = `{"run_window_count": <instances in the most recent run's
+   window>, "last": [the latest ten start times known, ISO, ascending]}`. `sent_at` comes from
+   `metadata.date`: the event's start time for a single event, and for a series the latest known
+   occurrence. `calendar.merge_volatile` merges each run into what is stored: `last` is the union
+   of the stored and incoming times trimmed to the latest ten, and `date` is the latest of them,
+   so a backfill of an earlier window never moves a series backwards (rev-96 R1). A single event
+   is not merged: a rescheduled event's start may legitimately move earlier. On a
    re-run, `update_document(metadata_patch=…)` re-promotes `sent_at` with no re-chunk.
 5. **Re-run flow.** `ingest_document` decides. If the content hash is unchanged it returns
    `created=False, body_changed=False`. When the stored `occurrences` or `date` differ, the
@@ -64,10 +70,10 @@ explained below.
    the command upserts each attendee's `(display name, email)` with `source="calendar"`, through
    `DirectoryStore.upsert_pair`. That is the same mining `refresh_calendar` does. Addresses are
    stored lowercased in `metadata.participants`, which the search predicate matches.
-   `_doc_participant_keys` (`people.py`, over the ceiling) is **not** extended, so the graph's
-   people aspect for a calendar document resolves no persons. Criterion 6 asks only that the
-   aspect be indexed (its watermark written). Adding calendar persons to the graph is a separate
-   change to an over-ceiling file and is recorded as a follow-up.
+   `people._doc_participant_keys` gains a `calendar` branch reading those addresses, so the
+   graph's people aspect resolves a calendar event's attendees (rev-96 R2; it was first recorded
+   as backlog BL-29 and then done here). `people.py` is over the ceiling: the growth is recorded
+   inline at the branch, in its module docstring and in its CLAUDE.md row.
 7. **Scope** (exact message from the ticket). `--since` and `--until` are `YYYY-MM-DD`, `--since`
    is inclusive and `--until` exclusive, the same as `ingest-gmail`'s `before:`. The window must
    be ≤ 92 days, and `--until` ≤ today + 14 days (UTC). Every refusal exits 2.

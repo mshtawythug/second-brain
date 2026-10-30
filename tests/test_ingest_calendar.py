@@ -140,7 +140,7 @@ def test_a_recurring_series_is_one_document_with_occurrences_in_metadata() -> No
     meta = doc.doc.metadata
     assert meta["series_id"] == fx.SERIES_ID
     assert meta["occurrences"] == {
-        "count": 3,  # the declined instance is not an occurrence
+        "run_window_count": 3,  # the declined instance is not an occurrence
         "last": [
             "2026-10-06T09:00:00-07:00",
             "2026-10-13T11:00:00-07:00",
@@ -157,7 +157,7 @@ def test_occurrences_keep_only_the_last_ten() -> None:
     doc = _by_id(_build(instances, {fx.SERIES_ID: fx.series_master()}))[fx.SERIES_ID]
 
     occ = doc.doc.metadata["occurrences"]
-    assert occ["count"] == 15
+    assert occ["run_window_count"] == 15
     assert occ["last"] == [f"{day}T09:00:00-07:00" for day in days[-10:]]
 
 
@@ -285,3 +285,68 @@ def test_clean_description_of_a_non_string_is_empty() -> None:
 
 def test_clean_line_joins_an_embedded_newline() -> None:
     assert clean_line("Room 4\nPIN 4321\nfloor 2") == "Room 4 floor 2"
+
+
+# --- merging a run into what is stored (rev-96 R1) --------------------------------
+
+_OCT = ["2026-10-06T09:00:00-07:00", "2026-10-13T11:00:00-07:00", "2026-10-27T09:00:00-07:00"]
+_SEP = ["2026-09-08T09:00:00-07:00", "2026-09-15T09:00:00-07:00"]
+
+
+def _series_meta(last: list[str], count: int) -> dict:
+    return {
+        "date": last[-1],
+        "series_id": fx.SERIES_ID,
+        "occurrences": {"run_window_count": count, "last": last},
+    }
+
+
+def test_an_earlier_window_never_moves_a_series_backwards() -> None:
+    merged = cal.merge_volatile(_series_meta(_OCT, 3), _series_meta(_SEP, 2))
+
+    assert merged["date"] == _OCT[-1]
+    assert merged["occurrences"] == {"run_window_count": 2, "last": [*_SEP, *_OCT]}
+
+
+def test_a_later_window_moves_a_series_forward() -> None:
+    merged = cal.merge_volatile(_series_meta(_SEP, 2), _series_meta(_OCT, 3))
+
+    assert merged["date"] == _OCT[-1]
+    assert merged["occurrences"]["last"] == [*_SEP, *_OCT]
+
+
+def test_the_merged_last_keeps_only_the_latest_ten() -> None:
+    days = [f"2026-10-{d:02d}T09:00:00-07:00" for d in range(1, 16)]
+
+    merged = cal.merge_volatile(_series_meta(days[:8], 8), _series_meta(days[6:], 9))
+
+    assert merged["occurrences"]["last"] == days[-10:]
+
+
+def test_merging_with_nothing_stored_keeps_the_run() -> None:
+    incoming = _series_meta(_OCT, 3)
+
+    assert cal.merge_volatile({}, incoming) == incoming
+
+
+def test_a_single_event_is_not_merged() -> None:
+    incoming = {"date": "2026-10-01T09:00:00-07:00", "event_id": fx.SINGLE_ID}
+
+    assert cal.merge_volatile({"date": "2026-10-20T09:00:00-07:00"}, incoming) is incoming
+
+
+# --- a series without a readable master (rev-96 R3) --------------------------------
+
+
+def test_a_series_without_a_readable_master_is_counted_as_a_fallback() -> None:
+    batch = _build(fx.series_instances(), masters={})
+
+    assert batch.fallbacks == 1
+    assert _by_id(batch)[fx.SERIES_ID].body_from_fallback is True
+
+
+def test_a_series_with_its_master_is_not_a_fallback() -> None:
+    batch = _build([*fx.series_instances(), fx.single()], {fx.SERIES_ID: fx.series_master()})
+
+    assert batch.fallbacks == 0
+    assert not any(doc.body_from_fallback for doc in batch.documents)

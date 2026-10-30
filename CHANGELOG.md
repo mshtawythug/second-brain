@@ -38,7 +38,11 @@ git tag scheme:
   visibility) are stored as `confidential`. The `gws` read gets a 120-second timeout and a 16 MiB
   output cap, and errors are printed by class only.
 - A series' occurrence dates live in its metadata, so a re-run that only finds new occurrences
-  updates the metadata without re-chunking or re-embedding.
+  updates the metadata without re-chunking or re-embedding. Each run is merged into what is
+  stored (the latest ten start times known, and the latest date), so backfilling an earlier window
+  never moves a series backwards. A series whose own record cannot be read keeps its stored text.
+- The graph's people aspect now resolves a calendar event's attendees
+  (`people._doc_participant_keys` reads its participants).
 - `brain ui` shows a calendar glyph for the new kind, and groups `_ingested/calendar` by month.
 - **Concept-skip policy.** `graph_rag/extract_policy.py` names the content types whose concept
   aspect is never extracted (`calendar_event` for now). Such a document is reconciled with an

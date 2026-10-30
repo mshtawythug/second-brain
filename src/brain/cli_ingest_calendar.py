@@ -25,6 +25,10 @@ can quote its stderr, and a database error's DETAIL can quote row values.
 ``--page-all`` read over 92 days is far larger than the single page the
 runner's 30-second default was sized for.
 
+**Series are merged, never moved backwards** (``calendar.merge_volatile``): a
+run over an earlier window keeps the later ``date`` and the latest ten
+occurrences. A series whose master could not be read keeps its stored body.
+
 **People.** ``--person`` resolves through ``directory_entries``, so when a
 document is created, its body changes, or its addresses change, each
 attendee's ``(name, address)`` pair is recorded there with ``source='calendar'``,
@@ -32,6 +36,7 @@ as ``directory.refresh_calendar`` does.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -116,6 +121,11 @@ def ingest_calendar(
         f"{batch.skipped} skipped (declined, untitled, cancelled, working location "
         "or out of office)"
     )
+    if batch.fallbacks:
+        typer.echo(
+            f"{batch.fallbacks} series master(s) could not be read: a stored series keeps "
+            "its body and gets only its dates refreshed"
+        )
     if dry_run:
         for cd in batch.documents:
             typer.echo(f"  {_dry_run_line(cd)}")
@@ -161,7 +171,9 @@ def _refuse(message: str) -> None:
 def _dry_run_line(cd: CalendarDoc) -> str:
     meta = cd.doc.metadata
     occurrences = meta.get("occurrences")
-    series = f" (series, {occurrences['count']} occurrence(s))" if occurrences else ""
+    series = ""
+    if occurrences:
+        series = f" (series, {occurrences['run_window_count']} occurrence(s) in this window)"
     return f"{str(meta.get('date', ''))[:10]}  {cd.doc.title}{series}"
 
 
@@ -227,10 +239,19 @@ def _ingest_one(
     allow_secrets: bool,
 ) -> str:
     """Ingest one document; return ``ingested|updated|refreshed|unchanged``."""
+    stored = _stored_document(conn, cd.external_id)
+    stored_meta = stored[1] if stored is not None else {}
+    # An earlier window must not move a series backwards (calendar.merge_volatile).
+    metadata = calendar_ingest.merge_volatile(stored_meta, cd.doc.metadata)
+    if stored is not None and cd.body_from_fallback:
+        # The master could not be read, so this body came from an instance and
+        # would rewrite (re-chunk, re-embed) a body built from the master. Keep
+        # the stored body; refresh only the metadata.
+        return _refresh_metadata(conn, cd, stored[0], stored_meta, metadata, cfg=cfg)
     result = ingest_document(
         conn,
         embedder=embedder,
-        doc=cd.doc,
+        doc=replace(cd.doc, metadata=metadata),
         source_kind=calendar_ingest.SOURCE_KIND,
         source_external_id=cd.external_id,
         source_metadata={"calendar_id": calendar},
@@ -250,28 +271,43 @@ def _ingest_one(
     if result.created or result.body_changed:
         _record_attendees(conn, cd)
         return "ingested" if result.created else "updated"
-    patch = _volatile_patch(conn, result.document_id, cd.doc.metadata)
-    if not patch:
-        return "unchanged"
-    # Metadata only: no new_content and no embedder, so no re-chunk and no embed.
-    update_document(
-        conn, document_id=result.document_id, metadata_patch=patch, vault_root=cfg.vault_path
-    )
-    if "participants" in patch:
-        _record_attendees(conn, cd)
-    return "refreshed"
+    return _refresh_metadata(conn, cd, result.document_id, stored_meta, metadata, cfg=cfg)
 
 
-def _volatile_patch(
-    conn: psycopg.Connection[Any], document_id: str, metadata: dict[str, Any]
-) -> dict[str, Any]:
-    row = conn.execute("SELECT metadata FROM documents WHERE id = %s", (document_id,)).fetchone()
-    stored: dict[str, Any] = (row[0] if row else None) or {}
-    return {
+def _stored_document(
+    conn: psycopg.Connection[Any], external_id: str
+) -> tuple[str, dict[str, Any]] | None:
+    """``(document id, metadata)`` of the stored calendar document, or ``None``."""
+    row = conn.execute(
+        "SELECT d.id::text, d.metadata FROM documents d JOIN sources s ON s.id = d.source_id "
+        "WHERE s.kind = %s AND s.external_id = %s",
+        (calendar_ingest.SOURCE_KIND, external_id),
+    ).fetchone()
+    return None if row is None else (str(row[0]), row[1] or {})
+
+
+def _refresh_metadata(
+    conn: psycopg.Connection[Any],
+    cd: CalendarDoc,
+    document_id: str,
+    stored: dict[str, Any],
+    metadata: dict[str, Any],
+    *,
+    cfg: Config,
+) -> str:
+    """Apply the volatile keys that differ from ``stored``; ``refreshed`` or ``unchanged``."""
+    patch = {
         key: metadata[key]
         for key in _VOLATILE_KEYS
         if key in metadata and stored.get(key) != metadata[key]
     }
+    if not patch:
+        return "unchanged"
+    # Metadata only: no new_content and no embedder, so no re-chunk and no embed.
+    update_document(conn, document_id=document_id, metadata_patch=patch, vault_root=cfg.vault_path)
+    if "participants" in patch:
+        _record_attendees(conn, cd)
+    return "refreshed"
 
 
 def _record_attendees(conn: psycopg.Connection[Any], cd: CalendarDoc) -> None:

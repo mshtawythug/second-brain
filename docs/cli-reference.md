@@ -673,10 +673,13 @@ brain ingest-calendar --since 2026-10-01 --until 2026-10-31 --calendar primary -
   joining block and any line carrying a dial-in number, a PIN, a passcode or a
   meeting ID are dropped.
 - **What metadata holds:** the start time, which dates the document (`sent_at`,
-  used by date filters and the recency boost; for a series, its latest
-  occurrence in the window), and for a series the number of occurrences in the
-  window and the last ten start times. When only these change, a re-run updates
-  the metadata without re-chunking or re-embedding.
+  used by date filters and the recency boost; for a series, its latest known
+  occurrence), and for a series the latest ten start times known and how many
+  occurrences the most recent run's window held. Each run is merged into what is
+  stored, so backfilling an earlier window never moves a series backwards. When
+  only these change, a re-run updates the metadata without re-chunking or
+  re-embedding. If a series' own record cannot be read, a stored series keeps its
+  text and only its dates are refreshed; the command prints how many.
 - **Skipped:** events you declined, events with no title, cancelled events, and
   working-location and out-of-office entries. **Private** events (and Google's legacy
   `confidential` visibility) are stored as `confidential`; the rest as `normal`.

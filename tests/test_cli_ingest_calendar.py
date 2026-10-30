@@ -151,7 +151,9 @@ def test_dry_run_lists_titles_and_dates_and_writes_nothing(
 
     assert result.exit_code == 0, result.output
     assert "2026-10-06  Vendor intro with Acme Widgets" in result.output
-    assert "2026-10-27  Weekly platform sync (series, 3 occurrence(s))" in result.output
+    assert "2026-10-27  Weekly platform sync (series, 3 occurrence(s) in this window)" in (
+        result.output
+    )
     assert "Optional lunch talk" not in result.output  # declined
     assert _calendar_docs(test_db) == {}
     assert embedder.embed_calls == 0
@@ -226,7 +228,7 @@ def test_each_fixture_class_lands_as_specified(
     assert docs[fx.SINGLE_ID]["sent_at"] == datetime(2026, 10, 6, 17, 0, tzinfo=UTC)
     assert docs[fx.SERIES_ID]["sent_at"] == datetime(2026, 10, 27, 16, 0, tzinfo=UTC)
     assert docs[fx.ALLDAY_ID]["sent_at"] == datetime(2026, 10, 14, tzinfo=UTC)
-    assert docs[fx.SERIES_ID]["metadata"]["occurrences"]["count"] == 3
+    assert docs[fx.SERIES_ID]["metadata"]["occurrences"]["run_window_count"] == 3
     assert docs[fx.SINGLE_ID]["participants"] == ["avery@example.com", "owner@example.com"]
 
 
@@ -307,7 +309,7 @@ def test_new_occurrences_change_only_the_metadata_without_re_chunking(
         before["content"],
         before["content_hash"],
     )
-    assert after["metadata"]["occurrences"]["count"] == 4
+    assert after["metadata"]["occurrences"]["run_window_count"] == 4
     assert after["metadata"]["occurrences"]["last"][-1] == "2026-11-03T09:00:00-07:00"
     assert after["sent_at"] == datetime(2026, 11, 3, 16, 0, tzinfo=UTC)
     assert _chunk_ids(test_db, before["id"]) == chunks
@@ -354,3 +356,77 @@ def test_the_attendee_pairs_reach_the_people_directory(
         ("avery sample", fx.AVERY[1]),
         ("blake sample", fx.BLAKE[1]),
     }
+
+
+# --- an earlier window after a later one (rev-96 R1) ------------------------------
+
+
+def test_an_earlier_window_does_not_move_a_series_backwards(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
+) -> None:
+    """Ingest October, then backfill September: the series keeps its October dates."""
+    assert _run().exit_code == 0
+    before = _calendar_docs(test_db)[fx.SERIES_ID]
+    embed_calls = embedder.embed_calls
+    gws.events = [fx.series_instance("2026-09-08"), fx.series_instance("2026-09-15")]
+
+    result = _run()
+
+    assert result.exit_code == 0, result.output
+    assert f"refreshed {fx.SERIES_TITLE}" in result.output
+    after = _calendar_docs(test_db)[fx.SERIES_ID]
+    assert after["sent_at"] == before["sent_at"] == datetime(2026, 10, 27, 16, 0, tzinfo=UTC)
+    assert after["metadata"]["date"] == "2026-10-27T09:00:00-07:00"
+    assert after["metadata"]["occurrences"] == {
+        "run_window_count": 2,  # the most recent run's window
+        "last": [
+            "2026-09-08T09:00:00-07:00",
+            "2026-09-15T09:00:00-07:00",
+            "2026-10-06T09:00:00-07:00",
+            "2026-10-13T11:00:00-07:00",
+            "2026-10-27T09:00:00-07:00",
+        ],
+    }
+    assert after["content_hash"] == before["content_hash"]
+    assert embedder.embed_calls == embed_calls
+
+
+# --- a series whose master cannot be read (rev-96 R3) -----------------------------
+
+
+def test_a_stored_series_keeps_its_body_when_its_master_cannot_be_read(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
+) -> None:
+    assert _run().exit_code == 0
+    before = _calendar_docs(test_db)[fx.SERIES_ID]
+    chunks = _chunk_ids(test_db, before["id"])
+    embed_calls = embedder.embed_calls
+    gws.masters = {}
+    gws.events.append(fx.series_instance("2026-11-03"))
+
+    result = _run()
+
+    assert result.exit_code == 0, result.output
+    assert "1 series master(s) could not be read" in result.output
+    assert "0 ingested, 0 updated, 1 occurrences refreshed, 3 unchanged, 0 failed" in (
+        result.output
+    )
+    after = _calendar_docs(test_db)[fx.SERIES_ID]
+    assert (after["content"], after["content_hash"]) == (before["content"], before["content_hash"])
+    assert "RRULE:FREQ=WEEKLY" in after["content"]  # still the master's body
+    assert after["metadata"]["occurrences"]["last"][-1] == "2026-11-03T09:00:00-07:00"
+    assert _chunk_ids(test_db, before["id"]) == chunks
+    assert embedder.embed_calls == embed_calls
+
+
+def test_a_new_series_without_a_readable_master_falls_back_to_an_instance(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
+) -> None:
+    gws.masters = {}
+
+    result = _run()
+
+    assert result.exit_code == 0, result.output
+    assert "1 series master(s) could not be read" in result.output
+    body = _calendar_docs(test_db)[fx.SERIES_ID]["content"]
+    assert "When: recurring series, 09:00–09:30 (UTC-07:00)" in body

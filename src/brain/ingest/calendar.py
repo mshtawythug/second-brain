@@ -27,9 +27,17 @@ What a document holds (spec RM-30, protocol points 3 and 6):
   body, and the re-ingest then goes through the pipeline's escalate-only
   sensitivity update.
 - **Metadata**: ``date`` (promoted to ``sent_at``: the start, or for a series
-  its latest occurrence in the window), ``participants`` (the attendees'
-  addresses, lowercased; the field ``--person`` matches), and for a series
-  ``occurrences`` (``count`` in the window and the ``last`` ten start times).
+  its latest known occurrence), ``participants`` (the attendees' addresses,
+  lowercased; the field ``--person`` matches), and for a series
+  ``occurrences``: ``last``, the latest ten start times known, and
+  ``run_window_count``, how many occurrences the most recent run's window held.
+  :func:`merge_volatile` merges a run into what is stored, so an earlier window
+  never moves a series' ``date`` or ``last`` backwards.
+- **Series without a readable master.** :attr:`CalendarDoc.body_from_fallback`
+  marks a series whose body came from an instance; for a document that already
+  exists, the command then keeps the stored body and refreshes only the
+  metadata, so one failed ``events get`` does not rewrite (re-chunk, re-embed)
+  the body. :attr:`CalendarBatch.fallbacks` counts them.
 - **Never stored**: attendee addresses in the body, any URL (join links carry
   passcodes in their query strings), ``conferenceData`` and ``hangoutLink``,
   Google's inserted invitation block, and dial-in, PIN and passcode lines.
@@ -42,8 +50,8 @@ What a document holds (spec RM-30, protocol points 3 and 6):
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -66,6 +74,7 @@ __all__ = [
     "CalendarDoc",
     "CalendarError",
     "build_documents",
+    "merge_volatile",
     "get_event",
     "list_events",
 ]
@@ -101,6 +110,9 @@ class CalendarDoc:
     #: directory that ``--person`` resolves through. Never written to the body.
     attendees: tuple[tuple[str | None, str], ...]
     confidential: bool
+    #: A series whose master could not be read or used: its body came from its
+    #: first instance in the window (module docstring).
+    body_from_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -109,6 +121,8 @@ class CalendarBatch:
 
     documents: tuple[CalendarDoc, ...]
     skipped: int
+    #: Series whose body came from an instance, not the master.
+    fallbacks: int = 0
 
 
 def list_events(
@@ -182,7 +196,11 @@ def build_documents(
             skipped += 1
         else:
             documents.append(doc)
-    return CalendarBatch(documents=tuple(documents), skipped=skipped)
+    return CalendarBatch(
+        documents=tuple(documents),
+        skipped=skipped,
+        fallbacks=sum(doc.body_from_fallback for doc in documents),
+    )
 
 
 def _single_document(event: dict[str, Any]) -> CalendarDoc | None:
@@ -211,7 +229,8 @@ def _series_document(
     # The master makes the body independent of the window; the first kept
     # instance stands in when it cannot be read or is not a usable event.
     base = kept[0][1]
-    if master is not None and not _skip(master) and _start(master) is not None:
+    from_master = master is not None and not _skip(master) and _start(master) is not None
+    if from_master and master is not None:
         base = master
     rules = [
         rule
@@ -220,16 +239,48 @@ def _series_document(
     ]
     prefix = f"recurring, {', '.join(rules)}" if rules else "recurring series"
     starts = [start[0] for start, _instance in kept]
-    return _document(
+    doc = _document(
         series_id,
         base,
         when=f"{prefix}, {_time_of_day(base)}",
         metadata={
             "date": starts[-1],
             "series_id": series_id,
-            "occurrences": {"count": len(starts), "last": starts[-_LAST_OCCURRENCES:]},
+            "occurrences": {
+                "run_window_count": len(starts),
+                "last": starts[-_LAST_OCCURRENCES:],
+            },
         },
     )
+    return replace(doc, body_from_fallback=not from_master)
+
+
+def merge_volatile(stored: Mapping[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """``incoming`` metadata merged with what a series' stored document already knows.
+
+    A run over an earlier window must not move a series backwards, so for a
+    series ``occurrences.last`` becomes the sorted union of the stored and the
+    incoming start times, trimmed to the latest ten, and ``date`` is the latest
+    of them. ``run_window_count`` stays the incoming run's own count. A single
+    event is returned unchanged: its ``date`` is its start, and a rescheduled
+    event's start may legitimately move earlier.
+    """
+    occurrences = incoming.get("occurrences")
+    if not isinstance(occurrences, dict):
+        return incoming
+    previous = stored.get("occurrences")
+    stored_last = previous.get("last") if isinstance(previous, dict) else None
+    starts = {s for s in [*(stored_last or []), *occurrences["last"]] if isinstance(s, str)}
+    last = sorted(starts, key=_start_sort_key)[-_LAST_OCCURRENCES:]
+    return {**incoming, "date": last[-1], "occurrences": {**occurrences, "last": last}}
+
+
+def _start_sort_key(start: str) -> datetime:
+    """A stored start time (``_start``'s ISO form) as a UTC datetime, for ordering."""
+    try:
+        return _aware(datetime.fromisoformat(start))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
 
 
 def _document(
