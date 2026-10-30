@@ -22,6 +22,7 @@ the last 7 days, on every brief surface, each under its own confidential lens.
 | `src/brain/cli.py` | `_print_brief` prints the optional sections through `brief.terminal_sections`, replacing the watch block line for line. **Net-zero** (see Deviations). |
 | `src/brain/brief_delivery.py` | `render_delivery` adds the section after the watch hits, one line per name. |
 | `src/brain/brief_publish.py` | The suggestion re-derivation check (`_suggestion_inputs`, was `_without_watches`) ignores `new_entities`. |
+| `src/brain/mcp_server.py` | `brain_brief`'s docstring names `new_entities` among the F6-gated keys, reworded in place. **Net-zero** (see Deviations). |
 | `tests/graph_entity_fakes.py` | Shared synthetic seeders (documents, entities, mentions). |
 | `tests/test_brief_entities.py` | The leaf: the four acceptance criteria, the lens, drafts, types, tenant, prefilter, order, limit, tables absent, rendering. |
 | `tests/test_brief_new_entities.py` | Every surface: payloads, page, terminal, `build_brief`'s two audiences, delivery, `without_drafts`, the suggestion check. |
@@ -74,10 +75,17 @@ level is bound as a parameter.
 - **D7, suggestions.** `build_brief` re-derives the published page's suggestions only when the two
   payloads differ in what the prompt reads. The section is not in the prompt, so it is left out of
   that comparison, as the watch hits are: a confidential-only entity costs no second Ollama call.
-- **D8, the lens sits inside the aggregate.** Gated, an entity mentioned by an old confidential
-  document and a new normal one IS listed (its first visible mention is new), and the permissive
-  payload does not list it (its first mention is old). Filtering after the aggregate would drop
-  it from the gated payload, and that absence would say a confidential mention exists.
+- **D8, the lens sits inside the aggregate.** An old confidential mention never enters the gated
+  `MIN`. That decides the outcome only for an entity whose row passes the prefilter, i.e. one
+  re-created inside the window: gated, an entity mentioned by an old confidential document and a
+  new normal one IS listed (its first visible mention is new), and the permissive payload does not
+  list it (its first mention is old). **In the common case the prefilter decides instead:** the
+  old confidential document is the one that created the row, so `created_at` is before the window
+  and the entity is listed in NEITHER lens, though its first visible mention is new. That is an
+  accepted consequence of the prefilter the ticket requires: it withholds a name from the gated
+  audience and never leaks one, and because both lenses drop it, the absence says nothing about a
+  confidential mention. Tests: `test_lens_is_applied_before_the_min_not_after_it` (the re-created
+  row) and `test_prefilter_withholds_an_entity_whose_row_an_old_confidential_mention_created`.
 
 ## Tests (RED first)
 
@@ -108,7 +116,9 @@ level is bound as a parameter.
 2. **`brief_delivery.py` and `brief_publish.py` are touched** (both shared with RM-15 and RM-16,
    spec §4.2): the delivered message carries the section (D3), and the suggestion check ignores it
    (D7).
-3. **`brain_brief`'s MCP docstring does not name `new_entities`.** `mcp_server.py` is over the
-   ceiling, and the tool needs no code change: it returns `assemble_brief(...).to_dict()` under its
-   own lens (`exclude_confidential=not include_confidential`), so the key is gated like the others.
-   `docs/configuration.md`'s MCP table names the key.
+3. **`mcp_server.py` is touched, at net zero.** The tool needs no code change: `brain_brief`
+   returns `assemble_brief(...).to_dict()` under its own lens (`exclude_confidential=not
+   include_confidential`), so the key is gated like the others. Its docstring's F6 paragraph now
+   names `new_entities` among the gated keys, reworded in place (5,106 → 5,106), as `82bc809` named
+   `watch_hits`. The file is over the ceiling, so its row gains the hop; no growth record is owed.
+   `docs/configuration.md`'s MCP table names the key too.

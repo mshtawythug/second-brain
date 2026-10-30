@@ -107,11 +107,27 @@ def test_ac4_graph_disabled_returns_nothing_without_error(test_db: psycopg.Conne
 def test_lens_is_applied_before_the_min_not_after_it(test_db: psycopg.Connection) -> None:
     # Old confidential mention + new normal mention. Gated, the confidential row never reaches
     # the MIN, so the entity is new to that audience; permissive, its first mention is old.
+    # created_at=YESTERDAY (the default) models a row RE-CREATED inside the window, the only case
+    # the prefilter lets through; the next test pins the common case.
     entity = _entity(test_db, "Emery Example")
     _mention(test_db, entity, _doc(test_db, ingested_at=TEN_DAYS_AGO, sensitivity="confidential"))
     _mention(test_db, entity, _doc(test_db, ingested_at=YESTERDAY))
 
     assert _names(test_db, exclude_confidential=True) == ["Emery Example"]
+    assert _names(test_db, exclude_confidential=False) == []
+
+
+def test_prefilter_withholds_an_entity_whose_row_an_old_confidential_mention_created(
+    test_db: psycopg.Connection,
+) -> None:
+    # The realistic case: the old confidential document created the row, so created_at is
+    # before the window. The prefilter drops the entity in BOTH lenses, though its first visible
+    # mention is new: a name withheld from the gated audience, never one leaked.
+    entity = _entity(test_db, "Ember Example", created_at=TEN_DAYS_AGO)
+    _mention(test_db, entity, _doc(test_db, ingested_at=TEN_DAYS_AGO, sensitivity="confidential"))
+    _mention(test_db, entity, _doc(test_db, ingested_at=YESTERDAY))
+
+    assert _names(test_db, exclude_confidential=True) == []
     assert _names(test_db, exclude_confidential=False) == []
 
 
@@ -204,11 +220,18 @@ def test_most_mentioned_first_then_newest_then_name_and_limit(
 def test_for_brief_uses_a_seven_day_window_and_the_configured_tenant(
     test_db: psycopg.Connection,
 ) -> None:
-    inside = _entity(test_db, "Tatum Example", created_at=NOW - timedelta(days=6))
-    _mention(test_db, inside, _doc(test_db, ingested_at=NOW - timedelta(days=6)))
-    outside = _entity(test_db, "Umber Example", created_at=NOW - timedelta(days=8))
-    _mention(test_db, outside, _doc(test_db, ingested_at=NOW - timedelta(days=8)))
-    cfg = Config(database_url="postgresql://u:p@localhost:5/db")  # type: ignore[call-arg]
+    tenant = "workspace-two"
+    six_days_ago, eight_days_ago = NOW - timedelta(days=6), NOW - timedelta(days=8)
+    inside = _entity(test_db, "Tatum Example", created_at=six_days_ago, tenant_id=tenant)
+    _mention(test_db, inside, _doc(test_db, ingested_at=six_days_ago), tenant_id=tenant)
+    outside = _entity(test_db, "Umber Example", created_at=eight_days_ago, tenant_id=tenant)
+    _mention(test_db, outside, _doc(test_db, ingested_at=eight_days_ago), tenant_id=tenant)
+    default_tenant = _entity(test_db, "Vesper Example", created_at=six_days_ago)
+    _mention(test_db, default_tenant, _doc(test_db, ingested_at=six_days_ago))
+    cfg = Config(
+        database_url="postgresql://u:p@localhost:5/db",  # type: ignore[call-arg]
+        graph_tenant_id=tenant,
+    )
 
     listed = for_brief(test_db, cfg, exclude_confidential=True, now=NOW)
 

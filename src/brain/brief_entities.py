@@ -16,8 +16,13 @@ window. Two facts about the graph tables (``012_graphrag.sql``) shape the query:
 **The confidential lens is inside the aggregate.** With ``exclude_confidential`` the
 confidential documents are removed in the ``WHERE`` clause, before ``GROUP BY`` and ``MIN``, so
 an entity known only from confidential documents has no rows and is not listed, and an old
-confidential mention cannot make an entity look old (or, by its absence, say that such a
-mention exists) to the gated audience. Filtering after the aggregate would do both.
+confidential mention never enters the ``MIN``. That last point decides the outcome only for an
+entity whose row passes the prefilter, i.e. one re-created inside the window: gated, it is
+listed (its first visible mention is new). In the common case the old confidential document is
+the one that CREATED the row, so ``created_at`` is before ``since`` and the prefilter drops the
+entity from BOTH payloads, though its first visible mention is new. That is the prefilter's
+accepted cost again: a name withheld from the gated audience, never one disclosed, and since
+both lenses drop it, its absence says nothing about a confidential mention.
 
 **Drafts never count**, in either lens: a draft-only entity is in neither payload, so
 ``brief_delivery.without_drafts`` has nothing of this section's to remove.
