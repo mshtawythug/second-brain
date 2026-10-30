@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias
 
+from ..sensitivity import CONFIDENTIAL, DEFAULT_SENSITIVITY
+
 if TYPE_CHECKING:
     from . import ExtractedDoc
 
@@ -61,6 +63,9 @@ class ExtractorSpec:
     wrap_errors: Callable[[], tuple[type[Exception], ...]] = _no_wrapped_errors
     #: False: only an explicit ``--ext`` or the extractor's own command uses it.
     in_directory_walks: bool = True
+    #: The tier a file of this type gets when the caller names none (RM-33: a
+    #: screenshot can show anything, so images are ``confidential``).
+    default_sensitivity: str = DEFAULT_SENSITIVITY
 
 
 def _validate_extensions(spec: ExtractorSpec, taken: dict[str, ExtractorSpec]) -> None:
@@ -174,13 +179,28 @@ def _docx_errors() -> tuple[type[Exception], ...]:
     return (PackageNotFoundError,)
 
 
+def _load_image() -> ExtractorFn:
+    from .image import extract_image
+
+    return extract_image
+
+
 #: The built-in extractors, in the order ``supported_extensions()`` lists them.
+#: ``image`` (RM-33) stays out of directory walks: drop folders and an explicit
+#: ``--ext`` reach it, so an existing ``brain ingest-dir`` run is unchanged.
 BUILTIN_EXTRACTORS: tuple[ExtractorSpec, ...] = (
     ExtractorSpec(name="text", extensions=(".txt",), load=_load_text),
     ExtractorSpec(name="markdown", extensions=(".md", ".markdown"), load=_load_markdown),
     ExtractorSpec(name="pdf", extensions=(".pdf",), load=_load_pdf, wrap_errors=_pdf_errors),
     ExtractorSpec(
         name="docx", extensions=(".docx",), load=_load_docx, wrap_errors=_docx_errors
+    ),
+    ExtractorSpec(
+        name="image",
+        extensions=(".png", ".jpg", ".jpeg"),
+        load=_load_image,
+        in_directory_walks=False,
+        default_sensitivity=CONFIDENTIAL,
     ),
 )
 
@@ -206,6 +226,12 @@ def extract_path(path: Path) -> ExtractedDoc:
 def supported_extensions(*, directory_walk: bool = False) -> list[str]:
     """Return the file extensions that :func:`extract_path` can handle."""
     return _DEFAULT_REGISTRY.supported_extensions(directory_walk=directory_walk)
+
+
+def default_sensitivity(path: Path) -> str:
+    """The tier ``path`` gets when no ``--sensitivity`` is given: its extractor's default."""
+    spec = spec_for(path)
+    return spec.default_sensitivity if spec is not None else DEFAULT_SENSITIVITY
 
 
 def spec_for(path: Path) -> ExtractorSpec | None:

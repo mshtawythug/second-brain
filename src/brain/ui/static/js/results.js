@@ -20,6 +20,7 @@ const SOURCE_ICONS = {
   github: "🔀",
   applenotes: "🗒️",
   notion: "📓",
+  screenshot: "📸",
 };
 
 /* `vault` is the fallback, matching `sourceIconFor`. It is a real glyph rather

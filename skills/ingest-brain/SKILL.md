@@ -48,6 +48,7 @@ never run the command from its table row alone.
 | The user's own GitHub PRs, issues, READMEs | `brain ingest-github --mine --since YYYY-MM-DD` | **REFUSES without `--repo`/`--mine` and `--since`.** Read [sources/github.md](sources/github.md). |
 | Notes in named Apple Notes folders (macOS) | `brain ingest-apple-notes --folder NAME` | **REFUSES without `--folder`** (repeatable; never all notes). Stored **confidential** unless `--sensitivity normal`. At most `--max` (200) a run; `--dry-run` first. Locked notes and attachments are skipped. The first run triggers macOS's Automation prompt for Notes: the user must allow it (`docs/guides/apple-notes.md` in the brain repo). |
 | A Notion export (folder or `.zip`) | `brain ingest-notion <export-path>` | No API: the user exports "Markdown & CSV" first. Pages by id, updated in place on re-export. `--with-databases` for rows; `--max` (default 200) a run. |
+| Screenshots / a drop folder | `brain ingest-folder --dir PATH --since 7d` | **Moves the files** into `imported/`. **REFUSES without `--dir`/`--configured` and `--since Nd`.** `--dry-run` first. Read [sources/drop-folders.md](sources/drop-folders.md). |
 
 ## Files and directories
 

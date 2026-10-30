@@ -22,6 +22,56 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — screenshots from a drop folder become searchable (RM-33)
+
+- `brain ingest-folder --dir PATH --since 7d` (one folder) or
+  `brain ingest-folder --configured --since 2d` (every folder in
+  `$BRAIN_HOME/drop-folders.toml` with `auto = true`). Each new file is moved to
+  the folder's `imported/` as `<stem>-<sha8><ext>`, then ingested from there and
+  titled by its original name, so two different files that arrive with one name
+  stay two documents. The same file dropped twice deletes the drop copy, only
+  after its full SHA-256 matches the earlier import, and re-ingests that import:
+  nothing is added when its document exists, and a file a crash left in
+  `imported/` without one is ingested. A move never overwrites a file, and a
+  transient failed ingest returns the file to the folder. A configured folder
+  that is missing (an unplugged volume) is skipped with a warning naming its
+  entry; the other folders still run. A locked file (Finder's "Locked") is reported
+  `failed` and left where it is; it never stops the files after it. Symlinks,
+  sub-folders, hidden files (iCloud stubs and in-progress screenshots), iCloud
+  files evicted from the disk, and files modified in the last 5 seconds are left
+  alone. A run stops after 200 files a folder or 8 minutes, and the rest wait for
+  the next run. Without `--dir` or `--configured`, and `--since`, the command exits 2.
+  A failure every run would repeat (an unreadable or oversized image, an OCR timeout,
+  the secret guard) leaves the file in `imported/`, reported `rejected`, so it is not
+  retried every 10 minutes; only a transient failure (the database) moves it back.
+  Files are moved by identity, not by name: the folders are held open, and a file
+  swapped for a symlink or a pipe mid-run is refused. File names are printed, and
+  titles stored, on one line with control characters removed.
+- A new image extractor OCRs `.png`, `.jpg` and `.jpeg` with the local
+  `tesseract` (RM-32's engine) into a `screenshot` document, stored
+  **confidential** by default on every path, `brain ingest x.png` and
+  `brain ingest-dir --ext png` included (a screenshot can show anything; the secret
+  guard still runs). An explicit `--sensitivity normal` is honoured.
+  `brain ingest` of a symlinked or unreadable image is a one-line refusal (exit 1),
+  not a traceback. Only Pillow's PNG and JPEG decoders are reachable. A file over 50 MiB,
+  an image over 70 million pixels or with a side over 32,767 is refused from its
+  header before it is decoded, and `tesseract` reads a grayscale PNG that brain
+  re-encodes, never the original file. Images stay out of `brain ingest-dir`'s
+  default walk. With OCR off or no `tesseract`, image folders are skipped with
+  the fix printed, and their files are not moved.
+- A new `screenshot` source kind, with a 📸 glyph in `brain ui` and month
+  headers under `_ingested/screenshot`. `screenshot` skips concept extraction.
+  That changed the concept-skip set, so its policy version went from `v1` to
+  `v2`: the next graph build or backfill re-reconciles every `calendar_event`
+  document once, with an empty extraction and no model call.
+- `brain-install-launchd --with-dropfolders` installs the opt-in
+  `com.brain.dropfolders` LaunchAgent, which runs
+  `brain ingest-folder --configured --since 2d` every 10 minutes. Like the
+  reranker it is kept by every later install (including `brain-up`'s) and removed
+  only by `brain-uninstall-launchd`. `brain doctor` gains a `drop folders` line,
+  and its `daemons` line checks the job only once it is installed. Guide:
+  `docs/guides/drop-folders.md`.
+
 ### Added — Notion pages from Notion's Markdown export (RM-35)
 
 - **`brain ingest-notion <export-path>`** reads a Notion "Export → Markdown & CSV" folder or

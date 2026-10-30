@@ -16,6 +16,16 @@ def test_calendar_event_is_a_skipped_type() -> None:
     assert "calendar_event" in CONCEPT_SKIP_CONTENT_TYPES
 
 
+def test_screenshot_is_a_skipped_type() -> None:
+    """RM-33: OCR text from a screenshot is short and noisy; its concept aspect is skipped."""
+    assert "screenshot" in CONCEPT_SKIP_CONTENT_TYPES
+
+
+def test_the_policy_version_was_bumped_for_screenshot() -> None:
+    """The set changed at RM-33, so the version did too (the module's own rule)."""
+    assert CONCEPT_SKIP_POLICY_VERSION == "v2"
+
+
 def test_skip_watermark_for_a_skipped_type() -> None:
     assert skip_watermark("calendar_event") == (
         f"skip:calendar_event:{CONCEPT_SKIP_POLICY_VERSION}",

@@ -577,11 +577,12 @@ def test_all_healthy_yields_no_failures(
     # RM-31 adds "github", ok here because ``gh`` is found (``shutil.which`` is pinned above).
     # RM-32 adds "ocr", off (ok) under tests/ocr_isolation_plugin.py.
     # RM-36 adds "apple notes", ok here because _healthy_osascript pins its path to a file.
+    # RM-33 adds "drop folders": none configured (ok) in the suite's isolated $BRAIN_HOME.
     assert [c.check for c in checks] == [
         "config", "daemons", "vault watcher", "brief delivery", "reranker", "github", "ocr",
-        "apple notes",
+        "apple notes", "drop folders",
     ]
-    assert [c.status for c in checks] == ["ok"] * 8
+    assert [c.status for c in checks] == ["ok"] * 9
 
 
 def test_every_failing_check_names_a_remedy(

@@ -67,8 +67,11 @@ def _install(tmp_path: Path, stub: Path) -> Path:
 def test_the_build_daemon_is_retired_not_installed() -> None:
     assert _INSTALLED_LABELS == (_WATCHER, _BRIEF)
     assert _RETIRED_LABELS == (_BUILD,)
-    # RM-14b's opt-in reranker sits between the installed and the retired labels.
-    assert _ALL_LABELS == (_WATCHER, _BRIEF, "com.brain.reranker", _BUILD)
+    # The opt-in labels (RM-14b's reranker, RM-33's drop folders) sit between the
+    # installed and the retired labels.
+    assert _ALL_LABELS == (
+        _WATCHER, _BRIEF, "com.brain.reranker", "com.brain.dropfolders", _BUILD
+    )
 
 
 def test_install_writes_and_bootstraps_only_the_watcher_and_brief(tmp_path: Path) -> None:
