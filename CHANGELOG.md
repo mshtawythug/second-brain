@@ -48,6 +48,30 @@ git tag scheme:
   `brain.ingest.text_safety.one_line` (moved from `github_docs`, which
   re-exports it).
 
+### Added — image-only PDFs are OCR'd (RM-32)
+
+- A scanned PDF or a photographed receipt used to ingest as an empty document
+  ("skipped (empty document)"). When a PDF's text layer averages under 25
+  characters a page and a page within the cap carries an image object, `brain` now renders up to
+  `BRAIN_OCR_MAX_PAGES` (default 50) pages at 200 dpi and reads them with the
+  local `tesseract` binary, 60 seconds at most per page. The text is stored as
+  `[page N]` blocks, and `metadata.ocr` records the page count and engine.
+  A PDF with a real text layer (25 or more characters a page on average), or
+  with no image within the cap, is never OCR'd; a sparse one that carries an
+  image is, and the OCR text replaces its text layer. A page renders to at most 70 million
+  pixels, counted as pdfium rounds them, with no side over 32,767 (a page that
+  fits only below 50 dpi is skipped); a document declaring any one image over
+  280 million pixels (masks and annotation appearances included) is not OCR'd,
+  checked from the headers before anything is decoded; and one document gets at
+  most 10 minutes of OCR, so a forged page size or a long scan cannot exhaust
+  memory or hold the `brain ui` job worker.
+- New knobs `BRAIN_OCR` (`auto` or `off`), `BRAIN_OCR_LANG` (default `eng`) and
+  `BRAIN_OCR_MAX_PAGES`, in `brain/settings/ocr.py`; `brain doctor` gains an
+  `ocr` line. Without `tesseract` (`brew install tesseract`), an image-only PDF
+  is still skipped as empty, with a one-line hint.
+- `pypdfium2` and `Pillow` are now explicit base dependencies. `pdfplumber`
+  already required both, so no new package is installed.
+
 ### Changed — the `ingest-brain` skill keeps its per-source recipes in `sources/`
 
 - The Gmail, Krisp, Slack, Jira and GitHub recipes moved out of

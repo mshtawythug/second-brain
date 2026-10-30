@@ -36,7 +36,7 @@ never run the command from its table row alone.
 
 | Source | Command | Notes |
 |---|---|---|
-| One local file (PDF / DOCX / MD / TXT) | `brain ingest <path>` | Dedup by `source_path`. `--force` reapplies. |
+| One local file (PDF / DOCX / MD / TXT) | `brain ingest <path>` | Dedup by `source_path`. `--force` reapplies. Scanned / image-only PDFs are OCR'd when `tesseract` is on PATH (`brew install tesseract`; `brain doctor`'s `ocr` line); without it, a hint plus "skipped (empty document)". Knobs: `BRAIN_OCR` / `BRAIN_OCR_LANG` / `BRAIN_OCR_MAX_PAGES`. |
 | A directory of files | `brain ingest-dir <dir>` | Recursive. `--ext md,pdf` to scope. `--dry-run` first. |
 | Gmail messages | `brain ingest-gmail` | **REFUSES without a scope flag.** Read [sources/gmail.md](sources/gmail.md). |
 | Google Calendar events | `brain ingest-calendar --since YYYY-MM-DD --until YYYY-MM-DD` | **REFUSES without both dates.** At most 92 days, ending at most 14 days ahead. `--dry-run` first. |
