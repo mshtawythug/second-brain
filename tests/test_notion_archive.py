@@ -560,10 +560,10 @@ def test_a_zip64_locator_is_followed_whatever_the_plain_record_claims(
     _refused_unparsed(archive, "more files than the cap", ExportLimits(max_files=3))
 
 
-def test_a_zip64_record_with_extensible_data_is_read_at_the_locator_s_offset(
+def test_a_zip64_record_with_extensible_data_is_refused_unparsed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """sec-104 (c): the bytes just before the locator are extensible data, not the record."""
+    """sec-104 (c) and its residual: fixed and unfixed zipfile read different records here."""
     archive = _zip64(tmp_path / "e.zip", 4, monkeypatch)
     data = bytearray(archive.read_bytes())
     record_at = data.rfind(b"PK\x06\x06")
@@ -572,9 +572,57 @@ def test_a_zip64_record_with_extensible_data_is_read_at_the_locator_s_offset(
     end = record_at + 56
     archive.write_bytes(bytes(data[:end]) + b"\x00" * 24 + bytes(data[end:]))
 
+    _refused_unparsed(archive, "not a readable zip")
+
+
+def test_the_old_zipfile_bypass_is_refused_unparsed(tmp_path: Path) -> None:
+    """sec-104 residual: an unfixed zipfile would parse every entry this shape hides."""
+    archive = tmp_path / "e.zip"
+    archive.write_bytes(fx.old_zipfile_bypass(50))
+
+    _refused_unparsed(archive, "not a readable zip", ExportLimits(max_files=10))
+
+
+def test_a_zip64_archive_with_prepended_data_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A self-extracting stub reads alike on fixed and unfixed zipfile: kept."""
+    archive = _zip64(tmp_path / "e.zip", 4, monkeypatch)
+    archive.write_bytes(b"#!synthetic stub\n" * 4 + archive.read_bytes())
+
     with open_export(archive, limits=ExportLimits(max_files=4)) as export:
         assert len(export.files) == 4
     _refused_unparsed(archive, "more files than the cap", ExportLimits(max_files=3))
+
+
+class _ManyInfos:
+    """A parsed archive that holds more entries than the directory walk counted."""
+
+    def __init__(self, count: int) -> None:
+        self._infos = [zipfile.ZipInfo(f"f{i}.png") for i in range(count)]
+
+    def infolist(self) -> list[zipfile.ZipInfo]:
+        return self._infos
+
+    def __enter__(self) -> _ManyInfos:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def test_the_parsed_entry_count_is_capped_as_a_backstop(tmp_path: Path) -> None:
+    """If a zipfile reads another directory than the walk did, its own count is capped."""
+    archive = _many(tmp_path / "e.zip", 1)  # the walk counts one entry
+
+    with pytest.raises(NotionExportError, match="more files than the cap"), open_export(
+        archive, limits=ExportLimits(max_files=3), open_zip=lambda _p: _ManyInfos(4)
+    ):
+        pass
+    with open_export(
+        archive, limits=ExportLimits(max_files=4), open_zip=lambda _p: _ManyInfos(4)
+    ) as export:
+        assert len(export.files) == 4
 
 
 def test_a_directory_larger_than_its_cap_is_refused_before_walking(tmp_path: Path) -> None:

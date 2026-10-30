@@ -235,9 +235,12 @@ class ZipExport:
     def __init__(self, archive: zipfile.ZipFile, limits: ExportLimits) -> None:
         self._zip = archive
         self._budget = _Budget(limits)
-        # ``open_export`` walked the same headers before ``zipfile`` parsed them, so
-        # ``infos`` holds at most ``limits.max_files`` entries.
+        # ``open_export`` walked the directory before ``zipfile`` parsed it; this is
+        # the backstop for a ``zipfile`` that reads a different one (an unfixed
+        # 3.11+ patch release, sec-104), and refuses what it parsed past the cap.
         infos = archive.infolist()
+        if len(infos) > limits.max_files:
+            raise NotionExportError(_TOO_MANY)
         self._members: dict[PurePosixPath, zipfile.ZipInfo] = {}
         listed: list[ExportFile] = []
         for info in infos:

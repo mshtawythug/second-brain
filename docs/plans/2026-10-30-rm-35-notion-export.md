@@ -150,6 +150,11 @@ case ("its own command"), so the export reader is its own module behind its own 
   equivalent on APFS, where the harness runs: `O_NOFOLLOW` (a link swapped in is another inode)
   and the read-time `S_ISREG`, which on ext4 is what refuses a FIFO or folder that reused the
   inode number. The ZIP64 "room" mutant is gone with the code it mutated.
+- After the residual fix, the harness still holds 54 mutations: the locator-first read, the
+  prepended fallback and the old record checks were replaced by the parsed-count backstop, the
+  record required before the locator, the fixed/unfixed divergence refusal and the new record
+  consistency check. Those, with the six other directory rules, were re-run as one batch of 10
+  (the disk rule caps batches): all 10 killed.
 - `tests/test_skills_token_routing.py::test_skills_sync_is_not_drifted` fails locally until
   `bin/brain-skills-sync` runs after merge, because SKILL.md gained the Notion row (CI skips it).
 
@@ -191,6 +196,19 @@ ignores (it parses the declared size); (c) it read the ZIP64 record just before 
 - `open_export` runs both, plus the directory-size cap, before calling `zipfile`; tests prove it
   through an injected `open_zip` factory that fails if called. `ZipExport`'s own count check was
   removed: it could no longer fire.
+
+**Residual: zipfile versions that disagree (sec-104, at `53df8d8`).** `requires-python >= 3.11`
+admits patch releases without the CVE-2025-8291 zipfile fix, which read the ZIP64 record just
+before the locator and ignore the locator's offset. sec built an archive whose small record at the
+offset passed the mirror (1 entry) while an unfixed zipfile parsed all 300k entries. So
+`_zip64` now requires the record just before the locator (what an unfixed zipfile reads) and
+refuses an archive that also has one at a different locator offset (where a fixed one reads
+first): that is the only shape on which they diverge. Prepended data (no record at the offset)
+reads alike and is kept. This reverses the earlier "(c): extensible data accepted": ZIP64
+extensible data is now refused, as no Notion export carries it. `ZipExport`'s parsed-count check
+is back as a backstop for a zipfile that reads another directory, tested through a fake
+`open_zip`. Tests: sec's shape (`notion_fixtures.old_zipfile_bypass`), a record both before the
+locator and at its offset, extensible data, and prepended data still accepted.
 
 **Inode reuse (found by CI on Linux).** ext4 reuses a freed inode number at once, so an
 unlink-then-create at the same path can carry the listed `(st_dev, st_ino)`. A regular file

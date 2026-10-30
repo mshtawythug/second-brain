@@ -41,9 +41,10 @@ git tag scheme:
 - The export is read as untrusted input: a zip is read member by member in memory and never
   extracted; a member name that is absolute or leaves the archive, a symbolic-link, encrypted or
   duplicate member, more than 100,000 entries, or more than 512 MiB of pages and tables refuses
-  the whole archive; a page over 8 MiB is skipped. The central directory is found exactly as
-  `zipfile` will find it (ZIP64 included) and its entries are counted header by header, in
-  constant memory, before `zipfile` parses it. A
+  the whole archive; a page over 8 MiB is skipped. The central directory is found as `zipfile`
+  will find it (ZIP64 included) and its entries are counted header by header, in constant memory,
+  before `zipfile` parses it; a ZIP64 layout that Python releases with and without the
+  CVE-2025-8291 zipfile fix would read differently is refused. A
   folder is walked without following links; hard-linked files are skipped, and a file replaced
   between listing and reading (by a link, a FIFO, a folder or another file) is refused.
 - A new page whose text matches an existing document's, and an empty page, are reported by id

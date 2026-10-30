@@ -13,6 +13,7 @@ import zipfile
 import pytest
 
 from brain.ingest import zip_directory as zd
+from tests import notion_fixtures as fx
 
 pytestmark = pytest.mark.nodb
 
@@ -137,15 +138,43 @@ def _with_extensible_data(data: bytes, extra: bytes) -> bytes:
     return bytes(out[:end]) + extra + bytes(out[end:])
 
 
-def test_the_zip64_record_is_read_at_the_locator_s_offset_first(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """sec-104 (c): with extensible data, the bytes before the locator are not the record."""
+def test_extensible_data_before_the_locator_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """sec-104 (c), then the residual: no record just before the locator is corrupt.
+
+    An unfixed 3.11+ ``zipfile`` reads the ZIP64 record just before the locator,
+    and finds extensible data there; only a fixed one reads it at the offset.
+    """
     data = _with_extensible_data(_zip64(4, monkeypatch), b"\x00" * 24)
 
-    assert _zipfile_count(data) == 4
-    assert _locate(data).declared_entries == 4
-    assert _reason(data, limit=3) == zd.TOO_MANY
+    with pytest.raises(zd.ZipDirectoryError) as info:
+        _locate(data)
+
+    assert info.value.reason == zd.CORRUPT
+
+
+def test_a_record_both_before_the_locator_and_at_its_offset_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one shape fixed and unfixed zipfile can read differently: refused."""
+    original = _zip64(4, monkeypatch)
+    record_at = original.rfind(ZIP64_SIG)
+    copy = original[record_at : record_at + 56]
+    data = _with_extensible_data(original, copy)  # a second, valid record before the locator
+
+    with pytest.raises(zd.ZipDirectoryError) as info:
+        _locate(data)
+
+    assert info.value.reason == zd.CORRUPT
+
+
+def test_the_old_zipfile_bypass_shape_is_refused() -> None:
+    """sec-104 residual: a small record at the locator's offset, padding before the locator."""
+    data = fx.old_zipfile_bypass(50)
+
+    with pytest.raises(zd.ZipDirectoryError) as info:
+        _locate(data)
+
+    assert info.value.reason == zd.CORRUPT
 
 
 def test_prepended_data_falls_back_to_the_record_before_the_locator(

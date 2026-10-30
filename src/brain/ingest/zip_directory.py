@@ -5,12 +5,17 @@
 declared size and ignoring its declared count. An untrusted archive therefore
 has to be bounded first, and by the same directory ``zipfile`` will read:
 
-- :func:`locate` picks the end record exactly as ``zipfile._EndRecData`` and
+- :func:`locate` picks the end record as ``zipfile._EndRecData`` and
   ``_EndRecData64`` do (copied, not called: they are private). A ZIP64 locator
-  is followed whenever its signature precedes the end record, and its record is
-  read at the locator's offset first, then just before the locator (prepended
-  data). With no locator, the plain record's values stand, even when they are
-  ``0xFFFF`` or ``0xFFFFFFFF`` (a plain archive with exactly 65,535 entries).
+  is followed whenever its signature precedes the end record. ``pyproject``
+  allows any 3.11+ patch release, and releases without the CVE-2025-8291 fix
+  read the ZIP64 record just before the locator, while fixed ones read it at
+  the locator's offset first. So the record must sit just before the locator,
+  and an archive with a record at the locator's offset as well is refused:
+  that is the only shape on which the two disagree. Prepended data (a record
+  before the locator and none at its offset) reads alike on both and is
+  accepted. With no locator, the plain record's values stand, even when they
+  are ``0xFFFF`` or ``0xFFFFFFFF`` (a plain archive with exactly 65,535 entries).
   The directory ends where that record starts, as in ``zipfile``, so a
   declared size larger than what precedes it (it would start before the file)
   is refused.
@@ -92,7 +97,15 @@ def _record(data: bytes, location: int) -> _EndRecord:
 
 
 def _zip64(fh: BinaryIO, record: _EndRecord) -> _EndRecord:
-    """``zipfile._EndRecData64``: follow a locator whenever one precedes the end record."""
+    """``zipfile._EndRecData64``, held to the shape every 3.11+ ``zipfile`` reads alike.
+
+    A locator is followed whenever one precedes the end record. The ZIP64
+    record must then sit just before the locator, which is where a ``zipfile``
+    without the CVE-2025-8291 fix reads it. One with the fix reads it at the
+    locator's offset first. So an archive with a record at that offset as well
+    (ZIP64 extensible data, or a crafted pair) is refused: the two versions
+    would read different directories.
+    """
     offset = record.location - _LOCATOR.size
     if offset < 0:
         return record
@@ -103,19 +116,20 @@ def _zip64(fh: BinaryIO, record: _EndRecord) -> _EndRecord:
     offset -= _ZIP64.size
     if disk != 0 or disks > 1 or reloff > offset:
         raise ZipDirectoryError(CORRUPT)
-    fh.seek(reloff)
-    extra = offset - reloff
+    fh.seek(offset)
     data = fh.read(_ZIP64.size)
-    if not data.startswith(_ZIP64_SIG) and reloff != offset:
-        fh.seek(offset)  # prepended data: the record sits just before the locator
-        extra = 0
-        data = fh.read(_ZIP64.size)
     if not data.startswith(_ZIP64_SIG):
-        raise ZipDirectoryError(CORRUPT)
+        raise ZipDirectoryError(CORRUPT)  # what an unfixed zipfile would read is no record
+    if reloff != offset:
+        fh.seek(reloff)
+        if fh.read(len(_ZIP64_SIG)) == _ZIP64_SIG:
+            raise ZipDirectoryError(CORRUPT)  # fixed and unfixed zipfile would differ
+        # Otherwise prepended data (a self-extracting stub): both read the record
+        # just before the locator, as this does.
     _sig, size, *_versions_disks, _here, entries, dir_size, dir_offset = _ZIP64.unpack(data)
-    if dir_offset + dir_size != reloff or size + 12 != _ZIP64.size + extra:
+    if dir_offset + dir_size != reloff or size + 12 != _ZIP64.size:
         raise ZipDirectoryError(CORRUPT)
-    return _EndRecord(entries, dir_size, dir_offset, offset - extra)
+    return _EndRecord(entries, dir_size, dir_offset, offset)
 
 
 def locate(fh: BinaryIO) -> Directory:
