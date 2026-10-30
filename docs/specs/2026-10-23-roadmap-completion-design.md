@@ -3661,7 +3661,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-39 | Mobile share-sheet capture | S | 7 | RM-33 | DONE (#111) |
 | RM-40 | Ingest tab phase 4: inbox folder | S | 7 | RM-13, RM-33 | TODO |
 | RM-41 | Browser history and bookmarks | L | 8 | RM-06, RM-07 | TODO |
-| RM-42 | Code-aware chunker | M | 8 | RM-07 | TODO |
+| RM-42 | Code-aware chunker | M | 8 | RM-07 | DONE (#109) |
 | RM-43 | Code-repository ingestion | M | 8 | RM-06, RM-42 | TODO |
 | RM-44 | Social bookmarks | S | 8 | RM-06, RM-07 | TODO |
 | RM-45 | Receipts (Gmail attachments) | M | 8 | RM-32 | TODO |
