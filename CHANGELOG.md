@@ -22,6 +22,28 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — saved searches, reported in the daily brief (RM-15)
+
+- **`brain watch`** saves a search: `add NAME QUERY` (with `--source`, `--tag`,
+  `--person`, `--kind`, `--without-tag`, and `--semantic` to match by meaning),
+  `list`, `check [--peek]`, `hits`, `pause`, `resume` and `rm`. A watch reports
+  documents that are new, or edited, since its last check, each once.
+- **The daily brief** checks every enabled watch first and lists the new hits in a
+  **Watch hits** section. The `--wiki` page lists at most 5 per watch, leaves out
+  confidential documents, and marks what it found as notified, so the next page
+  does not repeat it; the terminal brief and `brain watch hits` still show them.
+- **MCP**: `brain_watch_list`, `brain_watch_add`, `brain_watch_check` (peek only:
+  an agent never consumes the brief's notifications) and `brain_watch_remove`
+  (needs `confirm=true`). `brain_brief` carries `watch_hits`.
+- **`BRAIN_WATCH_MIN_COSINE`** (0.45) for semantic watches.
+- **Migration 029** (`saved_searches`, `saved_search_hits`): run `brain init`.
+  Until it is applied, the brief builds as before, without the section.
+
+### Changed — `brain brief`'s build moved to `brain.brief_publish` (RM-15)
+
+- The two-audience build (terminal payload, gated `--wiki` page) moved out of
+  `cli.py` into `brain.brief_publish.build_brief`, unchanged in behaviour.
+
 ### Added — a cross-encoder reranker stage, off by default (RM-14a)
 
 - **`BRAIN_RERANKER`** (`none` by default, `llamacpp` or `voyage`) adds a

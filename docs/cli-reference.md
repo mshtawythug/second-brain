@@ -1045,6 +1045,47 @@ brain brief --no-enrich              # skip the LLM next-step suggestions
 brain brief --date 2026-06-09 --json
 ```
 
+Every `brain brief` first checks your saved searches (`brain watch`, below) and
+adds a **Watch hits** section when one has new matches. The terminal lists every
+hit first seen in the capture window; the `--wiki` page lists the hits no page
+has listed yet, at most 5 per watch ("and N more"), and leaves out confidential
+documents. Once the page is written, those hits are marked as notified, so the
+next page does not repeat them. The section is absent when you have no watches.
+
+### brain watch
+
+Saved searches ("watch lists"). Save a query once, and each morning's brief lists
+the documents that **newly** match it: new documents, and older ones you have
+since edited. A watch matches **by words** (full-text, works with the embedder
+down) unless you pass `--semantic`, which matches by meaning and keeps a match
+whose similarity reaches `BRAIN_WATCH_MIN_COSINE`.
+
+```bash
+brain watch add roadmap "quarterly roadmap"        # by words
+brain watch add calls "pricing" --source krisp     # with filters
+brain watch add ideas "agent memory" --semantic    # by meaning
+brain watch list [--json]
+brain watch check [NAME] [--json]                  # check now and record new hits
+brain watch check --peek                           # report without recording
+brain watch hits [NAME] --since 7d [--json]        # recent hits, listed or not
+brain watch pause NAME | resume NAME | rm NAME
+```
+
+- **Filters** (`add`): `--source`, `--tag`, `--person`, `--kind`,
+  `--without-tag`, validated as `brain search` validates them. Tags are stored
+  normalised; the person is resolved again at each check.
+- **`add` records the current matches as already seen**, so the first brief
+  is not a flood and an immediate `check` reports nothing. A `--semantic` add
+  while the embedder is unavailable is refused, with nothing saved.
+- **A check looks at what changed since the last one** (documents created or
+  edited since an hour before the previous check), so a document is reported
+  once per watch, and an old match is never reported again.
+- **`check NAME` runs a paused watch too**; `check` with no name, and the brief,
+  check enabled watches only.
+- A semantic check that cannot embed is reported as `skipped, embedder
+  unavailable`; it records nothing and retries the same window next time.
+- Saved searches need migration 029: run `brain init` after upgrading.
+
 ### brain review
 
 Periodic synthesis over the corpus — a weekly review page plus a
