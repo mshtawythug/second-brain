@@ -37,6 +37,19 @@ git tag scheme:
 - The accepted trade: a long note rewritten almost entirely and renamed within
   one debounce window is treated as new, and loses its backlinks.
 
+### Added — `brain ui`: Copy path (RM-23)
+
+- **The note pane has a Copy path button**, so a note can be opened in any editor.
+  On a loopback server it copies the absolute path of the note's file, and
+  otherwise its path inside the vault. The status beside it says **Copied**, or
+  why the copy failed (a denied clipboard permission, for example).
+- **It is absent over `--lan`.** The browser's clipboard API exists only in a
+  secure context, and a plain `http://` LAN page is not one.
+- **`GET /api/notes/{id}` gains `abs_path`, only on a loopback bind** (the same
+  bind classification as the Ingest tab's gate), and never for a note whose body
+  is withheld or whose vault file is missing. There is no `obsidian://` link, and
+  the server never starts an editor.
+
 ### Added — tag rename, merge and suggested merges (RM-21)
 
 - **`brain tags`**: `list [--json]`, `rename OLD NEW`, `merge A B --into C` and
