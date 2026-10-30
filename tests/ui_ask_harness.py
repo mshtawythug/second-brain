@@ -61,8 +61,12 @@ CITATION_KEYS = frozenset({
 })
 
 ENABLED: dict[str, Any] = {
-    "enabled": True, "reason": None, "max_question_chars": 2000, "modes": ["hybrid"],
+    "enabled": True, "reason": None, "max_question_chars": 2000, "max_history_turns": 3,
+    "modes": ["hybrid"],
 }
+#: The keys ``GET /api/ask/config`` emits, proven against the real route by
+#: ``tests/test_ui_ask_wire_contract.py``.
+CONFIG_KEYS = frozenset(ENABLED)
 
 #: Every hostile string the tab must show as text. Each would raise a dialog, or
 #: create an element, if it ever reached an HTML parser.
@@ -171,6 +175,8 @@ SCRIPTS: dict[str, list[Frame]] = {
                                 ("__proto__", 1, 3), ("plan", 1, 3)]),
               _done(result())],
     "queue": [Frame("queued")],
+    # Settles on its first poll: the follow-up rows chain several asks.
+    "quick": [_done(result(answer="Plonk ships quarkle [1]."))],
 }
 
 

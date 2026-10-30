@@ -16,8 +16,13 @@ so a cancel is honoured until the result is recorded. **The deadline** caps the
 whole job at ``ask_max_iterations × 3 × ask_timeout_seconds``, checked at the same
 points; passing it fails the job with code ``timeout``.
 
-**Logging** carries the job id and counts only: never the question, the answer or
-a title. Failures are logged by the registry, class only.
+**Logging** carries the job id and counts only: never the question, the answer,
+a follow-up's earlier turns or a title. Failures are logged by the registry, class
+only.
+
+**Follow-ups** (RM-18c): :attr:`AskSpec.history` holds the earlier turns the tab
+sent, shape-checked by the route and capped by ``ask`` itself before the plan step,
+the only step that sees them.
 """
 from __future__ import annotations
 
@@ -32,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import psycopg
 
 from ..ask_errors import describe_ask_failure
+from ..ask_history import AskTurn
 from ..errors import (
     BrainError,
     ChatOutputTruncated,
@@ -86,6 +92,8 @@ class AskSpec:
 
     question: str
     no_loop: bool
+    #: A follow-up's earlier turns, oldest first (RM-18c); empty for a fresh ask.
+    history: tuple[AskTurn, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -273,8 +281,8 @@ def ask_runner(
             embedder.release()
         elapsed_ms = int((ask_runtime.clock() - started) * 1000)
         logger.info(
-            "ui ask job %s: %d citations in %d ms",
-            handle.job_id, len(result.citations), elapsed_ms,
+            "ui ask job %s: %d citations, %d earlier turns sent, in %d ms",
+            handle.job_id, len(result.citations), len(spec.history), elapsed_ms,
         )
         return _payload(ctx, result, levels, elapsed_ms)
 
@@ -308,6 +316,7 @@ def _ask_and_record(
             # server would serve them.
             exclude_confidential=not ctx.serve_confidential_bodies,
             on_step=on_step,
+            history=spec.history,
         )
         levels = _stored_sensitivity(conn, [c.document_id for c in result.citations])
         # The last cancel point: nothing has been recorded yet (A4).

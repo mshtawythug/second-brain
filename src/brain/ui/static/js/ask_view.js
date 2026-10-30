@@ -23,6 +23,10 @@
  *   4. The page's CSP has no `unsafe-inline`, so even a missed sink could not
  *      run inline script; tests/test_ui_security.py pins it.
  *
+ * FOLLOW UP (RM-18c). A turn whose answer is on screen, asked from this page,
+ * offers a "Follow up" button (`canFollowUp`); ask.js owns what it sends. A turn
+ * that was a follow-up says which question it followed, as text.
+ *
  * A WITHHELD ANSWER IS SHOWN AS WITHHELD (RM-18a.D1). Unless the server serves
  * confidential bodies, a citation of a non-normal note arrives with no id, title
  * or snippet, and the answer and sub-queries arrive as null because they could
@@ -56,6 +60,22 @@ const WITHHELD = "The answer is withheld on this server: it draws on a confident
 
 export function isSettled(record) {
   return record.gone || isTerminal(record.state);
+}
+
+/* A turn can be followed up only when its question was typed in this page (a
+   resumed turn's is not on the wire) and its answer is a string on screen (a
+   withheld one is null). Plan doc RM-18c D1. */
+export function canFollowUp(record) {
+  return record.state === "succeeded" && !record.gone
+    && typeof record.question === "string" && record.question !== ""
+    && Boolean(record.result) && typeof record.result.answer === "string"
+    && record.result.answer !== "";
+}
+
+function contextText(record) {
+  const history = Array.isArray(record.history) ? record.history : [];
+  const last = history[history.length - 1];
+  return last ? `Follow-up to: ${last.question}` : "";
 }
 
 /* The id a citation may link to, or null. Rule 2's id half. */
@@ -148,7 +168,8 @@ export function createTurn(record) {
   head.append(el("p", "turn-question"), el("span", "turn-state"));
   const phase = el("p", "turn-phase");
   phase.id = `turn-${record.id}-phase`;
-  row.append(head, el("ol", "turn-steps"), phase, el("div", "turn-detail"));
+  row.append(head, el("p", "turn-context"), el("ol", "turn-steps"), phase,
+             el("div", "turn-detail"));
   updateTurn(row, record);
   return row;
 }
@@ -159,6 +180,7 @@ export function updateTurn(row, record) {
      a reload is labelled by its submit time (it is not on the wire). */
   row.querySelector(".turn-question").textContent = record.question
     || `Asked at ${timeLabel(record.createdAt) || "an earlier visit"}`;
+  row.querySelector(".turn-context").textContent = contextText(record);
   const state = row.querySelector(".turn-state");
   state.textContent = record.gone ? "unknown" : record.state;
   state.dataset.state = record.gone ? "unknown" : record.state;
@@ -228,6 +250,12 @@ function detailNodes(record) {
     nodes.push(message);
   }
   if (record.state === "succeeded" && record.result) nodes.push(...resultNodes(record.result));
+  if (canFollowUp(record)) {
+    const button = el("button", "ghost-btn turn-follow-up", "Follow up");
+    button.type = "button";
+    button.dataset.action = "follow-up";
+    nodes.push(button);
+  }
   if (record.unreachable && !isSettled(record)) {
     nodes.push(el("p", "turn-note", "Cannot reach the server; still trying."));
   }

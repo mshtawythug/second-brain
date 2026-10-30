@@ -17,6 +17,7 @@ import psycopg
 import pytest
 from starlette.testclient import TestClient
 
+from brain.ask_history import MAX_HISTORY_ANSWER_CHARS, MAX_HISTORY_TURNS
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.ui.app import create_app
 from brain.ui.ask_service import ASK_KIND, ASK_RETAIN_FOR, MAX_QUESTION_CHARS, AskRuntime
@@ -96,6 +97,7 @@ def test_config_on_a_loopback_writable_server(
         "enabled": True,
         "reason": None,
         "max_question_chars": MAX_QUESTION_CHARS,
+        "max_history_turns": MAX_HISTORY_TURNS,
         "modes": ["hybrid"],
     }
 
@@ -163,7 +165,21 @@ def test_no_loop_defaults_to_false(test_db: psycopg.Connection[Any], tmp_path: P
         ({"question": "x" * (MAX_QUESTION_CHARS + 1)}, "question_too_long"),
         ({"question": "q", "no_loop": "yes"}, "invalid_no_loop"),
         ({"question": "q", "mode": "fuse"}, "unknown_field"),
-        ({"question": "q", "history": []}, "unknown_field"),
+        ({"question": "q", "history": {}}, "invalid_history"),
+        ({"question": "q", "history": ["q"]}, "invalid_history"),
+        ({"question": "q", "history": [{"question": "a"}]}, "invalid_history"),
+        ({"question": "q", "history": [{"question": "a", "answer": 7}]}, "invalid_history"),
+        ({"question": "q", "history": [{"question": " ", "answer": "b"}]}, "invalid_history"),
+        ({"question": "q", "history": [{"question": "a", "answer": ""}]}, "invalid_history"),
+        ({"question": "q", "history": [{"question": "a", "answer": "b", "x": 1}]},
+         "invalid_history"),
+        ({"question": "q", "history": [{"question": "a" * (MAX_QUESTION_CHARS + 1),
+                                        "answer": "b"}]}, "history_turn_too_long"),
+        ({"question": "q", "history": [{"question": "a",
+                                        "answer": "b" * (MAX_HISTORY_ANSWER_CHARS + 1)}]},
+         "history_turn_too_long"),
+        ({"question": "q", "no_loop": True, "history": [{"question": "a", "answer": "b"}]},
+         "history_requires_loop"),
     ],
 )
 def test_a_bad_request_is_a_400_and_queues_nothing(
@@ -175,6 +191,96 @@ def test_a_bad_request_is_a_400_and_queues_nothing(
     assert response.status_code == 400
     assert response.json()["error"]["code"] == code
     assert ctx.jobs is not None and ctx.jobs.run_next() is False
+
+
+class _PlanRecorder:
+    """Records the plan prompt; answers every step."""
+
+    def __init__(self) -> None:
+        self.plans: list[str] = []
+        self.others: list[str] = []
+
+    def __call__(self, prompt: str, *, schema: dict[str, Any], **_: Any) -> dict[str, Any]:
+        if "sub_queries" in schema:
+            self.plans.append(prompt)
+            return {"sub_queries": ["quillbeam"]}
+        self.others.append(prompt)
+        if "sufficient" in schema:
+            return {"sufficient": True, "follow_up_queries": []}
+        return {"answer": "None."}
+
+
+def _turns(count: int, answer_chars: int) -> list[dict[str, str]]:
+    return [
+        {"question": f"quillbeam question {n}", "answer": f"answer{n} " + "z" * answer_chars}
+        for n in range(1, count + 1)
+    ]
+
+
+def test_the_server_caps_a_follow_ups_history_oldest_first(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    # The route test the ticket names. Five turns arrive; the server keeps the
+    # newest three, then drops the oldest until 2,000 tokens fit (FakeEmbedder
+    # counts four characters a token, so two 3,000-character answers fit, three do
+    # not). The client is not trusted to have done either.
+    chat = _PlanRecorder()
+    ctx = _ctx(test_db, tmp_path, chat=chat)
+    client = _client(ctx)
+
+    snap = _ask(client, {"question": "And then?", "history": _turns(5, 3_000)})
+    assert snap.status_code == 202
+    assert ctx.jobs is not None and ctx.jobs.run_next()
+
+    assert client.get(f"/api/jobs/{snap.json()['id']}").json()["state"] == "succeeded"
+    (plan,) = chat.plans
+    assert "Earlier in this conversation:" in plan
+    for kept in (4, 5):
+        assert f"Q: quillbeam question {kept}\n" in plan
+    for dropped in (1, 2, 3):
+        assert f"quillbeam question {dropped}\n" not in plan
+    # RM-18c.D1: no later prompt sees any of it.
+    assert chat.others
+    assert not any("quillbeam question" in prompt for prompt in chat.others)
+
+
+def test_a_fresh_ask_has_no_history_in_its_plan(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    chat = _PlanRecorder()
+    ctx = _ctx(test_db, tmp_path, chat=chat)
+
+    assert _ask(_client(ctx), {"question": "q"}).status_code == 202
+    assert ctx.jobs is not None and ctx.jobs.run_next()
+
+    (plan,) = chat.plans
+    assert "Earlier in this conversation:" not in plan
+
+
+def test_an_empty_history_is_no_history_even_with_no_loop(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    ctx = _ctx(test_db, tmp_path, chat=_Chat([{"answer": "None."}]))
+    client = _client(ctx)
+
+    snap = _ask(client, {"question": "q", "no_loop": True, "history": []})
+
+    assert snap.status_code == 202
+    assert ctx.jobs is not None and ctx.jobs.run_next()
+    assert client.get(f"/api/jobs/{snap.json()['id']}").json()["state"] == "succeeded"
+
+
+def test_three_maximal_turns_fit_under_the_wire_cap(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    # Worst case on the wire: every character an astral one, escaped as two \uXXXX.
+    astral = "\U0001f600"
+    turn = {"question": astral * MAX_QUESTION_CHARS, "answer": astral * MAX_HISTORY_ANSWER_CHARS}
+    body = {"question": astral * MAX_QUESTION_CHARS, "history": [turn] * MAX_HISTORY_TURNS}
+
+    response = _ask(_client(_ctx(test_db, tmp_path)), body)
+
+    assert response.status_code == 202
 
 
 def test_a_lone_surrogate_is_a_400(test_db: psycopg.Connection[Any], tmp_path: Path) -> None:
