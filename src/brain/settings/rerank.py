@@ -48,6 +48,10 @@ MAX_DEPTH = 50
 DEFAULT_TIMEOUT_S = 5.0
 DEFAULT_MAX_CHARS = 1500
 
+#: The ports RM-14b's launchd job may bind: unprivileged, so never below 1024.
+MIN_LAUNCHD_PORT = 1024
+MAX_LAUNCHD_PORT = 65535
+
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _URL_SCHEMES = frozenset({"http", "https"})
 
@@ -93,6 +97,25 @@ def _loopback_url(env: Mapping[str, str]) -> str:
     ):
         raise ConfigError(message)
     return raw.rstrip("/")
+
+
+def launchd_rerank_port(env: Mapping[str, str]) -> int:
+    """The port ``com.brain.reranker`` binds, taken from ``BRAIN_RERANK_URL`` (RM-14b).
+
+    A deviation from the ticket, which fixed the job at 8081: on the owner's
+    machine 8081 was already LanguageTool's, so a fixed port made the job unable
+    to bind. Only the PORT follows the URL; the job's host stays a literal
+    ``127.0.0.1`` in the template. The URL must pass the same loopback check
+    searches apply, and name an explicit port in [1024, 65535]. Unset, it is
+    :data:`DEFAULT_RERANK_URL`'s 8081.
+    """
+    port = urlsplit(_loopback_url(env)).port
+    if port is None or not MIN_LAUNCHD_PORT <= port <= MAX_LAUNCHD_PORT:
+        raise ConfigError(
+            f"BRAIN_RERANK_URL must name an explicit port in "
+            f"[{MIN_LAUNCHD_PORT}, {MAX_LAUNCHD_PORT}] for the reranker's launchd job"
+        )
+    return port
 
 
 def load_rerank_settings(env: Mapping[str, str]) -> RerankSettings:

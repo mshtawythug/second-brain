@@ -96,8 +96,15 @@ brain-install-launchd --with-reranker
 
 This installs `com.brain.reranker`, a `KeepAlive` LaunchAgent that runs the command from step 3
 at login and restarts it if it dies. Its arguments are fixed in the template
-(`src/brain/templates/launchd/com.brain.reranker.plist.j2`). The model path is the only thing
-you can change, so the job always binds `127.0.0.1:8081`.
+(`src/brain/templates/launchd/com.brain.reranker.plist.j2`). Only the model path and the port
+can change, and the host is always `127.0.0.1`, so the job never listens beyond this machine.
+
+- **The port** is `BRAIN_RERANK_URL`'s, so the job listens where searches look for it: 8081
+  when the variable is unset. It is read from your shell, else from `$BRAIN_HOME/.env`. The
+  installer refuses a URL whose host is not `127.0.0.1`, `localhost` or `::1`, and one without
+  an explicit port in 1024–65535 (`http://127.0.0.1` alone, or `:80`). The host in the URL
+  never reaches the job: it binds `127.0.0.1` either way, so use `127.0.0.1` in the URL too.
+  To change the port, set it and run `brain-install-launchd` again.
 
 - **The model path** is `BRAIN_RERANK_GGUF`, taken from your shell, else from
   `$BRAIN_HOME/.env`, else `$BRAIN_HOME/models/bge-reranker-v2-m3-Q8_0.gguf`. The installer
@@ -133,12 +140,17 @@ HTTP server socket, hostname: 127.0.0.1, port: 8081`. Under launchd that line la
 `com.brain.reranker.err.log`, `brain doctor`'s `reranker` line says `not running`, and its
 `daemons` line reports the job's non-zero exit.
 
-Find the owner with `lsof -nP -iTCP:8081 -sTCP:LISTEN`. Then either:
+Find the owner with `lsof -nP -iTCP:8081 -sTCP:LISTEN`, pick a free port (8091 here), and move
+the reranker there:
 
-- **move the other service** off 8081, or
-- **skip the launchd job** and run `llama-server` yourself on another loopback port, with
-  `BRAIN_RERANK_URL` pointing at it. For example, use `--port 8091` in step 3 and set
-  `BRAIN_RERANK_URL=http://127.0.0.1:8091`. The launchd job's port is fixed at 8081.
+```bash
+echo 'BRAIN_RERANK_URL=http://127.0.0.1:8091' >> ~/.brain/.env
+brain-install-launchd            # re-renders com.brain.reranker with --port 8091
+```
+
+Searches and `brain doctor` read the same variable, so all three now agree. That is why the
+port follows `BRAIN_RERANK_URL`. The roadmap ticket fixed the job at 8081, and this machine is
+the reason it no longer does (a recorded deviation).
 
 ## Memory
 

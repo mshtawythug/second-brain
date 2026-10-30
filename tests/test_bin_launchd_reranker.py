@@ -12,6 +12,7 @@ Every launchctl here is a recording stub passed explicitly (no real ``launchctl`
 from __future__ import annotations
 
 import plistlib
+import re
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from brain.bin.launchd import (
     install_plists,
     render_plist,
     resolve_rerank_model,
+    resolve_rerank_port,
     uninstall_plists,
 )
 from brain.doctor_runtime import daemon_doctor_check
@@ -61,7 +63,7 @@ def _gguf(tmp_path: Path, name: str = "model.gguf") -> Path:
     return model
 
 
-def _render(model: Path) -> str:
+def _render(model: Path, port: int = 8081) -> str:
     return render_plist(
         _RERANKER,
         brain_home=Path("/fake/brain"),
@@ -69,6 +71,7 @@ def _render(model: Path) -> str:
         pipx_bin_dir=Path("/fake/pipx/bin"),
         brain_py=Path("/fake/python"),
         rerank_model=model,
+        rerank_port=port,
     )
 
 
@@ -77,6 +80,7 @@ def brain_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "brain"
     home.mkdir()
     monkeypatch.delenv("BRAIN_RERANK_GGUF", raising=False)
+    monkeypatch.delenv("BRAIN_RERANK_URL", raising=False)
     return home
 
 
@@ -128,7 +132,152 @@ def test_rendering_without_a_model_path_is_refused() -> None:
             vault_path=Path("/fake/vault"),
             pipx_bin_dir=Path("/fake/pipx/bin"),
             brain_py=Path("/fake/python"),
+            rerank_port=8081,
         )
+
+
+def test_rendering_without_a_port_is_refused() -> None:
+    with pytest.raises(LaunchdError, match="rerank_port"):
+        render_plist(
+            _RERANKER,
+            brain_home=Path("/fake/brain"),
+            vault_path=Path("/fake/vault"),
+            pipx_bin_dir=Path("/fake/pipx/bin"),
+            brain_py=Path("/fake/python"),
+            rerank_model=Path("/fake/m.gguf"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# the port (a deviation from the ticket, ruled 2026-10-30: 8081 was taken by
+# LanguageTool on the owner's machine). The host stays a literal 127.0.0.1.
+# ---------------------------------------------------------------------------
+
+
+def test_the_port_is_rendered_and_the_host_stays_loopback() -> None:
+    args = plistlib.loads(_render(Path("/fake/m.gguf"), port=8091).encode())["ProgramArguments"]
+
+    assert args[-4:] == ["--host", "127.0.0.1", "--port", "8091"]
+
+
+def test_the_host_is_never_a_template_variable() -> None:
+    from importlib.resources import files
+
+    text = (files("brain.templates.launchd") / f"{_RERANKER}.plist.j2").read_text()
+
+    assert "<string>127.0.0.1</string>" in text
+    assert "{{ rerank_port }}" in text
+    assert set(re.findall(r"\{\{ *(\w+) *\}\}", text)) == {
+        "brain_home", "user_home", "rerank_model_path", "rerank_port"
+    }
+
+
+@pytest.mark.parametrize("port", [0, 80, 1023, 65536, 70000])
+def test_render_refuses_a_port_out_of_range(port: int) -> None:
+    with pytest.raises(LaunchdError, match="1024"):
+        _render(Path("/fake/m.gguf"), port=port)
+
+
+def test_port_defaults_to_8081(brain_home: Path) -> None:
+    assert resolve_rerank_port(brain_home) == 8081
+
+
+def test_port_from_brain_home_dotenv(brain_home: Path) -> None:
+    (brain_home / ".env").write_text(
+        "BRAIN_RERANK_URL=http://127.0.0.1:8091\n", encoding="utf-8"
+    )
+
+    assert resolve_rerank_port(brain_home) == 8091
+
+
+@pytest.mark.parametrize(
+    "url", ["http://localhost:9001", "http://[::1]:9001", "http://127.0.0.1:9001/"]
+)
+def test_port_from_a_loopback_url(
+    brain_home: Path, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    monkeypatch.setenv("BRAIN_RERANK_URL", url)
+
+    assert resolve_rerank_port(brain_home) == 9001
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://10.9.8.7:8081",
+        "http://0.0.0.0:8081",
+        "http://reranker.example.invalid:8081",
+        "http://user:pw@127.0.0.1:8081",
+    ],
+)
+def test_a_non_loopback_url_is_refused_without_echoing_it(
+    brain_home: Path, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    monkeypatch.setenv("BRAIN_RERANK_URL", url)
+
+    with pytest.raises(LaunchdError, match="BRAIN_RERANK_URL") as exc:
+        resolve_rerank_port(brain_home)
+
+    assert url not in str(exc.value)
+    assert "10.9.8.7" not in str(exc.value) and "pw" not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "url", ["http://127.0.0.1", "http://127.0.0.1:80", "http://127.0.0.1:99999"]
+)
+def test_a_bad_port_is_refused(
+    brain_home: Path, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    monkeypatch.setenv("BRAIN_RERANK_URL", url)
+
+    with pytest.raises(LaunchdError, match="BRAIN_RERANK_URL"):
+        resolve_rerank_port(brain_home)
+
+
+def test_install_renders_the_configured_port(
+    tmp_path: Path, brain_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BRAIN_RERANK_GGUF", str(_gguf(tmp_path)))
+    monkeypatch.setenv("BRAIN_RERANK_URL", "http://127.0.0.1:8091")
+    stub, _log = _recorder(tmp_path)
+    agents = tmp_path / "agents"
+
+    install_plists(
+        brain_home=brain_home, launchd_dir=agents, launchctl=str(stub), with_reranker=True
+    )
+
+    args = plistlib.loads((agents / f"{_RERANKER}.plist").read_bytes())["ProgramArguments"]
+    assert args[-4:] == ["--host", "127.0.0.1", "--port", "8091"]
+
+
+def test_install_refuses_a_non_loopback_url_before_launchctl(
+    tmp_path: Path, brain_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BRAIN_RERANK_GGUF", str(_gguf(tmp_path)))
+    monkeypatch.setenv("BRAIN_RERANK_URL", "http://10.9.8.7:8081")
+    stub, log = _recorder(tmp_path)
+    agents = tmp_path / "agents"
+
+    with pytest.raises(LaunchdError, match="BRAIN_RERANK_URL"):
+        install_plists(
+            brain_home=brain_home, launchd_dir=agents, launchctl=str(stub), with_reranker=True
+        )
+
+    assert not (agents / f"{_RERANKER}.plist").exists()
+    assert _calls(log) == []
+
+
+def test_a_bad_url_does_not_touch_an_install_without_the_reranker(
+    tmp_path: Path, brain_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The URL is read only when the reranker job is rendered."""
+    monkeypatch.setenv("BRAIN_RERANK_URL", "http://10.9.8.7:8081")
+    stub, _log = _recorder(tmp_path)
+    agents = tmp_path / "agents"
+
+    install_plists(brain_home=brain_home, launchd_dir=agents, launchctl=str(stub))
+
+    assert (agents / "com.brain.watcher.plist").exists()
 
 
 # ---------------------------------------------------------------------------

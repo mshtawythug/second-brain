@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Jinja variables: brain_home, user_home, rerank_model_path
+<!-- Jinja variables: brain_home, user_home, rerank_model_path, rerank_port
      The launchd renderer (brain.bin.launchd.render_plist) MUST XML-escape every
      value before substitution. (No double hyphen may appear inside an XML
      comment, so the flags below are named without their dashes.)
@@ -9,9 +9,12 @@
      brain-up runs; only brain-uninstall-launchd removes it.
 
      The local cross-encoder reranker: llama.cpp's llama-server serving a
-     bge-reranker-v2-m3 GGUF. ProgramArguments are FIXED here on purpose: the
-     model path is the only variable, so the bind cannot be widened past
-     loopback (the passages it scores are document text). The "reranking" flag
+     bge-reranker-v2-m3 GGUF. ProgramArguments are FIXED here on purpose. The
+     model path and the port are the only variables, and the host is a literal
+     127.0.0.1, so the bind cannot be widened past loopback (the passages it
+     scores are document text). The port follows BRAIN_RERANK_URL (8081 when
+     unset): a deviation from the ticket, which fixed 8081, made because 8081
+     was LanguageTool's on the owner's machine. The "reranking" flag
      only enables the endpoint; "embedding" with "pooling rank" is what makes
      the model score pairs. /usr/bin/env resolves llama-server through the PATH
      below (Homebrew's prefix on Apple Silicon and on Intel). Guide:
@@ -34,7 +37,7 @@
         <string>--host</string>
         <string>127.0.0.1</string>
         <string>--port</string>
-        <string>8081</string>
+        <string>{{ rerank_port }}</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>

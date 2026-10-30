@@ -29,10 +29,15 @@ from importlib.resources import files as resource_files
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
-from ..config import _brain_home_root
+from ..config import ConfigError, _brain_home_root
 from ..errors import BrainError
 from ..install_config import brain_home_dotenv_value, resolve_install_vault
-from ..settings.rerank import DEFAULT_RERANK_GGUF_NAME
+from ..settings.rerank import (
+    DEFAULT_RERANK_GGUF_NAME,
+    MAX_LAUNCHD_PORT,
+    MIN_LAUNCHD_PORT,
+    launchd_rerank_port,
+)
 from ._launcher import ensure_shim
 
 # The launchd labels brain installs. watcher is the KeepAlive vault-sync daemon;
@@ -140,6 +145,25 @@ def resolve_rerank_model(brain_home: Path) -> Path:
     return brain_home / "models" / DEFAULT_RERANK_GGUF_NAME
 
 
+def resolve_rerank_port(brain_home: Path) -> int:
+    """The port ``com.brain.reranker`` binds: ``BRAIN_RERANK_URL``'s (RM-14b).
+
+    Same precedence as :func:`resolve_rerank_model`: the process env, then
+    ``$BRAIN_HOME/.env``, then the default URL (port 8081). A non-loopback host
+    or a port outside [1024, 65535] is a :class:`LaunchdError` whose message
+    names the variable, never its value. The host itself is not taken from the
+    URL: the template binds a literal ``127.0.0.1``.
+    """
+    raw = os.environ.get("BRAIN_RERANK_URL") or brain_home_dotenv_value(
+        brain_home, "BRAIN_RERANK_URL"
+    )
+    env = {"BRAIN_RERANK_URL": raw} if raw else {}
+    try:
+        return launchd_rerank_port(env)
+    except ConfigError as exc:
+        raise LaunchdError(f"com.brain.reranker: {exc}") from None
+
+
 def render_plist(
     label: str,
     brain_home: Path,
@@ -147,6 +171,7 @@ def render_plist(
     pipx_bin_dir: Path,
     brain_py: Path,
     rerank_model: Path | None = None,
+    rerank_port: int | None = None,
 ) -> str:
     """Render the .plist.j2 template for *label* into a string.
 
@@ -156,7 +181,7 @@ def render_plist(
     Raises :class:`LaunchdError` if the rendered XML does not parse, or if a
     ``{{ marker }}`` is left unsubstituted (``com.brain.reranker`` rendered
     without *rerank_model* would otherwise hand launchd a literal marker as
-    the model path).
+    the model path), or if *rerank_port* is outside [1024, 65535].
     """
     template_ref = resource_files("brain.templates.launchd") / f"{label}.plist.j2"
     text: str = template_ref.read_text(encoding="utf-8")
@@ -170,6 +195,12 @@ def render_plist(
     }
     if rerank_model is not None:
         substitutions["rerank_model_path"] = xml_escape(str(rerank_model))
+    if rerank_port is not None:
+        if not MIN_LAUNCHD_PORT <= rerank_port <= MAX_LAUNCHD_PORT:
+            raise LaunchdError(
+                f"rerank_port must be in [{MIN_LAUNCHD_PORT}, {MAX_LAUNCHD_PORT}]"
+            )
+        substitutions["rerank_port"] = str(rerank_port)
     for key, value in substitutions.items():
         text = text.replace("{{ " + key + " }}", value)
     leftover = _LEFTOVER_MARKER.search(text)
@@ -231,6 +262,9 @@ def install_plists(
         if (with_reranker and label == _RERANKER_LABEL)
         or (launchd_dir / f"{label}.plist").exists()
     )
+    # Read only when the reranker job is rendered, so a bad URL cannot break an
+    # install that never opted in; refused here, before any launchctl call.
+    rerank_port = resolve_rerank_port(brain_home) if _RERANKER_LABEL in optional else None
     launchd_dir.mkdir(parents=True, exist_ok=True)
 
     # Install the foreground wrapper scripts the plists reference.
@@ -259,6 +293,7 @@ def install_plists(
             pipx_bin_dir=pipx_bin_dir,
             brain_py=brain_py,
             rerank_model=rerank_model,
+            rerank_port=rerank_port,
         )
         plist_path = launchd_dir / f"{label}.plist"
 
@@ -359,7 +394,10 @@ def install_main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--with-reranker",
         action="store_true",
-        help=f"also install com.brain.reranker (llama-server on 127.0.0.1:8081); see {_GUIDE}",
+        help=(
+            "also install com.brain.reranker (llama-server on 127.0.0.1, at "
+            f"BRAIN_RERANK_URL's port, 8081 by default); see {_GUIDE}"
+        ),
     )
     args = parser.parse_args(argv)
     launchd_dir = Path(
