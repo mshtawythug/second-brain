@@ -204,13 +204,29 @@ def test_recipe_carries_the_parenthesized_default_jql_verbatim() -> None:
     assert DEFAULT_JQL in _jira_section()
 
 
-def test_recipe_ingests_as_confidential_jira_issues() -> None:
-    section = _jira_section()
+def _jira_command_block() -> str:
+    """The fenced ``bash`` block the agent copies: the flags must be IN it.
 
-    assert "--sensitivity confidential" in section
-    assert "--source jira" in section
-    assert "--content-type jira_issue" in section
-    assert '--external-id "<site-host>/<ISSUE-KEY>"' in section
+    Checking the whole section is not enough, because the bullets below the
+    block repeat ``--sensitivity confidential`` as prose. A recipe that dropped
+    the flag from the command would still have passed.
+    """
+    blocks = re.findall(r"^```bash\n(.*?)^```", _jira_section(), re.DOTALL | re.MULTILINE)
+    assert len(blocks) == 1, f"expected one bash block in the Jira section, found {len(blocks)}"
+    return blocks[0]
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--sensitivity confidential",
+        "--source jira",
+        "--content-type jira_issue",
+        '--external-id "<site-host>/<ISSUE-KEY>"',
+    ],
+)
+def test_recipe_command_ingests_as_confidential_jira_issues(flag: str) -> None:
+    assert flag in _jira_command_block(), f"the recipe's command block lacks {flag}"
 
 
 def test_recipe_refuses_a_jql_without_a_time_bound() -> None:
