@@ -668,6 +668,10 @@ def test_an_abandoned_worker_owes_a_job_it_dequeues_and_never_starts_it(
     Started, B could hang past process exit with only its ids owed, never its
     path. A worker that shutdown has abandoned owes every job it dequeues and
     runs none.
+
+    This pins the behaviour only: the flag is set before the dequeue, so it
+    cannot tell a flag check placed before the slot write from one after it.
+    The next test pins that ordering.
     """
     vault, journal = tmp_path / "vault", tmp_path / "state" / JOURNAL_NAME
     vault.mkdir()
@@ -698,3 +702,62 @@ def test_an_abandoned_worker_owes_a_job_it_dequeues_and_never_starts_it(
     assert journal.exists() and _journal_entries(journal) == [{"action": "delete", "path": "b.md"}]
     assert _row_at(test_db, "b.md") is not None, "an abandoned worker started a job"
     assert state.processed == 0 and state.current_job is None
+
+
+
+class _FlagSetAsTheSlotIsWritten(_WatcherState):
+    """Shutdown sets ``worker_abandoned`` exactly as the worker writes its slot.
+
+    That is the window rev-95 found: a flag check placed BEFORE the slot write
+    reads False, shutdown then sets the flag and reads a slot that does not
+    hold the job yet, and the worker starts a job nobody owes.
+    """
+
+    @property  # type: ignore[override]
+    def current_job(self) -> _Job | None:
+        return self.__dict__.get("_slot")
+
+    @current_job.setter
+    def current_job(self, job: _Job | None) -> None:
+        self.__dict__["_slot"] = job
+        if job is not None:
+            self.worker_abandoned = True
+
+
+def test_the_flag_is_read_after_the_slot_is_written(
+    test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path
+) -> None:
+    """rev-95: the worker writes ``current_job`` THEN reads the flag (shutdown: flag, then slot).
+
+    Deterministic, no threads: the flag flips on the slot write itself, so only
+    a check placed after that write sees it and owes the job instead of running it.
+    """
+    vault, journal = tmp_path / "vault", tmp_path / "state" / JOURNAL_NAME
+    vault.mkdir()
+    test_db.execute(
+        """
+        INSERT INTO documents (title, content, content_hash, content_type, kind, vault_path)
+        VALUES ('Job B', 'body', %s, 'note', 'vault', 'b.md')
+        """,
+        (f"hash-{uuid.uuid4()}",),
+    )
+    factory = _Factory()
+    first = factory()
+    first.autocommit = True
+    state = _FlagSetAsTheSlotIsWritten()
+    state.owed = OwedJournal(journal, vault)
+    assert not state.worker_abandoned, "fixture: the flag must start unset"
+    link = ReconnectingConnection(
+        factory, label="worker", sleep=lambda _d: None, stopping=lambda: False, conn=first
+    )
+    try:
+        state.jobs.put(_Job("delete", vault / "b.md"))
+        state.jobs.put(None)
+        _worker_loop(link, fake_embedder, WatchConfig(vault_path=vault, debounce_ms=10), state)
+    finally:
+        link.close()
+        factory.close_all()
+
+    assert _row_at(test_db, "b.md") is not None, "the job started inside the window"
+    owed = _journal_entries(journal) if journal.exists() else []
+    assert {"action": "delete", "path": "b.md"} in owed, owed
