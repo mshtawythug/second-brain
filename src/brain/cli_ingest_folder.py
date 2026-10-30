@@ -34,8 +34,10 @@ WAV this run converted points at the model or the binary. Each prints a WARNING 
 file's ``imported/`` name (its content hash) and the class, so a memo that fails every run
 is visible in every run's log. A :class:`~brain.ingest.voice.WhisperFailedError` is also
 counted per memo (:mod:`brain.ingest.voice_failures`, in ``$BRAIN_HOME/state``): the
-third one rejects the memo instead (sec-107 F5), and a success clears the count. A tool
-that cannot start is not counted: that is the machine, never the memo.
+third one rejects the memo instead (sec-107 F5), and a memo stored clears the count (only
+once the ingest succeeds). A tool that cannot start is not counted: that is the machine,
+never the memo. The ledger is best-effort (sec-107b N3): a ledger that cannot be read or
+written is a class-only warning, and the memo is handled as if it had no count.
 
 **A run with an audio folder** first removes temporary directories a crashed run left
 (:func:`~brain.ingest.voice.sweep_stale_tempdirs`, sec-107 F4), and runs with SIGTERM
@@ -372,6 +374,8 @@ def _ingest_step(ctx: _Context, folder: DropFolder) -> IngestFn:
             result = _ingest(ctx, folder, conn, doc, title)
         except SecretGuardError as exc:
             raise RejectedFileError("the secret guard refused the file") from exc
+        if path.suffix.lower() in VOICE_EXTENSIONS:
+            _forget_failures(path)  # only once the memo is stored (sec-107b N3)
         _emit_secret_notice(result.secret_notice)
         _emit_egress_notice(result.egress_notice)
         outcome, _ = classify(result)
@@ -386,9 +390,7 @@ def _extract(ctx: _Context, path: Path, timeout: float) -> ExtractedDoc:
         return extract_image(path, ocr=ctx.ocr, timeout=timeout)
     if suffix in VOICE_EXTENSIONS:
         # Whisper's own timeout, not the run's remainder (RM-38.D1, module docstring).
-        doc = extract_voice(path, whisper=ctx.whisper)
-        voice_failures.forget(_voice_state_dir(), path)
-        return doc
+        return extract_voice(path, whisper=ctx.whisper)
     return extract_path(path)
 
 
@@ -400,10 +402,29 @@ def _retry_or_reject(path: Path, exc: VoiceError) -> None:
     """Warn that ``path`` goes back; reject it instead at whisper's third failure on it."""
     failures = None
     if isinstance(exc, WhisperFailedError):
-        failures = voice_failures.record_failure(_voice_state_dir(), path)
-        if failures >= voice_failures.MAX_FAILURES:
+        try:
+            failures = voice_failures.record_failure(_voice_state_dir(), path)
+        except OSError as ledger_exc:  # best-effort: the memo still goes back (sec-107b N3)
+            _warn_ledger("updated", ledger_exc)
+        if failures is not None and failures >= voice_failures.MAX_FAILURES:
             raise RejectedFileError("whisper failed on the memo every time") from exc
     _warn_retry(path, exc, failures)
+
+
+def _forget_failures(path: Path) -> None:
+    """Clear a stored memo's whisper-failure count; a ledger error never fails the ingest."""
+    try:
+        voice_failures.forget(_voice_state_dir(), path)
+    except OSError as exc:
+        _warn_ledger("cleared", exc)
+
+
+def _warn_ledger(verb: str, exc: OSError) -> None:
+    typer.secho(
+        f"warning: the voice-failure count was not {verb} ({describe_failure(exc)})",
+        fg="yellow",
+        err=True,
+    )
 
 
 def _warn_retry(path: Path, exc: VoiceError, failures: int | None) -> None:

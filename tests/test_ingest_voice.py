@@ -740,6 +740,28 @@ def test_the_sweep_skips_another_user_s_dir(tmp_path: Path) -> None:
     assert old.is_dir()
 
 
+def test_the_sweep_skips_a_dir_removed_while_it_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sec-107b N2: another run's cleanup between the listing and the stat is not an error."""
+    now = 10_000_000.0
+    gone = _aged_dir(tmp_path, "brain-voice-gone", 9 * HOUR, now)
+    old = _aged_dir(tmp_path, "brain-voice-old", 9 * HOUR, now)
+    real_scandir = os.scandir
+
+    def scandir_then_remove(path: Any) -> Any:
+        if isinstance(path, int) or Path(path) != tmp_path:  # rmtree's own (fd) listings
+            return real_scandir(path)
+        entries = sorted(real_scandir(path), key=lambda e: e.name)
+        shutil.rmtree(gone)
+        return iter(entries)
+
+    monkeypatch.setattr(voice_mod.os, "scandir", scandir_then_remove)
+
+    assert sweep_stale_tempdirs(max_seconds=60.0, root=tmp_path, now=now) == 1
+    assert not old.exists()
+
+
 def test_the_sweep_of_a_missing_root_is_quiet(tmp_path: Path) -> None:
     assert sweep_stale_tempdirs(max_seconds=60.0, root=tmp_path / "gone") == 0
 

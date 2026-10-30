@@ -188,7 +188,7 @@ directory:
 | sec F4 stale WAVs | `sweep_stale_tempdirs` runs at the start of an `ingest-folder` run that has an audio folder. It removes this user's `brain-voice-*` real directories older than `max(3 h, the longest a memo can run at the cap)`. The longer bound means a live run at a 600-minute cap is never swept. | `ingest/voice.py`, `cli_ingest_folder.py` |
 | sec F5 endless retry | A new `WhisperFailedError(TranscriptionError)` is the only failure counted. The count is per SHA-256 in `$BRAIN_HOME/state/voice-failures.json` (`ingest/voice_failures.py`: atomic write, `0o700` directory, at most 1,000 entries, a malformed file starts over). The third failure raises `RejectedFileError`, and a success clears the count. A tool that cannot start is not counted. This supersedes the D4 "minimum" follow-up. | `ingest/voice_failures.py`, `cli_ingest_folder.py` |
 | sec F6 model file | `model_file_problem` requires a regular file owned by this user or root, with no group/other write bit, and not under a configured drop folder. A broken `drop-folders.toml` checks no folder, since the run reports it anyway. Otherwise the model is unavailable, and `brain doctor` warns with the hint. Root is allowed as an owner on purpose: only root could change such a file. | `ingest/whisper.py`, `doctor_voice.py` |
-| rev F1 orphaned child | `run_capped` kills the process group on any `BaseException`. Before, `Popen.__exit__` waited out the child: forever on `SystemExit`, and it left the child running on `KeyboardInterrupt`. The new `sigterm_as_system_exit()` wraps the `ingest-folder` run, so a bootout unwinds through the `TemporaryDirectory` and the fd `finally`. This is shared code. The image-OCR, Apple Notes and GitHub runners gain the kill, and their `Popen` calls are otherwise unchanged (`pass_fds` and `preexec_fn` are passed only when set). | `ingest/capped_process.py`, `cli_ingest_folder.py` |
+| rev F1 orphaned child | `run_capped` kills the process group on any `BaseException`. Before, `Popen.__exit__` waited out the child: forever on `SystemExit`, and it left the child running on `KeyboardInterrupt`. The new `sigterm_as_system_exit()` wraps the `ingest-folder` run, so a bootout unwinds through the `TemporaryDirectory` and the fd `finally`. This is shared code. The Apple Notes and GitHub readers gain the kill on an exception or Ctrl-C (SIGTERM handling is only around `ingest-folder`), and their `Popen` calls are otherwise unchanged (`pass_fds` and `preexec_fn` are passed only when set). Image OCR does not use `run_capped` (corrected in round 2; the `78d34e6` message overstates it). | `ingest/capped_process.py`, `cli_ingest_folder.py` |
 | rev F2 oversized stdout | `TranscriptTooLargeError` (rejected). | `ingest/voice.py` |
 
 **Proof.**
@@ -227,3 +227,58 @@ directory:
   it behaves the same as a bare `setrlimit`. A `restore_signals=False` test now kills it.
   The hook runs in the forked child, which coverage does not trace, so it carries a
   `pragma: no cover` and is tested in a fresh interpreter.
+
+## Review round 2 (PR #107)
+
+sec-107b confirmed all earlier findings fixed at `f06c64d`. Its own real-`afconvert` repro
+was killed by SIGXFSZ (`rc -25`) at exactly the limit, and the memo was rejected with
+`TMPDIR` left empty. That is the other form of a limit hit, and both forms are handled. The
+round's items are all LOW.
+
+**N1, the model check could be raced.** I used the fallback the ruling allows, not
+`-m /dev/fd/N`, after reading whisper.cpp's `src/whisper.cpp` at master:
+
+- `whisper_init_from_file_with_params_no_state` opens the model with
+  `std::ifstream(path_model)` and reads it sequentially, so `/dev/fd/N` would load.
+- But with `WHISPER_USE_COREML`, `whisper_get_coreml_path_encoder` derives the encoder's
+  path from the model's: it replaces `.bin` with `-encoder.mlmodelc`. If that load fails,
+  `whisper_init_state` returns null unless the build sets `WHISPER_COREML_ALLOW_FALLBACK`.
+  From `/dev/fd/N` the derived path is `/dev/fd/N-encoder.mlmodelc`, so on a Core ML build
+  every memo would fail, and after three tries be rejected.
+- Homebrew's build flags could not be confirmed here (no install, no formula fetched), and
+  users can build whisper with Core ML themselves.
+
+So `model_file_problem` now does two things:
+
+- It resolves the model strictly and `lstat`s the file: regular, owned by this uid or root,
+  no group or other write bit.
+- It requires every directory above it to be owned by this uid or root with no group or
+  other write bit. That covers the directories above the path as given and above the file
+  it resolves to. A sticky `/tmp` is refused as well.
+
+Then only this user or root can swap the model between the check and whisper's open. The
+new hint is `HINT_MODEL_DIR_UNSAFE`.
+
+**N2.** `sweep_stale_tempdirs` skips an entry whose `lstat` raises `OSError` (another run
+removed it after the listing). Before, that aborted the run.
+
+**N3.** Both ledger calls are best-effort. An `OSError` prints `warning: the voice-failure
+count was not updated/cleared (<class>)` and the run carries on: a failure still moves the
+memo back, and a success still counts. `forget` now runs only after `_ingest` succeeds, so a
+memo transcribed but not stored keeps its count.
+
+**Docs (rev 3, rev 4, sec INFO).**
+
+- The CHANGELOG no longer says image OCR gains the kill.
+- The sweep's age is stated with the long-cap case (about 20 hours at 600 minutes).
+- The over-long lines are wrapped.
+- The `afconvert` behaviour reads "exits 0 with the file truncated, or is killed by SIGXFSZ,
+  depending on the build; both are handled".
+
+**Proof.**
+
+- New tests were red first: N1 (six cases, plus an unreadable directory), N2 (an entry
+  removed between the listing and the `stat`) and N3 (an unwritable ledger on a failure, an
+  unwritable ledger on a success, and an ingest failure after a good transcription).
+- 9 mutations, all killed.
+- Coverage stays at 100% line and branch on the six modules.

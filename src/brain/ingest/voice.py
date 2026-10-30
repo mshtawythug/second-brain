@@ -29,11 +29,11 @@ through the drop-folder runner (:mod:`brain.drop_folder`); the tools are found b
    :data:`WAV_HEADER_SLACK_S` of audio plus :data:`WAV_HEADER_BYTES`): a lying header
    cannot fill the disk (about 95 MB a second, uncapped). The WAV's size is its true
    length (:data:`WAV_BYTES_PER_S`), checked against the cap before anything else about
-   the conversion. Hitting the limit is :class:`AudioTooLongError` both ways it shows: the
-   tool killed by SIGXFSZ, or a WAV cut off at the limit with exit 0 (what macOS's
-   ``afconvert`` does). The limit is past the cap's longest legitimate WAV (the cap plus
-   the slack), so a memo of exactly the cap is never rejected. The WAV's length, not the
-   header's, is the stored duration.
+   the conversion. Hitting the limit is :class:`AudioTooLongError` both ways it shows:
+   ``afconvert`` exits 0 with the WAV cut off at the limit, or is killed by SIGXFSZ,
+   depending on the build and how it is started; both are handled. The limit is past the
+   cap's longest legitimate WAV (the cap plus the slack), so a memo of exactly the cap is
+   never rejected. The WAV's length, not the header's, is the stored duration.
 5. ``whisper-cli -m MODEL -f WAV -nt -np``, with :func:`whisper_timeout`
    (``2 × duration + 60 s``, on the longer of the two durations). This timeout ignores
    the drop-folder run's own deadline (RM-38.D1): that deadline stops new files from
@@ -194,7 +194,10 @@ def sweep_stale_tempdirs(
         return 0
     removed = 0
     for entry in entries:
-        st = entry.stat(follow_symlinks=False)
+        try:
+            st = entry.stat(follow_symlinks=False)
+        except OSError:
+            continue  # removed since the listing (another run's cleanup): nothing to sweep
         if stat.S_ISDIR(st.st_mode) and st.st_uid == owner and st.st_mtime < cutoff:
             shutil.rmtree(entry.path, ignore_errors=True)
             removed += 1
@@ -267,8 +270,8 @@ def _transcribe_fd(fd: int, setup: WhisperSetup, max_file_bytes: int) -> tuple[f
         limit = wav_byte_limit(max_seconds)
         run = _run(setup, argv, AFCONVERT_TIMEOUT_S, fd=fd, max_file_bytes=limit)
         wav_seconds = wav.stat().st_size / WAV_BYTES_PER_S if wav.is_file() else None
-        # First: the limit stops afconvert with SIGXFSZ, or (as macOS's afconvert does) a
-        # quiet exit 0 and a WAV cut off at the limit. Either is the cap, never unreadable.
+        # First: the limit stops afconvert with SIGXFSZ or with a quiet exit 0 and a WAV
+        # cut off at the limit, depending on the build. Either is the cap, never unreadable.
         too_long = wav_seconds is not None and wav_seconds > max_seconds + WAV_HEADER_SLACK_S
         if run.returncode == -signal.SIGXFSZ or too_long:
             raise AudioTooLongError("memo longer than BRAIN_WHISPER_MAX_MINUTES")

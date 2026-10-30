@@ -60,21 +60,29 @@ git tag scheme:
   - `afconvert` runs under a file-size limit of the cap plus a second, so a memo whose
     header understates its length cannot fill the disk. Hitting the limit is `rejected`
     as too long, whether `afconvert` is killed by SIGXFSZ or stops with the WAV cut off.
-    A memo of exactly the cap is still transcribed. The stored duration is measured from the WAV, not read from the
-    header.
+    A memo of exactly the cap is still transcribed. The stored duration is measured from
+    the WAV, not read from the header.
   - Whisper printing more than 4 MiB is `rejected`; it is not retried.
   - A memo whisper fails on three times is `rejected` instead of being retried every run.
     The count is kept per memo content in `$BRAIN_HOME/state/voice-failures.json`, and a
     success clears it. A tool that cannot start is not counted.
   - `whisper-cli` found through a relative `PATH` entry is refused.
   - The model file must be owned by you (or root), not group- or world-writable, and not
-    inside a drop folder. Otherwise voice memos are off, and `brain doctor` says why.
-  - Stopping a run (Ctrl-C, or SIGTERM from `launchctl bootout`) kills the tool's whole
-    process group and deletes the temporary WAV. This also applies to the image-OCR,
-    Apple Notes and GitHub tool runners.
+    inside a drop folder. Every directory above it must also be owned by you or root and
+    not group- or world-writable, since whisper opens it by path after the check.
+    Otherwise voice memos are off, and `brain doctor` says why.
+  - In `brain ingest-folder`, stopping a run (Ctrl-C, or SIGTERM from `launchctl bootout`)
+    kills whisper's whole process group and deletes the temporary WAV. The Apple Notes
+    and GitHub readers share that runner, so a Ctrl-C or an exception there also kills
+    their tool's process group; SIGTERM is turned into a clean exit only around
+    `ingest-folder`. Image OCR runs `tesseract` through its own runner and is unchanged.
   - A run that was killed outright leaves its temporary folder behind. The next run with a
-    voice folder deletes this user's such folders once they are older than 3 hours (longer
-    if the cap allows longer memos).
+    voice folder deletes this user's such folders once they are older than 3 hours, or
+    longer when `BRAIN_WHISPER_MAX_MINUTES` allows longer runs (about 20 hours at 600).
+    A folder another run removes during the sweep is skipped.
+  - The failure count is best-effort: if `$BRAIN_HOME/state` cannot be written, the run
+    prints a class-only warning and carries on. A memo's count is cleared only once it
+    is stored.
 
 ### Added — screenshots from a drop folder become searchable (RM-33)
 

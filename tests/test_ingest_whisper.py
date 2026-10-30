@@ -19,6 +19,7 @@ from brain.ingest.whisper import (
     ENV_KEYS,
     HINT_MISSING_BINARY,
     HINT_MISSING_MODEL,
+    HINT_MODEL_DIR_UNSAFE,
     HINT_MODEL_IN_DROP_FOLDER,
     HINT_MODEL_OWNER,
     HINT_MODEL_WRITABLE,
@@ -371,3 +372,93 @@ def test_run_audio_tool_forwards_the_fd_and_the_file_size_limit() -> None:
     (call,) = calls
     assert call["pass_fds"] == (7,)
     assert callable(call["preexec_fn"])
+
+
+# --- review round 2 (PR #107): the directories above the model (sec-107b N1) ----------
+
+
+@pytest.mark.parametrize("mode", [0o775, 0o757, 0o1777])
+def test_a_model_in_a_directory_others_can_write_is_refused(tmp_path: Path, mode: int) -> None:
+    """Whisper opens the model by path later; whoever can write its directory can swap it."""
+    model = _model(tmp_path)
+    model.parent.chmod(mode)
+    try:
+        problem = model_file_problem(model, drop_folders=_no_folders)
+    finally:
+        model.parent.chmod(0o755)
+
+    assert problem == HINT_MODEL_DIR_UNSAFE
+
+
+def test_a_model_below_a_directory_others_can_write_is_refused(tmp_path: Path) -> None:
+    model = tmp_path / "shared" / "private" / "ggml.bin"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"synthetic model")
+    model.parent.parent.chmod(0o777)
+    try:
+        problem = model_file_problem(model, drop_folders=_no_folders)
+    finally:
+        model.parent.parent.chmod(0o755)
+
+    assert problem == HINT_MODEL_DIR_UNSAFE
+
+
+def test_a_model_directory_owned_by_another_user_is_refused(tmp_path: Path) -> None:
+    """A root-owned file reached through a directory the checking uid does not own."""
+    import os
+
+    root_owned = Path("/usr/bin/afinfo")
+    if not root_owned.is_file():  # pragma: no cover — macOS only
+        pytest.skip("needs a root-owned regular file")
+    link = tmp_path / "ggml.bin"
+    link.symlink_to(root_owned)
+
+    problem = model_file_problem(link, uid=os.getuid() + 1, drop_folders=_no_folders)
+
+    assert problem == HINT_MODEL_DIR_UNSAFE
+
+
+def test_the_directories_of_a_symlink_s_target_are_checked_too(tmp_path: Path) -> None:
+    real = tmp_path / "elsewhere" / "ggml.bin"
+    real.parent.mkdir()
+    real.write_bytes(b"synthetic model")
+    real.chmod(0o644)
+    link_dir = tmp_path / "models"
+    link_dir.mkdir()
+    link = link_dir / "ggml.bin"
+    link.symlink_to(real)
+    real.parent.chmod(0o777)
+    try:
+        problem = model_file_problem(link, drop_folders=_no_folders)
+    finally:
+        real.parent.chmod(0o755)
+
+    assert problem == HINT_MODEL_DIR_UNSAFE
+
+
+def test_the_directories_of_the_link_itself_are_checked_too(tmp_path: Path) -> None:
+    real = _model(tmp_path)
+    link_dir = tmp_path / "links"
+    link_dir.mkdir()
+    (link_dir / "ggml.bin").symlink_to(real)
+    link_dir.chmod(0o777)
+    try:
+        problem = model_file_problem(link_dir / "ggml.bin", drop_folders=_no_folders)
+    finally:
+        link_dir.chmod(0o755)
+
+    assert problem == HINT_MODEL_DIR_UNSAFE
+
+
+def test_a_model_in_a_safe_tree_through_a_symlink_is_accepted(tmp_path: Path) -> None:
+    real = _model(tmp_path)
+    (tmp_path / "link.bin").symlink_to(real)
+
+    assert model_file_problem(tmp_path / "link.bin", drop_folders=_no_folders) is None
+
+
+def test_an_unreadable_directory_above_the_model_is_unsafe(tmp_path: Path) -> None:
+    """A directory that cannot be stat-ed cannot be shown safe."""
+    from brain.ingest.whisper import _dirs_safe
+
+    assert _dirs_safe([tmp_path / "gone"], (0, 0)) is False

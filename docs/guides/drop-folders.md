@@ -84,7 +84,9 @@ on this machine by whisper.cpp, and only the transcript enters the brain: the au
 the folder's `imported/`, and the 16 kHz WAV made for whisper is deleted straight after, even
 when the run is stopped with Ctrl-C or `launchctl bootout`. If the process is killed outright
 (a crash, a power cut), the WAV's temporary folder stays. The next run with a voice folder
-deletes it once it is older than 3 hours. Nothing leaves the machine.
+deletes it once it is older than 3 hours, or longer when `BRAIN_WHISPER_MAX_MINUTES` allows
+longer runs (about 20 hours at 600), so a memo still being transcribed is never touched.
+Nothing leaves the machine.
 
 ### 1. Install whisper.cpp and a model
 
@@ -111,7 +113,10 @@ brain doctor                    # the `voice memos` line should be OK
 
 whisper loads the model into its own process, so the model file has to be yours: owned by
 you (or root), not writable by your group or by everyone (`chmod go-w` it), and not inside
-a drop folder. Otherwise voice memos stay off and `brain doctor` says which rule failed.
+a drop folder. The same goes for every directory above it (owned by you or root, not
+group- or world-writable), because whisper opens the file by path after the check, so
+`/tmp` and shared folders are out. Otherwise voice memos stay off and `brain doctor` says
+which rule failed.
 `whisper-cli` must be found through an absolute `PATH` entry.
 
 ### 2. Configure a folder
@@ -145,14 +150,15 @@ folder. brain never reads the Voice Memos app's own store.
   run while one is still going.
 - A memo of silence adds no document and stays in `imported/`.
 - **Rejected, never retried:** too long, not readable as audio, any timeout, or a transcript
-  over 4 MiB. To try one again, `brain ingest <folder>/imported/<file>`. It is stored confidential, under source
-  `manual`, unless you pass `--sensitivity normal`.
+  over 4 MiB. To try one again, `brain ingest <folder>/imported/<file>`. It is stored
+  confidential, under source `manual`, unless you pass `--sensitivity normal`.
 - **Moved back, retried next run:** whisper failing on the converted WAV, which points at the
   model or the binary rather than the memo. Each time, the run prints a warning naming the
   memo's `imported/` name (it carries the content hash), the error class, and
   `failure N of 3`. The third failure on the same memo content rejects it, so it stays in
   `imported/` instead of being retried every 10 minutes. The counts are kept in
-  `$BRAIN_HOME/state/voice-failures.json`, and a success clears a memo's count. A tool that
+  `$BRAIN_HOME/state/voice-failures.json`, and a memo's count is cleared once it is stored.
+  If that file cannot be written, the run warns (by error class only) and carries on. A tool that
   cannot start at all is not counted, since that is the machine, not the memo. To look at a
   rejected memo, check `brain doctor`, then try `brain ingest` on it by hand.
 - With voice memos off (no `BRAIN_WHISPER_MODEL`), no model file, or no `whisper-cli`, voice

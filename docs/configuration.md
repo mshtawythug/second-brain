@@ -527,7 +527,7 @@ The opt-in LaunchAgent is `brain-install-launchd --with-dropfolders`; see
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `BRAIN_WHISPER_MODEL` | (unset: off) | A whisper.cpp model file (`ggml-*.bin`), absolute or starting with `~`. Unset means voice memos are off; brain never downloads a model. The file must be a regular file owned by you (or root), not group- or world-writable, and not inside a drop folder; otherwise voice memos are off and `brain doctor` says why. Read by `brain/settings/voice.py`. |
+| `BRAIN_WHISPER_MODEL` | (unset: off) | A whisper.cpp model file (`ggml-*.bin`), absolute or starting with `~`. Unset means voice memos are off; brain never downloads a model. The file must be a regular file owned by you (or root), not group- or world-writable, in directories only you or root can write, and not inside a drop folder; otherwise voice memos are off and `brain doctor` says why. Read by `brain/settings/voice.py`. |
 | `BRAIN_WHISPER_MAX_MINUTES` | `60` | The longest memo transcribed, 1 to 600. A longer one is skipped (`rejected`). Whisper's timeout is twice the memo's length plus 60 s, so this also bounds how long one memo can hold a run. |
 
 Voice memos also need `whisper-cli` on `PATH` (`brew install whisper-cpp`) and macOS's

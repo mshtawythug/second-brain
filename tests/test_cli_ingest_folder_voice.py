@@ -572,3 +572,69 @@ def test_sigterm_is_a_system_exit_while_memos_are_transcribed(
     with pytest.raises(SystemExit):
         seen[0](signal.SIGTERM, None)
     assert signal.getsignal(signal.SIGTERM) == before
+
+
+# --- review round 2 (PR #107): the ledger is best-effort (sec-107b N3) ----------------------
+
+
+def test_a_ledger_that_cannot_be_written_still_moves_the_memo_back(
+    home: Path, drop: Path, vault: Path, tools: FakeTools, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    src = _memo(drop)
+    _configure(home, drop)
+    (home / "state").write_text("a file where the state directory should be")
+    tools.whisper = CappedRun(b"", 3, False, False)
+
+    result = _run("--configured", "--since", "2d")
+
+    assert result.exit_code == 1
+    assert src.is_file()  # moved back, as a transient failure, not stuck
+    assert "the voice-failure count was not updated (FileExistsError" in result.output
+    assert "was not transcribed (WhisperFailedError);" in result.output
+
+
+def test_a_ledger_that_cannot_be_cleared_does_not_fail_the_ingest(
+    home: Path, drop: Path, vault: Path, tools: FakeTools, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    src = _memo(drop)
+    _configure(home, drop)
+    state = home / "state"
+    state.mkdir()
+    digest = hashlib.sha256(AUDIO_BYTES).hexdigest()
+    (state / STATE_NAME).write_text(json.dumps({digest: 1}))
+    state.chmod(0o500)  # the ledger reads, but cannot be rewritten
+    try:
+        result = _run("--configured", "--since", "2d")
+    finally:
+        state.chmod(0o700)
+
+    assert result.exit_code == 0, result.output
+    assert "the voice-failure count was not cleared (PermissionError" in result.output
+    assert len(_docs(test_db)) == 1
+    assert not src.exists()
+
+
+def test_the_count_is_cleared_only_after_the_ingest_succeeds(
+    home: Path, drop: Path, vault: Path, tools: FakeTools, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A memo transcribed but not stored (the database, the embedder) keeps its count."""
+    src = _memo(drop)
+    _configure(home, drop)
+    state = home / "state"
+    state.mkdir()
+    digest = hashlib.sha256(AUDIO_BYTES).hexdigest()
+    (state / STATE_NAME).write_text(json.dumps({digest: 2}))
+
+    def ingest_fails(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("synthetic database outage")
+
+    monkeypatch.setattr("brain.cli_ingest_folder._ingest", ingest_fails)
+
+    result = _run("--configured", "--since", "2d")
+
+    assert result.exit_code == 1
+    assert src.is_file()
+    assert _ledger(home) == {digest: 2}

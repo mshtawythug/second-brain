@@ -12,7 +12,13 @@ need four things, checked in this order, and the first one missing is the hint:
 **The model is code-adjacent input** (sec-107 F6): whisper loads it into its process, so
 a model file someone else can replace is refused. It must be a regular file owned by
 this user (or root), with no group or world write bit, and not inside a configured drop
-folder (``$BRAIN_HOME/drop-folders.toml``), where files arrive from elsewhere. **A
+folder (``$BRAIN_HOME/drop-folders.toml``), where files arrive from elsewhere. Whisper
+opens it by path, after this check, so **every directory above it** (above the path as
+given and above the file it resolves to) must also be owned by this user or root and
+have no group or world write bit (sec-107b N1): then nobody else can swap the file in
+between. Passing whisper an fd (``-m /dev/fd/N``) was ruled out: whisper.cpp builds with
+Core ML derive the encoder's path from the model's (``…/ggml-base.en-encoder.mlmodelc``),
+so every memo would fail on such a build. **A
 relative ``whisper-cli``** (``shutil.which`` returns one for a relative ``PATH`` entry,
 sec-107 F3) is refused too: it would resolve against whatever the working directory is.
 
@@ -61,6 +67,10 @@ HINT_MODEL_WRITABLE = (
 )
 HINT_MODEL_IN_DROP_FOLDER = (
     "BRAIN_WHISPER_MODEL names a file inside a drop folder: keep the model elsewhere"
+)
+HINT_MODEL_DIR_UNSAFE = (
+    "BRAIN_WHISPER_MODEL is in a directory another user can change: "
+    "chmod go-w it, or keep the model in a directory of your own"
 )
 
 
@@ -154,20 +164,39 @@ def model_file_problem(
 
     ``uid`` (default: this process's) and ``drop_folders`` are test seams.
     """
+    owners = (os.getuid() if uid is None else uid, 0)
     try:
-        st = os.stat(path)
+        resolved = path.resolve(strict=True)
+        st = os.lstat(resolved)
     except OSError:
         return HINT_MISSING_MODEL
     if not stat.S_ISREG(st.st_mode):
         return HINT_MISSING_MODEL
-    if st.st_uid not in (os.getuid() if uid is None else uid, 0):
+    if st.st_uid not in owners:
         return HINT_MODEL_OWNER
     if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         return HINT_MODEL_WRITABLE
-    resolved = path.resolve()
+    if not _dirs_safe([*path.absolute().parents, *resolved.parents], owners):
+        return HINT_MODEL_DIR_UNSAFE
     if any(resolved.is_relative_to(folder) for folder in drop_folders()):
         return HINT_MODEL_IN_DROP_FOLDER
     return None
+
+
+def _dirs_safe(dirs: Sequence[Path], owners: tuple[int, int]) -> bool:
+    """Every directory owned by one of ``owners`` with no group or world write bit.
+
+    A sticky world-writable directory (``/tmp``) is refused too: its other users cannot
+    replace the model, but they can create the names around it first.
+    """
+    for directory in dirs:
+        try:
+            st = os.stat(directory)
+        except OSError:
+            return False
+        if st.st_uid not in owners or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return False
+    return True
 
 
 def resolve_whisper(

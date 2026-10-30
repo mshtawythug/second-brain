@@ -25,8 +25,10 @@ temporary directories are cleaned up instead of the process dying where it stand
 when set, so the other runners' calls are unchanged: ``pass_fds`` lets the child read a
 file the caller has already opened (as ``/dev/fd/N``), and ``max_file_bytes`` sets the
 child's ``RLIMIT_FSIZE``, so no file it writes can grow past that size. What the tool
-then does varies (killed by SIGXFSZ, an error exit, or, as ``afconvert`` does, a quiet
-exit 0 with the file cut at the limit), so a caller judges the file, not the exit code.
+then does varies: killed by SIGXFSZ, an error exit, or a quiet exit 0 with the file cut
+at the limit. ``afconvert`` exits 0 with the file truncated, or is killed by SIGXFSZ,
+depending on the build and how it is started; a caller handles both, judging the signal
+and the file rather than exit 0.
 The limit is set by a ``preexec_fn`` (:func:`limit_file_size`) on a value computed before
 the fork. It also sets SIGXFSZ to its default action, so a tool that does not handle the
 signal itself dies of it at the limit, ``returncode == -SIGXFSZ``. (``Popen``'s default
