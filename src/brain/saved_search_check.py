@@ -27,14 +27,15 @@ reranker cannot change.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
 import psycopg
 
-from .config import ConfigError
+from .config import Config, ConfigError
 from .errors import BrainError, PersonAmbiguous, PersonNotFound
 from .ingest import Embedder
 from .queries import resolve_person_to_keys
@@ -96,6 +97,39 @@ class CheckResult:
     matches: list[WatchMatch]
     skipped: str | None = None
     started_at: datetime | None = None
+
+
+def build_matcher(
+    cfg: Config,
+    *,
+    embedder: Callable[[], Embedder] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Matcher:
+    """The matcher every surface uses: the config's floor, the watch knob, a lazy embedder.
+
+    ``embedder`` defaults to :func:`brain.embeddings.make_embedder` of ``cfg``; whichever it is,
+    it is called at most once, and only if a semantic watch is checked. ``env`` defaults to
+    ``os.environ`` (after ``Config.load()``, spec §2.3).
+    """
+    from .settings.watch import load_watch_settings
+
+    built: list[Embedder] = []
+
+    def _embedder() -> Embedder:
+        if not built:
+            if embedder is not None:
+                built.append(embedder())
+            else:
+                from .embeddings import make_embedder
+
+                built.append(make_embedder(cfg))
+        return built[0]
+
+    return Matcher(
+        embedder=_embedder,
+        vector_sim_floor=cfg.vector_sim_floor,
+        min_cosine=load_watch_settings(os.environ if env is None else env).min_cosine,
+    )
 
 
 class _Skip(Exception):
@@ -370,6 +404,7 @@ __all__ = [
     "SavedSearchError",
     "WatchMatch",
     "add_watch",
+    "build_matcher",
     "check_enabled",
     "check_watch",
     "peek_enabled",

@@ -43,6 +43,7 @@ from .cli_recall import register as register_recall
 from .cli_search import register as register_search
 from .cli_sensitivity import register_backfill as register_backfill_sensitivity
 from .cli_usage import register as register_usage
+from .cli_watch import register as register_watch
 
 #: A function that attaches commands or a sub-app to the root Typer app.
 Registrar = Callable[[typer.Typer], None]
@@ -76,8 +77,10 @@ REGISTRARS: tuple[tuple[str, Registrar], ...] = (
 #: Command modules added after RM-06, in the order ``brain --help`` lists them.
 #: Unlike :data:`REGISTRARS`, this tuple IS the registration mechanism: ``cli.py``
 #: runs it through :func:`register_extensions`, so an entry here is all a new
-#: command module needs. Empty until the first such module lands.
-EXTENSION_REGISTRARS: tuple[tuple[str, Registrar], ...] = ()
+#: command module needs.
+EXTENSION_REGISTRARS: tuple[tuple[str, Registrar], ...] = (
+    ("watch", register_watch),  # RM-15, saved searches
+)
 
 #: Registrars that attach to a SUB-APP rather than the root ``app``, and so
 #: cannot live in :data:`REGISTRARS` (whose entries are all

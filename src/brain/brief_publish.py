@@ -46,7 +46,7 @@ from .saved_search import (
     unnotified_view,
     watch_tables_present,
 )
-from .saved_search_check import CheckResult, Matcher, check_enabled
+from .saved_search_check import CheckResult, build_matcher, check_enabled
 
 #: Opens one database connection from a URL: :func:`brain.db.connect` in production.
 Connect = Callable[[str], AbstractContextManager[psycopg.Connection[Any]]]
@@ -78,7 +78,8 @@ def build_brief(
         # its row lock is released before the brief's reads (RM-15 plan, D5).
         conn.autocommit = True
         watches_on = watch_tables_present(conn)
-        checks = check_enabled(conn, _matcher(cfg, embedder)) if watches_on else []
+        matcher = build_matcher(cfg, embedder=None if embedder is None else lambda: embedder)
+        checks = check_enabled(conn, matcher) if watches_on else []
         skipped = _skipped_notes(checks)
         data = brief_mod.assemble_brief(
             conn,
@@ -141,28 +142,6 @@ def build_brief(
             conn.autocommit = True
             mark_notified(conn, view.pending)
     return data, written_path
-
-
-def _matcher(cfg: Config, embedder: Embedder | None) -> Matcher:
-    """The watch matcher for this build; the embedder is built only if a check asks for it."""
-    import os
-
-    from .settings.watch import load_watch_settings
-
-    built: list[Embedder] = [] if embedder is None else [embedder]
-
-    def _embedder() -> Embedder:
-        if not built:
-            from .embeddings import make_embedder
-
-            built.append(make_embedder(cfg))
-        return built[0]
-
-    return Matcher(
-        embedder=_embedder,
-        vector_sim_floor=cfg.vector_sim_floor,
-        min_cosine=load_watch_settings(os.environ).min_cosine,
-    )
 
 
 def _skipped_notes(checks: list[CheckResult]) -> list[WatchNote]:
