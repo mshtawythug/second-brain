@@ -1,4 +1,4 @@
-"""Request validation for the Ingest tab (Ingest spec §5.1).
+"""Request validation for the Ingest tab (Ingest spec §5.1, and §5.2 for a file).
 
 A leaf beside :mod:`brain.ui.schemas` rather than inside it, so that module keeps its
 headroom under the file-size ceiling. Validation happens **at submit, before
@@ -48,6 +48,45 @@ def parse_paste(payload: Mapping[str, Any]) -> PasteSpec:
         body=_body(payload.get("body")),
         tags=_tags(payload.get("tags", [])),
         content_type=_content_type(payload.get("content_type", DEFAULT_PASTE_CONTENT_TYPE)),
+        sensitivity=_sensitivity(payload.get("sensitivity")),
+        enrich=_enrich(payload.get("enrich", True)),
+    )
+
+
+#: The fields a file-submit request may carry (Ingest spec §5.2). No ``content_type``:
+#: an upload's type is its extractor's, and no ``body``: the bytes were staged.
+_FILE_FIELDS = frozenset({"upload_id", "title", "tags", "sensitivity", "enrich"})
+
+
+@dataclass(frozen=True)
+class FileSpec:
+    """A validated file submit. ``title`` overrides the extracted one when set."""
+
+    upload_id: str
+    title: str | None
+    tags: tuple[str, ...]
+    sensitivity: SensitivityLevel
+    enrich: bool
+
+
+def parse_file(payload: Mapping[str, Any]) -> FileSpec:
+    """Validate ``POST /api/ingest/file``'s body. Raises 400.
+
+    The upload id's FORMAT is checked by the staging area, which answers 404
+    ``upload_unknown`` for any id it does not hold; here it must only be a string.
+    """
+    unknown = sorted(set(payload) - _FILE_FIELDS)
+    if unknown:
+        raise UiBadRequest(f"unknown field(s): {', '.join(unknown)}", code="unknown_field")
+    upload_id = payload.get("upload_id")
+    if not isinstance(upload_id, str) or not upload_id:
+        raise UiBadRequest("upload_id must be a string", code="invalid_upload_id")
+    title = payload.get("title")
+    return FileSpec(
+        upload_id=upload_id,
+        title=None if title is None or (isinstance(title, str) and not title.strip())
+        else _title(title),
+        tags=_tags(payload.get("tags", [])),
         sensitivity=_sensitivity(payload.get("sensitivity")),
         enrich=_enrich(payload.get("enrich", True)),
     )

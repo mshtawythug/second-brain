@@ -60,14 +60,8 @@ async def read_body_capped(request: Request, limit: int) -> bytes:
     read, and a lying or absent one (chunked transfer) is refused by the counter
     the moment the running total passes the cap.
     """
-    declared = request.headers.get("content-length", "")
-    # isascii(): "²".isdigit() is true and int() rejects it. A declared length
-    # longer than any real cap's digits is over the cap without converting it
-    # (CPython refuses int() past 4300 digits).
-    digits = declared.lstrip("0") or "0"
-    if declared.isascii() and declared.isdigit() and (
-        len(digits) > len(str(limit)) or int(digits) > limit
-    ):
+    declared = declared_length(request)
+    if declared is not None and declared > limit:
         raise UiPayloadTooLarge(
             f"request body must be at most {limit} bytes", code="body_too_large"
         )
@@ -79,6 +73,28 @@ async def read_body_capped(request: Request, limit: int) -> bytes:
                 f"request body must be at most {limit} bytes", code="body_too_large"
             )
     return bytes(received)
+
+
+#: A declared length with more digits than this is larger than any cap here, and
+#: is reported as this bound instead of being converted (CPython refuses int()
+#: past 4300 digits, and a 500 there would be a free crash).
+_MAX_LENGTH_DIGITS = 18
+
+
+def declared_length(request: Request) -> int | None:
+    """The request's ``Content-Length`` as an int, or ``None`` when absent or malformed.
+
+    Only a precheck: a lying or absent length is caught by the caller's stream
+    counter, so a malformed header is treated like a missing one.
+    """
+    declared = request.headers.get("content-length", "")
+    # isascii(): "²".isdigit() is true and int() rejects it.
+    if not (declared.isascii() and declared.isdigit()):
+        return None
+    digits = declared.lstrip("0") or "0"
+    if len(digits) > _MAX_LENGTH_DIGITS:
+        return int(10**_MAX_LENGTH_DIGITS)
+    return int(digits)
 
 
 def db_guard(exc: psycopg.Error) -> Exception:

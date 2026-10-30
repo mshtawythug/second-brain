@@ -94,8 +94,30 @@ dependencies = [
   # silently-wrong result that justifies the caps on `pgvector` and `typer`.
   # Upper bounds here would buy nothing and cost real resolution conflicts in
   # shared environments.
-  "pypdf>=5.0",
+  # FLOORS RAISED for security (RM-13, PR #77 security review), not for an API:
+  # `brain ui` now parses PDFs a browser uploaded, so a known parser defect is
+  # reachable from a request. Measured 2026-10-29 in the RM-13 venv (uv, Python
+  # 3.11): pypdf 6.21.4, pdfplumber 0.11.10, pdfminer.six 20260107 resolved; the
+  # suite of record was green on exactly those, and neither floor adds a wheel on
+  # that resolution.
+  # - pypdf >= 6.14: rules out CVE-2025-62707 (GHSA-vr63-x8vc-m265, excessive
+  #   iteration, fixed in 6.1.3, the reviewer's suggested floor) AND the later
+  #   CVE-2026-59937 (repeated malformed cross-reference streams, a DoS, fixed in
+  #   6.14.0), which 6.1.3 would still have admitted. Not exercised: any version
+  #   between 6.14 and 6.21.4.
+  # - pdfminer.six >= 20251230 (pdfplumber's parser; declared here because the
+  #   floor is ours to state, pdfplumber pins it exactly): rules out
+  #   CVE-2025-64512 (GHSA-wf5f-4jwr-ppcp, pickle deserialization of CMap cache
+  #   files, fixed in 20251107) and CVE-2025-70559, that fix's incomplete
+  #   successor, fixed in 20251230. pdfplumber 0.11.10 requires
+  #   `pdfminer.six==20260107`, so this floor only refuses an OLDER pdfplumber
+  #   resolution that would bring a vulnerable pdfminer. Not exercised: 20251230.
+  # Still unbounded above, for the reason given above. The residual risk (a
+  # hostile PDF can exhaust memory or wedge the one job worker; no subprocess
+  # sandbox) is recorded in the Ingest spec §7.4 and the backlog.
+  "pypdf>=6.14",
   "pdfplumber>=0.11",
+  "pdfminer.six>=20251230",
   "python-docx>=1.1",
   # The `[plugins]` extra pulls `mdit-py-plugins`, which `brain ui` uses for
   # ONE thing: GFM task lists (`mdit_py_plugins.tasklists`). §2.1 waiver granted

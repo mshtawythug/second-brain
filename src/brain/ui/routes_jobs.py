@@ -25,7 +25,9 @@ def _iso(value: datetime | None) -> str | None:
 
 #: The result keys that name a document, withheld by the lens below. The id is
 #: one of them: ``GET /api/notes/<id>`` opens the note, title and body included.
-_NAMING_KEYS = ("title", "vault_path", "document_id")
+#: So is an upload's ``original_filename`` (RM-13): a filename is often more
+#: revealing than a title (Ingest spec §7.5).
+_NAMING_KEYS = ("title", "vault_path", "document_id", "original_filename")
 
 
 def _thaw(value: Any) -> Any:
@@ -45,8 +47,8 @@ def lensed_result(
     A job id is NOT a capability: ``GET /api/jobs`` lists every retained id, and
     a dedup skip can land on an existing confidential document the paste did not
     name. So unless ``serve_confidential_titles`` is on (the gate the tree and the
-    recent rail use), a result that names a document has its ``title``,
-    ``vault_path`` and ``document_id`` withheld (``None``, with
+    recent rail use), a result that names a document has every key in
+    :data:`_NAMING_KEYS` withheld (``None``, with
     ``title_withheld: true``) unless it says the document is ``normal``. That is
     fail-closed: a result naming a document with no ``sensitivity`` at all is
     withheld too. Applied on every path that returns a snapshot. The cost: a

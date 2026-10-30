@@ -1,0 +1,245 @@
+"""Pure checks on an upload: its filename, its extension, its cap, and its bytes (RM-13).
+
+The Ingest spec's §7.4, with the ticket's one change: the allow-list is the explicit
+constant :data:`~brain.ui.ingest_limits.UPLOAD_EXTENSIONS`, intersected with the
+extractor registry, never the registry alone.
+
+Nothing the client sends is trusted. The ``X-Brain-Filename`` header is used only for
+its extension and its display stem, and the bytes must match the extension whatever
+the browser declared. No staging state lives here; ``upload_staging`` owns the disk.
+
+Refusals raise the route-facing :class:`~brain.ui.errors.UiError` subclasses directly,
+as ``ingest_schemas`` does, so a route maps nothing. Their messages are fixed strings:
+never the filename, never a parser's exception text.
+"""
+from __future__ import annotations
+
+import re
+import unicodedata
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import unquote
+
+from ..ingest.dispatch import ExtractorRegistry, spec_for, supported_extensions
+from .errors import UiBadRequest, UiUnsupportedMedia
+from .ingest_limits import (
+    BINARY_UPLOAD_EXTENSIONS,
+    DOCX_MAX_CENTRAL_DIRECTORY_BYTES,
+    DOCX_MAX_EXPANDED_BYTES,
+    DOCX_MAX_MEMBERS,
+    DOCX_MAX_RATIO,
+    MAX_BINARY_UPLOAD_BYTES,
+    MAX_FILENAME_BYTES,
+    MAX_FILENAME_CHARS,
+    MAX_TEXT_UPLOAD_BYTES,
+    UPLOAD_EXTENSIONS,
+)
+
+_PDF_MAGIC = b"%PDF-"
+_ZIP_MAGIC = b"PK\x03\x04"
+_DOCX_BODY = "word/document.xml"
+
+#: The zip end-of-central-directory record: its signature, its fixed size, the
+#: offsets of its "total entries" (2 bytes) and "central directory size" (4 bytes)
+#: fields, and how far from the end it can start (a trailing comment is at most
+#: 65,535 bytes).
+_EOCD_SIGNATURE = b"PK\x05\x06"
+_EOCD_SIZE = 22
+_EOCD_TOTAL_ENTRIES = 10
+_EOCD_CD_SIZE = 12
+#: The zip64 end-of-central-directory LOCATOR: 20 bytes immediately before the
+#: end record. When it is there, zipfile takes size_cd and the count from the
+#: zip64 record instead, so the 32-bit fields above prove nothing (rev-77 R5).
+_ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
+_ZIP64_LOCATOR_SIZE = 20
+_EOCD_SEARCH = _EOCD_SIZE + 0xFFFF + _ZIP64_LOCATOR_SIZE
+
+#: Every leading run of dots and whitespace (Unicode whitespace too: U+3000), so a
+#: stem never starts with either, whatever order they come in.
+_LEADING_JUNK = re.compile(r"^[\s.]+")
+
+#: Unicode categories removed from a filename: controls (NUL included) and format
+#: characters, among them the bidi overrides that make ``evil<RLO>fdp.txt`` render
+#: as ``eviltxt.pdf``.
+_STRIPPED_CATEGORIES = frozenset({"Cc", "Cf"})
+
+
+@dataclass(frozen=True)
+class SafeName:
+    """A sanitized filename: ``stem`` carries no separator and no leading dot."""
+
+    stem: str
+    ext: str
+
+    @property
+    def basename(self) -> str:
+        return f"{self.stem}{self.ext}"
+
+
+def uploadable_extensions(registry: ExtractorRegistry | None = None) -> list[str]:
+    """:data:`UPLOAD_EXTENSIONS` that an extractor handles, in registry order.
+
+    ``registry`` defaults to the process-wide one; a test passes its own.
+    """
+    known = registry.supported_extensions() if registry else supported_extensions()
+    return [ext for ext in known if ext in UPLOAD_EXTENSIONS]
+
+
+def upload_cap(ext: str) -> int:
+    """The per-file byte cap for an uploadable extension."""
+    return MAX_BINARY_UPLOAD_BYTES if ext in BINARY_UPLOAD_EXTENSIONS else MAX_TEXT_UPLOAD_BYTES
+
+
+def upload_kind(ext: str) -> str:
+    """The extractor's registry name for ``ext`` (``markdown``, ``pdf``, …)."""
+    spec = spec_for(Path(f"x{ext}"))
+    if spec is None:
+        raise _unsupported()
+    return spec.name
+
+
+def _bad_filename() -> UiBadRequest:
+    return UiBadRequest(
+        "X-Brain-Filename must name a file (percent-encoded UTF-8)", code="bad_filename"
+    )
+
+
+def _unsupported(message: str | None = None) -> UiUnsupportedMedia:
+    allowed = ", ".join(sorted(UPLOAD_EXTENSIONS))
+    return UiUnsupportedMedia(
+        message or f"only these file types may be uploaded: {allowed}", code="unsupported_file"
+    )
+
+
+def sanitize_filename(header: str, registry: ExtractorRegistry | None = None) -> SafeName:
+    """Reduce ``X-Brain-Filename`` to a safe ``(stem, ext)``.
+
+    Percent-decoded as strict UTF-8 (the raw header must be ASCII), reduced to its
+    final component (anything up to the last ``/`` or ``\\`` is dropped), stripped of
+    control and format characters, surrounding space, and every leading dot and space
+    (to a fixed point), and capped at
+    :data:`MAX_FILENAME_CHARS` characters and :data:`MAX_FILENAME_BYTES` UTF-8 bytes
+    (cut on a character boundary) with the extension kept. 400 ``bad_filename`` when
+    nothing is left; 415 ``unsupported_file`` when the extension is not uploadable.
+    """
+    if not header.isascii():
+        raise _bad_filename()
+    try:
+        decoded = unquote(header, encoding="utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise _bad_filename() from exc
+    final = decoded.replace("\\", "/").rsplit("/", 1)[-1]
+    name = "".join(
+        ch for ch in final if unicodedata.category(ch) not in _STRIPPED_CATEGORIES
+    ).strip()
+    if not _LEADING_JUNK.sub("", name):
+        raise _bad_filename()  # nothing but dots and space: ".", "..", " . "
+    ext = Path(name).suffix.lower()
+    if ext not in uploadable_extensions(registry):
+        raise _unsupported()
+    # Leading dots AND whitespace, stripped to a fixed point in one pass: a single
+    # strip-then-lstrip left the dot in ". .x.md" (aud-77 A1).
+    stem = _LEADING_JUNK.sub("", name[: -len(ext)])
+    if not stem:
+        raise _bad_filename()  # an extension and nothing else: ". ..md"
+    return SafeName(stem=_fit(stem[: MAX_FILENAME_CHARS - len(ext)], ext), ext=ext)
+
+
+def _fit(stem: str, ext: str) -> str:
+    """``stem`` shortened, a whole character at a time, until the name fits in bytes."""
+    budget = MAX_FILENAME_BYTES - len(ext.encode("utf-8"))
+    while len(stem.encode("utf-8")) > budget:
+        stem = stem[:-1]
+    return stem
+
+
+def sniff(path: Path, ext: str) -> None:
+    """Refuse (415 ``unsupported_file``) bytes that do not match ``ext``.
+
+    ``%PDF-`` for a PDF; for a ``.docx``, a zip whose central directory holds
+    ``word/document.xml`` and passes the zip-bomb bounds; for text and markdown,
+    strict UTF-8 with no NUL. Reads at most the file itself, which the per-file cap
+    has already bounded; a ``.docx`` is never extracted here.
+    """
+    if ext == ".pdf":
+        _sniff_magic(path, _PDF_MAGIC, "the file is not a PDF")
+    elif ext == ".docx":
+        _sniff_docx(path)
+    elif ext in UPLOAD_EXTENSIONS:
+        _sniff_text(path)
+    else:
+        raise _unsupported()
+
+
+def _sniff_magic(path: Path, magic: bytes, message: str) -> None:
+    with path.open("rb") as handle:
+        if handle.read(len(magic)) != magic:
+            raise _unsupported(message)
+
+
+def _sniff_text(path: Path) -> None:
+    data = path.read_bytes()
+    if b"\x00" in data:
+        raise _unsupported("the file is not text (it contains a NUL byte)")
+    try:
+        data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise _unsupported("the file is not UTF-8 text") from exc
+
+
+def _declared_directory(path: Path) -> tuple[int, int] | None:
+    """The zip's declared ``(entry count, central directory bytes)``, read from its
+    end record WITHOUT opening it.
+
+    ``None`` when no end record is found. A zip64 archive (a locator just before
+    the end record, or the ``0xFFFF`` / ``0xFFFFFFFF`` markers in the 32-bit fields)
+    is reported as ``(0xFFFF, 0xFFFFFFFF)``, past both bounds: zipfile would read
+    the real size_cd from the zip64 record, which is not checked here, and no
+    ``.docx`` under the 25 MiB cap needs zip64.
+    """
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        handle.seek(max(0, size - _EOCD_SEARCH))
+        tail = handle.read()
+    at = tail.rfind(_EOCD_SIGNATURE)
+    if at < 0 or at + _EOCD_SIZE > len(tail):
+        return None
+    locator = at - _ZIP64_LOCATOR_SIZE
+    if locator >= 0 and tail[locator : locator + 4] == _ZIP64_LOCATOR_SIGNATURE:
+        return 0xFFFF, 0xFFFFFFFF
+    entries = tail[at + _EOCD_TOTAL_ENTRIES : at + _EOCD_TOTAL_ENTRIES + 2]
+    size_cd = tail[at + _EOCD_CD_SIZE : at + _EOCD_CD_SIZE + 4]
+    return int.from_bytes(entries, "little"), int.from_bytes(size_cd, "little")
+
+
+def _sniff_docx(path: Path) -> None:
+    _sniff_magic(path, _ZIP_MAGIC, "the file is not a .docx (not a zip)")
+    # Before ZipFile parses the central directory into memory, from the end
+    # record. The bound that matters is size_cd: zipfile reads exactly size_cd
+    # bytes of central directory and builds an entry for every record in them,
+    # whatever the declared count says, so a count check alone is bypassed by
+    # under-reporting it (sec-77 re-review). size_cd is the field zipfile
+    # trusts, so bounding it bounds the parse; and a zip64 locator is refused
+    # outright, because with one zipfile takes size_cd from the zip64 record
+    # instead (rev-77 R5). The count is refused too, and re-checked after.
+    declared = _declared_directory(path)
+    if declared is None:
+        raise _unsupported("the file is not a .docx (a damaged zip)")
+    entries, directory_bytes = declared
+    if entries > DOCX_MAX_MEMBERS or directory_bytes > DOCX_MAX_CENTRAL_DIRECTORY_BYTES:
+        raise _unsupported("the .docx holds too many parts to unpack safely")
+    try:
+        with zipfile.ZipFile(path) as archive:
+            members = archive.infolist()
+    except (zipfile.BadZipFile, OSError, ValueError) as exc:
+        raise _unsupported("the file is not a .docx (a damaged zip)") from exc
+    if len(members) > DOCX_MAX_MEMBERS:
+        raise _unsupported("the .docx holds too many parts to unpack safely")
+    if not any(member.filename == _DOCX_BODY for member in members):
+        raise _unsupported("the file is not a .docx (no word/document.xml)")
+    if sum(member.file_size for member in members) > DOCX_MAX_EXPANDED_BYTES:
+        raise _unsupported("the .docx is too large to unpack safely")
+    if any(member.file_size > DOCX_MAX_RATIO * member.compress_size for member in members):
+        raise _unsupported("the .docx compresses too far to unpack safely")
