@@ -171,4 +171,51 @@ removed; the cap dropping newest-first; history sent without **Follow up**; MCP 
 
 ## Evidence
 
-(filled in as the work lands)
+- **RED before code.** `tests/test_ask_history.py`: first a collection error (no
+  `brain.ask_history`); with the leaf in place and `ask.py` untouched, 5 failed (`ask()` got an
+  unexpected keyword `history`; `_plan_prompt` took one argument), 10 passed (the pure cap and block).
+  `tests/test_ui_ask_routes.py`: 14 failed (the config key, every shape refusal, the server cap, the
+  empty-history and wire-cap rows), 37 passed. `tests/test_ui_browser_agent.py`, the new rows only:
+  3 failed (no **Follow up** button to click), 5 passed (they assert an absence that already held).
+- **GREEN.** `tests/test_ask_history.py` 15, `tests/test_ui_ask_routes.py` 51,
+  `tests/test_ui_ask_wire_contract.py` 4, `tests/test_ui_browser_agent.py` 26 (under the lock).
+  Targeted non-browser set (every `test_ask*`, `test_mcp_ask*`, `test_cli_ask*`, `test_ui_ask*`,
+  `test_ui_jobs*`, `test_import_cycles`, `test_log_privacy`, `test_ui_static_behaviour`,
+  `test_ui_tabs_static`, `test_ui_security`, `test_docs_assets_ask`, `test_ci_workflow`): 722 passed.
+  Coverage: `ask_history.py` 100%, `ui/routes_ask.py` 100%. No local full suite (disk policy); CI is
+  the full-suite evidence.
+- **Acceptance criteria.** AC1: `test_a_follow_ups_plan_prompt_holds_the_previous_turn_and_nothing_else_does`,
+  `test_ask_caps_the_history_oldest_first_with_the_embedders_tokenizer` and the route test
+  `test_the_server_caps_a_follow_ups_history_oldest_first`. AC2: `test_a_fresh_ask_has_no_history_in_its_plan_prompt`,
+  `test_a_fresh_ask_has_no_history_in_its_plan` (route) and `test_a_fresh_ask_sends_no_history`
+  (browser: the body's keys are exactly `question`, `no_loop`). AC3: `test_mcp_brain_ask_takes_no_history`
+  (the tool's parameters equal those at `7a3931c`).
+- **Mutation proofs**, each in its own `git archive` copy (PYTHONDONTWRITEBYTECODE, `__pycache__`
+  purged, PYTHONPATH pinned, `brain.__file__` realpath checked under the copy, the anchor applied
+  exactly once, the copy deleted after):
+  1. history reaches synthesis (`history_block(turns) + question` into `_call_synthesize_step`):
+     2 red, the AC1 unit test and the route cap test;
+  2. the cap removed in `ask` (`turns = tuple(history)`): 2 red;
+  3. the cap walks oldest-first (`for turn in recent`): 6 red;
+  4. the cap keeps the first three, not the last (`[:max_turns]`): 3 red;
+  5. MCP `brain_ask` gains a `history` parameter: 1 red (AC3);
+  6. the route lets `no_loop` + history through: 1 red;
+  7. `ask` drops history silently on `no_loop`: 1 red;
+  8. a fresh ask sends `history: []` (browser): 3 red;
+  9. the follow-up context is kept after it is sent (browser): 1 red;
+  10. a withheld (null) answer offers **Follow up** (browser): 1 red.
+- **End to end.** The real app under uvicorn with its worker thread, on the 5434 rm18c database, a
+  fake `ChatJson` (no Ollama) and a real Chromium: the first ask's body was
+  `{question, no_loop}` and its plan prompt had no history; **Follow up** showed "Following up on:
+  Who ships quarkle?" and turned Quick answer off; the second ask's body carried
+  `history: [{question, answer}]` of the first turn; its plan prompt ended with the "Earlier in this
+  conversation:" block and `Question: And on which day?`; its two reflect and synthesize prompts held
+  no part of the earlier turn; the second card read "Follow-up to: Who ships quarkle?"; and
+  `sessionStorage` held only the two job ids.
+- `ruff check`, `mypy src/` clean; `python scripts/check_ceiling_table.py` passes (16 files over 800,
+  one row each); `grep -c '^| .*no commit through' CLAUDE.md` = 1. `ask.py` 706 → 723 (+17, budget
+  +50).
+- One test-only count moved: the `hidden-toggle-scan-finds-nothing` GUARDS row expects 26 `.hidden =`
+  sites, not 25, because `ask.js` hides `#agent-follow-up` with `hidden` (a `$("id")` receiver the
+  scan resolves, with no `display` rule on it). The `.turn-context` line uses `:empty` instead, as
+  `.turn-phase` does.
