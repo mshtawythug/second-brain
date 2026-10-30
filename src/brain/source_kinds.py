@@ -2,8 +2,8 @@
 
 ``sources.kind`` is bare ``TEXT NOT NULL`` with no CHECK constraint
 (``001_init.sql:6``), so the database accepts any string. Every read surface,
-though, treats the column as a closed enum of four values: the facet panel
-buckets by it, ``brain.ui.schemas`` offers exactly those four in its dropdown,
+though, treats the column as a closed enum: the facet panel
+buckets by it, ``brain.ui.schemas`` offers exactly those values in its dropdown,
 and ``brain.vault.links`` resolves ``[[<kind>:<external-id>]]`` against the same
 set. The enum is therefore real, but it was enforced nowhere on the way in.
 
@@ -33,18 +33,21 @@ class InvalidSourceKind(BrainError):
     """An ingest entry point was handed a ``source`` outside the closed set."""
 
 
-#: The four kinds the ingest paths may write to ``sources.kind``. **This is the
+#: The kinds the ingest paths may write to ``sources.kind``. **This is the
 #: canonical definition** — :data:`brain.ui.schemas.VALID_SOURCE_KINDS`,
 #: :data:`brain.cli._VALID_SOURCE_KINDS` and :data:`brain.vault.links._SOURCE_KINDS`
 #: are re-exports *of this object*, so the mirroring runs toward them, not from
 #: them. (The direction was stated backwards here until 2026-08-21, which matters:
 #: a reader treating this as the mirror edits one of the re-exports and expects the
 #: enum to change.) A new kind is added here and nowhere else in Python (RM-07).
-VALID_SOURCE_KINDS: frozenset[str] = frozenset({"manual", "krisp", "gmail", "slack"})
+#: ``calendar`` (RM-30): Google Calendar events, from ``brain ingest-calendar``.
+VALID_SOURCE_KINDS: frozenset[str] = frozenset(
+    {"manual", "krisp", "gmail", "slack", "calendar"}
+)
 
 
 def source_kinds_hint() -> str:
-    """``gmail|krisp|manual|slack`` — sorted, for error messages."""
+    """``calendar|gmail|krisp|manual|slack`` — sorted, for error messages."""
     return "|".join(sorted(VALID_SOURCE_KINDS))
 
 

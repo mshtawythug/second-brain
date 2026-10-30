@@ -15,7 +15,7 @@ import { pagerModel } from "/static/js/pager.js";
    Adding a source is one line — and, per the overlay's own note, necessary but
    not sufficient: a source-specific chip style would need the same entry. */
 const SOURCE_ICONS = {
-  krisp: "🎙️", slack: "💬", gmail: "📧", manual: "✍️", vault: "🌱",
+  krisp: "🎙️", slack: "💬", gmail: "📧", calendar: "📅", manual: "✍️", vault: "🌱",
 };
 
 /* `vault` is the fallback, matching `sourceIconFor`. It is a real glyph rather

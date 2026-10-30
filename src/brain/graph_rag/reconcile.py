@@ -401,7 +401,10 @@ def reconcile_document(
     # never-raise: an Ollama outage yields [] (WARN) and the watermark marks the
     # doc concept-indexed-empty until `build --concepts --force` (spec §17b #7).
     extracted: list[ExtractedEntity] = []
-    if plan.concept_stale:
+    # RM-30: a type the extract policy skips keeps ``extracted == []`` and runs the
+    # rest of the stale concept path, which clears any earlier concept mentions
+    # and writes the policy's watermark from the plan (``extract_policy``).
+    if plan.concept_stale and not plan.concept_skipped:
         assert extractor is not None and plan.content is not None  # see nothing_to_do
         extracted = extractor.extract(plan.content)
     # 3. Write: take the graph write lock, then drop a plan whose doc was edited

@@ -74,9 +74,14 @@ function saveShowIngested(value) {
 
 /* Folders whose notes are grouped by month, per the overlay (P4.3). NOT every
    folder: month headers make sense where the folder is a chronological feed —
-   a meeting transcript per call, an email thread per day — and are noise in a
-   hand-organised vault folder where the author chose the arrangement. */
-const MONTH_GROUPED_PATHS = new Set(["_ingested/krisp", "_ingested/gmail"]);
+   a meeting transcript per call, an email thread per day, a calendar event per
+   meeting (RM-30) — and are noise in a hand-organised vault folder where the
+   author chose the arrangement. */
+const MONTH_GROUPED_PATHS = new Set([
+  "_ingested/krisp",
+  "_ingested/gmail",
+  "_ingested/calendar",
+]);
 
 const MONTHS = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",

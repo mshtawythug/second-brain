@@ -22,6 +22,27 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — calendar events as documents (RM-30)
+
+- **`brain ingest-calendar --since YYYY-MM-DD --until YYYY-MM-DD`** stores Google Calendar events
+  as documents through the `gws` CLI: one `calendar_event` document per event, and one per
+  recurring series, under the new `calendar` source kind. Both dates are required; the window is at
+  most 92 days and ends at most 14 days ahead. `--calendar` (default `primary`), `--dry-run`,
+  `--tag`, `--enrich` (no summary by default) and `--allow-secrets`.
+- Meetings without a transcript are now searchable, filterable with `--source calendar` and
+  `--person`, and dated by their start time. Attendee addresses are stored only as participants,
+  never in the body; conference links and dial-in, PIN and passcode lines are dropped. Declined,
+  untitled, cancelled, working-location and out-of-office entries are skipped, and private events
+  are stored as `confidential`.
+- A series' occurrence dates live in its metadata, so a re-run that only finds new occurrences
+  updates the metadata without re-chunking or re-embedding.
+- `brain ui` shows a calendar glyph for the new kind, and groups `_ingested/calendar` by month.
+- **Concept-skip policy.** `graph_rag/extract_policy.py` names the content types whose concept
+  aspect is never extracted (`calendar_event` for now). Such a document is reconciled with an
+  empty extraction and a policy watermark, so the next `brain graphrag build --backfill` counts it
+  as skipped, and its people aspect still runs. Adding a type and bumping
+  `CONCEPT_SKIP_POLICY_VERSION` strips that type's earlier concept mentions on the next backfill.
+
 ### Fixed — the graph build survives a concurrent delete; a reconcile re-checks the participants (RM-27)
 
 - **`brain graphrag build` no longer stops when a document is deleted while it runs.** A document
