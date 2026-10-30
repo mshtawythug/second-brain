@@ -49,7 +49,9 @@ import { openNote } from "/static/js/inspector.js";
    live vocabulary is results.js's table (itself ported from the retired Quartz
    overlay, deleted at R3); keep the two in step. */
 const SOURCE_ICONS = {
-  krisp: "🎙️", slack: "💬", gmail: "📧", manual: "✍️", vault: "🌱",
+  krisp: "🎙️", slack: "💬", gmail: "📧", calendar: "📅", manual: "✍️", vault: "🌱",
+  jira: "🎫",
+  github: "🔀",
 };
 const sourceIconFor = (kind) => SOURCE_ICONS[kind] || SOURCE_ICONS.vault;
 

@@ -1,0 +1,345 @@
+"""Code-host reader for `brain ingest-github` (RM-31): the `gh` CLI calls and their parsing.
+
+Path (b) of the new-source protocol: a shell-out to the already-authenticated
+``gh`` (``gh auth login``), behind an injectable :data:`GhRunner` so tests never
+run it. This module only reads; :mod:`brain.ingest.github_docs` turns what it
+returns into documents, and :mod:`brain.cli_ingest_github` writes them.
+
+**No credential and no ``gh`` text leaves this module.** ``brain`` never asks
+``gh`` for its token and never requests response headers. Every
+:class:`GithubError` message is written here and names only the subcommand, an
+exit code, a timeout or an exception class, never ``gh``'s stdout or stderr
+(which can quote an account, a URL with a token, or a server message), so the
+CLI may print it as it is. Raised ``from None``, so no traceback chains the
+original either.
+
+**Pagination.** ``gh api --paginate`` prints each page as its own JSON value,
+one after another; :func:`parse_pages` reads that stream, which ``--slurp``
+would do only on newer ``gh`` releases.
+
+**Scope.** Every search is the owner's: author, assignee or reviewer
+(:data:`_ROLES`), so ``--repo`` narrows a search to the named repositories and
+never widens it to their other contributors' items (the #100 review ruling).
+
+**The output cap** is enforced while reading: stdout is read in chunks and
+``gh`` is killed as soon as :data:`GH_MAX_STDOUT_BYTES` is passed, so an
+oversized answer is refused before it is held. stderr is discarded unread.
+"""
+from __future__ import annotations
+
+import base64
+import binascii
+import contextlib
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import threading
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import date
+from typing import Any, Literal
+
+SOURCE_KIND = "github"
+
+#: One ``gh`` call: argv in, stdout out; raises :class:`GithubError`.
+GhRunner = Callable[[list[str]], str]
+
+#: Per call. A search of up to 501 results, or one paginated comment list, is far below it.
+GH_TIMEOUT_SECONDS = 60
+#: The largest answer read; ``gh`` is killed past it (module docstring).
+GH_MAX_STDOUT_BYTES = 32 * 1024 * 1024
+_READ_CHUNK_BYTES = 65536
+#: ``OWNER/REPO`` as the code host spells them; see :func:`is_repo_name`.
+REPO_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}")
+
+#: The ``--json`` fields per search type. They must be fields that type has in
+#: ``gh search <type> --help``: ``issues`` has no ``isDraft``, and gh refuses an
+#: unknown field with exit 1 (``tests/github_fixtures.py`` pins both sets).
+_SEARCH_FIELDS: Mapping[str, str] = {
+    "prs": (
+        "number,title,body,repository,url,state,updatedAt,createdAt,author,"
+        "isDraft,isPullRequest,labels,commentsCount"
+    ),
+    "issues": (
+        "number,title,body,repository,url,state,updatedAt,createdAt,author,"
+        "isPullRequest,labels,commentsCount"
+    ),
+}
+#: The owner's roles, per search type (the ticket: author, assignee or reviewer).
+_ROLES: Mapping[str, tuple[tuple[str, str], ...]] = {
+    "prs": (("--author", "@me"), ("--assignee", "@me"), ("--reviewed-by", "@me")),
+    "issues": (("--author", "@me"), ("--assignee", "@me")),
+}
+#: ``gh`` must never wait on a prompt or print an upgrade banner into stdout.
+_QUIET_ENV = {"GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1", "NO_COLOR": "1"}
+_INSTALL_HINT = (
+    "gh CLI not found on PATH: install it (https://cli.github.com), then `gh auth login`"
+)
+
+
+class GithubError(RuntimeError):
+    """A ``gh`` call failed or answered something unusable. The message quotes no ``gh`` output."""
+
+
+@dataclass(frozen=True)
+class SearchScope:
+    """What one run reads: the owner's items in ``repos`` (all repositories when empty).
+
+    ``mine`` changes no search (every search is the owner's); it adds the
+    READMEs of the result repositories the owner owns (plan ruling R1).
+    """
+
+    repos: tuple[str, ...]
+    mine: bool
+    since: date
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    """One pull request or issue from ``gh search``."""
+
+    kind: Literal["pr", "issue"]
+    repo: str
+    number: int
+    updated_at: str
+    raw: Mapping[str, Any]
+
+    @property
+    def external_id(self) -> str:
+        """The dedup key, ``<owner>/<repo>#<number>`` (PRs and issues share the numbers)."""
+        return f"{self.repo}#{self.number}"
+
+
+@dataclass(frozen=True)
+class RawItem:
+    """A hit and what its per-item reads returned (``pr`` and reviews are PR-only)."""
+
+    hit: SearchHit
+    pr: Mapping[str, Any] | None
+    reviews: tuple[Mapping[str, Any], ...]
+    review_comments: tuple[Mapping[str, Any], ...]
+    issue_comments: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class Readme:
+    text: str
+    path: str
+    sha: str
+
+
+def is_repo_name(name: str) -> bool:
+    """``OWNER/REPO``, whole string, and never a ``.`` or ``..`` repository segment."""
+    return REPO_PATTERN.fullmatch(name) is not None and name.split("/")[1] not in {".", ".."}
+
+
+def gh_runner(
+    args: list[str],
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+    timeout: float = GH_TIMEOUT_SECONDS,
+    max_stdout_bytes: int = GH_MAX_STDOUT_BYTES,
+) -> str:
+    """The production :data:`GhRunner`. ``which`` and ``popen`` are test seams.
+
+    A timer kills ``gh`` at ``timeout``; the read kills it past ``max_stdout_bytes``.
+    ``gh`` runs in its own process group and the whole group is killed, because a
+    child it started (an extension, a credential helper) would otherwise keep
+    stdout open and the read would wait for it.
+    """
+    if not args:
+        raise GithubError("gh runner invoked with no arguments")
+    binary = which(args[0])
+    if binary is None:
+        raise GithubError(_INSTALL_HINT)
+    label = f"`gh {args[1]}`" if len(args) > 1 else "`gh`"
+    timed_out = threading.Event()
+    oversized = False
+    chunks: list[bytes] = []
+    try:
+        with popen(
+            [binary, *args[1:]],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env={**os.environ, **_QUIET_ENV},
+            start_new_session=True,
+        ) as proc:
+            def _kill() -> None:
+                timed_out.set()
+                _kill_group(proc)
+
+            timer = threading.Timer(timeout, _kill)
+            timer.start()
+            try:
+                size = 0
+                assert proc.stdout is not None  # stdout=PIPE
+                while chunk := proc.stdout.read(_READ_CHUNK_BYTES):
+                    size += len(chunk)
+                    if size > max_stdout_bytes:
+                        oversized = True
+                        _kill_group(proc)
+                        break
+                    chunks.append(chunk)
+                returncode = proc.wait()
+            finally:
+                timer.cancel()
+    except OSError as exc:
+        raise GithubError(f"{label} could not run ({type(exc).__name__})") from None
+    if oversized:
+        raise GithubError(
+            f"{label} output exceeded {max_stdout_bytes} bytes; narrow --since or --repo"
+        )
+    if timed_out.is_set():
+        raise GithubError(f"{label} timed out after {timeout:g}s")
+    if returncode != 0:
+        raise GithubError(f"{label} failed (exit {returncode})")
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def _kill_group(proc: subprocess.Popen[bytes]) -> None:
+    """SIGKILL ``proc``'s process group (it leads one: ``start_new_session``)."""
+    with contextlib.suppress(ProcessLookupError):  # already gone
+        os.killpg(proc.pid, signal.SIGKILL)
+
+
+def parse_pages(raw: str) -> list[Any]:
+    """Every value in ``gh api --paginate`` output; array pages are flattened."""
+    decoder = json.JSONDecoder()
+    values: list[Any] = []
+    pos, end = 0, len(raw)
+    while True:
+        while pos < end and raw[pos].isspace():
+            pos += 1
+        if pos == end:
+            return values
+        try:
+            value, pos = decoder.raw_decode(raw, pos)
+        except (json.JSONDecodeError, RecursionError):  # RecursionError: nesting too deep
+            raise GithubError("could not parse the gh output") from None
+        values.extend(value if isinstance(value, list) else [value])
+
+
+def _object(raw: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, RecursionError):  # RecursionError: nesting too deep
+        raise GithubError("could not parse the gh output") from None
+    if not isinstance(value, dict):
+        raise GithubError("the gh output was not a JSON object")
+    return value
+
+
+def _api(path: str, *, runner: GhRunner, paginate: bool = False) -> str:
+    return runner(["gh", "api", *(["--paginate"] if paginate else []), path])
+
+
+def viewer_login(*, runner: GhRunner) -> str:
+    """The authenticated account's login (``gh api user``); its other fields are ignored."""
+    login = _object(_api("user", runner=runner)).get("login")
+    if not isinstance(login, str) or not login:
+        raise GithubError("gh api user returned no login")
+    return login
+
+
+def search_items(scope: SearchScope, *, limit: int, runner: GhRunner) -> list[SearchHit]:
+    """The owner's PRs and issues in scope, deduplicated, newest ``updatedAt`` first."""
+    hits: dict[str, SearchHit] = {}
+    for kind in ("prs", "issues"):
+        for role in _ROLES[kind]:
+            for hit in _search(kind, role, scope, limit=limit, runner=runner):
+                hits.setdefault(hit.external_id, hit)
+    return sorted(hits.values(), key=lambda h: (h.updated_at, h.external_id), reverse=True)
+
+
+def _search(
+    kind: str, role: tuple[str, ...], scope: SearchScope, *, limit: int, runner: GhRunner
+) -> list[SearchHit]:
+    args = ["gh", "search", kind, *role]
+    for repo in scope.repos:
+        args += ["--repo", repo]
+    args += [
+        "--updated", f">={scope.since.isoformat()}",
+        "--sort", "updated", "--order", "desc",
+        "--limit", str(limit),
+        "--json", _SEARCH_FIELDS[kind],
+    ]
+    try:
+        results = json.loads(runner(args))
+    except (json.JSONDecodeError, RecursionError):  # RecursionError: nesting too deep
+        raise GithubError(f"could not parse the gh search {kind} output") from None
+    if not isinstance(results, list):
+        raise GithubError(f"the gh search {kind} output was not a list")
+    item_kind: Literal["pr", "issue"] = "pr" if kind == "prs" else "issue"
+    return [hit for raw in results if (hit := _hit(item_kind, raw)) is not None]
+
+
+def _hit(kind: Literal["pr", "issue"], raw: Any) -> SearchHit | None:
+    """A :class:`SearchHit`, or ``None`` for a result missing what the key needs."""
+    if not isinstance(raw, dict):
+        return None
+    repository = raw.get("repository")
+    repo = repository.get("nameWithOwner") if isinstance(repository, dict) else None
+    number = raw.get("number")
+    if not isinstance(repo, str) or not is_repo_name(repo):
+        return None
+    if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+        return None
+    updated = raw.get("updatedAt")
+    return SearchHit(kind, repo, number, updated if isinstance(updated, str) else "", raw)
+
+
+def fetch_repo(repo: str, *, runner: GhRunner) -> bool:
+    """Whether ``repo`` is not public: ``private``, or a visibility other than ``public``."""
+    resource = _object(_api(f"repos/{repo}", runner=runner))
+    private = resource.get("private")
+    if not isinstance(private, bool):
+        raise GithubError("gh api repos returned no privacy flag")
+    visibility = resource.get("visibility")
+    return private or (isinstance(visibility, str) and visibility != "public")
+
+
+def fetch_item(hit: SearchHit, *, runner: GhRunner) -> RawItem:
+    """The reads one hit needs: for a PR its detail, reviews and inline comments."""
+    base = f"repos/{hit.repo}"
+    pr: dict[str, Any] | None = None
+    reviews: tuple[Mapping[str, Any], ...] = ()
+    review_comments: tuple[Mapping[str, Any], ...] = ()
+    if hit.kind == "pr":
+        pr = _object(_api(f"{base}/pulls/{hit.number}", runner=runner))
+        reviews = _list(f"{base}/pulls/{hit.number}/reviews", runner=runner)
+        review_comments = _list(f"{base}/pulls/{hit.number}/comments", runner=runner)
+    issue_comments = _list(f"{base}/issues/{hit.number}/comments", runner=runner)
+    return RawItem(hit, pr, reviews, review_comments, issue_comments)
+
+
+def _list(path: str, *, runner: GhRunner) -> tuple[Mapping[str, Any], ...]:
+    raw = _api(f"{path}?per_page=100", runner=runner, paginate=True)
+    return tuple(v for v in parse_pages(raw) if isinstance(v, dict))
+
+
+def fetch_readme(repo: str, *, runner: GhRunner) -> Readme | None:
+    """The repository's README, or ``None`` when it has none or it cannot be read."""
+    try:
+        resource = _object(_api(f"repos/{repo}/readme", runner=runner))
+    except GithubError:
+        return None
+    content, encoding = resource.get("content"), resource.get("encoding")
+    if not isinstance(content, str) or encoding != "base64":
+        return None
+    try:
+        # The API wraps the base64 at 60 columns; strict decoding after the
+        # newlines are removed rejects anything else.
+        text = base64.b64decode("".join(content.split()), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return None
+    if not text.strip():
+        return None
+    path, sha = resource.get("path"), resource.get("sha")
+    return Readme(
+        text, path if isinstance(path, str) else "README", sha if isinstance(sha, str) else ""
+    )

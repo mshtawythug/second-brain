@@ -43,6 +43,80 @@ git tag scheme:
 - `pypdfium2` and `Pillow` are now explicit base dependencies. `pdfplumber`
   already required both, so no new package is installed.
 
+### Added — your pull requests, issues and READMEs as documents (RM-31)
+
+- `brain ingest-github` reads your code-host activity through the `gh` CLI and
+  its own login: only items you authored, are assigned or reviewed. It refuses
+  to run without `--repo OWNER/REPO` or `--mine`, and `--since` (exit 2);
+  `--repo` narrows to those repositories and never reads other contributors'
+  items there. It stops at 500 documents a run, saying so. One document
+  per PR, issue and README, deduplicated by `<owner>/<repo>#<n>` and
+  `<owner>/<repo>:README` under the new `github` source.
+- The body keeps only your own comments; `--with-thread` adds everyone's. State,
+  counts and labels live in metadata, so a merged PR is a metadata-only update
+  (no re-chunk, no re-embed), and an unchanged item is not read again.
+- Items from private or internal repositories, or from a repository whose
+  visibility could not be read, are stored `confidential`. No `gh` output or
+  stderr is printed or stored: every error names only the command and its exit
+  code.
+- `brain doctor` has a `github` row (is `gh` on `PATH`?), and the `ingest-brain`
+  skill has a recipe for the GitHub MCP connector when `gh` is not installed.
+- The ingest secret guard (and the pre-commit hook) now also catches the code
+  host's `gho_`, `ghu_`, `ghs_` and `ghr_` tokens, not only `ghp_` and
+  `github_pat_`.
+
+### Added — calendar events as documents (RM-30)
+
+- **`brain ingest-calendar --since YYYY-MM-DD --until YYYY-MM-DD`** stores Google Calendar events
+  as documents through the `gws` CLI: one `calendar_event` document per event, and one per
+  recurring series, under the new `calendar` source kind. Both dates are required; the window is at
+  most 92 days and ends at most 14 days ahead. `--calendar` (default `primary`), `--dry-run`,
+  `--tag`, `--enrich` (no summary by default) and `--allow-secrets`.
+- Meetings without a transcript are now searchable, filterable with `--source calendar` and
+  `--person`, and dated by their start time. Attendee addresses are stored only as participants,
+  never in the body. One cleaner treats the title, location, description and attendee names: it
+  removes every link and address (obfuscated forms included) and drops any line with a dial-in
+  number, PIN, passcode or meeting ID. A title keeps the words before the secret, so it stays
+  findable by name. A date is told apart from a phone number by being a whole, valid date
+  ("2026.10.06" stays; "01.70.37.22.46" is a phone number and goes). The rules prefer privacy to
+  recall, so an ordinary line that looks like a dial-in is dropped too. Declined, untitled,
+  cancelled, working-location and out-of-office entries are skipped, and private events (or
+  Google's legacy `confidential` visibility) are stored as `confidential`. The `gws` read gets a
+  120-second timeout and a 16 MiB output cap, and errors are printed by class only.
+- A series' occurrence dates live in its metadata, so a re-run that only finds new occurrences
+  updates the metadata without re-chunking or re-embedding. Each run is merged into what is
+  stored (the latest ten start times known, and the latest date), so backfilling an earlier window
+  never moves a series backwards, and an occurrence that is no longer in the calendar stops
+  dating the series. A series whose own record cannot be read keeps its stored text.
+- The graph's people aspect now resolves a calendar event's attendees
+  (`people._doc_participant_keys` reads its participants). Because `brain review weekly` tallies
+  its "key people" through the same function, a week's meetings now count their attendees'
+  addresses there too, as its Gmail threads already did. That is intended: a meeting is key-people
+  signal. Confidential documents stay out, as before.
+- `brain ui` shows a calendar glyph for the new kind, and groups `_ingested/calendar` by month.
+- **Concept-skip policy.** `graph_rag/extract_policy.py` names the content types whose concept
+  aspect is never extracted (`calendar_event` for now). Such a document is reconciled with an
+  empty extraction and a policy watermark, so the next `brain graphrag build --backfill` counts it
+  as skipped, and its people aspect still runs. Adding a type and bumping
+  `CONCEPT_SKIP_POLICY_VERSION` strips that type's earlier concept mentions on the next backfill.
+
+### Added — Jira issues as a source, through an agent recipe (RM-34)
+
+- **A new source kind, `jira`.** `brain ingest-stdin --source jira` is accepted, and the facet
+  panel, the source filter and `[[jira:<host>/<KEY>]]` links pick it up. In `brain ui` a Jira row
+  gets its own glyph. `_ingested/jira/` has no month headers in the tree, which is intended.
+- **The recipe lives in the `ingest-brain` skill, not in code.** The Atlassian MCP connector
+  fetches the issues, and the skill pipes each one into `brain ingest-stdin --source jira
+  --content-type jira_issue --sensitivity confidential`. There is no Jira API client. The scope is
+  in the recipe: by default the JQL is
+  `(assignee = currentUser() OR reporter = currentUser()) AND updated >= -30d`, with the
+  parentheses. The agent refuses a JQL with no time bound, and project-wide pulls are not part of
+  the recipe. Issues ingest as `confidential`, because work-tracker content is the employer's.
+  Status and assignee go in metadata, never in the body. Other people's comments go in only on
+  request.
+- **`brain ingest-stdin --help` lists the accepted kinds from the one definition.** It had listed
+  four kinds as a literal, so it would have called `jira` invalid.
+
 ### Fixed — the vault watcher no longer loses a delete across a shutdown or a lost connection (RM-26)
 
 - A file deleted (or renamed away) just as the watcher shut down, or while it

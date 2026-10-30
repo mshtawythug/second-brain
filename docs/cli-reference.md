@@ -654,6 +654,106 @@ Dates passed to `--since` / `--until` are converted into Gmail `after:` /
 `before:` query terms, so use Gmail's `YYYY/MM/DD` shape. Raw `--query` is
 passed through and can use any Gmail search syntax.
 
+## Calendar ingest
+
+`brain ingest-calendar` (RM-30) stores Google Calendar events as documents
+through the `gws` CLI and its own login. Both `--since` and `--until`
+(`YYYY-MM-DD`; `--since` inclusive, `--until` exclusive) are required. The
+window is at most 92 days, and `--until` is at most 14 days after today (UTC).
+Otherwise the command exits 2 with "ingest-calendar requires --since and
+--until (at most 92 days, ending at most 14 days ahead)".
+
+```bash
+brain ingest-calendar --since 2026-09-01 --until 2026-10-01 --dry-run
+brain ingest-calendar --since 2026-10-01 --until 2026-10-31 --calendar primary --tag meetings
+```
+
+- **One document per event, and one per recurring series** (source `calendar`,
+  content type `calendar_event`, deduplicated by the event id or the series id).
+  A series takes its title, description and attendees from the series itself,
+  so a re-run over a different window does not change its text.
+- **What the body holds:** the title, the time (or, for a series, its
+  recurrence rule and time of day), the location, the attendees' names, and
+  the description, all with every link and address removed. Attendee addresses
+  are stored only as participants, which is what `--person` matches. Google's
+  joining block and any line carrying a dial-in number, a PIN, a passcode or a
+  meeting ID are dropped. A title keeps the words before the secret: "Weekly
+  sync, passcode is 7Hk2pQ" is stored as "Weekly sync", and a keyword with no
+  value ("Password manager rollout") stays. The rules prefer privacy to
+  recall: an ordinary description line that looks like a dial-in ("Discuss the
+  access code rollout") is dropped too.
+- **What metadata holds:** the start time, which dates the document (`sent_at`,
+  used by date filters and the recency boost; for a series, its latest known
+  occurrence), and for a series the latest ten start times known and how many
+  occurrences the most recent run's window held. Each run is merged into what is
+  stored, so backfilling an earlier window never moves a series backwards. When
+  only these change, a re-run updates the metadata without re-chunking or
+  re-embedding. If a series' own record cannot be read, a stored series keeps its
+  text and only its dates are refreshed; the command prints how many.
+- **Skipped:** events you declined, events with no title, cancelled events, and
+  working-location and out-of-office entries. **Private** events (and Google's legacy
+  `confidential` visibility) are stored as `confidential`; the rest as `normal`.
+- **Future events.** The recency boost treats a future date as today, so an
+  upcoming event ranks as the newest document. The 14-day limit on `--until`
+  bounds that.
+- **Cost.** No summary unless `--enrich` is passed, and when the graph is on,
+  no concept extraction: `calendar_event` is in
+  `graph_rag.extract_policy.CONCEPT_SKIP_CONTENT_TYPES` (the people aspect still
+  runs). Attendee names and addresses are recorded in the people directory, so
+  `brain search --source calendar --person "<name>"` finds the event.
+- `--dry-run` lists the titles and dates and writes nothing. There is no daemon
+  run; schedule the command yourself if you want one.
+
+## GitHub ingest
+
+`brain ingest-github` (RM-31) stores your own pull requests, issues and
+repository READMEs as documents, through the `gh` CLI and its own login
+(`gh auth login`); brain stores no token. It requires `--repo OWNER/REPO`
+(repeatable) or `--mine`, **and** `--since YYYY-MM-DD`. Otherwise it exits 2
+with "ingest-github requires --repo or --mine, and --since".
+
+```bash
+brain ingest-github --mine --since 2026-10-01 --dry-run
+brain ingest-github --mine --since 2026-10-01 --tag github
+brain ingest-github --repo example-org/example-repo --since 2026-09-01 --with-thread
+```
+
+- **Scope.** Only your own items are read: PRs you authored, are assigned or
+  reviewed, and issues you authored or are assigned, updated since `--since`.
+  `--mine` reads them everywhere; `--repo` narrows them to the named
+  repositories and never reads other contributors' items there.
+  Organisation-wide pulls and commits are not read.
+- **One document per PR or issue** (source `github`, content types `github_pr`
+  and `github_issue`, deduplicated by `<owner>/<repo>#<number>`), and one per
+  README (`github_readme`, `<owner>/<repo>:README`). READMEs are read for each
+  `--repo` repository and, with `--mine`, for the result repositories you own;
+  `--no-readmes` skips them.
+- **What the body holds:** the title line, the description and **your own**
+  comments (issue comments, review bodies and inline review comments).
+  Other people's comments are added only with `--with-thread`; their logins are
+  not stored in the body otherwise.
+- **What metadata holds:** the state (`open`, `closed` or `merged`), the draft
+  flag, the review and comment counts, the labels, and the update, close and
+  merge times. When only these change, a re-run updates the metadata without
+  re-chunking or re-embedding. An item whose update time has not moved is not
+  read again. The creation time dates the document (`sent_at`).
+- **Sensitivity.** Items and READMEs from a repository that is not public
+  (private, or an enterprise `internal` one) are stored as `confidential`, and
+  so is anything from a repository whose visibility could not be read.
+- **Terminal safety.** Titles are stored and printed on one line with control
+  and format characters removed, so a title cannot drive your terminal. `gh`'s
+  output is read up to 32 MiB per call and `gh` is stopped past that; its
+  error output is never shown.
+- **Cap and cost.** At most 500 documents a run: PRs and issues first, newest
+  first, then READMEs in the budget left. The command says when it stopped at
+  the cap. Every new document gets a summary (`--no-enrich` skips it), and when
+  the graph is on, concept extraction takes minutes per document in the
+  watcher's graph lane, so a full 500-document run keeps the lane busy for days.
+  Start with a short `--since`.
+- `--dry-run` lists what would be read and writes nothing. Without `gh` on
+  `PATH` the command exits 1 with an install hint, and `brain doctor`'s `github`
+  row warns.
+
 ## Status and health
 
 ```bash
