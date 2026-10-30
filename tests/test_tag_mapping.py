@@ -217,8 +217,8 @@ def _brute_force_co_occurrence(
 def test_co_occurrence_equals_the_brute_force_rule_on_a_random_corpus(seed: int) -> None:
     rng = random.Random(seed)
     noise = [f"n{i:02d}" for i in range(20)]
-    # Partner tags that appear only beside their lead, at strengths either side of the 0.8 cut,
-    # so the rule fires for some pairs and not for others; plus independent noise tags.
+    # Partner tags that mostly appear beside their lead, at strengths either side of the 0.8
+    # cut, so the rule fires for some pairs and not for others; plus independent noise tags.
     strengths = {f"p{i}": rng.choice([0.6, 0.75, 0.85, 0.95, 1.0]) for i in range(8)}
     doc_tags: dict[str, list[str]] = {}
     for d in range(400):
@@ -228,6 +228,10 @@ def test_co_occurrence_equals_the_brute_force_rule_on_a_random_corpus(seed: int)
                 tags.add(f"{lead}-lead")
                 if rng.random() < strength:
                     tags.add(f"{lead}-partner")
+            elif rng.random() < 0.02:
+                # A partner without its lead: the two document sets are NOT nested, so the
+                # union is larger than either set and |A| + |B| - shared is actually tested.
+                tags.add(f"{lead}-partner")
         doc_tags[f"d{d:03d}"] = sorted(tags)
 
     expected = _brute_force_co_occurrence(doc_tags)
@@ -238,7 +242,49 @@ def test_co_occurrence_equals_the_brute_force_rule_on_a_random_corpus(seed: int)
     }
 
     assert expected  # the corpus is built so the rule fires
+    docs_by_tag: dict[str, set[str]] = {}
+    for doc_id, tags in doc_tags.items():
+        for tag in tags:
+            docs_by_tag.setdefault(tag, set()).add(doc_id)
+    # ... and so its partner/lead sets are NOT nested, where |A| + |B| - shared != max(|A|, |B|).
+    assert any(
+        not docs_by_tag[f"{lead}-partner"] <= docs_by_tag[f"{lead}-lead"]
+        for lead in strengths
+        if f"{lead}-partner" in docs_by_tag
+    )
     assert got.keys() == expected.keys()
     for pair, (overlap, shared) in expected.items():
         assert got[pair][1] == shared
         assert got[pair][0] == pytest.approx(overlap)
+
+
+@pytest.mark.parametrize(
+    ("b_docs", "suggested", "overlap"),
+    [
+        # A on d1..d5, B on d2..d6: shared 4, union 6, Jaccard 0.667 -> not suggested. (A union
+        # taken as max(|A|, |B|) = 5 would give 0.8 and wrongly suggest it.)
+        (range(2, 7), False, 4 / 6),
+        # A on d1..d9, B on d2..d10: shared 8, union 10, Jaccard 0.8 -> suggested, at the cut.
+        (range(2, 11), True, 0.8),
+    ],
+)
+def test_co_occurrence_on_non_nested_document_sets(
+    b_docs: range, suggested: bool, overlap: float
+) -> None:
+    a_docs = range(1, len(b_docs) + 1)
+    doc_tags: dict[str, list[str]] = {}
+    for i in set(a_docs) | set(b_docs):
+        doc_tags[f"d{i:02d}"] = [
+            t for t, docs in (("harbor", a_docs), ("lantern", b_docs)) if i in docs
+        ]
+
+    got = _pairs(suggest_merges(doc_tags))
+
+    pair = got.get(("harbor", "lantern")) or got.get(("lantern", "harbor"))
+    if not suggested:
+        assert pair is None
+        return
+    assert pair is not None
+    assert pair.reasons == ("co-occurrence",)
+    assert pair.overlap == pytest.approx(overlap)
+    assert pair.shared == 8
