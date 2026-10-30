@@ -56,6 +56,11 @@ CAST = frozenset(
 # confidential) cannot run from a manifest seed; ``tests/test_cli_ingest_github.py``
 # covers it. Keeping it out also keeps the 22-doc count that the demo tests, docs
 # and recorded demo tape pin.
+# ``applenotes`` (RM-36): an Apple Notes note is ingested ``confidential`` by
+# default, and the demo manifest has no sensitivity field, so a demo note would
+# showcase the wrong tier (the ``jira`` reason); the ``osascript`` read cannot
+# run from a manifest seed either. ``tests/test_cli_ingest_apple_notes.py``
+# covers the path. Keeping it out also keeps the 22-doc count.
 # ``screenshot`` (RM-33): a screenshot is OCR text from an image file moved into a
 # drop folder's ``imported/``, stored ``confidential`` by default; the manifest
 # seeds text, not images, and has no sensitivity field, so a demo screenshot
@@ -64,7 +69,7 @@ CAST = frozenset(
 # The exemption is checked against the canonical set below, so it cannot outlive
 # the kind, and any kind added later still fails this guard until it is either
 # seeded or exempted here.
-DEMO_EXEMPT_KINDS = frozenset({"calendar", "jira", "github", "screenshot"})
+DEMO_EXEMPT_KINDS = frozenset({"calendar", "jira", "github", "applenotes", "screenshot"})
 EXPECTED_SOURCES = VALID_SOURCE_KINDS - DEMO_EXEMPT_KINDS
 
 # Real-provider email domains that must NEVER appear (generic provider domains,

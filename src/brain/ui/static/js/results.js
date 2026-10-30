@@ -18,6 +18,7 @@ const SOURCE_ICONS = {
   krisp: "🎙️", slack: "💬", gmail: "📧", calendar: "📅", manual: "✍️", vault: "🌱",
   jira: "🎫",
   github: "🔀",
+  applenotes: "🗒️",
   screenshot: "📸",
 };
 
