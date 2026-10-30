@@ -39,6 +39,7 @@ from typing import Literal, Protocol
 
 import httpx
 
+from . import near_dup_store
 from .brief import BriefData, watch_section_lines
 from .brief_entities import SECTION_TITLE, section_lines
 
@@ -287,6 +288,10 @@ def render_delivery(brief: BriefData, *, include_todos: bool) -> tuple[str, str]
     # entity is in it, because the section never counts a draft.
     if entity_lines := section_lines(brief.new_entities):
         lines += ["", SECTION_TITLE, *[f"- {_one_line(line)}" for line in entity_lines]]
+    # A count, no title (§2.5 rule 3); the gated payload's count leaves out confidential and
+    # draft ends, so it reveals neither (RM-19 plan, R4).
+    if dup_lines := near_dup_store.brief_lines(brief.possible_duplicates):
+        lines += ["", near_dup_store.section_title(brief.possible_duplicates), f"- {dup_lines[0]}"]
     lines += ["", f"Open action items: {len(brief.open_todos)}"]
     if include_todos:
         lines += [f"- [ ] {_one_line(row.text)}" for row in brief.open_todos]

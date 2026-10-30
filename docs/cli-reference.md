@@ -1148,6 +1148,13 @@ known only from confidential documents. The section comes from the GraphRAG
 entity tables, so it is absent when `BRAIN_GRAPH_ENABLED=false` or those tables
 do not exist. `--json` carries it as `new_entities`.
 
+A **Possible duplicates (N)** line appears when near-duplicate pairs (`brain
+dedup`, below) are open. It is a count, never a title. The terminal counts every
+open pair; the `--wiki` page, and anything delivered, counts only pairs whose
+two documents are neither confidential nor drafts. The brief never scans; the
+daily brief job runs `brain dedup scan --limit 500` just before it. `--json`
+carries it as `possible_duplicates`.
+
 **Delivery (opt-in, off by default).** With `BRAIN_BRIEF_DELIVERY=email` or
 `slack` (see [configuration](configuration.md#brain_brief_delivery--send-the-daily-brief-to-yourself)),
 `brain brief --wiki` also sends the page's content to you once it is written:
@@ -1200,6 +1207,43 @@ brain watch pause NAME | resume NAME | rm NAME
   import), `check` and the terminal brief say how many more matched than it could record
   (a semantic check says "50 checked, more may exist"); `brain search` lists them.
 - Saved searches need migration 029: run `brain init` after upgrading.
+
+### brain dedup
+
+Near-duplicate detection: pairs of documents that are near-copies of each other
+(a forwarded email, a re-sent draft, one file ingested twice by two paths). It
+**flags only**: nothing is ever refused, merged or deleted. Deleting one of a
+pair stays `brain rm`.
+
+```bash
+brain dedup scan [--all] [--limit N]         # sign new/edited documents, record pairs
+brain dedup list [--status open|dismissed|confirmed] [--limit N] [--json]
+brain dedup dismiss A B                      # not duplicates; never re-opened
+brain dedup confirm A B                      # duplicates (a label only)
+```
+
+- **How a pair is found.** Each body is lowercased and split into words; every
+  run of 5 words is hashed, and a 128-value MinHash signature with 32 bands of 4
+  rows proposes candidates. A candidate is recorded only when its estimated
+  word-5-gram Jaccard similarity is **at least 0.85**. Documents under **50
+  words** are skipped, and two documents of one Gmail thread are never paired.
+- **`scan` signs only what is new or edited** (a document whose content hash
+  changed since its last signature); `--all` re-signs everything, and `--limit`
+  caps one run, reporting how many are left. The daily brief job runs
+  `brain dedup scan --limit 500` on its own line before `brain brief --wiki`, so
+  a failed scan never stops the brief.
+- **An edit is re-checked**: an open pair that no longer verifies is dropped.
+  A pair you **dismissed** or **confirmed** keeps its label through every later
+  scan, so a dismissed pair is never re-opened. Deleting a document deletes its
+  pairs.
+- `dismiss` and `confirm` take id prefixes (6+ characters), in either order.
+- `list` is the terminal, so it lists confidential documents too; MCP
+  `brain_dedup_list` does not, unless asked (see
+  [configuration](configuration.md#mcp-tools)).
+- The Ingest tab's job result carries `possible_duplicates`: the new document's
+  near-copies among documents already signed. A confidential near-copy's title,
+  id and path are withheld unless `brain ui` serves confidential titles.
+- Needs migration 030: run `brain init` after upgrading.
 
 ### brain review
 

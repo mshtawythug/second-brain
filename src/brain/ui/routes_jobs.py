@@ -73,7 +73,43 @@ def lensed_result(
             if key in payload:
                 payload[key] = None
     payload["title_withheld"] = withhold
+    if "possible_duplicates" in payload:
+        payload["possible_duplicates"] = _lensed_duplicates(
+            payload["possible_duplicates"],
+            serve_confidential_titles=serve_confidential_titles,
+            parent_withheld=withhold,
+        )
     return payload
+
+
+#: What a withheld near-duplicate loses (RM-19): everything that names it.
+_DUPLICATE_NAMING_KEYS = ("document_id", "title", "vault_path")
+
+
+def _lensed_duplicates(
+    value: Any, *, serve_confidential_titles: bool, parent_withheld: bool
+) -> list[dict[str, Any]]:
+    """The ``possible_duplicates`` list, each entry lensed (RM-19 plan, R5).
+
+    :func:`lensed_result` reads top-level keys only, and this list names its documents one level
+    down. An entry is withheld unless titles are served or it says it is ``normal``; a missing
+    level and a non-mapping entry are withheld (fail-closed), and a value that is not a list
+    becomes ``[]``. When the job's own document is withheld, every entry is: a named near-copy
+    of a withheld document discloses what that document says.
+    """
+    if not isinstance(value, list):
+        return []
+    entries = []
+    for raw in value:
+        entry: dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
+        withhold = parent_withheld or (
+            not serve_confidential_titles and entry.get("sensitivity") != "normal"
+        )
+        if withhold:
+            entry.update(dict.fromkeys(_DUPLICATE_NAMING_KEYS))
+        entry["withheld"] = withhold
+        entries.append(entry)
+    return entries
 
 
 #: What a withheld citation loses: everything that names or quotes its document.

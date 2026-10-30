@@ -24,7 +24,7 @@ from typing import Any
 
 import psycopg
 
-from . import brief_entities, chat
+from . import brief_entities, chat, near_dup_store
 from .activity import recent_captures
 from .config import Config
 from .errors import EnrichmentError, describe_failure
@@ -85,6 +85,8 @@ class BriefData:
     watch_notes: list[WatchNote] = field(default_factory=list)
     #: Entities first seen this week (RM-17), under this payload's confidential lens.
     new_entities: list[brief_entities.NewEntity] = field(default_factory=list)
+    #: Open near-duplicate pairs (RM-19); gated, no pair with a confidential or draft end.
+    possible_duplicates: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the wire shape shared by ``brain brief --json`` + MCP."""
@@ -142,6 +144,7 @@ class BriefData:
                 for note in self.watch_notes
             ],
             "new_entities": [entity.to_dict() for entity in self.new_entities],
+            "possible_duplicates": self.possible_duplicates,
         }
 
 
@@ -161,10 +164,10 @@ def assemble_brief(
     passes today so this stays deterministic under test). Suggestions are filled
     separately by :func:`suggest_next_steps`.
 
-    ``exclude_confidential`` (F6) is threaded to ALL FIVE reads below, and it
-    has to be all five: they are independent queries against ``documents`` — a
-    time window, a body scan, an interaction join, the watch hits, and the new
-    entities' aggregate — so closing any one of them closes none of the others.
+    ``exclude_confidential`` (F6) is threaded to ALL SIX reads below, and it
+    has to be all six: they are independent queries against ``documents`` — a
+    time window, a body scan, an interaction join, the watch hits, the new
+    entities' aggregate and the duplicate count — so closing one closes none of the others.
 
     The watch hits are the TERMINAL set (every hit first seen in the last
     ``since_hours``, notified or not); no check runs here, so MCP ``brain_brief``
@@ -211,6 +214,9 @@ def assemble_brief(
         watch_hits=watch_hits,
         new_entities=brief_entities.for_brief(
             conn, cfg, exclude_confidential=exclude_confidential
+        ),
+        possible_duplicates=near_dup_store.count_open(
+            conn, exclude_confidential=exclude_confidential
         ),
     )
 
@@ -365,6 +371,8 @@ def _render_brief_body(brief: BriefData) -> str:
         lines += ["", "## Watch hits", "", *[f"- {line}" for line in watch_lines]]
     if entity_lines := brief_entities.section_lines(brief.new_entities):
         lines += ["", f"## {brief_entities.SECTION_TITLE}", "", *[f"- {e}" for e in entity_lines]]
+    if dup_lines := near_dup_store.brief_lines(n_dups := brief.possible_duplicates):
+        lines += ["", f"## {near_dup_store.section_title(n_dups)}", "", f"- {dup_lines[0]}"]
 
     if brief.suggestions:
         lines += ["", "## Suggested next steps", ""]
@@ -379,6 +387,8 @@ def terminal_sections(brief: BriefData) -> list[tuple[str, list[str]]]:
     sections = [
         ("👀  Watch hits", watch_section_lines(brief)),
         (f"🆕  {brief_entities.SECTION_TITLE}", brief_entities.section_lines(brief.new_entities)),
+        (f"🔁  {near_dup_store.section_title(n := brief.possible_duplicates)}",
+         near_dup_store.brief_lines(n)),
     ]
     return [(heading, lines) for heading, lines in sections if lines]
 

@@ -159,6 +159,8 @@ _KNOWN_GATED = frozenset(
         "brain_graphrag_communities",
         # RM-15: a peek at each watch's new matches, lens in the search predicate.
         "brain_watch_check",
+        # RM-19: near-duplicate pairs, the lens on BOTH ends in the SQL predicate.
+        "brain_dedup_list",
     }
 )
 
