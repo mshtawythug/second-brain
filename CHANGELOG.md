@@ -22,6 +22,28 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — a code-aware chunker for the `code` content type (RM-42, PR #109)
+
+- Documents with `content_type="code"` are chunked at definition boundaries,
+  one definition per chunk. Python is split with the stdlib `ast` module at
+  top-level functions and classes; a class over the budget is split by method,
+  and the module docstring and imports form a header chunk. Python that does not
+  parse (Python 2, syntax errors) and JavaScript/TypeScript, Go, Rust, Java and
+  shell use a table of top-level declaration patterns. A comment, attribute or
+  decorator block directly above a declaration goes with it. Every chunk starts
+  with a `path:start-end symbol` line, and the path is put on one line without
+  control characters and capped in length.
+- Every code chunk, header included, stays within the prose chunker's ceiling
+  (`INGEST_CHUNK_TARGET_TOKENS + INGEST_CHUNK_OVERLAP_TOKENS`). A definition over
+  it is packed by blank-line blocks, then lines, then characters.
+- Every other content type chunks exactly as before. No extractor produces `code`
+  yet (RM-43 adds it), so no stored chunk changes. New leaves are
+  `brain/ingest/chunk_dispatch.py` (`chunk_for`) and
+  `brain/ingest/code_chunker.py`. `ingest/__init__.py`'s two chunking calls now
+  go through `chunk_for`, at net zero lines. The path and language hints are
+  read from the document's `metadata` (`path`, `language`). Tree-sitter is not
+  used (RM-42.D1).
+
 ### Added — voice memos, transcribed on this machine (RM-38)
 
 - A drop folder with `kind = "voice"` takes `.m4a`, `.mp3` and `.wav` memos (shared or
