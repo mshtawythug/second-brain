@@ -206,6 +206,8 @@ def test_a_served_confidential_note_carries_abs_path(
         ("::", None, False),
         ("loopback-alias.example", ("127.0.0.1",), False),  # round 16 alias
         ("localhost", ("192.0.2.30",), False),
+        # Mixed answer: loopback AND a LAN address is not loopback (round 10).
+        ("localhost", ("127.0.0.1", "192.0.2.30"), False),
     ],
 )
 def test_build_context_derives_serve_abs_path_from_the_bind(

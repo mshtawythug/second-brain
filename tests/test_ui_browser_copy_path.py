@@ -112,25 +112,29 @@ def static_origin() -> Iterator[str]:
         server.server_close()
 
 
-def _fulfill_api(route: Any, path: str) -> None:
+#: ``/api/health`` for a ``--read-only`` server: the note bar drops every write.
+_READ_ONLY_HEALTH: dict[str, Any] = {"status": "ok", "read_only": True, "notices": []}
+
+
+def _fulfill_api(route: Any, path: str, stubs: dict[str, Any]) -> None:
     match = re.fullmatch(r"/api/notes/([^/]+)", path)
-    body = NOTES.get(match.group(1)) if match is not None else _STUBS.get(path)
+    body = NOTES.get(match.group(1)) if match is not None else stubs.get(path)
     if body is None:
         route.fulfill(status=404, body="{}", content_type="application/json")
         return
     route.fulfill(status=200, body=json.dumps(body), content_type="application/json")
 
 
-def _route_api(route: Any) -> None:
+def _route_api(route: Any, stubs: dict[str, Any]) -> None:
     path = "/" + route.request.url.split("://", 1)[1].split("/", 1)[1]
-    _fulfill_api(route, path.split("?")[0])
+    _fulfill_api(route, path.split("?")[0], stubs)
 
 
 def _route_lan(route: Any) -> None:
     """Serve every LAN_ORIGIN request: API stubs, else the static file off disk."""
     path = "/" + route.request.url.split("://", 1)[1].split("/", 1)[1].split("?")[0]
     if path.startswith("/api/"):
-        _fulfill_api(route, path)
+        _fulfill_api(route, path, _STUBS)
         return
     root = static_dir().parent.resolve()
     target = (root / path.lstrip("/")).resolve()
@@ -157,7 +161,10 @@ def browser() -> Iterator[Any]:
             launched.close()
 
 
-def _boot(browser: Any, origin: str, *, init_script: str | None = None) -> Any:
+def _boot(
+    browser: Any, origin: str, *, init_script: str | None = None,
+    stubs: dict[str, Any] = _STUBS,
+) -> Any:
     """A booted app page at ``origin``, clipboard permissions granted there."""
     context = browser.new_context(viewport={"width": 1280, "height": 800})
     context.grant_permissions(["clipboard-read", "clipboard-write"], origin=origin)
@@ -167,7 +174,7 @@ def _boot(browser: Any, origin: str, *, init_script: str | None = None) -> Any:
     if origin == LAN_ORIGIN:
         page.route(f"{LAN_ORIGIN}/**", _route_lan)
     else:
-        page.route("**/api/**", _route_api)
+        page.route("**/api/**", lambda route: _route_api(route, stubs))
     page.goto(f"{origin}/static/index.html")
     page.wait_for_selector('[role="treeitem"]', timeout=8000)
     return page
@@ -221,6 +228,28 @@ def test_without_abs_path_the_button_copies_vault_path(
         timeout=5000,
     )
     assert _clipboard(page) == VAULT_PATH
+
+
+def test_a_read_only_server_still_offers_the_button(
+    browser: Any, static_origin: str
+) -> None:
+    """Copying a path mutates nothing, so ``--read-only`` keeps the button.
+
+    The bar's write buttons (Draft, Move, Delete) live under ``if (!readOnly)``;
+    the copy control must not, or a read-only loopback server loses it.
+    """
+    stubs = {**_STUBS, "/api/health": _READ_ONLY_HEALTH}
+    page = _boot(browser, static_origin, stubs=stubs)
+    _open(page, "n-abs")
+    assert page.locator('.note-bar button:has-text("Delete")').count() == 0
+
+    page.click(BUTTON, timeout=5000)
+
+    page.wait_for_function(
+        "(sel) => document.querySelector(sel)?.textContent === 'Copied'", arg=STATUS,
+        timeout=5000,
+    )
+    assert _clipboard(page) == ABS_PATH
 
 
 def test_a_note_with_no_path_has_no_button(browser: Any, static_origin: str) -> None:
