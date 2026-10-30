@@ -12,6 +12,8 @@ import functools
 import io
 import logging
 import math
+import zlib
+from collections.abc import Iterator
 from pathlib import Path
 
 import psycopg
@@ -21,14 +23,17 @@ from PIL import Image
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
+from brain.errors import describe_failure
 from brain.ingest import ingest_document
 from brain.ingest.ocr import PAGE_TIMEOUT_S, OcrSetup
 from brain.ingest.pdf import (
+    MAX_IMAGE_PIXELS,
     MAX_PIXELS,
     MAX_SIDE_PX,
     MIN_RENDER_DPI,
     OCR_DEADLINE_S,
     PageTooLargeError,
+    embedded_image_pixels,
     extract_pdf,
     render_page_png,
     render_scale,
@@ -68,18 +73,7 @@ def _thin_pdf(path: Path, width_pt: float, height_pt: float) -> Path:
         b"/BitsPerComponent 8 /Length 1 >>\nstream\n" + image + b"\nendstream",
         f"<< /Length {len(draw)} >>\nstream\n".encode() + draw + b"\nendstream",
     ]
-    out = bytearray(b"%PDF-1.4\n")
-    offsets = []
-    for number, body in enumerate(objects, start=1):
-        offsets.append(len(out))
-        out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
-    xref = len(out)
-    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
-    out += b"".join(f"{offset:010d} 00000 n \n".encode() for offset in offsets)
-    trailer = f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
-    out += trailer.encode()
-    path.write_bytes(bytes(out))
-    return path
+    return _write_pdf(path, objects)
 
 
 # ---------------------------------------------------------------------------
@@ -112,13 +106,20 @@ def test_a_large_page_is_scaled_down_so_the_rounded_bitmap_fits_the_cap(
 
 @pytest.mark.parametrize(
     ("width", "height"),
-    [(0.01, 3.5e8), (1e-30, 1e30), (3.5e8, 0.01)],
-    ids=["thin-tall", "overflow-int", "thin-wide"],
+    [(0.01, 3.5e8), (1e-30, 1e30), (3.5e8, 0.01), (3e7, 0.01), (1e8, 0.001)],
+    ids=["thin-tall", "overflow-int", "thin-wide", "moderate-83mpx", "aud-99-277m"],
 )
 def test_a_thin_page_cannot_round_past_the_cap(width: float, height: float) -> None:
     """sec-99b: 0.01 x 3.5e8 pt was 3.5e6 pt2 of area but a 1 x 972,222,223 px bitmap."""
     with pytest.raises(PageTooLargeError):
         render_scale(width, height)
+
+
+def test_a_side_under_one_pixel_is_refused() -> None:
+    """0.01 x 1,000 pt is 1 x 2,778 px once rounded, under every cap, but holds no text line."""
+    with pytest.raises(PageTooLargeError, match="one pixel"):
+        render_scale(0.01, 1_000)
+    assert min(_bitmap(0.5, 1_000, render_scale(0.5, 1_000))) == 2  # 0.5 pt is 1.39 px
 
 
 def test_a_side_past_tesseracts_limit_is_refused_even_under_the_area_cap() -> None:
@@ -142,6 +143,7 @@ def test_every_scale_returned_fits_both_caps(width: float, height: float) -> Non
     width_px, height_px = _bitmap(width, height, scale)
     assert width_px * height_px <= MAX_PIXELS
     assert max(width_px, height_px) <= MAX_SIDE_PX
+    assert min(width, height) * scale >= 1
     assert scale >= MIN_RENDER_DPI / 72
 
 
@@ -270,6 +272,139 @@ def test_a_memory_error_while_rendering_skips_that_page(
 
     assert doc.content == "[page 2]\nsecond"
     assert caplog.messages == ["OCR skipped page 1 of 2: MemoryError"]
+
+
+# ---------------------------------------------------------------------------
+# embedded image decode (rev-99 MEDIUM)
+# ---------------------------------------------------------------------------
+
+#: Declared 12,000 px square, 1 byte a pixel: 144 Mpx, about a 140 KB file.
+BIG_IMAGE_SIDE = 12_000
+
+
+def _declared_image_pdf(path: Path, side_px: int, *, nested: bool) -> Path:
+    """A letter page drawing one ``side_px`` square gray flate image, optionally via a Form.
+
+    The image stream is compressed a megabyte of zeros at a time with ``zlib.compressobj``, so
+    the test never holds the image in memory, and nothing here decodes it.
+    """
+    compressor = zlib.compressobj(9)
+    zeros = b"\0" * (1 << 20)
+    remaining = side_px * side_px
+    parts: list[bytes] = []
+    while remaining:
+        count = min(remaining, len(zeros))
+        parts.append(compressor.compress(zeros[:count]))
+        remaining -= count
+    data = b"".join([*parts, compressor.flush()])
+    image = (
+        f"<< /Type /XObject /Subtype /Image /Width {side_px} /Height {side_px} "
+        f"/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode "
+        f"/Length {len(data)} >>\nstream\n"
+    ).encode() + data + b"\nendstream"
+    draw_image = b"q 100 0 0 100 0 0 cm /Im0 Do Q"
+    if nested:
+        form = (
+            f"<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] "
+            f"/Resources << /XObject << /Im0 6 0 R >> >> /Length {len(draw_image)} >>\nstream\n"
+        ).encode() + draw_image + b"\nendstream"
+        resources, draw, fourth = b"/Fm0 4 0 R", b"q /Fm0 Do Q", form
+    else:
+        resources, draw, fourth = b"/Im0 4 0 R", draw_image, image
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << "
+        + resources
+        + b" >> >> /Contents 5 0 R >>",
+        fourth,
+        f"<< /Length {len(draw)} >>\nstream\n".encode() + draw + b"\nendstream",
+        *([image] if nested else []),
+    ]
+    return _write_pdf(path, objects)
+
+
+def _write_pdf(path: Path, objects: list[bytes]) -> Path:
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+    out += b"".join(f"{offset:010d} 00000 n \n".encode() for offset in offsets)
+    trailer = f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    out += trailer.encode()
+    path.write_bytes(bytes(out))
+    return path
+
+
+def test_the_image_bound_defaults_to_four_times_the_pixel_cap() -> None:
+    assert MAX_IMAGE_PIXELS == 4 * MAX_PIXELS == 280_000_000
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["direct", "nested-form"])
+def test_embedded_image_pixels_reads_the_declared_size_without_decoding(
+    tmp_path: Path, nested: bool
+) -> None:
+    path = _declared_image_pdf(tmp_path / "big.pdf", BIG_IMAGE_SIDE, nested=nested)
+
+    document = pypdfium2.PdfDocument(str(path))
+    try:
+        pixels = embedded_image_pixels(document[0])
+    finally:
+        document.close()
+
+    assert path.stat().st_size < 200_000
+    assert pixels == BIG_IMAGE_SIDE**2
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["direct", "nested-form"])
+def test_a_page_whose_images_exceed_the_bound_is_skipped_before_render(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, nested: bool
+) -> None:
+    path = _declared_image_pdf(tmp_path / "big.pdf", BIG_IMAGE_SIDE, nested=nested)
+    engine = _Engine([])
+    low_bound = functools.partial(render_page_png, max_image_pixels=100_000_000)
+
+    with caplog.at_level(logging.WARNING, logger="brain.ingest.pdf"):
+        doc = extract_pdf(path, ocr=_setup(engine), render=low_bound)
+
+    assert engine.calls == []
+    assert doc.content == ""
+    assert caplog.messages == ["OCR skipped page 1 of 1: PageTooLargeError"]
+
+
+class _UnreadableImage:
+    def get_px_size(self) -> tuple[int, int]:
+        raise pypdfium2.PdfiumError("synthetic unreadable image")
+
+
+class _PageWithUnreadableImage:
+    """Enough of a ``PdfPage`` for ``render_page_png`` to reach the image check."""
+
+    def __init__(self) -> None:
+        self.rendered = False
+
+    def get_size(self) -> tuple[float, float]:
+        return (612.0, 792.0)
+
+    def get_objects(self, filter: tuple[int, ...]) -> Iterator[_UnreadableImage]:
+        yield _UnreadableImage()
+
+    def render(self, **_: object) -> object:
+        self.rendered = True
+        raise AssertionError("rendered a page whose image size could not be read")
+
+
+def test_an_unreadable_image_size_fails_closed() -> None:
+    page = _PageWithUnreadableImage()
+
+    with pytest.raises(PageTooLargeError) as caught:
+        render_page_png(page)  # type: ignore[arg-type]
+
+    assert not page.rendered
+    assert describe_failure(caught.value) == "PageTooLargeError from PdfiumError"
 
 
 # ---------------------------------------------------------------------------

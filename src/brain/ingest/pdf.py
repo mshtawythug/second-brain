@@ -40,6 +40,11 @@ MAX_PIXELS = 70_000_000
 #: The longest side, in pixels, a bitmap may have: tesseract's own limit. A thin page
 #: (0.01 x 3.5e8 pt) is small in area but rounds up to a 1 x 972,222,223 px bitmap.
 MAX_SIDE_PX = 32_767
+#: The most native pixels the embedded images of one page may hold. pdfium decodes each
+#: image XObject at its own size to draw the page, whatever the page size: rev-99 measured
+#: a 30,000 px square flate image (an 875 KB file) peaking at 1.11 GB. 4x MAX_PIXELS leaves
+#: headroom for a real scan, which embeds about one page-sized image.
+MAX_IMAGE_PIXELS = 4 * MAX_PIXELS
 #: A page that only fits under :data:`MAX_PIXELS` below 50 dpi is skipped: text that small
 #: is not legible to tesseract, so rendering it would cost memory and read nothing.
 MIN_RENDER_DPI = 50
@@ -54,7 +59,7 @@ Clock = Callable[[], float]
 
 
 class PageTooLargeError(OcrError):
-    """A page would render below :data:`MIN_RENDER_DPI` to fit :data:`MAX_PIXELS`."""
+    """A page cannot be rendered within the bounds: its size, a side, or its embedded images."""
 
 
 def _fit_scale(width_pt: float, height_pt: float, max_pixels: int) -> float:
@@ -89,16 +94,62 @@ def render_scale(width_pt: float, height_pt: float, *, max_pixels: int = MAX_PIX
     width_px, height_px = math.ceil(width_pt * scale), math.ceil(height_pt * scale)
     if max(width_px, height_px) > MAX_SIDE_PX:
         raise PageTooLargeError("page side too long to render")
+    if min(width_pt, height_pt) * scale < 1:
+        # A side under one pixel holds no line of text; pdfium would still round it up to 1.
+        raise PageTooLargeError("page side under one pixel")
     # No separate ``width_px * height_px > max_pixels`` check: _fit_scale already sizes the
     # scale from the rounded-up bitmap, so that check could never fire (see the grid test in
     # tests/test_ingest_pdf_ocr_limits.py, which asserts the post-condition).
     return scale
 
 
-def render_page_png(page: pypdfium2.PdfPage, *, max_pixels: int = MAX_PIXELS) -> bytes:
-    """Render ``page`` at up to 200 dpi within ``max_pixels``, and encode it as PNG."""
+def embedded_image_pixels(page: pypdfium2.PdfPage) -> int:
+    """The native pixels of every image object on ``page``, nested Form XObjects included.
+
+    ``PdfImage.get_px_size`` reads the image dictionary only, so nothing is decoded (rev-99
+    measured 28 MB of RSS on a page whose one image is 30,000 px square). Each draw is
+    counted, so an image drawn twice counts twice, which can only overstate the decode.
+    """
+    total = 0
+    for image in page.get_objects(filter=(pdfium_c.FPDF_PAGEOBJ_IMAGE,)):
+        width, height = image.get_px_size()
+        total += width * height
+    return total
+
+
+def _check_embedded_images(page: pypdfium2.PdfPage, max_image_pixels: int) -> None:
+    """Refuse a page whose images pdfium would decode past ``max_image_pixels``; fail closed."""
+    try:
+        pixels = embedded_image_pixels(page)
+    except (
+        pypdfium2.PdfiumError,
+        OSError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        ArithmeticError,
+        ctypes.ArgumentError,
+    ) as exc:
+        # An image whose size cannot be read is treated as too large, never as zero.
+        raise PageTooLargeError("embedded image size unreadable") from exc
+    if pixels > max_image_pixels:
+        raise PageTooLargeError("embedded images too large to decode")
+
+
+def render_page_png(
+    page: pypdfium2.PdfPage,
+    *,
+    max_pixels: int = MAX_PIXELS,
+    max_image_pixels: int = MAX_IMAGE_PIXELS,
+) -> bytes:
+    """Render ``page`` at up to 200 dpi within both caps, and encode it as PNG.
+
+    The embedded images are sized before :meth:`~pypdfium2.PdfPage.render`, which is where
+    pdfium would decode them; ``max_pixels`` and ``max_image_pixels`` are seams for tests.
+    """
     width, height = page.get_size()
     scale = render_scale(width, height, max_pixels=max_pixels)
+    _check_embedded_images(page, max_image_pixels)
     # Grayscale: one byte a pixel instead of three, and tesseract binarises anyway.
     image = page.render(scale=scale, grayscale=True).to_pil()
     buffer = io.BytesIO()
