@@ -203,8 +203,9 @@ echo "<KEY>: <summary>
   listings. Only the user can ask for `normal`.
 - **Dedup is `(jira, <site-host>/<ISSUE-KEY>)`**, so the same key on two sites stays two
   documents. Re-ingesting a changed issue updates it in place.
-- **An unchanged body prints `skipped:` and leaves metadata alone.** If only the status
-  or assignee moved, patch it without a re-chunk:
+- **An unchanged body prints `skipped (already ingested): <title> → <document-id>` and
+  leaves metadata alone.** If only the status or assignee moved, patch it without a
+  re-chunk, passing the id after `→`:
   `brain edit <document-id> --metadata '{"status": "Done"}'`.
 
 The 30-day bound keeps a run to tens of issues; batch small, as for Krisp.
