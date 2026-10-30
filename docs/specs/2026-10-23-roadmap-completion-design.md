@@ -3635,7 +3635,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-18a | Agent tab backend | M | 4 | RM-10, RM-02 | DONE (#79) |
 | RM-18b | Agent tab front end and output hardening | M | 4 | RM-18a, RM-11 | DONE (#83) |
 | RM-18c | Agent tab follow-up questions | S | 4 | RM-18b | TODO |
-| RM-19 | Near-duplicate detection | M | 5 | RM-06 | TODO |
+| RM-19 | Near-duplicate detection | M | 5 | RM-06 | DONE (#86) |
 | RM-20 | Document-level embedding stage (off) | M | 5 | RM-09, RM-14c | TODO |
 | RM-21 | Tag rename, merge, suggest-merges | S | 5 | RM-06 | TODO |
 | RM-22a | Engagement readout and gate | S | 5 | — | TODO |
