@@ -195,6 +195,11 @@ docs/audits/*
 # discarded unread). Both are kept: the first is the evidence for the decision,
 # the second is what a future wave would re-run.
 !docs/audits/2026-08-13-snippet-constraints.json
+# The F6 draft/sensitivity residue audit — prose moved VERBATIM out of
+# CLAUDE.md (already checked in) when CLAUDE.md was slimmed under the
+# instruction-size limit (docs/plans/2026-10-29-slim-claude-md.md). It is a
+# standing review checkpoint CLAUDE.md points at, and contains no corpus data.
+!docs/audits/f6-residue-audit.md
 docs/notes/
 docs/qa/
 docs/summaries/

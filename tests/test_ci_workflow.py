@@ -176,7 +176,7 @@ def test_ci_lint_job_runs_the_ceiling_table_check_after_mypy() -> None:
 
     assert CEILING_CHECK_RUN in runs, (
         f"ci.yml's lint job never runs `{CEILING_CHECK_RUN}` — a file can cross "
-        "800 lines with no CLAUDE.md ceiling-table row and CI stays green"
+        "800 lines with no docs/ceiling-table.md row and CI stays green"
     )
     assert "mypy src/" in runs, "ci.yml's lint job no longer runs `mypy src/`"
     assert runs.index(CEILING_CHECK_RUN) > runs.index("mypy src/"), (

@@ -49,7 +49,7 @@ Concurrency invariants worth restating:
   worker past its join's queue and in-flight job (it then starts no job); every
   job settles its captured ids (``settle_capture``). CLAUDE.md's ceiling table records that wiring.
   These are the 2026-10-22 race fixes, reasoned at ``_fire``,
-  ``_supersede_pending`` and the drain; CLAUDE.md's ceiling table records them.
+  ``_supersede_pending`` and the drain; docs/ceiling-table.md records them.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
   spamming events can't OOM the process; on overflow we trigger an
   immediate full sync and clear the buffer.
