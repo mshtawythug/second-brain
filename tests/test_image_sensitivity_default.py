@@ -141,3 +141,36 @@ def test_ingest_dir_still_refuses_a_bad_level_before_any_write(
 
     assert result.exit_code == 1
     assert test_db.execute("SELECT count(*) FROM documents").fetchone() == (0,)
+
+
+def test_brain_ingest_of_a_symlinked_png_is_a_one_line_refusal(
+    tmp_path: Path, embedder: CountingEmbedder, test_db: psycopg.Connection[Any]
+) -> None:
+    """sec-105 nit: ELOOP from the O_NOFOLLOW open is a refusal by class, exit 1."""
+    real = _png(tmp_path / "real.png")
+    link = tmp_path / "link.png"
+    link.symlink_to(real)
+
+    result = CliRunner().invoke(app, ["ingest", "--no-enrich", str(link)])
+
+    assert result.exit_code == 1
+    assert "cannot read link.png: OSError[ELOOP]" in result.output
+    assert str(tmp_path) not in result.output
+    assert isinstance(result.exception, SystemExit)
+    assert test_db.execute("SELECT count(*) FROM documents").fetchone() == (0,)
+
+
+def test_brain_ingest_of_an_unreadable_png_is_a_one_line_refusal(
+    tmp_path: Path, embedder: CountingEmbedder, test_db: psycopg.Connection[Any]
+) -> None:
+    path = tmp_path / "broken.png"
+    path.write_bytes(b"not an image")
+
+    result = CliRunner().invoke(app, ["ingest", "--no-enrich", str(path)])
+
+    assert result.exit_code == 1
+    assert (
+        "cannot read broken.png: UnreadableImageError: not a readable PNG or JPEG image"
+        in result.output
+    )
+    assert isinstance(result.exception, SystemExit)

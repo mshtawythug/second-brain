@@ -43,6 +43,7 @@ import psycopg
 import typer
 
 from .agent import resolve_agent_id
+from .cli_extract import extract_or_exit
 from .config import Config
 from .db import connect
 from .embeddings import is_hosted_embedder
@@ -249,7 +250,7 @@ def ingest(
     embedder = _build_embedder(cfg)
     enricher = None if no_enrich else _build_enricher(cfg)
     graph_syncer = _build_graph_syncer(cfg)
-    doc = extract_path(path)
+    doc = extract_or_exit(path)
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         try:
@@ -270,9 +271,8 @@ def ingest(
                 sensitivity=sensitivity or default_sensitivity(path),
             )
         except SecretGuardError as e:
-            # Single-file ingest: a refusal is the whole command's outcome, so
-            # exit non-zero. Nothing was written — the guard raises before the
-            # content hash and before the write transaction opens.
+            # Single-file ingest: a refusal is the whole outcome, so exit 1. Nothing was
+            # written: the guard raises before the content hash and the write transaction.
             typer.secho(str(e), fg="red", err=True)
             raise typer.Exit(code=1) from e
         except SensitivityError as e:

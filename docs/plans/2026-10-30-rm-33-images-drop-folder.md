@@ -216,3 +216,17 @@ and retried every run inside `--since`.
   by path. Every other bad value is still a `ConfigError`.
 - **sec-105 L3:** `--dry-run` reports an `OSError` from the scan by class and exits 1,
   never with a traceback carrying the path.
+
+## Review round 3 (#105, rev-105 N1 and the sec-105 nit)
+
+- **N1, a locked file (`chflags uchg`) starved the folder.** (a) When the old name
+  cannot be unlinked after this run created the new one, `_Mover.move` removes the new
+  name (still by identity) and re-raises, so a failed move leaves no stray import.
+  (b) `_duplicate` never raises on the drop-copy unlink; the outcome says "drop copy kept
+  (PermissionError[EPERM])". (c) `run()` turns any `OSError` escaping one file into that
+  file's `failed` outcome, so one file never aborts the folder. The tests use an injected
+  `unlink` seam, since Linux CI has no `chflags`.
+- **The nit:** `brain ingest` extracts through the new leaf `cli_extract.extract_or_exit`.
+  An `OSError` (`ELOOP` for a symlinked `.png`) or an `ImageError` is a one-line refusal
+  with exit 1, not a traceback. `cli_ingest.py` stays net-zero (858), and its
+  ceiling-table row is promoted and gains a hop.

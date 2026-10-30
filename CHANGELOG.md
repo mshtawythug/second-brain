@@ -35,7 +35,8 @@ git tag scheme:
   `imported/` without one is ingested. A move never overwrites a file, and a
   transient failed ingest returns the file to the folder. A configured folder
   that is missing (an unplugged volume) is skipped with a warning naming its
-  entry; the other folders still run. Symlinks,
+  entry; the other folders still run. A locked file (Finder's "Locked") is reported
+  `failed` and left where it is; it never stops the files after it. Symlinks,
   sub-folders, hidden files (iCloud stubs and in-progress screenshots), iCloud
   files evicted from the disk, and files modified in the last 5 seconds are left
   alone. A run stops after 200 files a folder or 8 minutes, and the rest wait for
@@ -50,7 +51,9 @@ git tag scheme:
   `tesseract` (RM-32's engine) into a `screenshot` document, stored
   **confidential** by default on every path, `brain ingest x.png` and
   `brain ingest-dir --ext png` included (a screenshot can show anything; the secret
-  guard still runs). An explicit `--sensitivity normal` is honoured. Only Pillow's PNG and JPEG decoders are reachable. A file over 50 MiB,
+  guard still runs). An explicit `--sensitivity normal` is honoured.
+  `brain ingest` of a symlinked or unreadable image is a one-line refusal (exit 1),
+  not a traceback. Only Pillow's PNG and JPEG decoders are reachable. A file over 50 MiB,
   an image over 70 million pixels or with a side over 32,767 is refused from its
   header before it is decoded, and `tesseract` reads a grayscale PNG that brain
   re-encodes, never the original file. Images stay out of `brain ingest-dir`'s

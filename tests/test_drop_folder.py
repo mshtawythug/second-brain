@@ -1033,3 +1033,124 @@ def test_a_copy_whose_times_cannot_be_set_is_still_moved(
 
     assert report.outcomes[0].status == "ingested"
     assert _tree(tmp_path) == {f"{IMPORTED_DIR}/shot-{_sha8(body)}.png": body}
+
+
+# ---------------------------------------------------------------------------
+# rev-105 N1: a locked file (chflags uchg; EPERM on unlink) never starves the folder.
+# Linux CI has no chflags, so the lock is the injected ``unlink`` seam.
+# ---------------------------------------------------------------------------
+
+
+def _locked(*names: str) -> Callable[[str, int], None]:
+    """An ``unlink`` that refuses ``names`` with EPERM, as a Finder-locked file does."""
+
+    def unlink(name: str, dir_fd: int) -> None:
+        if name in names:
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+        os.unlink(name, dir_fd=dir_fd)
+
+    return unlink
+
+
+def test_a_locked_file_leaves_no_stray_import_and_never_starves_the_folder(
+    tmp_path: Path,
+) -> None:
+    _drop(tmp_path, "locked.png", b"locked bytes", age_s=200)
+    _drop(tmp_path, "later.png", b"later bytes", age_s=100)
+    ingest = _Ingest()
+
+    first = _run(_folder(tmp_path), ingest, unlink=_locked("locked.png"))
+    _drop(tmp_path, "next.png", b"next bytes", age_s=50)
+    second = _run(_folder(tmp_path), ingest, unlink=_locked("locked.png"))
+
+    for report in (first, second):
+        assert report.outcomes[0] == drop_folder.FileOutcome(
+            "locked.png", "failed", "PermissionError[EPERM]"
+        )
+    assert [o.status for o in first.outcomes[1:]] == ["ingested"]
+    assert [(o.name, o.status) for o in second.outcomes[1:]] == [("next.png", "ingested")]
+    assert _tree(tmp_path) == {
+        "locked.png": b"locked bytes",
+        f"{IMPORTED_DIR}/later-{_sha8(b'later bytes')}.png": b"later bytes",
+        f"{IMPORTED_DIR}/next-{_sha8(b'next bytes')}.png": b"next bytes",
+    }
+    assert [c[1] for c in ingest.calls] == ["later", "next"]
+
+
+def test_a_locked_duplicate_drop_copy_is_reported_kept_and_never_raises(
+    tmp_path: Path,
+) -> None:
+    body = b"same"
+    (tmp_path / IMPORTED_DIR).mkdir()
+    final = tmp_path / IMPORTED_DIR / f"locked-{_sha8(body)}.png"
+    final.write_bytes(body)
+    _drop(tmp_path, "locked.png", body, age_s=200)
+    _drop(tmp_path, "later.png", b"later", age_s=100)
+
+    report = _run(
+        _folder(tmp_path),
+        _Ingest(answers=["unchanged", "ingested"]),
+        unlink=_locked("locked.png"),
+    )
+
+    assert report.outcomes[0] == drop_folder.FileOutcome(
+        "locked.png", "duplicate", "drop copy kept (PermissionError[EPERM])"
+    )
+    assert report.outcomes[1].status == "ingested"
+    assert final.read_bytes() == body
+
+
+def test_a_locked_rejected_duplicate_keeps_the_copy_and_says_so(tmp_path: Path) -> None:
+    body = b"same"
+    (tmp_path / IMPORTED_DIR).mkdir()
+    (tmp_path / IMPORTED_DIR / f"locked-{_sha8(body)}.png").write_bytes(body)
+    _drop(tmp_path, "locked.png", body)
+    rejected = drop_folder.RejectedFileError("no")
+    rejected.__cause__ = ValueError("x")
+
+    report = _run(_folder(tmp_path), _Ingest(answers=[rejected]), unlink=_locked("locked.png"))
+
+    assert report.outcomes[0].detail == "ValueError; drop copy kept (PermissionError[EPERM])"
+    assert (tmp_path / "locked.png").exists()
+
+
+def test_a_locked_import_on_the_way_back_leaves_no_second_copy(tmp_path: Path) -> None:
+    """The move back: the imported/ name cannot go, so the folder copy it made is removed."""
+    body = b"fails"
+    _drop(tmp_path, "shot.png", body)
+    locked_import = f"shot-{_sha8(body)}.png"
+
+    report = _run(
+        _folder(tmp_path),
+        _Ingest(answers=[ValueError("transient")]),
+        unlink=_locked(locked_import),
+    )
+
+    assert report.outcomes[0].status == "failed"
+    assert "left in imported/" in report.outcomes[0].detail
+    assert _tree(tmp_path) == {f"{IMPORTED_DIR}/{locked_import}": body}
+
+
+def test_an_unexpected_os_error_is_that_files_failure_not_the_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = b"same"
+    (tmp_path / IMPORTED_DIR).mkdir()
+    (tmp_path / IMPORTED_DIR / f"first-{_sha8(body)}.png").write_bytes(body)
+    _drop(tmp_path, "first.png", body, age_s=200)
+    _drop(tmp_path, "second.png", b"second", age_s=100)
+    real = drop_folder._sha256_fd
+    calls: list[int] = []
+
+    def flaky(fd: int) -> str:
+        calls.append(fd)
+        if len(calls) == 2:  # the duplicate check of first.png's import
+            raise OSError(errno.EIO, "I/O error")
+        return real(fd)
+
+    monkeypatch.setattr(drop_folder, "_sha256_fd", flaky)
+
+    report = _run(_folder(tmp_path), _Ingest())
+
+    assert report.outcomes[0] == drop_folder.FileOutcome("first.png", "failed", "OSError[EIO]")
+    assert report.outcomes[1].status == "ingested"

@@ -103,6 +103,9 @@ Lstat = Callable[[Path], Any]
 #: ``(from_name, to_name, from_dir_fd, to_dir_fd)``; ``FileExistsError`` when taken.
 Link = Callable[[str, str, int, int], None]
 Write = Callable[[int, bytes], int]
+#: ``(name, dir_fd)``: ``os.unlink(name, dir_fd=dir_fd)``. A seam: a locked file
+#: (``chflags uchg``) raises ``EPERM`` here, and Linux CI has no ``chflags``.
+Unlink = Callable[[str, int], None]
 Clock = Callable[[], float]
 
 
@@ -215,12 +218,14 @@ def run(
     lstat: Lstat = os.lstat,
     link: Link | None = None,
     write: Write = os.write,
+    unlink: Unlink | None = None,
 ) -> DropReport:
     """Move each new file into ``imported/`` and ingest it there (module docstring).
 
     Raises :class:`DropFolderError` before touching any file when the folder cannot be
-    used. ``now`` (wall-clock seconds), ``clock``, ``lstat``, ``link`` and ``write`` are
-    test seams.
+    used. ``now`` (wall-clock seconds), ``clock``, ``lstat``, ``link``, ``write`` and
+    ``unlink`` are test seams. One file never aborts the folder: an unexpected
+    ``OSError`` from a file is that file's ``failed`` outcome (rev-105 N1).
     """
     if folder.mode != "ingest":
         raise DropFolderError(f"mode {folder.mode!r} is not available until RM-39")
@@ -230,16 +235,20 @@ def run(
     until = datetime.fromtimestamp(wall - SETTLE_S, UTC)
     with _open_dirs(folder.path) as dirs:
         files = scan(folder, since=since, until=until, lstat=lstat)
-        mover = _Mover(dirs, link=link or _hard_link, write=write)
+        mover = _Mover(dirs, link=link or _hard_link, write=write, unlink=unlink or _unlink)
         start = clock()
         outcomes: list[FileOutcome] = []
         for index, src in enumerate(files):
             elapsed = clock() - start
             if index >= max_files or elapsed >= deadline_s:
                 return DropReport(folder.path, tuple(outcomes), deferred=len(files) - index)
-            outcomes.append(
-                _one(conn, src.name, ingest=ingest, timeout=deadline_s - elapsed, mover=mover)
-            )
+            try:
+                outcome = _one(
+                    conn, src.name, ingest=ingest, timeout=deadline_s - elapsed, mover=mover
+                )
+            except OSError as exc:  # one file never aborts the folder (rev-105 N1)
+                outcome = FileOutcome(src.name, "failed", describe_failure(exc))
+            outcomes.append(outcome)
     return DropReport(folder.path, tuple(outcomes), deferred=0)
 
 
@@ -278,6 +287,10 @@ def _open_dirs(folder: Path) -> Iterator[_Dirs]:
             os.close(imported_fd)
     finally:
         os.close(folder_fd)
+
+
+def _unlink(name: str, dir_fd: int) -> None:
+    os.unlink(name, dir_fd=dir_fd)
 
 
 def _hard_link(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
@@ -349,6 +362,7 @@ class _Mover:
     dirs: _Dirs
     link: Link
     write: Write
+    unlink: Unlink = _unlink
 
     def move(
         self, name: str, to_name: str, *, fd: int, identity: tuple[int, int], digest: str,
@@ -368,9 +382,16 @@ class _Mover:
             # This run created ``to_name``; what it names is not the file that was hashed
             # (a symlink or another file was swapped in), so it goes and nothing moves.
             with contextlib.suppress(FileNotFoundError):
-                os.unlink(to_name, dir_fd=to_dir)
+                self.unlink(to_name, to_dir)
             raise MoveRaceError("the file changed during the move")
-        _unlink_if_same(name, from_dir, identity)
+        try:
+            _unlink_if_same(name, from_dir, identity, self.unlink)
+        except OSError:
+            # The old name cannot go (a locked file: EPERM). Remove the name this run
+            # created, so a failed move leaves no stray import behind (rev-105 N1).
+            with contextlib.suppress(OSError):
+                _unlink_if_same(to_name, to_dir, expected, self.unlink)
+            raise
         return expected
 
     def _copy_exclusive(self, fd: int, to_name: str, to_dir: int, digest: str) -> tuple[int, int]:
@@ -419,7 +440,7 @@ def _one(
         digest = _sha256_fd(fd)
         identity = _identity(st)
         dst_name = _imported_name(name, digest)
-        step = _Step(conn, ingest, timeout, name, dst_name, mover.dirs)
+        step = _Step(conn, ingest, timeout, name, dst_name, mover.dirs, mover.unlink)
         try:
             moved = mover.move(name, dst_name, fd=fd, identity=identity, digest=digest)
         except FileExistsError:
@@ -454,6 +475,7 @@ class _Step:
     name: str
     dst_name: str
     dirs: _Dirs
+    unlink: Unlink = _unlink
 
     def ingest_moved(self, identity: tuple[int, int]) -> str:
         """Ingest ``imported/<dst_name>``, which must still be the file with ``identity``.
@@ -498,18 +520,28 @@ def _duplicate(step: _Step, identity: tuple[int, int], digest: str) -> FileOutco
     try:
         status = step.ingest_moved(_identity(dst_st))
     except RejectedFileError as exc:
-        _unlink_if_same(name, dirs.folder, identity)
-        return FileOutcome(name, "rejected", _cause(exc))
+        return FileOutcome(name, "rejected", _cause(exc) + _drop_copy_kept(step, identity))
     except Exception as exc:  # noqa: BLE001 - transient: keep the drop copy for the next run
         return FileOutcome(name, "failed", describe_failure(exc))
-    _unlink_if_same(name, dirs.folder, identity)
-    return FileOutcome(name, "duplicate" if status == "unchanged" else status)
+    status = "duplicate" if status == "unchanged" else status
+    return FileOutcome(name, status, _drop_copy_kept(step, identity).removeprefix("; "))
 
 
-def _unlink_if_same(name: str, dir_fd: int, identity: tuple[int, int]) -> None:
+def _drop_copy_kept(step: _Step, identity: tuple[int, int]) -> str:
+    """Delete the drop copy; ``""``, or why it was kept. Never raises (rev-105 N1)."""
+    try:
+        _unlink_if_same(step.name, step.dirs.folder, identity, step.unlink)
+    except OSError as exc:  # a locked file: EPERM
+        return f"; drop copy kept ({describe_failure(exc)})"
+    return ""
+
+
+def _unlink_if_same(
+    name: str, dir_fd: int, identity: tuple[int, int], unlink: Unlink = _unlink
+) -> None:
     """Delete ``name`` only while it is still the file with ``identity``."""
     if _same_file(name, dir_fd, identity):
-        os.unlink(name, dir_fd=dir_fd)
+        unlink(name, dir_fd)
 
 
 def _move_back(dst_name: str, name: str, mover: _Mover, detail: str, digest: str) -> str:
