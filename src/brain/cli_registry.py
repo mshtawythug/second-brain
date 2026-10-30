@@ -39,6 +39,7 @@ import typer
 from .cli_dedup import register as register_dedup
 from .cli_docs import register_lifecycle, register_list
 from .cli_ingest import register as register_ingest
+from .cli_ingest_calendar import register as register_ingest_calendar
 from .cli_ingest_github import register as register_ingest_github
 from .cli_note import register as register_note
 from .cli_recall import register as register_recall
@@ -85,6 +86,7 @@ EXTENSION_REGISTRARS: tuple[tuple[str, Registrar], ...] = (
     ("watch", register_watch),  # RM-15, saved searches
     ("dedup", register_dedup),  # RM-19, near-duplicate detection
     ("tags", register_tags),  # RM-21, tag rename / merge / suggest-merges
+    ("ingest-calendar", register_ingest_calendar),  # RM-30, calendar events as documents
     ("ingest-github", register_ingest_github),  # RM-31, code-host activity
 )
 

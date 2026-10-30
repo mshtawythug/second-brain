@@ -57,6 +57,7 @@ import psycopg
 from ..errors import GraphReconcileError
 from .concepts import CONCEPTS_ASPECT, concept_inputs_hash
 from .extract import EntityExtractor
+from .extract_policy import skip_watermark
 from .person_resolver import ResolvedPerson
 from .relational import DocInputs, fetch_doc_content_at, fetch_doc_inputs, index_state
 from .weighting import suppress_ver
@@ -123,6 +124,9 @@ class ReconcilePlan:
     #: The body to extract from, read only when ``concept_stale`` and only if
     #: the document still has ``content_hash`` (else ``None``: superseded).
     content: str | None
+    #: The content type skips concept extraction (``extract_policy``, RM-30): the
+    #: two ``concept_*`` fields hold the skip pair, and ``content`` is ``""``.
+    concept_skipped: bool = False
 
     @property
     def nothing_to_do(self) -> bool:
@@ -199,13 +203,19 @@ def plan_reconcile(
     concept_stale = False
     extractor_ver = ""
     c_inputs_hash = ""
-    if extractor is not None:
+    # RM-30: a type the policy skips is compared against, and later written
+    # with, the policy's pair, so a skipped document counts as done.
+    skip_pair = skip_watermark(content_type) if extractor is not None else None
+    if skip_pair is not None:
+        c_inputs_hash, extractor_ver = skip_pair
+    elif extractor is not None:
         extractor_ver = extractor.version
         c_inputs_hash = concept_inputs_hash(
             cfg.cooccur_window,
             cfg.max_entities_per_doc,
             stopwords=cfg.graph_extract_stopwords,
         )
+    if extractor is not None:
         concept_watermark = (content_hash, c_inputs_hash, extractor_ver, sver)
         concept_stale = force or (
             index_state(conn, tenant_id, document_id, CONCEPTS_ASPECT) != concept_watermark
@@ -224,8 +234,14 @@ def plan_reconcile(
         concept_extractor_ver=extractor_ver,
         concept_inputs_hash=c_inputs_hash,
         # Pinned to the hash read above (fetch_doc_content_at); ``None`` means the
-        # doc changed in between, and the plan is superseded.
-        content=fetch_doc_content_at(conn, document_id, content_hash) if concept_stale else "",
+        # doc changed in between, and the plan is superseded. A skipped type is
+        # never extracted, so its body is not read.
+        content=(
+            fetch_doc_content_at(conn, document_id, content_hash)
+            if concept_stale and skip_pair is None
+            else ""
+        ),
+        concept_skipped=skip_pair is not None,
     )
 
 

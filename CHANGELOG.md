@@ -44,6 +44,41 @@ git tag scheme:
   host's `gho_`, `ghu_`, `ghs_` and `ghr_` tokens, not only `ghp_` and
   `github_pat_`.
 
+### Added — calendar events as documents (RM-30)
+
+- **`brain ingest-calendar --since YYYY-MM-DD --until YYYY-MM-DD`** stores Google Calendar events
+  as documents through the `gws` CLI: one `calendar_event` document per event, and one per
+  recurring series, under the new `calendar` source kind. Both dates are required; the window is at
+  most 92 days and ends at most 14 days ahead. `--calendar` (default `primary`), `--dry-run`,
+  `--tag`, `--enrich` (no summary by default) and `--allow-secrets`.
+- Meetings without a transcript are now searchable, filterable with `--source calendar` and
+  `--person`, and dated by their start time. Attendee addresses are stored only as participants,
+  never in the body. One cleaner treats the title, location, description and attendee names: it
+  removes every link and address (obfuscated forms included) and drops any line with a dial-in
+  number, PIN, passcode or meeting ID. A title keeps the words before the secret, so it stays
+  findable by name. A date is told apart from a phone number by being a whole, valid date
+  ("2026.10.06" stays; "01.70.37.22.46" is a phone number and goes). The rules prefer privacy to
+  recall, so an ordinary line that looks like a dial-in is dropped too. Declined, untitled,
+  cancelled, working-location and out-of-office entries are skipped, and private events (or
+  Google's legacy `confidential` visibility) are stored as `confidential`. The `gws` read gets a
+  120-second timeout and a 16 MiB output cap, and errors are printed by class only.
+- A series' occurrence dates live in its metadata, so a re-run that only finds new occurrences
+  updates the metadata without re-chunking or re-embedding. Each run is merged into what is
+  stored (the latest ten start times known, and the latest date), so backfilling an earlier window
+  never moves a series backwards, and an occurrence that is no longer in the calendar stops
+  dating the series. A series whose own record cannot be read keeps its stored text.
+- The graph's people aspect now resolves a calendar event's attendees
+  (`people._doc_participant_keys` reads its participants). Because `brain review weekly` tallies
+  its "key people" through the same function, a week's meetings now count their attendees'
+  addresses there too, as its Gmail threads already did. That is intended: a meeting is key-people
+  signal. Confidential documents stay out, as before.
+- `brain ui` shows a calendar glyph for the new kind, and groups `_ingested/calendar` by month.
+- **Concept-skip policy.** `graph_rag/extract_policy.py` names the content types whose concept
+  aspect is never extracted (`calendar_event` for now). Such a document is reconciled with an
+  empty extraction and a policy watermark, so the next `brain graphrag build --backfill` counts it
+  as skipped, and its people aspect still runs. Adding a type and bumping
+  `CONCEPT_SKIP_POLICY_VERSION` strips that type's earlier concept mentions on the next backfill.
+
 ### Added — Jira issues as a source, through an agent recipe (RM-34)
 
 - **A new source kind, `jira`.** `brain ingest-stdin --source jira` is accepted, and the facet
