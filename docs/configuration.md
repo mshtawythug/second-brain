@@ -465,9 +465,11 @@ stdout -l <lang>`, with a 60-second limit per page; a page that times out or
 fails is skipped with a class-only warning.
 
 A PDF is untrusted input, so two more bounds are fixed in code. A page renders to
-at most 70 million pixels (A0 at 200 dpi is about 62 million): a larger page is
-rendered at a lower resolution, and one that would fit only below 50 dpi is
-skipped, so a forged page size cannot exhaust memory. One document gets at most
+at most 70 million pixels, counted as pdfium allocates them (each side rounded
+up), with no side longer than 32,767 pixels (tesseract's limit); A0 at 200 dpi is
+about 62 million. A larger page is rendered at a lower resolution, and one that
+would fit only below 50 dpi, or whose long side would not fit, is skipped, so a
+forged page size (a huge or a very thin MediaBox) cannot exhaust memory. One document gets at most
 10 minutes of OCR in total; at the deadline OCR stops, keeps the pages read so
 far, and logs a count. This matters because `brain ui` ingests on one job worker
 that cannot be cancelled. The text is stored
