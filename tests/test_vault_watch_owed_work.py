@@ -656,3 +656,45 @@ def test_a_worker_past_its_join_owes_its_in_flight_delete_and_its_id(
     assert {"action": "graph_remove", "id": doc_id} in owed, owed
     assert _row_at(test_db, "gone.md") is None
     assert doc_id in graph.removed, "the next start did not hand the dropped remove to the graph"
+
+
+def test_an_abandoned_worker_owes_a_job_it_dequeues_and_never_starts_it(
+    test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path
+) -> None:
+    """Round 3 residual (aud-95): job B dequeued after shutdown gave up on the worker.
+
+    The in-flight job A finished while shutdown was still inside
+    ``_owe_in_flight``, so the worker took B before ``_take_queued`` could.
+    Started, B could hang past process exit with only its ids owed, never its
+    path. A worker that shutdown has abandoned owes every job it dequeues and
+    runs none.
+    """
+    vault, journal = tmp_path / "vault", tmp_path / "state" / JOURNAL_NAME
+    vault.mkdir()
+    test_db.execute(
+        """
+        INSERT INTO documents (title, content, content_hash, content_type, kind, vault_path)
+        VALUES ('Job B', 'body', %s, 'note', 'vault', 'b.md')
+        """,
+        (f"hash-{uuid.uuid4()}",),
+    )
+    factory = _Factory()
+    first = factory()
+    first.autocommit = True
+    state = _WatcherState()
+    state.owed = OwedJournal(journal, vault)
+    state.worker_abandoned = True
+    link = ReconnectingConnection(
+        factory, label="worker", sleep=lambda _d: None, stopping=lambda: False, conn=first
+    )
+    try:
+        state.jobs.put(_Job("delete", vault / "b.md"))
+        state.jobs.put(None)
+        _worker_loop(link, fake_embedder, WatchConfig(vault_path=vault, debounce_ms=10), state)
+    finally:
+        link.close()
+        factory.close_all()
+
+    assert journal.exists() and _journal_entries(journal) == [{"action": "delete", "path": "b.md"}]
+    assert _row_at(test_db, "b.md") is not None, "an abandoned worker started a job"
+    assert state.processed == 0

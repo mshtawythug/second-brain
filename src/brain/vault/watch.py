@@ -46,8 +46,8 @@ Concurrency invariants worth restating:
   unapplied at shutdown, a delete's id lost with its connection, and a graph
   remove the lane could not apply are journaled and replayed at the next start
   (``owed_work``, RM-26), as are the lane's removes after a setup failure and a
-  worker past its join's queue and in-flight job; every job settles its captured
-  ids (``settle_capture``). CLAUDE.md's ceiling table records that wiring.
+  worker past its join's queue and in-flight job (it then starts no job); every
+  job settles its captured ids (``settle_capture``). CLAUDE.md's ceiling table records that wiring.
   These are the 2026-10-22 race fixes, reasoned at ``_fire``,
   ``_supersede_pending`` and the drain; CLAUDE.md's ceiling table records them.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
@@ -908,6 +908,9 @@ def _worker_loop(
         job = state.jobs.get()
         if job is None:
             return
+        if state.worker_abandoned:  # RM-26: shutdown stopped waiting; owe it, never start it
+            _owe(state, [job])
+            continue
         state.current_job = job
         try:
             counted = link.call(_job_runner(job, embedder, config, state, graph_syncer))
