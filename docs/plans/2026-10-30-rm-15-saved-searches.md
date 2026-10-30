@@ -124,10 +124,40 @@
 
 ## Risks
 
+- **A check fetches at most 50 documents** (`CHECK_LIMIT`, each leg's candidate cap). When more
+  newly match in one window (a bulk import), the rest are never recorded: the window moves on.
+  A lexical check counts them exactly (`SearchDiagnostics.total_documents`) and a semantic one
+  says it filled the limit; the brief, `brain watch check` and MCP report it (review round, D14).
 - A semantic check holds its row lock for one embed (accepted by the ticket).
 - A match outside the seed's top 50 that is later edited is reported once (it is new in the
   window, and was never reported before).
 - `brief.py` grows (≈ 315 → ≈ 400 with the renderers); it stays well under 800.
+
+## Review round (rev-78, at `2dbbd38`; fixed in `82bc809`)
+
+- **D6 strengthened, a bad knob cannot break the brief.** `BRAIN_WATCH_MIN_COSINE` was read when
+  the matcher was built, so a bad value made every `brain brief` raise, even with no watches or
+  without 029. `build_matcher` now reads it lazily, only when a semantic watch is checked, and a
+  `ConfigError` there skips that watch (`SKIP_MIN_COSINE`); `build_brief` builds the matcher only
+  when 029 is present. With the knob lazy, nothing on the CLI or MCP path raises a `ConfigError`
+  any more: a semantic `add` is refused through the existing seed-failure path (exit 1 /
+  `INVALID_PARAMS`, naming the variable, never the value), and a semantic check reports the skip.
+- **D14, the fetch limit is reported** (the risk above). `CheckResult.unrecorded` / `capped`,
+  `saved_search_check.limit_note`, `WatchNote.limit`. The published page gives the line without
+  its count, because the count is taken over both tiers (the F6 membership oracle).
+- **D13 revised, the seed marker is a column.** Migration 029 (unshipped, never applied to prod,
+  confirmed by the coordinator) gains `saved_search_hits.seeded BOOLEAN NOT NULL DEFAULT FALSE`,
+  written by `add`'s seed; `NOT_SEED_SQL` is `NOT h.seeded`. The earlier marker
+  (`notified_at = first_seen_at`) would have hidden a real hit recorded and marked in one
+  transaction, which RM-16 could do; a regression test pins it.
+- `brain_brief`'s MCP docstring names `watch_hits` (`mcp_server.py`, reworded in place, net zero;
+  its CLAUDE.md row gains the hop). A test pins that the suggestion prompt carries no watch hit,
+  which is what keeps D4 safe.
+- **Recorded, no code change.** (1) A second `--wiki` run on the same day rewrites the page, and
+  the hits the first run marked drop off it; AC6 requires that, so it is backlog row BL-20 ("brief
+  page: include hits notified on the same date"). (2) `saved_search_hits` has no index on
+  `document_id`; the ticket's DDL has none, and the `ON DELETE CASCADE` from `documents` then
+  scans the table per deleted document, which is cheap at this table's size. Add one if it grows.
 
 ## What the end-to-end run found, and the fix
 
@@ -137,7 +167,7 @@ the matches `brain watch add` seeds as already seen listed in the terminal brief
 row recorded seen and notified in one transaction, so its `notified_at` equals its
 `first_seen_at`; `hits_since` leaves those rows out (`saved_search.NOT_SEED_SQL`). A hit a check
 finds is inserted unnotified and marked by a later transaction, so the two always differ.
-Regression tests in `tests/test_saved_search_check.py` and `tests/test_saved_search.py`.
+Regression tests in `tests/test_saved_search_check.py` and `tests/test_saved_search.py`. (The review round replaced this marker with the explicit `seeded` column; see above.)
 
 ## Mutation proofs
 

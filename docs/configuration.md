@@ -436,7 +436,8 @@ with a failed embed: `--record-baseline` writes nothing and `--fail-below` exits
 | `BRAIN_WATCH_MIN_COSINE` | `0.45` | How similar a document must be (cosine, 0 to 1) for a `--semantic` watch to report it (`brain watch`, roadmap ticket RM-15). Watches that match by words, the default, ignore it. |
 
 It lives in the feature settings leaf `brain/settings/watch.py`. A value outside
-0 to 1 is a `ConfigError` naming the variable.
+0 to 1 is a `ConfigError` naming the variable, raised only when a semantic watch is
+checked: it skips those watches and never stops `brain brief`.
 
 ## Search and retrieval trust boundaries
 
@@ -754,7 +755,7 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `brain_brief` | Daily digest: recent captures, open todos, pins, best-effort next steps. Params: `since_hours`, `todo_since_days`, `no_enrich`. Titles + todo texts only. Also carries `watch_hits` (saved-search hits first seen in the capture window) and `watch_notes`; it runs no watch check. |
 | `brain_watch_list` | The saved searches (`brain watch`): name, query, mode, enabled, filters, timestamps. Names no document. |
 | `brain_watch_add` | Save a search. Params: `name`, `query`, `source`, `tag`, `person`, `kind`, `without_tag`, `semantic`. Current matches are recorded as already seen; no count is returned. A taken name or a bad filter is `INVALID_PARAMS`. |
-| `brain_watch_check` | What is new for a watch (or every enabled one) right now. **Peek only**: nothing is recorded and the brief still reports the same documents. Params: `name`, `include_confidential`. |
+| `brain_watch_check` | What is new for a watch (or every enabled one) right now. **Peek only**: nothing is recorded and the brief still reports the same documents. Params: `name`, `include_confidential`. A check looks at 50 documents at most: `unrecorded` counts further full-text matches, and `capped` says a semantic check reached 50. |
 | `brain_watch_remove` | Remove a watch and its recorded hits. Refused unless `confirm=true`. |
 | `brain_review_weekly` | Synthesize a week's activity into a review page. Params: `week` (ISO `YYYY-Www`), `no_graph`, `emit`. |
 | `brain_review_scan` | Run a contradiction / staleness scan into the review queue. Params: `scan_type` (`conflicts`\|`stale`\|`all`), `dry_run`, `limit`. |

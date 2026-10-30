@@ -1111,7 +1111,12 @@ brain watch pause NAME | resume NAME | rm NAME
 - **`check NAME` runs a paused watch too**; `check` with no name, and the brief,
   check enabled watches only.
 - A semantic check that cannot embed is reported as `skipped, embedder
-  unavailable`; it records nothing and retries the same window next time.
+  unavailable`; it records nothing and retries the same window next time. A bad
+  `BRAIN_WATCH_MIN_COSINE` skips semantic watches the same way and never stops
+  the brief.
+- **A check records at most 50 documents.** When more match at once (a bulk
+  import), `check` and the brief say how many more matched than it could record
+  (a semantic check says "50 checked, more may exist"); `brain search` lists them.
 - Saved searches need migration 029: run `brain init` after upgrading.
 
 ### brain review
