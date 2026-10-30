@@ -297,8 +297,11 @@ def test_the_whole_paste_works_from_the_keyboard(harness: Harness) -> None:
             order.append(focused)
         if focused == "ingest-submit":
             break
-    assert order == ["ingest-title", "ingest-body", "ingest-tags", "ingest-content-type",
-                     "ingest-sensitivity-normal", "ingest-no-enrich", "ingest-submit"]
+    # RM-13 put the Paste / File switch first (one stop: a radio group) and moved
+    # the type, which only a paste has, into the paste fields.
+    assert order == ["ingest-mode-paste", "ingest-title", "ingest-body", "ingest-content-type",
+                     "ingest-tags", "ingest-sensitivity-normal", "ingest-no-enrich",
+                     "ingest-submit"]
 
     page.focus("#ingest-title")
     page.keyboard.type("Keyboard paste")

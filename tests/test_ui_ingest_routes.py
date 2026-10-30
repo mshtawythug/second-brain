@@ -20,6 +20,7 @@ from brain.ui.ingest_limits import (
     MAX_PASTE_BODY_BYTES,
     MAX_PASTE_WIRE_BYTES,
     MAX_QUEUED_JOBS,
+    MAX_STAGED_BYTES,
     PASTE_CONTENT_TYPES,
 )
 from brain.ui.jobs import JobHandle, JobRegistry
@@ -75,6 +76,10 @@ def test_config_on_a_loopback_writable_server(client: TestClient) -> None:
     assert payload["limits"] == {
         "paste_body_bytes": MAX_PASTE_BODY_BYTES,
         "max_queued_jobs": MAX_QUEUED_JOBS,
+        # This fixture has no staging area, so no extension and no per-type cap;
+        # tests/test_ui_ingest_upload.py covers a context that has one (RM-13).
+        "upload_bytes": {},
+        "staged_bytes": MAX_STAGED_BYTES,
     }
     assert payload["extensions"] == []
 

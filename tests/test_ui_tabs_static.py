@@ -79,7 +79,8 @@ def test_the_ingest_pane_is_a_real_tab_not_a_deferred_one() -> None:
     assert '<form class="ingest-form" id="ingest-form"' in ingest
     # Labels on every control: each id the form submits has a <label for=...>.
     for control in ("ingest-title", "ingest-body", "ingest-tags", "ingest-content-type",
-                    "ingest-no-enrich"):
+                    "ingest-no-enrich", "ingest-mode-paste", "ingest-mode-file",
+                    "ingest-file", "ingest-file-title"):
         assert f'id="{control}"' in ingest
         assert f'for="{control}"' in ingest, f"{control} has no <label for>"
 
@@ -89,3 +90,14 @@ def test_the_agent_pane_is_still_deferred() -> None:
 
     assert 'class="shell deferred-tab"' in agent.split(">", 1)[0]
     assert "Deferred to a later release" in agent
+
+
+def test_file_mode_has_a_real_button_for_the_drop_zone() -> None:
+    """RM-13: dropping is never the only way in; the button opens the file input."""
+    ingest = _section(_INDEX, "ingest")
+
+    assert re.search(r'<button[^>]*\bid="ingest-drop"[^>]*type="button"', ingest)
+    assert re.search(r'<input type="file"[^>]*\bid="ingest-file"[^>]*tabindex="-1"', ingest)
+    # File mode stays unavailable until the config offers an extension.
+    assert re.search(r'id="ingest-mode-file"[^>]*\bdisabled', ingest)
+    assert re.search(r'id="ingest-file-fields"[^>]*\bhidden', ingest)

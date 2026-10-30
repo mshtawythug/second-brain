@@ -20,7 +20,8 @@ access. Three layers, all in :class:`RequestGuardMiddleware`:
 3. ``Content-Type: application/json`` is required. This alone defeats HTML
    ``<form>`` CSRF (a form can only send urlencoded / multipart / text-plain)
    and forces a CORS preflight on any cross-origin ``fetch``, which layer 1
-   then rejects.
+   then rejects. Exactly one route, :data:`UPLOAD_ROUTE`, requires
+   ``application/octet-stream`` instead, which no form can send either.
 
 **Why these are middleware and not decorators.** Read-only mode in particular
 short-circuits every non-safe method here, before the router ever resolves a
@@ -49,6 +50,10 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 
 #: Methods that may not mutate. Everything else passes the full guard.
 SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
+
+#: The only (method, path) whose body is not JSON: the raw upload (Ingest spec §7.2).
+UPLOAD_ROUTE: tuple[str, str] = ("POST", "/api/ingest/uploads")
+UPLOAD_MEDIA_TYPE = "application/octet-stream"
 
 #: The header the browser shell sends its shared secret in. A header, never a
 #: query parameter: query strings land in access logs and in ``Referer``.
@@ -219,10 +224,16 @@ class RequestGuardMiddleware:
             raise UiForbidden("cross-site mutations are refused", code="cross_site")
 
         media_type = self._header(scope, "content-type").split(";")[0].strip().lower()
-        if media_type != "application/json":
-            raise UiUnsupportedMedia(
-                "mutations require Content-Type: application/json"
-            )
+        # THE ONE EXCEPTION (Ingest spec §7.2, D7): the raw upload body. A LITERAL
+        # method-and-path match, so it never extends to a prefix or to a route
+        # added later; JSON is refused there. octet-stream is not CORS-safelisted
+        # (a cross-origin fetch must preflight, and no CORS headers are served),
+        # and no HTML <form> can send it, so layer 3's argument still holds. The
+        # token, read-only, Origin and Sec-Fetch-Site checks above all ran.
+        # Pinned by tests/test_ui_ingest_security.py over every route in the app.
+        expected = UPLOAD_MEDIA_TYPE if (method, path) == UPLOAD_ROUTE else "application/json"
+        if media_type != expected:
+            raise UiUnsupportedMedia(f"this request requires Content-Type: {expected}")
 
 
 def build_middleware(context: UiContext) -> list[Any]:

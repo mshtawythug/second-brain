@@ -1,4 +1,5 @@
-/* The Ingest tab, paste mode (RM-11, Ingest spec §8).
+/* The Ingest tab: the form, its Paste / File switch, and the job panel (RM-11, RM-13;
+ * Ingest spec §8).
  *
  * LAZY. Nothing here runs at boot except `wireIngest()` attaching listeners. The
  * first time the tab is shown it loads `GET /api/ingest/config` — the tab
@@ -10,8 +11,10 @@
  * ORDER-FREE in boot(): it owns #tab-ingest, which no renderer touches, and
  * subscribes to nothing.
  *
- * The job row is drawn by ingest_view.js; polling and storage are jobs.js.
- * Every server string reaches the page as text.
+ * The job row is drawn by ingest_view.js; polling and storage are jobs.js; file
+ * mode's staging and drop zone are ingest_file.js. Tags, sensitivity and the
+ * summary switch are shared by both modes. Every server string reaches the page
+ * as text.
  */
 
 import { $, el, toast } from "/static/js/dom.js";
@@ -24,6 +27,9 @@ import {
 import {
   announcement, createJobRow, isSettled, updateJobRow,
 } from "/static/js/ingest_view.js";
+import {
+  acceptsFiles, describeFileLimits, fileProblem, submitStagedFile, wireFileMode,
+} from "/static/js/ingest_file.js";
 
 const UNAVAILABLE = {
   read_only: "This server is read-only.",
@@ -88,6 +94,20 @@ function fillControls(cfg) {
   $("ingest-body-hint").textContent =
     `Up to ${formatBytes(cfg.limits.paste_body_bytes)}. Credential-like strings are `
     + "checked by the secret guard before anything is saved.";
+  describeFileLimits(cfg);
+  /* File mode is offered only when this server accepts at least one type. */
+  $("ingest-mode-file").disabled = !acceptsFiles(cfg);
+}
+
+function mode() {
+  return $("ingest-mode-file").checked ? "file" : "paste";
+}
+
+function onModeChange() {
+  const file = mode() === "file";
+  $("ingest-paste-fields").hidden = file;
+  $("ingest-file-fields").hidden = !file;
+  showError("");
 }
 
 async function loadConfig() {
@@ -222,15 +242,22 @@ function resumeRemembered() {
   }
 }
 
-function readForm() {
+/* The fields both modes send. */
+function readCommon() {
   const checked = $("ingest-sensitivity").querySelector("input:checked");
+  return {
+    tags: $("ingest-tags").value.split(",").map((t) => t.trim()).filter(Boolean),
+    sensitivity: checked ? checked.value : config.default_sensitivity,
+    enrich: !$("ingest-no-enrich").checked,
+  };
+}
+
+function readForm() {
   return {
     title: $("ingest-title").value.trim(),
     body: $("ingest-body").value,
-    tags: $("ingest-tags").value.split(",").map((t) => t.trim()).filter(Boolean),
     content_type: $("ingest-content-type").value,
-    sensitivity: checked ? checked.value : config.default_sensitivity,
-    enrich: !$("ingest-no-enrich").checked,
+    ...readCommon(),
   };
 }
 
@@ -244,21 +271,34 @@ function problem(paste) {
   return "";
 }
 
-async function onSubmit(event) {
-  event.preventDefault();
-  if (!config || !config.enabled) return;
+async function submitPaste() {
   const paste = readForm();
   const message = problem(paste);
   showError(message);
-  if (message) return;
+  if (message) return null;
+  const snapshot = await submitJob("/api/ingest/paste", paste);
+  $("ingest-title").value = "";
+  $("ingest-body").value = "";
+  return snapshot;
+}
+
+async function submitFile() {
+  const message = fileProblem();
+  showError(message);
+  if (message) return null;
+  return submitStagedFile(readCommon());
+}
+
+async function onSubmit(event) {
+  event.preventDefault();
+  if (!config || !config.enabled) return;
   const submit = $("ingest-submit");
   submit.disabled = true;
   try {
-    const snapshot = await submitJob("/api/ingest/paste", paste);
+    const snapshot = await (mode() === "file" ? submitFile() : submitPaste());
+    if (!snapshot) return;
     track(newRecord(snapshot), { immediate: false });
     announce(announcement(jobs.get(snapshot.id).record));
-    $("ingest-title").value = "";
-    $("ingest-body").value = "";
     $("ingest-tags").value = "";
   } catch (error) {
     showError(error.message);
@@ -309,4 +349,6 @@ export function wireIngest() {
   document.querySelector('.tab[data-tab="ingest"]').addEventListener("click", onTabShown);
   $("ingest-form").addEventListener("submit", onSubmit);
   $("ingest-jobs").addEventListener("click", onJobsClick);
+  $("ingest-mode").addEventListener("change", onModeChange);
+  wireFileMode({ config: () => config, showError, announce });
 }

@@ -32,7 +32,9 @@ const OUTCOMES = {
   empty: "Nothing to index: no text could be extracted.",
 };
 
-const PHASES = { queued: "Starting", preparing: "Preparing", finishing: "Writing" };
+const PHASES = {
+  queued: "Starting", preparing: "Preparing", extracting: "Reading the file", finishing: "Writing",
+};
 
 const SUMMARY = {
   written: "Summary written.",
@@ -208,6 +210,9 @@ function resultNodes(record) {
     open.dataset.id = result.document_id;
     doc.append(open);
     nodes.push(doc);
+  }
+  if (result.original_filename) {
+    nodes.push(el("p", "job-file", `From ${result.original_filename}`));
   }
   if (result.vault_path) nodes.push(el("code", "job-path", result.vault_path));
   if (result.outcome !== "empty") nodes.push(factsList(result));

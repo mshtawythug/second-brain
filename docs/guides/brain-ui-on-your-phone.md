@@ -111,8 +111,8 @@ evicting the tab in the background — leaves every request refused (403) until 
 - **Anyone with the URL can read your brain.** The token is the only gate, so treat the printed
   URL like a password.
 - **Prefer `--read-only` for phone reading.** A phone on the LAN then has no write path at all.
-- **The Ingest tab does not work over the LAN.** Ingest is offered only when `brain ui` is bound
-  to this machine, even with a valid token: one ingest can spend minutes of the embedding model's
+- **The Ingest tab does not work over the LAN**, neither paste nor file upload. Ingest is offered
+  only when `brain ui` is bound to this machine, even with a valid token: one ingest can spend minutes of the embedding model's
   time, and a leaked token should not let any device on the network do that. On a `--lan` or
   `--host` bind the tab is disabled and says why. To capture from a phone, use `+ New` (a note,
   without `--read-only`), or run `brain ingest` on the machine itself.

@@ -171,7 +171,11 @@
      hide it (see `.shell[hidden]` in css/layout.css for the trap that avoids).
      The job list is NOT a live region: progress changes on every poll, and a
      live list would re-announce each one. #ingest-announce gets one sentence
-     per state change instead. -->
+     per state change instead.
+     FILE MODE (RM-13): js/ingest_file.js. The drop zone is a real <button> that
+     opens the file input, so dropping is never the only way in; the input keeps
+     its <label> and leaves the tab order (the button is its keyboard path). The
+     "Upload a file" choice stays disabled until the config offers an extension. -->
 <section class="ingest-pane" id="tab-ingest" aria-labelledby="ingest-heading" hidden>
   <div class="ingest-layout">
     <header class="ingest-head">
@@ -179,31 +183,63 @@
       <p class="ingest-help">Paste text or markdown to add it to your brain. It is
          chunked, embedded and summarized, saved under <code>_ingested/manual/</code>,
          and found by search. Pasting the same text again changes nothing. For a
-         note you will keep editing, use <strong>+ New</strong> in Notes.</p>
+         note you will keep editing, use <strong>+ New</strong> in Notes. You can
+         also upload one file at a time; a file already added with
+         <code>brain ingest</code> becomes a second copy.</p>
     </header>
     <p class="ingest-unavailable" id="ingest-unavailable" role="status" hidden></p>
     <form class="ingest-form" id="ingest-form" novalidate>
       <fieldset class="ingest-fieldset" id="ingest-fieldset" disabled>
-        <legend>Paste</legend>
-        <div class="ingest-field">
-          <label for="ingest-title">Title</label>
-          <input type="text" id="ingest-title" autocomplete="off" required>
-        </div>
-        <div class="ingest-field">
-          <label for="ingest-body">Text or markdown</label>
-          <textarea id="ingest-body" rows="12" spellcheck="false" required
-                    aria-describedby="ingest-body-hint"></textarea>
-          <p class="ingest-hint" id="ingest-body-hint"></p>
-        </div>
-        <div class="ingest-row">
+        <legend>Add to your brain</legend>
+        <fieldset class="ingest-choice" id="ingest-mode">
+          <legend>Source</legend>
+          <div class="ingest-radio">
+            <input type="radio" name="ingest-mode" id="ingest-mode-paste" value="paste" checked>
+            <label for="ingest-mode-paste">Paste text</label>
+          </div>
+          <div class="ingest-radio">
+            <input type="radio" name="ingest-mode" id="ingest-mode-file" value="file" disabled>
+            <label for="ingest-mode-file">Upload a file</label>
+          </div>
+        </fieldset>
+        <div class="ingest-group" id="ingest-paste-fields">
           <div class="ingest-field">
-            <label for="ingest-tags">Tags (comma separated)</label>
-            <input type="text" id="ingest-tags" autocomplete="off">
+            <label for="ingest-title">Title</label>
+            <input type="text" id="ingest-title" autocomplete="off" required>
+          </div>
+          <div class="ingest-field">
+            <label for="ingest-body">Text or markdown</label>
+            <textarea id="ingest-body" rows="12" spellcheck="false" required
+                      aria-describedby="ingest-body-hint"></textarea>
+            <p class="ingest-hint" id="ingest-body-hint"></p>
           </div>
           <div class="ingest-field">
             <label for="ingest-content-type">Type</label>
             <select id="ingest-content-type"></select>
           </div>
+        </div>
+        <div class="ingest-group" id="ingest-file-fields" hidden>
+          <div class="ingest-field">
+            <label for="ingest-file">File</label>
+            <input type="file" class="ingest-file-input" id="ingest-file" tabindex="-1"
+                   aria-describedby="ingest-file-hint">
+            <button class="ingest-drop" id="ingest-drop" type="button"
+                    aria-describedby="ingest-file-hint">Choose a file, or drop one here</button>
+            <p class="ingest-hint" id="ingest-file-hint"></p>
+          </div>
+          <div class="ingest-staged" id="ingest-staged" hidden>
+            <span class="ingest-staged-name" id="ingest-staged-name"></span>
+            <span class="ingest-staged-state" id="ingest-staged-state"></span>
+            <button class="ghost-btn" id="ingest-staged-remove" type="button">Remove</button>
+          </div>
+          <div class="ingest-field">
+            <label for="ingest-file-title">Title (optional; the file's own otherwise)</label>
+            <input type="text" id="ingest-file-title" autocomplete="off">
+          </div>
+        </div>
+        <div class="ingest-field">
+          <label for="ingest-tags">Tags (comma separated)</label>
+          <input type="text" id="ingest-tags" autocomplete="off">
         </div>
         <fieldset class="ingest-choice" id="ingest-sensitivity">
           <legend>Sensitivity</legend>

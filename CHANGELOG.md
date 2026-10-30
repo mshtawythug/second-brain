@@ -22,6 +22,39 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — the Ingest tab: upload a file
+
+The **Ingest** tab can now upload one file per job (roadmap ticket RM-13, phase 3
+of the Ingest tab design): `.md`, `.markdown`, `.txt`, `.pdf` or `.docx`.
+
+- **Upload a file** beside **Paste text**. Choose a file or drop it on the zone,
+  which is also a button, so the keyboard path is the same. The file is uploaded
+  as soon as it is chosen, shown with **Remove**, and ingested as a job on the same
+  panel when you press **Ingest**, with optional tags, sensitivity and title.
+- Refused before anything is kept: a type outside the list, a name that reduces to
+  nothing, a file over its cap (5 MiB for text and markdown, 25 MiB for PDF and
+  Word, 64 MiB staged in total), or bytes that do not match the extension (a PDF
+  must start `%PDF-`; a `.docx` must be a zip holding `word/document.xml` and pass
+  zip-bomb bounds; text must be UTF-8 without NUL). Caps are enforced on the
+  stream, so an oversize body is never held in memory.
+- New routes: `POST /api/ingest/uploads` (the raw bytes, `application/octet-stream`,
+  name in `X-Brain-Filename`), `POST /api/ingest/file` (queue the job) and
+  `DELETE /api/ingest/uploads/{id}`. The upload route is the one place the server
+  accepts a body that is not JSON; a test over every mutating route proves it is
+  exactly that one route and method. No multipart parser is used.
+- Staged files live in a private (`0700`) per-process temporary directory and are
+  deleted when their job ends however it ends (a queued job cancelled before it
+  ran included), when removed, once 15 minutes old and unsubmitted (checked at the
+  next upload or submit), and at shutdown; a dead server's leftovers are swept at
+  the next start. Filenames are never logged.
+- An uploaded document dedups on its extracted text, not a path: the same file
+  uploaded twice is **Already in your brain**, but a file once ingested with
+  `brain ingest <path>` becomes a second document.
+- `GET /api/ingest/config` now reports the uploadable `extensions` (an explicit
+  allow-list, checked against the extractor registry) and their caps. A job
+  result carries `original_filename`, withheld with the title for a confidential
+  document.
+
 ### Added — a cross-encoder reranker stage, off by default (RM-14a)
 
 - **`BRAIN_RERANKER`** (`none` by default, `llamacpp` or `voyage`) adds a
