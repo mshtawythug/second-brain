@@ -35,6 +35,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 
     from ..config import Config
     from ..ingest import Embedder
+    from .ask_service import AskRuntime
     from .ingest_service import IngestRuntime
     from .jobs import JobRegistry
     from .upload_staging import UploadStaging
@@ -180,6 +181,10 @@ class UiContext:
     #: extension. Built by ``server.build_context`` on a bind that may ingest; the
     #: app lifespan sweeps dead roots at startup and removes its own at shutdown.
     uploads: UploadStaging | None = None
+    #: The Agent tab's chat seam and clock (RM-18a). ``None`` makes the ask routes
+    #: answer 503 ``jobs_unavailable``. Built by ``server.build_context`` with
+    #: ``brain.chat.chat_json``; a test injects a scripted ``ChatJson`` here.
+    ask_runtime: AskRuntime | None = None
 
     def connect(self) -> AbstractContextManager[psycopg.Connection[Any]]:
         """Open a per-request connection. Always used as a ``with`` block."""

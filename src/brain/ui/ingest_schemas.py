@@ -92,7 +92,7 @@ def parse_file(payload: Mapping[str, Any]) -> FileSpec:
     )
 
 
-def _encodes(value: str) -> bool:
+def encodes_utf8(value: str) -> bool:
     """Strict UTF-8: a lone surrogate (valid JSON, ``"\\ud800"``) is refused here.
 
     Accepted, it would fail inside the job at the database and report the
@@ -106,7 +106,7 @@ def _encodes(value: str) -> bool:
 
 
 def _title(value: Any) -> str:
-    if not isinstance(value, str) or not value.strip() or not _encodes(value):
+    if not isinstance(value, str) or not value.strip() or not encodes_utf8(value):
         raise UiBadRequest("title must be non-empty UTF-8 text", code="invalid_title")
     title = value.strip()
     if len(title) > MAX_TITLE_CHARS:
@@ -117,7 +117,7 @@ def _title(value: Any) -> str:
 
 
 def _body(value: Any) -> str:
-    if not isinstance(value, str) or not value.strip() or not _encodes(value):
+    if not isinstance(value, str) or not value.strip() or not encodes_utf8(value):
         raise UiBadRequest("body must be non-empty UTF-8 text", code="invalid_body")
     if len(value.encode("utf-8")) > MAX_PASTE_BODY_BYTES:
         raise UiPayloadTooLarge(
@@ -127,7 +127,9 @@ def _body(value: Any) -> str:
 
 
 def _tags(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, list) or not all(isinstance(t, str) and _encodes(t) for t in value):
+    if not isinstance(value, list) or not all(
+        isinstance(t, str) and encodes_utf8(t) for t in value
+    ):
         raise UiBadRequest("tags must be a list of strings", code="invalid_tags")
     return tuple(normalize_tags(value))
 

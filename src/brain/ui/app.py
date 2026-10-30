@@ -23,6 +23,7 @@ from starlette.staticfiles import StaticFiles
 
 from ..errors import VaultPathEscape
 from . import (
+    routes_ask,
     routes_discovery,
     routes_graph,
     routes_ingest,
@@ -233,6 +234,8 @@ def create_app(context: UiContext) -> Starlette:
             methods=["DELETE"],
         ),
         Route("/api/ingest/file", routes_upload.submit_upload, methods=["POST"]),
+        Route("/api/ask/config", routes_ask.ask_config, methods=["GET"]),
+        Route("/api/ask", routes_ask.submit, methods=["POST"]),
         Route("/api/jobs", routes_jobs.list_jobs, methods=["GET"]),
         Route("/api/jobs/{job_id}", routes_jobs.get_job, methods=["GET"]),
         Route("/api/jobs/{job_id}/cancel", routes_jobs.cancel_job, methods=["POST"]),

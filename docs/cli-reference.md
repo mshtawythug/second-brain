@@ -930,6 +930,29 @@ unknown or expired upload. `DELETE /api/ingest/uploads/{upload_id}` (body `{}`)
 discards an unsubmitted file. An upload's result also carries
 `original_filename`, withheld with the title.
 
+The Agent tab's backend (its front end ships separately) asks a question as a job
+on the same worker, one at a time with ingest. `POST /api/ask` with JSON
+`{question, no_loop?}` (a question of at most 2,000 characters; `no_loop`
+defaults to false) answers 202 with a job of kind `ask`, which runs `brain ask`'s
+plan, retrieve, reflect and synthesize loop in `hybrid` mode. Poll it with
+`GET /api/jobs/{id}?after=<seq>`: each step is an event (`plan`, `retrieve`,
+`reflect`, `synthesize`, with the iteration as `done`), and the result is
+`brain ask --json`'s shape plus each citation's `sensitivity` and `withheld`, and
+`elapsed_ms`. Cancel it with `POST /api/jobs/{id}/cancel` at any point until it
+finishes; a cancelled ask records nothing. An ask that runs past
+`BRAIN_ASK_MAX_ITERATIONS` × 3 × `BRAIN_ASK_TIMEOUT_SECONDS` fails with
+`timeout`; the other error codes are `chat_unavailable`, `context_overflow`,
+`output_truncated`, `synthesis_failed`, `embedder_unavailable`, `database_error`
+and `internal_error`. Answers draw on confidential documents only where the
+server serves confidential bodies (a loopback bind, or `--include-confidential`),
+and a citation of a confidential or unknown-level document is withheld, with the
+answer, where it does not. Ask jobs are never listed by `GET /api/jobs`; a result
+is readable only by its id, and only for 10 minutes. `GET /api/ask/config`
+reports whether asking is available and why not (`read_only`,
+`requires_loopback` or `jobs_unavailable`), the question cap and the modes. Like
+ingest, asking is refused on `--read-only` (403 `read_only`) and over `--host` /
+`--lan` (403 `ask_requires_loopback`).
+
 ## brain people
 
 ```bash

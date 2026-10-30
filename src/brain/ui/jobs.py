@@ -294,8 +294,13 @@ class JobRegistry:
             return self._snapshot_locked(job)
 
     def get(self, job_id: str, *, after: int = 0) -> JobSnapshot:
-        """The job's snapshot, with only the events whose ``seq > after``."""
+        """The job's snapshot, with only the events whose ``seq > after``.
+
+        Evicts first, as every read does: an unlisted job (an ask, RM-18a) must not
+        outlive its retention because nobody listed or submitted.
+        """
         with self._lock:
+            self._evict_locked()
             return self._snapshot_locked(self._require_locked(job_id), after=after)
 
     def list_recent(self) -> tuple[JobSnapshot, ...]:
@@ -308,6 +313,7 @@ class JobRegistry:
     def cancel(self, job_id: str) -> JobSnapshot:
         """Cancel per the Ingest spec §4.4 table. Raises :class:`NotCancellable`."""
         with self._lock:
+            self._evict_locked()
             job = self._require_locked(job_id)
             if job.state == "queued":
                 self._queue.remove(job)
@@ -319,6 +325,10 @@ class JobRegistry:
             snapshot = self._snapshot_locked(job)
         self._run_settled()
         return snapshot
+
+    def retention(self, kind: str) -> timedelta:
+        """How long a finished job of ``kind`` stays readable (the per-kind override)."""
+        return self._retain_for_by_kind.get(kind, self._retain_for)
 
     def run_next(self) -> bool:
         """Run ONE queued job on the calling thread. False when none is queued."""
@@ -500,7 +510,7 @@ class JobRegistry:
             if j.state in TERMINAL_STATES and j.finished_at is not None
         ]
         for job in terminal:
-            ttl = self._retain_for_by_kind.get(job.kind, self._retain_for)
+            ttl = self.retention(job.kind)
             assert job.finished_at is not None
             if job.finished_at + ttl <= now:
                 del self._jobs[job.id]
