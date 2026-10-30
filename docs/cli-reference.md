@@ -768,6 +768,55 @@ brain ingest-github --repo example-org/example-repo --since 2026-09-01 --with-th
   `PATH` the command exits 1 with an install hint, and `brain doctor`'s `github`
   row warns.
 
+## Notion export ingest
+
+`brain ingest-notion` (RM-35) stores the pages of a Notion "Export → Markdown & CSV" export,
+given as the unzipped folder or the `.zip` itself. It calls no Notion API and needs no token:
+what you exported is the scope.
+
+```bash
+brain ingest-notion ~/Downloads/Export-abc123.zip
+brain ingest-notion ~/Downloads/Export-abc123 --with-databases --since 2026-09-01
+brain ingest-notion ~/Downloads/Export-abc123.zip --max 50 --tag notion
+```
+
+- **One document per page** (source `notion`, content type `notion_page`), deduplicated by the
+  32-hex page id at the end of each file name (`Title <id>.md`), not by its path. Re-export to a
+  new folder and re-run: every page updates in place, and unchanged pages are left alone.
+- **Titles** come from the page's `# ` first line, else the file name without its id.
+- **Skipped and counted:** images and other attachments, `.md` files with no parseable id (never
+  guessed), every copy of an id that appears twice, nested archives (Notion splits large exports
+  into `Part-N.zip` files: unzip the outer archive and pass each inner one), links, and pages over
+  8 MiB. The database CSVs are counted and never stored.
+- **Databases.** With `--with-databases`, each database row is ingested from the row page the
+  export writes for it (`<Database> <id>/<Row> <id>.md`), with its properties; a row's
+  `Last edited time` dates it. If a database's CSV lists rows but the export has no row pages,
+  the command says so.
+- **`--since YYYY-MM-DD`** keeps pages last edited on or after that day. Pages with no readable
+  last-edited property (ordinary pages have none) are kept and counted. Notion writes that time
+  in your local zone with no offset and it is stored as if it were UTC, so it serves ordering and
+  the `--since` day window only and may be off by your UTC offset.
+- **Not stored, and said so:** a new page whose text is identical to an existing document's
+  (`skipped <id>: same text as an existing document`) and an empty page (`skipped <id>: empty`).
+  Neither counts as unchanged or toward what remains under `--max`.
+- **Cap and cost.** `--max` (default 200) caps the pages written a run; when it stops, it prints
+  how many still need writing, and re-running continues, since unchanged pages are free. Every new
+  page gets a summary (`--no-enrich` skips it), and with the graph on, concept extraction takes
+  minutes per page: 200 new pages can keep the graph lane busy for about 30 hours.
+- **Sensitivity** is `normal` unless `--sensitivity confidential`. The secret guard runs on every
+  page (`--allow-secrets` skips it for one run).
+- **Untrusted input.** A zip is read member by member in memory and never extracted. It is refused
+  whole (exit 1) when a member name is absolute or leaves the archive, a member is a symbolic
+  link, encrypted or duplicated, it holds more than 100,000 entries (counted header by header
+  before the archive is parsed), its ZIP64 records could be read differently by different Python
+  patch releases, or its pages and tables add up to more than 512 MiB.
+  A folder is walked without following links; files with more than one hard link are skipped,
+  and a file replaced between listing and reading is refused.
+- **Terminal safety.** Titles are stored on one line with control and format characters removed,
+  at most 300 characters. Output names pages by id, never by title; a page the secret guard
+  refuses prints `refused <page id>: N finding(s)`, and its warn and redact notices are labelled
+  with the page id.
+
 ## Drop folders (screenshots)
 
 `brain ingest-folder` (RM-33) ingests the files saved into a drop folder: a

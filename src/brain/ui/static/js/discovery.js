@@ -53,6 +53,7 @@ const SOURCE_ICONS = {
   jira: "🎫",
   github: "🔀",
   applenotes: "🗒️",
+  notion: "📓",
   screenshot: "📸",
 };
 const sourceIconFor = (kind) => SOURCE_ICONS[kind] || SOURCE_ICONS.vault;

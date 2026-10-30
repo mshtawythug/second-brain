@@ -19,6 +19,7 @@ const SOURCE_ICONS = {
   jira: "🎫",
   github: "🔀",
   applenotes: "🗒️",
+  notion: "📓",
   screenshot: "📸",
 };
 

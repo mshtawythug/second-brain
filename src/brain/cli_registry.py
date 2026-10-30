@@ -43,6 +43,7 @@ from .cli_ingest_apple_notes import register as register_ingest_apple_notes
 from .cli_ingest_calendar import register as register_ingest_calendar
 from .cli_ingest_folder import register as register_ingest_folder
 from .cli_ingest_github import register as register_ingest_github
+from .cli_ingest_notion import register as register_ingest_notion
 from .cli_note import register as register_note
 from .cli_recall import register as register_recall
 from .cli_search import register as register_search
@@ -91,6 +92,7 @@ EXTENSION_REGISTRARS: tuple[tuple[str, Registrar], ...] = (
     ("ingest-calendar", register_ingest_calendar),  # RM-30, calendar events as documents
     ("ingest-github", register_ingest_github),  # RM-31, code-host activity
     ("ingest-apple-notes", register_ingest_apple_notes),  # RM-36, named Apple Notes folders
+    ("ingest-notion", register_ingest_notion),  # RM-35, Notion's Markdown export
     ("ingest-folder", register_ingest_folder),  # RM-33, drop folders (screenshots)
 )
 
