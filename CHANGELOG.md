@@ -33,14 +33,17 @@ git tag scheme:
   `--person`, and dated by their start time. Attendee addresses are stored only as participants,
   never in the body. One cleaner treats the title, location, description and attendee names: it
   removes every link and address (obfuscated forms included) and drops any line with a dial-in
-  number, PIN, passcode or meeting ID. Declined, untitled, cancelled, working-location and
+  number, PIN, passcode or meeting ID. A title loses only the dial-in part, so it stays findable
+  by name. The rules prefer privacy to recall, so an ordinary line that looks like a dial-in is
+  dropped too. Declined, untitled, cancelled, working-location and
   out-of-office entries are skipped, and private events (or Google's legacy `confidential`
   visibility) are stored as `confidential`. The `gws` read gets a 120-second timeout and a 16 MiB
   output cap, and errors are printed by class only.
 - A series' occurrence dates live in its metadata, so a re-run that only finds new occurrences
   updates the metadata without re-chunking or re-embedding. Each run is merged into what is
   stored (the latest ten start times known, and the latest date), so backfilling an earlier window
-  never moves a series backwards. A series whose own record cannot be read keeps its stored text.
+  never moves a series backwards, and an occurrence that is no longer in the calendar stops
+  dating the series. A series whose own record cannot be read keeps its stored text.
 - The graph's people aspect now resolves a calendar event's attendees
   (`people._doc_participant_keys` reads its participants).
 - `brain ui` shows a calendar glyph for the new kind, and groups `_ingested/calendar` by month.

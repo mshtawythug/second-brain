@@ -32,7 +32,8 @@ What a document holds (spec RM-30, protocol points 3 and 6):
   ``occurrences``: ``last``, the latest ten start times known, and
   ``run_window_count``, how many occurrences the most recent run's window held.
   :func:`merge_volatile` merges a run into what is stored, so an earlier window
-  never moves a series' ``date`` or ``last`` backwards.
+  never moves a series' ``date`` or ``last`` backwards, and an occurrence the
+  run's window no longer holds (cancelled, declined) is dropped.
 - **Series without a readable master.** :attr:`CalendarDoc.body_from_fallback`
   marks a series whose body came from an instance; for a document that already
   exists, the command then keeps the stored body and refreshes only the
@@ -67,7 +68,7 @@ from brain.vault.derived_links.directory import GwsRunner, _parse_gws_pages
 from brain.vault.derived_links.participants import is_email_like
 
 from . import ExtractedDoc
-from .calendar_text import clean_description, clean_line
+from .calendar_text import clean_description, clean_line, clean_title
 
 __all__ = [
     "CONTENT_TYPE",
@@ -258,28 +259,45 @@ def _series_document(
     return replace(doc, body_from_fallback=not from_master)
 
 
-def merge_volatile(stored: Mapping[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+def merge_volatile(
+    stored: Mapping[str, Any],
+    incoming: dict[str, Any],
+    *,
+    window: tuple[datetime, datetime] | None = None,
+) -> dict[str, Any]:
     """``incoming`` metadata merged with what a series' stored document already knows.
 
     A run over an earlier window must not move a series backwards, so for a
     series ``occurrences.last`` becomes the sorted union of the stored and the
     incoming start times, trimmed to the latest ten, and ``date`` is the latest
-    of them. ``run_window_count`` stays the incoming run's own count. A single
-    event is returned unchanged: its ``date`` is its start, and a rescheduled
-    event's start may legitimately move earlier.
+    of them. ``run_window_count`` stays the incoming run's own count.
+
+    ``window`` is the run's ``[time_min, time_max)``. A stored start inside it
+    that the run did not return was cancelled or declined since, so it is
+    dropped; without that, a cancelled future occurrence would hold ``date``
+    (``sent_at``) in the future. A stored start outside the window is kept: the
+    run says nothing about it. A single event is returned unchanged: its
+    ``date`` is its start, and a rescheduled event's start may legitimately
+    move earlier.
     """
     occurrences = incoming.get("occurrences")
     if not isinstance(occurrences, dict):
         return incoming
     previous = stored.get("occurrences")
     stored_last = previous.get("last") if isinstance(previous, dict) else None
+    incoming_last = set(occurrences["last"])
     parsed = {
         start: moment
-        for start in [*(stored_last or []), *occurrences["last"]]
+        for start in [*(stored_last or []), *incoming_last]
         if (moment := _parse_stored_start(start)) is not None
+        and (start in incoming_last or not _inside(moment, window))
     }
     last = sorted(parsed, key=parsed.__getitem__)[-_LAST_OCCURRENCES:]
     return {**incoming, "date": last[-1], "occurrences": {**occurrences, "last": last}}
+
+
+def _inside(moment: datetime, window: tuple[datetime, datetime] | None) -> bool:
+    return window is not None and window[0] <= moment < window[1]
 
 
 def _parse_stored_start(start: object) -> datetime | None:
@@ -299,7 +317,7 @@ def _parse_stored_start(start: object) -> datetime | None:
 def _document(
     external_id: str, event: dict[str, Any], *, when: str, metadata: dict[str, Any]
 ) -> CalendarDoc:
-    title = clean_line(event.get("summary")) or PLACEHOLDER_TITLE
+    title = clean_title(event.get("summary")) or PLACEHOLDER_TITLE
     attendees = _attendees(event)
     private = event.get("visibility") in _PRIVATE_VISIBILITIES
     lines = [title, f"When: {when}"]

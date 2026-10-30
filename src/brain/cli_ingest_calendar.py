@@ -36,7 +36,7 @@ as ``directory.refresh_calendar`` does.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -135,6 +135,7 @@ def ingest_calendar(
         _ingest_all(
             batch.documents,
             calendar=calendar,
+            window=window,
             # Tags are canonical at every write boundary; ingest_document
             # normalizes only when it merges into an existing row.
             tags=normalize_tags(list(tag)),
@@ -180,34 +181,46 @@ def _dry_run_line(cd: CalendarDoc) -> str:
     return f"{str(meta.get('date', ''))[:10]}  {cd.doc.title}{series}"
 
 
+@dataclass(frozen=True)
+class _Run:
+    """What every document of one run is ingested with."""
+
+    cfg: Config
+    calendar: str
+    tags: list[str]
+    window: tuple[datetime, datetime]
+    embedder: Embedder
+    enricher: OllamaEnricher | None
+    graph_syncer: GraphSyncer
+    allow_secrets: bool
+
+
 def _ingest_all(
     documents: tuple[CalendarDoc, ...],
     *,
     calendar: str,
     tags: list[str],
+    window: tuple[datetime, datetime],
     enrich: bool,
     allow_secrets: bool,
 ) -> None:
     cfg = Config.load()
-    embedder = _build_embedder(cfg)
-    enricher = _build_enricher(cfg) if enrich else None
-    graph_syncer = _build_graph_syncer(cfg)
+    run = _Run(
+        cfg=cfg,
+        calendar=calendar,
+        tags=tags,
+        window=window,
+        embedder=_build_embedder(cfg),
+        enricher=_build_enricher(cfg) if enrich else None,
+        graph_syncer=_build_graph_syncer(cfg),
+        allow_secrets=allow_secrets,
+    )
     counts = {"ingested": 0, "updated": 0, "refreshed": 0, "unchanged": 0, "failed": 0}
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         for cd in documents:
             try:
-                outcome = _ingest_one(
-                    conn,
-                    cd,
-                    cfg=cfg,
-                    calendar=calendar,
-                    tags=tags,
-                    embedder=embedder,
-                    enricher=enricher,
-                    graph_syncer=graph_syncer,
-                    allow_secrets=allow_secrets,
-                )
+                outcome = _ingest_one(conn, cd, run)
             except SecretGuardError as exc:
                 # Per document, like ingest-gmail's per thread: one false positive
                 # must not abort the run.
@@ -229,52 +242,48 @@ def _ingest_all(
     )
 
 
-def _ingest_one(
-    conn: psycopg.Connection[Any],
-    cd: CalendarDoc,
-    *,
-    cfg: Config,
-    calendar: str,
-    tags: list[str],
-    embedder: Embedder,
-    enricher: OllamaEnricher | None,
-    graph_syncer: GraphSyncer,
-    allow_secrets: bool,
-) -> str:
+def _ingest_one(conn: psycopg.Connection[Any], cd: CalendarDoc, run: _Run) -> str:
     """Ingest one document; return ``ingested|updated|refreshed|unchanged``."""
     stored = _stored_document(conn, cd.external_id)
     stored_meta = stored[1] if stored is not None else {}
-    # An earlier window must not move a series backwards (calendar.merge_volatile).
-    metadata = calendar_ingest.merge_volatile(stored_meta, cd.doc.metadata)
-    if stored is not None and cd.body_from_fallback:
+    # An earlier window must not move a series backwards, and an occurrence the
+    # window no longer holds is dropped (calendar.merge_volatile).
+    metadata = calendar_ingest.merge_volatile(stored_meta, cd.doc.metadata, window=run.window)
+    if stored is None or stored_meta.get("participants") != metadata.get("participants"):
+        # Before the write, so the graph reconcile it triggers resolves the
+        # attendees through the directory.
+        _record_attendees(conn, cd)
+    if stored is not None and cd.body_from_fallback and not cd.confidential:
         # The master could not be read, so this body came from an instance and
         # would rewrite (re-chunk, re-embed) a body built from the master. Keep
-        # the stored body; refresh only the metadata.
-        return _refresh_metadata(conn, cd, stored[0], stored_meta, metadata, cfg=cfg)
+        # the stored body; refresh only the metadata. A confidential one still
+        # goes through ingest_document: its escalate-only sensitivity update
+        # (and the hosted-egress veto) matters more than the churn.
+        return _refresh_metadata(conn, stored[0], stored_meta, metadata, run)
     result = ingest_document(
         conn,
-        embedder=embedder,
+        embedder=run.embedder,
         doc=replace(cd.doc, metadata=metadata),
         source_kind=calendar_ingest.SOURCE_KIND,
         source_external_id=cd.external_id,
-        source_metadata={"calendar_id": calendar},
-        tags=tags,
-        vault_root=cfg.vault_path,
-        enricher=enricher,
-        enrich=enricher is not None,
-        enrich_min_tokens=cfg.enrich_min_tokens,
-        graph_syncer=graph_syncer,
-        secret_guard=cfg.secret_guard,
-        allow_secrets=allow_secrets,
+        source_metadata={"calendar_id": run.calendar},
+        tags=run.tags,
+        vault_root=run.cfg.vault_path,
+        enricher=run.enricher,
+        enrich=run.enricher is not None,
+        enrich_min_tokens=run.cfg.enrich_min_tokens,
+        graph_syncer=run.graph_syncer,
+        secret_guard=run.cfg.secret_guard,
+        allow_secrets=run.allow_secrets,
         sensitivity=CONFIDENTIAL if cd.confidential else DEFAULT_SENSITIVITY,
     )
     _emit_secret_notice(result.secret_notice)
     _emit_egress_notice(result.egress_notice)
     assert result.document_id is not None  # every non-replace path returns the row id
     if result.created or result.body_changed:
-        _record_attendees(conn, cd)
+        _record_attendees(conn, cd)  # display names live in the body
         return "ingested" if result.created else "updated"
-    return _refresh_metadata(conn, cd, result.document_id, stored_meta, metadata, cfg=cfg)
+    return _refresh_metadata(conn, result.document_id, stored_meta, metadata, run)
 
 
 def _stored_document(
@@ -291,12 +300,10 @@ def _stored_document(
 
 def _refresh_metadata(
     conn: psycopg.Connection[Any],
-    cd: CalendarDoc,
     document_id: str,
     stored: dict[str, Any],
     metadata: dict[str, Any],
-    *,
-    cfg: Config,
+    run: _Run,
 ) -> str:
     """Apply the volatile keys that differ from ``stored``; ``refreshed`` or ``unchanged``."""
     patch = {
@@ -307,9 +314,14 @@ def _refresh_metadata(
     if not patch:
         return "unchanged"
     # Metadata only: no new_content and no embedder, so no re-chunk and no embed.
-    update_document(conn, document_id=document_id, metadata_patch=patch, vault_root=cfg.vault_path)
-    if "participants" in patch:
-        _record_attendees(conn, cd)
+    # The graph syncer goes along, so a participants change re-indexes the people.
+    update_document(
+        conn,
+        document_id=document_id,
+        metadata_patch=patch,
+        vault_root=run.cfg.vault_path,
+        graph_syncer=run.graph_syncer,
+    )
     return "refreshed"
 
 

@@ -45,12 +45,32 @@ explained below.
    `conferenceData` and `hangoutLink` are never read. A title the cleaner empties is stored as
    `(calendar event)` rather than skipped: the ticket skips events with *no* title, and such an
    event still has a time and attendees. A display name the cleaner empties is dropped.
+   - **Re-check rounds (sec-96 S2–S5, rev-96 V1–V3).** Normalisation also removes Unicode format
+     characters and decodes `%40` and HTML entities; dash variants (U+2010–U+2015) count as phone
+     separators; `pwd` / `pw` (with a value) and `Kennung` are keywords; addresses may have spaces
+     around `@` and the dots; `tel:` / `sip:` links are removed with the other links. The date
+     mask covers `M/D/YYYY`, `D.M.YYYY`, `YYYY.MM.DD`, `YYYY/MM/DD` and two-digit years.
+   - **Titles are cleaned span by span** (`clean_title`): the keyword with its value, the one-tap
+     token and the digit run are removed, not the whole title, so "Project ID: ENG-123 kickoff"
+     keeps "Project kickoff". A keyword with no value is not a secret and stays in a title
+     ("Password manager rollout"). Descriptions, locations and display names keep whole-line
+     dropping.
+   - **The documented trade, privacy over recall (S6).** Outside a title, "Discuss the access code
+     rollout", "password reset policy discussion" and "Meeting ID card" are dropped as dial-in
+     lines, and "Year 2026 2027 2028 planning" as a digit run. In every field, "node.js/react" and
+     "README.md/notes" go as scheme-less links (V3, a stricter host rule, was not done: requiring
+     three labels would let `zoom.us/j/…` and `whereby.com/…` through, and a TLD allowlist would
+     miss unlisted conference hosts), and "Team at Acme dot com launch" goes as a spelled-out
+     address. A test pins the over-removal as intended.
 3. **Series.** Instances come from `singleEvents=true`; the series document reads title,
    description, location, attendees and visibility from the **master** (`events get`), so the
    body does not depend on the run's window. If the master cannot be read, a NEW series falls
    back to its earliest instance in the window; a series already stored keeps its stored body and
    gets only its metadata refreshed, so one failed `events get` does not re-chunk and re-embed it
-   (rev-96 R3). `CalendarBatch.fallbacks` counts these, and the CLI prints the count. Instances the owner declined are dropped from the
+   (rev-96 R3). `CalendarBatch.fallbacks` counts these, and the CLI prints the count. A
+   fallback series that turned **private** still goes through `ingest_document`, because its
+   escalate-only sensitivity update (and the hosted-egress veto) matters more than the churn
+   (sec-96 S1). Instances the owner declined are dropped from the
    occurrences. A series with no remaining instances, or whose master the owner declined, is
    skipped.
 4. **`metadata.occurrences`** = `{"run_window_count": <instances in the most recent run's
@@ -58,8 +78,10 @@ explained below.
    `metadata.date`: the event's start time for a single event, and for a series the latest known
    occurrence. `calendar.merge_volatile` merges each run into what is stored: `last` is the union
    of the stored and incoming times trimmed to the latest ten, and `date` is the latest of them,
-   so a backfill of an earlier window never moves a series backwards (rev-96 R1). A single event
-   is not merged: a rescheduled event's start may legitimately move earlier. On a
+   so a backfill of an earlier window never moves a series backwards (rev-96 R1). A stored start
+   inside the run's window that the run did not return (cancelled or declined since) is dropped,
+   so a cancelled future occurrence stops dating the series (rev-96 R6). A single event is not
+   merged: a rescheduled event's start may legitimately move earlier. On a
    re-run, `update_document(metadata_patch=…)` re-promotes `sent_at` with no re-chunk.
 5. **Re-run flow.** `ingest_document` decides. If the content hash is unchanged it returns
    `created=False, body_changed=False`. When the stored `occurrences` or `date` differ, the
@@ -72,7 +94,9 @@ explained below.
    stored lowercased in `metadata.participants`, which the search predicate matches.
    `people._doc_participant_keys` gains a `calendar` branch reading those addresses, so the
    graph's people aspect resolves a calendar event's attendees (rev-96 R2; it was first recorded
-   as backlog BL-29 and then done here). `people.py` is over the ceiling: the growth is recorded
+   as backlog BL-29 and then done here). The attendees are recorded in the directory before the
+   write, and a metadata-only refresh passes `graph_syncer`, so a participants-only change (an
+   address-only attendee) re-indexes the people too (rev-96 R5). `people.py` is over the ceiling: the growth is recorded
    inline at the branch, in its module docstring and in its CLAUDE.md row.
 7. **Scope** (exact message from the ticket). `--since` and `--until` are `YYYY-MM-DD`, `--since`
    is inclusive and `--until` exclusive, the same as `ingest-gmail`'s `before:`. The window must

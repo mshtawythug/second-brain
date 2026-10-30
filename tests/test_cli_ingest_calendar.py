@@ -20,6 +20,7 @@ from typer.testing import CliRunner, Result
 from brain.cli import app
 from brain.enrichment import SummaryResult
 from brain.errors import DirectoryRefreshError
+from brain.vault.derived_links.directory import DirectoryStore
 from tests import calendar_fixtures as fx
 from tests.conftest import CountingEmbedder
 from tests.secret_fixtures import SYNTHETIC_AWS_KEY
@@ -373,7 +374,9 @@ def test_an_earlier_window_does_not_move_a_series_backwards(
     embed_calls = embedder.embed_calls
     gws.events = [fx.series_instance("2026-09-08"), fx.series_instance("2026-09-15")]
 
-    result = _run()
+    result = CliRunner().invoke(
+        app, ["ingest-calendar", "--since", "2026-09-01", "--until", "2026-10-01"]
+    )
 
     assert result.exit_code == 0, result.output
     assert f"refreshed {fx.SERIES_TITLE}" in result.output
@@ -580,3 +583,78 @@ def test_a_changed_address_alone_refreshes_participants_and_the_directory(
         (moved[1],),
     ).fetchone()
     assert row is not None and row[0] == 1
+
+
+
+# --- sec-96 S1, rev-96 R5 and R6 ------------------------------------------------
+
+
+def test_a_fallback_series_that_turned_private_becomes_confidential(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
+) -> None:
+    """S1: an unreadable master must not bypass the escalate-only sensitivity update."""
+    assert _run().exit_code == 0
+    assert _calendar_docs(test_db)[fx.SERIES_ID]["sensitivity"] == "normal"
+    gws.masters = {}
+    gws.events = [
+        {**e, "visibility": "private"} if e.get("recurringEventId") else e for e in gws.events
+    ]
+
+    result = _run()
+
+    assert result.exit_code == 0, result.output
+    assert _calendar_docs(test_db)[fx.SERIES_ID]["sensitivity"] == "confidential"
+
+
+def _person_keys_of(conn: psycopg.Connection[Any], document_id: str) -> set[str]:
+    rows = conn.execute(
+        "SELECT e.canonical_key FROM graph_entity_mentions m "
+        "JOIN graph_entities e ON e.tenant_id = m.tenant_id AND e.id = m.entity_id "
+        "WHERE m.document_id = %s AND e.entity_type = 'person'",
+        (document_id,),
+    ).fetchall()
+    return {str(r[0]) for r in rows}
+
+
+def test_an_address_only_attendee_reaches_the_people_graph_on_a_refresh(
+    test_db: psycopg.Connection[Any],
+    gws: fx.FakeGws,
+    embedder: CountingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R5: a participants-only refresh re-indexes the people aspect."""
+    monkeypatch.setenv("BRAIN_GRAPH_ENABLED", "true")
+    monkeypatch.setenv("BRAIN_GRAPH_GENERIC_DF", "1.0")
+    casey = ("Casey Sample", "casey@example.com")
+    DirectoryStore(test_db).upsert_pair(display_name=casey[0], email=casey[1], source="gmail")
+    assert _run().exit_code == 0
+    doc_id = _calendar_docs(test_db)[fx.SINGLE_ID]["id"]
+    assert "casey sample" not in _person_keys_of(test_db, doc_id)
+    # An attendee with no display name: the body (names only) does not change.
+    gws.events[0] = {**fx.single(), "attendees": [*fx.single()["attendees"], {"email": casey[1]}]}
+
+    result = _run()
+
+    assert result.exit_code == 0, result.output
+    assert f"refreshed {fx.SINGLE_TITLE}" in result.output
+    assert "casey sample" in _person_keys_of(test_db, doc_id)
+
+
+def test_a_cancelled_future_occurrence_stops_dating_the_series(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
+) -> None:
+    """R6: a start inside the run's window that the run no longer returns is dropped."""
+    window = ["ingest-calendar", "--since", "2026-10-01", "--until", "2026-11-10"]
+    gws.events.append(fx.series_instance("2026-11-03"))
+    assert CliRunner().invoke(app, window).exit_code == 0
+    assert _calendar_docs(test_db)[fx.SERIES_ID]["sent_at"] == datetime(
+        2026, 11, 3, 16, 0, tzinfo=UTC
+    )
+    gws.events.pop()  # the 3 November occurrence was cancelled
+
+    result = CliRunner().invoke(app, window)
+
+    assert result.exit_code == 0, result.output
+    after = _calendar_docs(test_db)[fx.SERIES_ID]
+    assert after["sent_at"] == datetime(2026, 10, 27, 16, 0, tzinfo=UTC)
+    assert "2026-11-03T09:00:00-07:00" not in after["metadata"]["occurrences"]["last"]

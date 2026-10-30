@@ -453,3 +453,25 @@ def test_a_malformed_stored_start_is_dropped_from_the_merge() -> None:
     merged = cal.merge_volatile(stored, _series_meta(_OCT, 3))
 
     assert merged["occurrences"]["last"] == [*_SEP, *_OCT]
+
+
+
+def test_a_start_inside_the_window_that_the_run_lacks_is_dropped() -> None:
+    """rev-96 R6: a cancelled future occurrence must not keep dating the series."""
+    stored = _series_meta([*_OCT, "2026-11-03T09:00:00-07:00"], 4)
+    window = (datetime(2026, 10, 1, tzinfo=UTC), datetime(2026, 11, 10, tzinfo=UTC))
+
+    merged = cal.merge_volatile(stored, _series_meta(_OCT, 3), window=window)
+
+    assert merged["occurrences"]["last"] == _OCT
+    assert merged["date"] == _OCT[-1]
+
+
+def test_a_start_outside_the_window_is_kept() -> None:
+    stored = _series_meta([*_SEP, *_OCT], 5)
+    window = (datetime(2026, 10, 1, tzinfo=UTC), datetime(2026, 11, 1, tzinfo=UTC))
+
+    merged = cal.merge_volatile(stored, _series_meta(_OCT[:1], 1), window=window)
+
+    assert merged["occurrences"]["last"] == [*_SEP, _OCT[0]]
+    assert merged["date"] == _OCT[0]

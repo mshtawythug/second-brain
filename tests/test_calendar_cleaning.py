@@ -9,6 +9,7 @@ no dial-in keyword, in any field. Everything goes through the public
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any
 
 import pytest
@@ -66,21 +67,44 @@ ADVERSARIAL = [
     "bob(at)example.com",
     "bob at example dot com",
     "bob@localhost",
+    # sec-96 re-check: format characters, Unicode dashes, %40, spaces, entities
+    "zoom\u200b.us/j/1?pwd=x",
+    "alice\u200b@example.com",
+    "+1\u2011555\u2011123\u20114567",
+    "alice%40example.com",
+    "alice @ example . com",
+    "alice&#64;example.com",
+    # sec-96 re-check: pwd / pw with a value, and Kennung
+    "pwd: hunter2",
+    "pw 1234",
+    "Kennung: 998",
 ]
 
 _KEYWORDS = re.compile(
-    r"\bpin\b|pass\s*-?(?:code|word|wort)|kennwort|meeting\s*-?\s*id|conference\s*-?\s*id|"
-    r"access\s*code|\bcode\s*[:#]|\bbridge\b|dial\s*-?\s*in|one\s*tap|join by phone|"
-    r"\btel:|mailto:",
+    r"\bpin\b|pass\s*-?(?:code|word|wort)|kennwort|kennung|meeting\s*-?\s*id|"
+    r"conference\s*-?\s*id|access\s*code|\bcode\s*[:#]|\bbridge\b|dial\s*-?\s*in|one\s*tap|"
+    r"join by phone|\bpwd\b|\bpw\b|\btel:|mailto:",
     re.IGNORECASE,
 )
+# A title may keep a keyword with no value next to it ("Password manager
+# rollout"); it must not keep a keyword WITH a value.
+_KEYWORD_WITH_VALUE = re.compile(rf"(?:{_KEYWORDS.pattern})\s*(?:[:#=]|\d)", re.IGNORECASE)
+
+
+def _assert_no_secret(text: str) -> None:
+    assert not re.search(r"\d{3,}", text), text  # no digit run
+    assert "@" not in text and "＠" not in text and "%40" not in text, text  # no address
+    # Every address and link in the table is on an example domain, so this also
+    # catches one that survives encoded (an HTML entity for "@").
+    assert "example" not in text.lower(), text
+    assert not re.search(r"\[at\]|\(at\)|\bat example\b", text, re.IGNORECASE), text
+    assert not re.search(r"://|www\.|\b[\w-]+\.[a-z]{2,}[/?]", text, re.IGNORECASE), text
+    assert not _KEYWORD_WITH_VALUE.search(text), text
+    assert not any(unicodedata.category(ch) == "Cf" for ch in text), text
 
 
 def _assert_clean(text: str) -> None:
-    assert not re.search(r"\d{3,}", text), text  # no digit run
-    assert "@" not in text and "＠" not in text, text  # no address
-    assert not re.search(r"\[at\]|\(at\)|\bat example\b", text, re.IGNORECASE), text
-    assert not re.search(r"://|www\.|\b[\w-]+\.[a-z]{2,}[/?]", text, re.IGNORECASE), text
+    _assert_no_secret(text)
     assert not _KEYWORDS.search(text), text
 
 
@@ -107,10 +131,12 @@ def _only_doc(event: dict[str, Any]) -> cal.CalendarDoc:
 def test_no_field_keeps_a_link_address_digit_run_or_keyword(text: str) -> None:
     doc = _only_doc(_event_with(text))
 
-    _assert_clean(doc.doc.title)
-    body = doc.doc.content
-    when_line = next(line for line in body.splitlines() if line.startswith("When:"))
-    _assert_clean(body.replace(when_line, ""))  # the When line is ours, not theirs
+    _assert_no_secret(doc.doc.title)  # title mode: spans removed, see clean_title
+    title_line, when_line, *rest = doc.doc.content.splitlines()
+    assert title_line == doc.doc.title
+    assert when_line.startswith("When:")  # the When line is ours, not theirs
+    body = "\n".join(rest)
+    _assert_clean(body)
     for name, _email in doc.attendees:
         _assert_clean(name or "")
     assert "Agenda first." in body and "Agenda last." in body
@@ -207,3 +233,57 @@ def test_a_line_that_only_mentions_joining_survives() -> None:
     doc = _only_doc(_event_with("Planning", description="Join us for cake afterwards"))
 
     assert "Join us for cake afterwards" in doc.doc.content
+
+
+# --- titles keep their words (rev-96 re-review) ----------------------------------
+
+ORDINARY_TITLES = [
+    ("Team offsite 10/06/2026 - 10/08/2026", "Team offsite 10/06/2026 - 10/08/2026"),
+    ("Release 2026.10.06 go/no-go", "Release 2026.10.06 go/no-go"),
+    ("Planning 6.10.26 to 2026/10/30", "Planning 6.10.26 to 2026/10/30"),
+    ("Q4 budget: 1 250 000 USD", "Q4 budget: USD"),
+    ("Password manager rollout", "Password manager rollout"),
+    ("Join the teams offsite planning", "Join the teams offsite planning"),
+    ("Project ID: ENG-123 kickoff", "Project kickoff"),
+    ("Interview round 2 (ID 4471)", "Interview round 2"),
+    ("Code review: parser", "Code review: parser"),
+    ("1:1 with Avery at 10:30", "1:1 with Avery at 10:30"),
+    ("C# guild sync", "C# guild sync"),
+    ("Weekly sync PIN 4321", "Weekly sync"),
+    ("Standup, dial-in: +1 555 010 0199", "Standup"),
+    # what a removed dial-in leaves behind is tidied away
+    ("Sync (PIN 4321) weekly", "Sync weekly"),
+    ("Call +1 323-555-0100,,123456789# US", "Call US"),
+]
+
+
+@pytest.mark.parametrize(("title", "kept"), ORDINARY_TITLES)
+def test_an_ordinary_title_keeps_its_words(title: str, kept: str) -> None:
+    doc = _only_doc(_event_with(title, description="Agenda."))
+
+    assert doc.doc.title == kept
+
+
+def test_a_title_keeps_words_a_description_line_would_lose() -> None:
+    """Title mode removes spans; the same text as a description line goes whole."""
+    doc = _only_doc(_event_with("Project ID: ENG-123 kickoff", description="Agenda."))
+
+    assert doc.doc.title == "Project kickoff"
+    assert "Location" not in doc.doc.content  # the location is line mode: dropped
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Discuss the access code rollout",
+        "password reset policy discussion",
+        "Meeting ID card",
+        "Year 2026 2027 2028 planning",
+    ],
+)
+def test_a_description_line_is_over_removed_by_design(line: str) -> None:
+    """S6, the documented trade: privacy over recall outside a title."""
+    doc = _only_doc(_event_with("Planning", description=f"Keep.\n{line}"))
+
+    assert line not in doc.doc.content
+    assert doc.doc.content.endswith("Keep.")
