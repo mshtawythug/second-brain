@@ -186,3 +186,30 @@ POST -> 403 read_only
 
 The out-of-range `[9]` (and `[2]` where only one document was retrieved) is dropped by
 `ask._sanitize_answer`, as in the CLI.
+
+### Review round 1 (rev-79, aud-79 at `2f7e3af`)
+
+- **rev-79 (1):** `search._query_embed` keeps the last query embedder in a module-level dict.
+  Through `StepGuardEmbedder`'s guard, that entry kept the handle, the job and its result
+  alive past retention. The runner now calls `release()` in a `finally`, which drops the
+  guard. `test_an_evicted_ask_is_not_kept_alive_by_the_query_embedder_registry` checks with
+  a weakref that the job record is collected after eviction.
+- **rev-79 (2):** a recording chat pins `timeout`, `model`, `num_predict`, `schema` and
+  `cfg` on every call.
+- **rev-79 (3):** a cancel, and separately a clock jump, lands between two query embeds.
+  Each must propagate through `run_search` with no text-only fallback, no second backend
+  embed and no further chat call.
+- **aud-79 (A1):** the route test asserts the read-back `"confidential"` level. A document
+  deleted before the read-back has no level, and the lens withholds it.
+- **Lens docstring:** the answer can paraphrase uncited documents, so the guarantee rests
+  on `exclude_confidential` at retrieval.
+
+Mutation proofs, run in a fresh `git archive` copy of `c26d3b9` under the same harness rules
+as above. All of them went red, and the restored copy passed 69.
+
+| # | Mutation | Red test |
+|---|---|---|
+| R1 | the `finally` no longer calls `release()` | `test_an_evicted_ask_is_not_kept_alive_by_the_query_embedder_registry` |
+| R2 | `_GuardedChat` drops `timeout` | `test_the_guarded_chat_forwards_every_keyword_on_every_call` |
+| R3 | `search_with_fts_fallback` catches `BrainError` | `test_a_guard_at_the_second_query_embed_propagates_and_never_falls_back` (both params) |
+| A1 | the citation level is hard-coded `"normal"` | the `[True]` confidential route test, and `test_a_cited_document_deleted_before_the_read_back_has_no_level_and_is_withheld` |
