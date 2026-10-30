@@ -9,7 +9,8 @@ import typer
 
 from .config import Config
 from .db import connect
-from .ingest import Embedder, update_document
+from .errors import describe_failure
+from .ingest import Embedder, _content_hash, update_document
 from .ingest.guard import SecretFinding, redact_secrets, scan_secrets
 from .queries import (
     ScannableDocument,
@@ -41,6 +42,11 @@ from .vault.sensitivity_propagate import propagate_sensitivity_to_vault
 #: command and silently rewriting 1,376 documents) is unrecoverable without a
 #: backup.
 _ACTIONS = ("report", "mark-confidential", "redact")
+
+#: What the report says for ``_apply_redact``'s documented failure (RM-29).
+#: ``update_document``'s own message names the other document's id; this
+#: sentence names the cause and quotes nothing.
+REDACT_COLLISION_MESSAGE = "redacted body collides with another document's content hash"
 
 
 @dataclass
@@ -114,6 +120,11 @@ def _apply_redact(
     redacted body now matches another document's ``content_hash``. It is caught
     PER DOCUMENT so one poisoned row cannot abort a sweep over the whole corpus
     — the failure is recorded and reported in the final tally instead.
+
+    The record is class-only (RM-29): ``update_document``'s message names the
+    other document's id, and a ``ValueError`` from deeper in the pipeline can
+    carry anything. A collision is recorded as ``REDACT_COLLISION_MESSAGE``,
+    any other failure as ``describe_failure(exc)``.
     """
     redacted, _ = redact_secrets(doc.content)
     if redacted == doc.content:
@@ -127,9 +138,36 @@ def _apply_redact(
             vault_root=cfg.vault_path,
         )
     except ValueError as exc:
-        result.errors.append((doc.id, str(exc)))
+        reason = (
+            REDACT_COLLISION_MESSAGE
+            if _hash_taken_by_another(conn, doc.id, redacted)
+            else describe_failure(exc)
+        )
+        result.errors.append((doc.id, reason))
         return
     result.written += 1
+
+
+def _hash_taken_by_another(conn: Any, document_id: str, content: str) -> bool:
+    """True when ``document_id`` still exists and another document holds ``content``'s hash.
+
+    ``update_document`` raises a bare ``ValueError`` both for this collision and
+    for other failures, such as a document deleted mid-sweep. Its message is the
+    only thing that tells them apart, and the report must not use the message.
+    So the cause is checked against the database instead, with the same hash
+    function ``update_document`` uses (``brain.ingest._content_hash``). The
+    check runs only after a failure.
+
+    The swept row must still exist: ``update_document`` looks it up before it
+    checks for a collision, so a document deleted mid-sweep failed as "not
+    found", even when another document already holds the redacted hash.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM documents WHERE content_hash = %s AND id <> %s "
+        "AND EXISTS (SELECT 1 FROM documents WHERE id = %s) LIMIT 1",
+        (_content_hash(content), document_id, document_id),
+    ).fetchone()
+    return row is not None
 
 
 def _build_embedder(cfg: Config) -> Embedder:

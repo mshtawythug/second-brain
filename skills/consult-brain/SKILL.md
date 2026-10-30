@@ -104,6 +104,7 @@ Use filters to sharpen. Most useful flags:
 | `--since N` | Last N days by **ingestion time** (`documents.ingested_at`); a bare number is days, or pass a duration suffix (`7d` / `24h` / `90m`). When the user means "the call/email happened in the last N days," reach for `--after` instead — `--since` will misfire on content ingested today but dated months ago. |
 | `--after YYYY-MM-DD` / `--before YYYY-MM-DD` | Absolute event-date window — filters on `coalesce(sent_at, ingested_at)`, inclusive lower / exclusive upper. Prefer this for "last month / Q1 / since the kickoff" queries. |
 | `--person "<name or email>"` | Resolves through the directory (exact email → exact display name → substring; alpha tiebreak). Matches **every recorded name-variant** of a merged person, so docs stored under different forms (Gmail `jane.doe` vs Krisp `Jane Doe`) all surface — the match is complete across sources. A genuinely ambiguous name (two *different* people) exits 2 with candidates — narrow it down or use email |
+| `--entity "<name>"` *(+ `--entity-type org\|person\|project\|tool\|topic`)* | Only docs that mention this graph entity (needs `BRAIN_GRAPH_ENABLED=true` + `brain graphrag build`; else exit 2). An unknown name exits 2 pointing at `brain graphrag entities`; a name of several types exits 2 asking for `--entity-type` |
 | `--kind <content-type>` | `transcript`, `email`, `krisp_action_items`, `note`, `markdown`, `pdf`, … (this is `documents.content_type`, NOT the tier enum) |
 | `--thread <gmail_thread_id>` | Pull every doc in one Gmail thread |
 | `--draft / --no-draft` | Tri-state; default both. `--no-draft` excludes quarantined docs |
@@ -120,8 +121,7 @@ Query-shape tips:
   `brain search "scaling teams" --tag interview --limit 8 --json`
 - "Action items from Q1 meetings" → use `brain-todo` instead.
 - "Write in my voice about engineering culture" →
-  `brain search "engineering culture" --kind note --limit 5 --json`
-  (vault notes carry tone better than transcripts).
+  `brain search "engineering culture" --kind note --limit 5 --json` (vault notes carry tone better than transcripts).
 
 **People shortcut.** Before searching, if the user names a person you don't
 know yet, run `brain people "<name>"` first to confirm the canonical display
@@ -143,7 +143,7 @@ brain recall "<query>" --budget 2000 --json
 
 Same filters as `brain search` (`--person`, `--after`/`--before`, `--kind`,
 `--tag`, `--source`, `--thread`, `--without-tag`, `--fts-only`), so most tuned
-searches port straight over — `--draft`, `--has-tag`, `--sensitivity` and
+searches port straight over — `--draft`, `--has-tag`, `--sensitivity`, `--entity` and
 `--updated-*` are search-only. Raise `--budget` for a broad question (4000 for
 multi-source synthesis). **`--budget` bounds the passage block, not the
 `--json` payload**: `--json` adds per-passage metadata around the same text,

@@ -759,7 +759,7 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 
 | Tool | What it does |
 |---|---|
-| `brain_search` | Hybrid search with `source`, `tag`, `since_days`, and `fts_only` filters. Falls back to text-only matching when the query embed fails, and says so in the `fallback*` keys. |
+| `brain_search` | Hybrid search with `source`, `tag`, `since_days`, and `fts_only` filters, and `entity` / `entity_type` (RM-24: only docs that mention that graph entity; needs `BRAIN_GRAPH_ENABLED=true` and `brain graphrag build`, else `INVALID_PARAMS`). Falls back to text-only matching when the query embed fails, and says so in the `fallback*` keys. |
 | `brain_recall` | Passages packed to a token budget, with `[N]` citations. Falls back to text-only matching when the query embed fails, and says so in the `fallback*` keys and in the context block's header. |
 | `brain_show` | Return one full document by 6+ character id prefix. |
 | `brain_related` | Documents related to one document, best first: `brain ui`'s related-notes panel. Params: `id` (6+ char prefix), `limit` (default 10, at most 20), `include_confidential`. Without `include_confidential`, confidential neighbours are left out, and asking about a confidential document is `INVALID_PARAMS`. An empty list means no candidate cleared the ranking floors; on a brain of under about 40 documents that often happens even when similar documents exist. |

@@ -35,6 +35,7 @@ from typing import Any
 import psycopg
 import yaml
 
+from ..errors import describe_failure
 from .derived_links.fence import refresh_fences_naming
 from .export import regenerate_vault_file
 from .frontmatter import rewrite_sensitivity
@@ -48,6 +49,11 @@ class PropagationFailure:
     already phrased for a human and carries its own recovery instruction,
     because the caller that renders it has no idea which stage failed or what
     fixes it.
+
+    A caught exception appears in ``message`` only as
+    :func:`brain.errors.describe_failure` (its class, an ``OSError``'s errno),
+    never as its text, because callers print ``message`` to the terminal
+    (RM-29).
     """
 
     stage: str
@@ -109,7 +115,7 @@ def propagate_sensitivity_to_vault(
                     PropagationFailure(
                         "mirror",
                         f"could not write sensitivity into {vault_path_rel}: "
-                        f"{exc}. The next `brain vault sync` will revert "
+                        f"{describe_failure(exc)}. The next `brain vault sync` will revert "
                         f"{label} to the frontmatter's value — fix the file "
                         f"and re-run.",
                     )
@@ -123,7 +129,7 @@ def propagate_sensitivity_to_vault(
             failures.append(
                 PropagationFailure(
                     "mirror",
-                    f"vault mirror write failed for {label}: {exc}. The "
+                    f"vault mirror write failed for {label}: {describe_failure(exc)}. The "
                     f"database change succeeded — recover via "
                     f"`brain vault export`.",
                 )
@@ -136,7 +142,7 @@ def propagate_sensitivity_to_vault(
             PropagationFailure(
                 "fences",
                 f"could not refresh derived-link fences after marking {label} "
-                f"as {level}: {exc}. Other documents' published pages may "
+                f"as {level}: {describe_failure(exc)}. Other documents' published pages may "
                 f"still name it — run `brain vault relink-derived`.",
             )
         )

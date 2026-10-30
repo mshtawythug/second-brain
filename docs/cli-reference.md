@@ -176,6 +176,20 @@ matches docs recorded under **any** known variant of that person — space-form
 combination the sources emitted — so Gmail-header and Krisp-label spellings of
 the same person all count as one identity.
 
+`--entity "<name>"` (`brain search` only) keeps documents that mention that
+graph entity. The name is matched against the entity's canonical key, and only
+when no key matches, against its display name, case-insensitively. A curated
+alias rule (`BRAIN_GRAPH_ALIASES_PATH`) adds its target entity and keeps the
+named one: rules are merged only by `brain graphrag build` / `refresh`, so an
+unmerged name can still have documents of its own. The FTS leg, the vector leg, the total and `--facets` all
+see the filter. A name that matches entities of several types exits 2 and asks
+for `--entity-type org|person|project|tool|topic`. A name that matches nothing
+exits 2 and points at `brain graphrag entities`. It needs the graph: with
+`BRAIN_GRAPH_ENABLED` off, or no graph tables, it exits 2 with "`--entity` needs
+the graph: set BRAIN_GRAPH_ENABLED=true and run `brain graphrag build`". MCP
+`brain_search` takes `entity` and `entity_type` and raises `INVALID_PARAMS` in
+the same cases.
+
 `--since` takes a bare number or a duration suffix — `7d` (days), `24h`
 (hours), `90m` (minutes) — on the commands that share this parser: `search`,
 `explain`, `todo`, `enrich`, and `gaps` (bare number = **days**), plus `brain
@@ -418,6 +432,52 @@ On a database missing migration 019/023/024/027/028 the command **fails** with a
 `brain init` hint rather than reporting confident zeroes — the opposite of the
 telemetry *write* path, which swallows so that search keeps working. A silently
 incomplete report is worse than no report.
+
+### Engagement readout — `--engagement`
+
+```bash
+brain usage --engagement              # counts over the last 30 days
+brain usage --engagement --days 7
+brain usage --engagement --json
+```
+
+Is there enough engagement data for an interactions-aware ranking stage to
+learn from? The readout counts **document** interactions over `--days`:
+
+- reads, split by surface (`cli` / `mcp` / `ui` / `wiki`) into opens
+  (`opened`) and clicks (`clicked`)
+- distinct documents opened
+- `rated useful` and `rated irrelevant`
+- how many reads came from a search session, and what share of all reads that
+  is: the row's session id names a logged search. (`brain ask` logs its
+  citations under the ask's own session, which is not a search.)
+- the size of the whole `interactions` table: rows, and bytes as
+  `pg_total_relation_size`.
+
+A rating of a graph target (an entity, community or theme) is not counted,
+because a document ranking stage cannot learn from it. It is still included in
+the table size.
+
+The last line is the **gate**: met when, over the last 90 days, there are at
+least **500 reads (opens + clicks) across at least 100 distinct documents and
+30 explicit ratings**. The gate is **always** judged over 90 days, whatever
+`--days` says, so widening the window cannot meet it. Reads include the
+`opened` row `brain ask` records for each citation in an answer; the
+search-session share is how to tell those apart from reads after a search.
+Each count is printed beside its threshold:
+
+```
+Gate (always the last 90 days): NOT MET — reads 40 of 500 · documents 40 of 100 · ratings 5 of 30
+```
+
+The gate's `reads` equals what the report above calls "opens" (`opened` +
+`clicked`). The readout's `opens` and `clicks` split that total: `opens` counts
+`opened` only (the JSON key too), `clicks` counts `clicked`. The output is
+counts only. No title, query, document id or agent appears in either
+form. `--json` adds a `gate` object (`met`, each count, each `min_*`).
+`--raw-queries` is refused (exit 2), because the readout has no queries, and
+`--limit` has no effect on it. Without `--engagement`, `brain usage` prints
+exactly what it printed before the flag existed.
 
 ## Confidentiality
 
@@ -684,6 +744,13 @@ non-`report` action **and** pass `--apply`; either alone is a no-op report.
 
 `redact` is by far the slowest option for that reason. An unrecognized
 `--action` is a usage error (**exit 2**).
+
+A document that `redact` could not rewrite is listed under `error(s)` (and in
+`--json`'s `errors`) and keeps its secret. A `mark-confidential` change that
+could not reach a vault file is listed the same way. Every reason names the
+failure's class only, never the exception's text. The usual case, where the redacted body is
+identical to another document's, reads "redacted body collides with another
+document's content hash".
 
 One limit worth stating plainly: this finds what is *already stored*. It cannot
 un-send anything that was already transmitted to a hosted embedder before the

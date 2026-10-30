@@ -233,6 +233,42 @@ class PersonNotFound(BrainError):
         self.query = query
 
 
+class EntityFilterError(BrainError):
+    """A ``--entity`` search filter that cannot be applied (RM-24).
+
+    The CLI maps it to ``typer.BadParameter`` (exit 2) and MCP ``brain_search``
+    to ``INVALID_PARAMS``. Raised directly for an unknown ``--entity-type`` or an
+    ``--entity-type`` with no ``--entity``.
+    """
+
+
+class EntityGraphUnavailable(EntityFilterError):
+    """``--entity`` was given but the graph is disabled or its tables are absent."""
+
+
+class EntityNotFound(EntityFilterError):
+    """No graph entity matched the ``--entity`` argument."""
+
+    def __init__(self, query: str) -> None:
+        super().__init__(
+            f"--entity {query!r} matched no graph entity; "
+            "list them with `brain graphrag entities`"
+        )
+        self.query = query
+
+
+class EntityAmbiguous(EntityFilterError):
+    """The ``--entity`` argument matched entities of several types."""
+
+    def __init__(self, query: str, entity_types: list[str]) -> None:
+        super().__init__(
+            f"--entity {query!r} matched entities of {len(entity_types)} types "
+            f"({', '.join(entity_types)}). Pass --entity-type to choose one."
+        )
+        self.query = query
+        self.entity_types = entity_types
+
+
 class ElicitError(BrainError):
     """Base class for tacit-knowledge elicitation failures."""
 

@@ -7,6 +7,13 @@ are **withheld** unless ``--raw-queries`` is passed. A query log is often more
 revealing than any single document it found — it records what someone was
 looking for, including the searches that returned nothing. Counts are
 identical either way; only the label changes.
+
+``--engagement`` (RM-22a) prints a different readout instead of the report:
+document opens, clicks and ratings from :mod:`brain.engagement`, and whether
+RM-22b's data gate is met. ``--days`` sets only the readout's counts; the gate
+line is always over :data:`brain.engagement.GATE_WINDOW_DAYS`. The branch
+returns before the report code, so ``brain usage`` without the flag prints
+exactly what it printed before the flag (``tests/test_cli_usage_golden.py``).
 """
 from __future__ import annotations
 
@@ -16,6 +23,13 @@ from rich.table import Table
 
 from .config import Config
 from .db import connect
+from .engagement import (
+    GATE_WINDOW_DAYS,
+    EngagementGate,
+    EngagementStats,
+    engagement_gate,
+    engagement_stats,
+)
 from .format import console, emit_json
 from .gaps import search_queries_schema_hint
 from .usage import UsageReport, build_usage_report
@@ -23,6 +37,13 @@ from .usage import UsageReport, build_usage_report
 #: Rows of the daily table shown in human output. The JSON carries every day;
 #: a 90-day window rendered in full would bury the summary it sits under.
 _DAILY_ROWS_SHOWN = 14
+
+#: ``brain usage --engagement`` on a database missing ``interactions``
+#: (migration 010) or ``search_queries`` (019).
+_ENGAGEMENT_SCHEMA_HINT = (
+    "interactions or search_queries table missing (a migration is not "
+    "applied) — run `brain init` first"
+)
 
 
 def _totals_line(report: UsageReport) -> str:
@@ -174,6 +195,87 @@ def _sources_table(report: UsageReport) -> Table:
     return table
 
 
+def _engagement_lines(stats: EngagementStats) -> list[str]:
+    """The readout's two summary lines. Counts only: no title, query or id."""
+    share = stats.search_session_share
+    from_search = (
+        f"from a search session {stats.search_session_reads:,} of {stats.reads:,}"
+    )
+    if share is not None:
+        from_search += f" ({share * 100:.1f}%)"
+    counts = "  ·  ".join(
+        [
+            f"opens {stats.opens:,}",
+            f"clicks {stats.clicks:,}",
+            f"documents opened {stats.documents_opened:,}",
+            f"rated useful {stats.rated_useful:,}",
+            f"rated irrelevant {stats.rated_irrelevant:,}",
+            from_search,
+        ]
+    )
+    size = (
+        f"interactions table: {stats.interactions_rows:,} rows  ·  "
+        f"{stats.interactions_bytes:,} bytes (all rows, all time)"
+    )
+    return [counts, size]
+
+
+def _gate_line(gate: EngagementGate) -> str:
+    """One line, each count beside its threshold, so a miss shows how far off."""
+    g = gate.to_dict()
+    verdict = "MET" if gate.met else "NOT MET"
+    return (
+        f"Gate (always the last {GATE_WINDOW_DAYS} days): {verdict} — "
+        f"reads {g['reads']:,} of {g['min_reads']:,} · "
+        f"documents {g['documents']:,} of {g['min_documents']:,} · "
+        f"ratings {g['ratings']:,} of {g['min_ratings']:,}"
+    )
+
+
+def _engagement_surface_table(stats: EngagementStats) -> Table:
+    table = Table(title="By surface", title_justify="left")
+    table.add_column("Surface")
+    for name in ("Opens", "Clicks"):
+        table.add_column(name, justify="right")
+    for row in stats.by_surface:
+        table.add_row(row.surface, f"{row.opens:,}", f"{row.clicks:,}")
+    return table
+
+
+def _engagement_readout(*, days: int, json_output: bool) -> None:
+    """``brain usage --engagement``: counts over ``days``, the gate over 90."""
+    cfg = Config.load()
+    try:
+        with connect(cfg.database_url) as conn:
+            stats = engagement_stats(conn, days=days)
+            # The gate never follows --days, so it cannot be met by widening
+            # the window (RM-22a). At exactly 90 days the counts are the same
+            # query, so they are reused rather than read twice.
+            gate_stats = (
+                stats
+                if days == GATE_WINDOW_DAYS
+                else engagement_stats(conn, days=GATE_WINDOW_DAYS)
+            )
+    except psycopg.errors.UndefinedTable as e:
+        # The readout reads two tables, so the report's hint (which names
+        # search_queries for every missing table) could name the wrong one.
+        # Any other error is a real bug and propagates.
+        typer.secho(_ENGAGEMENT_SCHEMA_HINT, fg="red", err=True)
+        raise typer.Exit(code=1) from e
+    gate = engagement_gate(gate_stats)
+
+    if json_output:
+        emit_json({**stats.to_dict(), "gate": gate.to_dict()})
+        return
+
+    typer.echo(f"Brain engagement — last {days} day(s), document interactions")
+    for line in _engagement_lines(stats):
+        typer.echo(f"  {line}")
+    typer.echo("")
+    console.print(_engagement_surface_table(stats))
+    typer.echo(_gate_line(gate))
+
+
 def usage(
     days: int = typer.Option(30, "--days", "-d", min=1, help="Lookback window in days."),
     json_output: bool = typer.Option(
@@ -190,6 +292,15 @@ def usage(
     limit: int = typer.Option(
         10, "--limit", "-n", min=1, help="Rows per top-N section."
     ),
+    engagement: bool = typer.Option(
+        False,
+        "--engagement",
+        help=(
+            "Print the engagement readout instead: document opens, clicks and "
+            "ratings over --days, and whether the ranking gate is met (always "
+            "judged over the last 90 days). Counts only."
+        ),
+    ),
 ) -> None:
     """Show how much this brain is being read from and written to.
 
@@ -201,7 +312,19 @@ def usage(
 
     ``--json`` withholds raw query strings by default; pass ``--raw-queries``
     to include them.
+
+    ``--engagement`` prints the engagement readout instead (RM-22a).
     """
+    if engagement:
+        if raw_queries:
+            # The readout carries no query strings at all; accepting the flag
+            # would suggest it had added some.
+            raise typer.BadParameter(
+                "the engagement readout has no query strings",
+                param_hint="--raw-queries",
+            )
+        _engagement_readout(days=days, json_output=json_output)
+        return
     cfg = Config.load()
     try:
         with connect(cfg.database_url) as conn:
