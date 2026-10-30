@@ -176,6 +176,38 @@ def test_redact_hash_collision_gets_the_fixed_sentence(
     assert errors == [{"id": dirty_id, "error": REDACT_COLLISION_MESSAGE}]
 
 
+@pytest.mark.usefixtures("_scan_secrets")
+def test_redact_of_a_document_deleted_mid_sweep_is_not_a_collision(
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A document deleted mid-sweep fails as "not found", even beside a twin.
+
+    The twin already holds the redacted body's hash, so a collision check that
+    ignores whether the swept row still exists would misreport the failure.
+    The row is deleted on the sweep's own connection, just before the real
+    ``update_document`` runs, as a concurrent ``brain rm`` would leave it.
+    """
+    from brain import cli_sensitivity
+
+    real_update = cli_sensitivity.update_document
+
+    def _delete_then_update(conn: Any, *, document_id: str, **kwargs: Any) -> Any:
+        conn.execute("DELETE FROM documents WHERE id = %s", (document_id,))
+        return real_update(conn, document_id=document_id, **kwargs)
+
+    dirty = f"Synthetic runbook two.\n\nkey {_FAKE_AWS_KEY} here\n"
+    redacted, _ = redact_secrets(dirty)
+    dirty_id = _seed(test_db, title="Synthetic deleted dirty", content=dirty)
+    _seed(test_db, title="Synthetic deleted twin", content=redacted)
+    monkeypatch.setattr("brain.cli_sensitivity.update_document", _delete_then_update)
+
+    result = _redact("--json")
+
+    assert result.exit_code == 0, result.output
+    errors = json.loads(result.output)["errors"]
+    assert errors == [{"id": dirty_id, "error": "ValueError"}]
+
+
 def test_redact_collision_message_is_the_documented_sentence() -> None:
     """The ticket fixes the wording. A reworded constant should fail here."""
     assert REDACT_COLLISION_MESSAGE == (

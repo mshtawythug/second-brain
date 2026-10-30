@@ -39,7 +39,10 @@ document deleted mid-sweep. Only the message tells them apart, and the report mu
 message. So after a failure, `_hash_taken_by_another` checks the database: does another document
 already hold the redacted body's content hash? It hashes with the same function `update_document`
 uses (`brain.ingest._content_hash`). `vault/sync.py` and `backfill/source_rows.py` already import
-private ingest helpers this way. The query runs only on the failure path.
+private ingest helpers this way. The query runs only on the failure path. It also requires the
+swept row to still exist: `update_document` looks the row up before it checks for a collision,
+so a document deleted mid-sweep failed as "not found" even when a twin holds the redacted hash
+(review round 1).
 
 ## Files
 
@@ -50,7 +53,7 @@ private ingest helpers this way. The query runs only on the failure path.
 | `src/brain/vault/sensitivity_propagate.py` | one import line, three messages rewritten in place, and a `PropagationFailure` docstring note (143 → 149) |
 | `tests/test_class_only_reports.py` | new: sentinel tests on both report paths |
 | `CHANGELOG.md`, `docs/cli-reference.md` | Unreleased entry; `scan-secrets`'s error reasons |
-| `docs/plans/2026-10-23-backlog-reconciliation.md` | H-6 closed |
+| `docs/plans/2026-10-23-backlog-reconciliation.md` | H-6 closed; BL-25 added (the remaining CLI echoes, from the review) |
 | `docs/specs/2026-10-23-roadmap-completion-design.md` | Appendix B, RM-29 → DONE (follow-up commit, once the PR number exists) |
 
 No source file here is in the CLAUDE.md ceiling table, so the promotion rule does not apply.
@@ -62,7 +65,7 @@ Every exception message in these tests is a sentinel string that no code path pr
 | AC | Test |
 |---|---|
 | 1. A sentinel message never appears in the export report | `test_export_summary_never_quotes_the_exception_message` (the `ExportSummary`), `test_cli_vault_export_report_never_quotes_the_exception_message` (the terminal output of `brain vault export`) |
-| 2. A sentinel message never appears in the sensitivity report | `test_redact_report_never_quotes_the_exception_message` (text and `--json`; a `ValueError` that is not a collision gives `describe_failure`); `test_redact_hash_collision_gets_the_fixed_sentence` (a real collision: the fixed sentence, no id of the other document, no original message); `test_mark_confidential_report_never_quotes_the_exception_message` (all three propagation `except` sites) |
+| 2. A sentinel message never appears in the sensitivity report | `test_redact_report_never_quotes_the_exception_message` (text and `--json`; a `ValueError` that is not a collision gives `describe_failure`); `test_redact_hash_collision_gets_the_fixed_sentence` (a real collision: the fixed sentence, no id of the other document, no original message); `test_redact_of_a_document_deleted_mid_sweep_is_not_a_collision` (a deleted row beside a twin: `ValueError`, not the sentence); `test_mark_confidential_report_never_quotes_the_exception_message` (all three propagation `except` sites) |
 | 3. The errno class still appears for an `OSError` | both export tests assert `OSError[ENOSPC]` |
 
 `test_redact_collision_message_is_the_documented_sentence` pins the ticket's wording.
@@ -79,6 +82,7 @@ Every exception message in these tests is a sentinel string that no code path pr
    body is already redacted, and `_apply_redact` returns early then. The clause mirrors
    `update_document`'s own collision query.
 7. Each of `sensitivity_propagate.py`'s three sites back to `{exc}`, one at a time (three runs).
+8. The collision query's `EXISTS` clause removed (review round 1).
 
 ## Risks
 

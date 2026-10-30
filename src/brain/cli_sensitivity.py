@@ -149,7 +149,7 @@ def _apply_redact(
 
 
 def _hash_taken_by_another(conn: Any, document_id: str, content: str) -> bool:
-    """True when another document already stores ``content``'s content hash.
+    """True when ``document_id`` still exists and another document holds ``content``'s hash.
 
     ``update_document`` raises a bare ``ValueError`` both for this collision and
     for other failures, such as a document deleted mid-sweep. Its message is the
@@ -157,10 +157,15 @@ def _hash_taken_by_another(conn: Any, document_id: str, content: str) -> bool:
     So the cause is checked against the database instead, with the same hash
     function ``update_document`` uses (``brain.ingest._content_hash``). The
     check runs only after a failure.
+
+    The swept row must still exist: ``update_document`` looks it up before it
+    checks for a collision, so a document deleted mid-sweep failed as "not
+    found", even when another document already holds the redacted hash.
     """
     row = conn.execute(
-        "SELECT 1 FROM documents WHERE content_hash = %s AND id <> %s LIMIT 1",
-        (_content_hash(content), document_id),
+        "SELECT 1 FROM documents WHERE content_hash = %s AND id <> %s "
+        "AND EXISTS (SELECT 1 FROM documents WHERE id = %s) LIMIT 1",
+        (_content_hash(content), document_id, document_id),
     ).fetchone()
     return row is not None
 
