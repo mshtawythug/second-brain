@@ -278,8 +278,8 @@ def run_one(
     nothing. Raises :class:`DropFolderError` as :func:`run` does; any other ``OSError``
     is the file's ``failed`` outcome, by class.
     """
-    if folder.mode != "ingest":
-        raise DropFolderError(f"mode {folder.mode!r} is not available until RM-39")
+    if folder.mode != "ingest":  # never a capture folder: RM-39's mode deletes on success
+        raise DropFolderError("only an ingest folder's file can be run by name")
     if folder.kind is None:
         raise DropFolderError("an ingest folder needs a source kind")
     if not _is_bare_name(name) or Path(name).suffix.lower() not in folder.extensions:

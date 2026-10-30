@@ -252,9 +252,17 @@ def test_a_symlinked_imported_refuses_the_folder(tmp_path: Path) -> None:
     assert list(elsewhere.iterdir()) == []
 
 
-def test_capture_mode_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(DropFolderError, match="RM-39"):
-        _run_one(_folder(tmp_path, mode="capture"), "x.md", _Ingest())
+def test_a_capture_folder_is_refused_and_nothing_moves(tmp_path: Path) -> None:
+    """RM-39's capture mode deletes a file on success; run_one never runs one."""
+    (tmp_path / "x.md").write_bytes(b"keep me")
+    ingest = _Ingest()
+
+    with pytest.raises(DropFolderError, match="only an ingest folder"):
+        _run_one(_folder(tmp_path, mode="capture"), "x.md", ingest)
+
+    assert ingest.calls == []
+    assert _tree(tmp_path) == {"x.md": b"keep me"}
+    assert not (tmp_path / IMPORTED_DIR).exists()
 
 
 def test_an_ingest_folder_needs_a_kind(tmp_path: Path) -> None:
