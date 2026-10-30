@@ -292,6 +292,51 @@ Two MEDIUM and three LOW findings, none critical or high, fixed in `6c01fb6`.
 The regex's seven-digit bound is redundant with the 2²² range check (every eight-digit pid is out
 of range); each layer that is not redundant is proven on its own.
 
+## Review round 1, continued: the code review (rev-77) and the audit (aud-77), at `973870a`
+
+Fixed in `39d9941`, with the security round above, and pushed together.
+
+- **R1 (MEDIUM).** `file_runner` caught only `ValueError` / `OSError` from `extract_path`, so a `.docx`
+  that passes the sniff but not python-docx (lxml's `XMLSyntaxError` for a malformed
+  `document.xml`; a `KeyError` for a zip with no `[Content_Types].xml`) ended as `internal_error`,
+  "may already have been saved", which was false. Now ANY exception from the extraction call alone is
+  `unreadable_file` (nothing is written before it). Tested with both shapes through `submit_file` +
+  `run_next`, staged directory deleted.
+- **R2 (MEDIUM).** The guard fix above read every complex rule by its subject, so a mis-scoped
+  RESCUE passed. Corrected as recorded in the deviation above, with two GUARDS entries.
+- **R3 (LOW).** `docs/cli-reference.md` (and the CHANGELOG) said an unsubmitted file "is deleted
+  after 15 minutes". Ruling: no periodic expiry; reworded to "once it is 15 minutes old, at the next
+  upload or submit, or when the server stops".
+- **R4 (LOW).** A file dropped beside the zone was opened by the browser in place of the app. While
+  file mode is shown, window-level `dragover` / `drop` listeners cancel the default for a drag that
+  carries files and route the drop to the zone's handler; in paste mode they do nothing. Two browser
+  tests.
+- **A1 (MEDIUM).** `". .x.md"` and the U+3000 variant kept a leading dot (stem `.x`). Leading dots and
+  whitespace are now stripped to a fixed point (`^[\s.]+`), and an extension with no stem
+  (`". ..md"`) is `bad_filename`; the old, unreachable `stem.strip(". ")` check is gone. Consistent
+  with the byte cap: the stem is stripped first, then cut to 120 characters and 200 bytes.
+- **A2 (MEDIUM).** `pid_alive`'s "exists but not ours" branch was untested; `pid_alive(1)` is now
+  asserted alive (and a known-dead pid dead).
+- **A3 (LOW).** The reachable missed lines are covered: `_remove` on a file and on a missing
+  directory, an unlistable sweep entry, a missing sweep parent, `upload_kind(".exe")`, a damaged
+  central directory behind a sane end record, and an end record that under-reports its count.
+  `upload_checks.py`, `upload_staging.py` and `routes_upload.py` are at 100%.
+- **A4 / A5 (LOW).** The browser count and the Files and Tests sections are corrected (above).
+- **A6 (LOW).** Memory `cli.md` no longer says `extensions ([] until RM-13)`.
+
+**Mutation proofs after both rounds, all re-run on `39d9941`: 42 of 42 killed.** 36 Python: the 18
+from the first pass, re-anchored where the code moved (the sniff is now behind `self._sniffer`; the
+own-pid check is merged with the range check); the 14 security-round entries; and four new ones
+(A1 single-pass strip, A1 empty stem accepted, A2 `PermissionError` read as dead, R1 catch narrowed
+back to `ValueError` / `OSError`). 6 JS, under the lock: the three from the first pass and three for
+R4 (the window `drop` listener removed, the window `dragover` listener removed, and the file-mode test
+replaced by `true`). The R2 guard entries run inside `test_every_guard_can_fail` on every suite.
+
+**Tests for the round** (no local full suite, per the standing disk policy; CI's "Tests" job is the
+full-suite evidence): every non-browser `tests/test_ui_*.py` plus log privacy, dispatch, pdf and
+docx, 1,395 passed; the three ingest browser modules, 60 passed, under the lock; `ruff` and
+`mypy src/` clean.
+
 ## End-to-end
 
 A real `brain ui` against a scratch DB on 5434 (`second_brain_test_rm13_e2e`), a scratch `BRAIN_HOME` and a
