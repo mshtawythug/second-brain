@@ -149,6 +149,42 @@ def test_dropping_one_file_stages_it(harness: Harness) -> None:
     assert page.get_attribute("#ingest-drop", "data-dragging") is None
 
 
+def _drop_on(page: Any, selector: str, names: list[str]) -> bool:
+    """Drop files on ``selector``; True when the page cancelled the default (open the file)."""
+    return bool(page.evaluate(
+        """([selector, names]) => {
+          const transfer = new DataTransfer();
+          for (const name of names) transfer.items.add(new File(["synthetic"], name));
+          const target = document.querySelector(selector);
+          const over = new DragEvent("dragover", {dataTransfer: transfer, bubbles: true,
+                                                  cancelable: true});
+          target.dispatchEvent(over);
+          const drop = new DragEvent("drop", {dataTransfer: transfer, bubbles: true,
+                                              cancelable: true});
+          target.dispatchEvent(drop);
+          return over.defaultPrevented && drop.defaultPrevented;
+        }""",
+        [selector, names],
+    ))
+
+
+def test_a_file_dropped_beside_the_zone_is_staged_not_opened(harness: Harness) -> None:
+    """The browser would otherwise open the file in place of the app (rev-77 R4)."""
+    page = _file_mode(harness)
+
+    assert _drop_on(page, "#ingest-heading", ["beside-the-zone.md"])
+
+    _ready(page)
+    assert unquote(harness.jobs.uploads[0]["filename"]) == "beside-the-zone.md"
+
+
+def test_in_paste_mode_a_page_drop_is_left_to_the_browser(harness: Harness) -> None:
+    harness.open_tab()
+
+    assert not _drop_on(harness.page, "#ingest-heading", ["pasted.md"])
+    assert harness.jobs.uploads == []
+
+
 def test_dropping_two_files_is_refused_without_a_request(harness: Harness) -> None:
     page = _file_mode(harness)
 

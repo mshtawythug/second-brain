@@ -870,7 +870,8 @@ from the file's name for a PDF or a text file), then **Ingest**. The job runs on
 the same panel as a paste, and an identical file uploaded again is **Already in
 your brain**. A file ingested once with `brain ingest <path>` and once by upload
 becomes two documents: the upload has no path to dedup on. An uploaded file you
-never submit is deleted after 15 minutes; a submitted one when its job ends.
+never submit is deleted once it is 15 minutes old, at the next upload or submit,
+or when the server stops; a submitted one when its job ends.
 
 The tab sits on these routes. On a
 loopback, writable server, `POST /api/ingest/paste` ingests pasted text as an

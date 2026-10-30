@@ -16,6 +16,12 @@
  * NEVER A DRAG-ONLY AFFORDANCE. The drop zone is a real <button> that opens the
  * file input, so a keyboard user reaches the same path. One file per job.
  *
+ * A FILE DROPPED BESIDE THE ZONE IS NOT LOST. The browser's default for a file
+ * dropped on the page is to open it, replacing the app (and any unsent form).
+ * While file mode is shown, window-level listeners cancel that default for a
+ * drag that carries files, and a drop anywhere on the page is treated as a drop
+ * on the zone. In paste mode the window listeners do nothing.
+ *
  * A STALE ANSWER IS DISCARDED. Each selection bumps `generation`; an upload that
  * lands after the user removed it, or chose another file, is deleted on the
  * server rather than shown.
@@ -152,6 +158,26 @@ function onDragLeave() {
   $("ingest-drop").removeAttribute("data-dragging");
 }
 
+function carriesFiles(event) {
+  return Boolean(event.dataTransfer && Array.from(event.dataTransfer.types || []).includes("Files"));
+}
+
+/* Only while file mode is on screen; the zone's own handlers run first. */
+function fileModeShown() {
+  return !$("ingest-file-fields").hidden && !$("tab-ingest").hidden;
+}
+
+function onWindowDragOver(event) {
+  if (event.defaultPrevented || !carriesFiles(event) || !fileModeShown()) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+}
+
+function onWindowDrop(event) {
+  if (event.defaultPrevented || !carriesFiles(event) || !fileModeShown()) return;
+  onDrop(event);
+}
+
 /* The hint under the drop zone: the types and sizes this server accepts. */
 export function describeFileLimits(cfg) {
   const parts = offered(cfg).map((t) => `${t.ext} up to ${mib(t.cap)}`);
@@ -195,6 +221,8 @@ export function wireFileMode(options) {
   drop.addEventListener("dragover", onDragOver);
   drop.addEventListener("dragleave", onDragLeave);
   drop.addEventListener("drop", onDrop);
+  window.addEventListener("dragover", onWindowDragOver);
+  window.addEventListener("drop", onWindowDrop);
   $("ingest-file").addEventListener("change", onPicked);
   $("ingest-staged-remove").addEventListener("click", () => {
     const name = staged ? staged.name : "";

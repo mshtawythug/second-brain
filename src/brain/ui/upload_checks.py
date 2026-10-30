@@ -14,6 +14,7 @@ never the filename, never a parser's exception text.
 """
 from __future__ import annotations
 
+import re
 import unicodedata
 import zipfile
 from dataclasses import dataclass
@@ -45,6 +46,10 @@ _EOCD_SIGNATURE = b"PK\x05\x06"
 _EOCD_SIZE = 22
 _EOCD_TOTAL_ENTRIES = 10
 _EOCD_SEARCH = _EOCD_SIZE + 0xFFFF
+
+#: Every leading run of dots and whitespace (Unicode whitespace too: U+3000), so a
+#: stem never starts with either, whatever order they come in.
+_LEADING_JUNK = re.compile(r"^[\s.]+")
 
 #: Unicode categories removed from a filename: controls (NUL included) and format
 #: characters, among them the bidi overrides that make ``evil<RLO>fdp.txt`` render
@@ -104,7 +109,8 @@ def sanitize_filename(header: str, registry: ExtractorRegistry | None = None) ->
 
     Percent-decoded as strict UTF-8 (the raw header must be ASCII), reduced to its
     final component (anything up to the last ``/`` or ``\\`` is dropped), stripped of
-    control and format characters, surrounding space and leading dots, and capped at
+    control and format characters, surrounding space, and every leading dot and space
+    (to a fixed point), and capped at
     :data:`MAX_FILENAME_CHARS` characters and :data:`MAX_FILENAME_BYTES` UTF-8 bytes
     (cut on a character boundary) with the extension kept. 400 ``bad_filename`` when
     nothing is left; 415 ``unsupported_file`` when the extension is not uploadable.
@@ -116,19 +122,20 @@ def sanitize_filename(header: str, registry: ExtractorRegistry | None = None) ->
     except UnicodeDecodeError as exc:
         raise _bad_filename() from exc
     final = decoded.replace("\\", "/").rsplit("/", 1)[-1]
-    cleaned = "".join(
+    name = "".join(
         ch for ch in final if unicodedata.category(ch) not in _STRIPPED_CATEGORIES
-    ).strip().lstrip(".").strip()
-    if not cleaned:
-        raise _bad_filename()
-    path = Path(cleaned)
-    ext = path.suffix.lower()
+    ).strip()
+    if not _LEADING_JUNK.sub("", name):
+        raise _bad_filename()  # nothing but dots and space: ".", "..", " . "
+    ext = Path(name).suffix.lower()
     if ext not in uploadable_extensions(registry):
         raise _unsupported()
-    stem = _fit(path.name[: -len(ext)][: MAX_FILENAME_CHARS - len(ext)], ext)
-    if not stem.strip(". "):
-        raise _bad_filename()
-    return SafeName(stem=stem, ext=ext)
+    # Leading dots AND whitespace, stripped to a fixed point in one pass: a single
+    # strip-then-lstrip left the dot in ". .x.md" (aud-77 A1).
+    stem = _LEADING_JUNK.sub("", name[: -len(ext)])
+    if not stem:
+        raise _bad_filename()  # an extension and nothing else: ". ..md"
+    return SafeName(stem=_fit(stem[: MAX_FILENAME_CHARS - len(ext)], ext), ext=ext)
 
 
 def _fit(stem: str, ext: str) -> str:

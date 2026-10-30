@@ -84,7 +84,7 @@ _MESSAGES: Mapping[str, str] = {
 
 
 class UnreadableFile(BrainError):
-    """``extract_path`` could not read a staged upload (a ``ValueError`` or ``OSError``).
+    """``extract_path`` could not read a staged upload, for any reason.
 
     Raised by the file runner so the mapping below can tell it from a ``ValueError``
     raised anywhere else in the pipeline. It carries the extension only.
@@ -240,7 +240,13 @@ def file_runner(
         handle.progress("extracting")
         try:
             extracted = extract_path(upload.path)
-        except (ValueError, OSError) as exc:
+        except Exception as exc:
+            # Broad on purpose, and ONLY around extraction: a file that passed the
+            # sniff can still fail in the parser in ways extract_path does not wrap
+            # (lxml's XMLSyntaxError for a malformed document.xml, a KeyError for a
+            # zip with no [Content_Types].xml). Nothing has been written yet, so
+            # "unreadable, nothing was written" is true; internal_error's "may
+            # already have been saved" would not be (rev-77 R1).
             raise UnreadableFile(upload.name.ext) from exc
         handle.check_cancelled()  # point 3: after extraction
         # A NEW document, never the extractor's mutated: the staged path means

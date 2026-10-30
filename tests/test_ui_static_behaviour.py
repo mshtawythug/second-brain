@@ -116,6 +116,7 @@ import ast
 import re
 import sys
 import traceback
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import NamedTuple
 
@@ -1250,16 +1251,97 @@ def _simple_parts(selector: str) -> frozenset[str] | None:
 def _subject_parts(selector: str) -> frozenset[str] | None:
     """The simple selectors of a selector's SUBJECT: its rightmost compound.
 
-    ``.ingest-pane .ingest-group`` -> ``{.ingest-group}``. Used only where the
-    question is "could this rule's ``display`` reach the element?", and there it
-    over-approximates on purpose: it assumes the ancestor part matches, so a rule
-    that MIGHT apply is treated as applying, which can only make the
-    ``[hidden]`` guard stricter. Without it every rule in a feature sheet whose
-    selectors are scoped to a pane (``ingest.css``) was invisible to that guard,
-    which RM-13 found when its two new ``[hidden]`` rules could be deleted
-    without a red test. ``None`` when the subject itself is not a compound.
+    ``.ingest-pane .ingest-group`` -> ``{.ingest-group}``. ``None`` when the
+    subject itself is not a compound. Without this, every rule in a feature sheet
+    whose selectors are scoped to a pane (``ingest.css``) was invisible to the
+    ``[hidden]`` guard, which RM-13 found when its two new ``[hidden]`` rules
+    could be deleted without a red test.
+
+    The subject alone is NOT enough to decide that a complex rule applies, and
+    which way it errs matters (rev-77 R2). See :func:`_complex_rule_applies`.
     """
     return _simple_parts(re.split(r"\s*[ >+~]\s*", selector.strip())[-1])
+
+
+#: Elements with no end tag: they are never anyone's ancestor.
+_VOID_TAGS = frozenset({
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+    "source", "track", "wbr",
+})
+
+
+class _AncestryParser(HTMLParser):
+    """The simple-selector sets of an element's ancestors, outermost first."""
+
+    def __init__(self, wanted: str) -> None:
+        super().__init__()
+        self.wanted = wanted
+        self.stack: list[tuple[str, frozenset[str]]] = []
+        self.found: tuple[frozenset[str], ...] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        keys = {tag} | {"." + name for name in (values.get("class") or "").split()}
+        if values.get("id"):
+            keys.add(f"#{values['id']}")
+        if values.get("id") == self.wanted and self.found is None:
+            self.found = tuple(k for _, k in self.stack)
+        if tag not in _VOID_TAGS:
+            self.stack.append((tag, frozenset(keys)))
+
+    def handle_endtag(self, tag: str) -> None:
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                return
+
+
+def _element_ancestors(selector: str, html: str) -> tuple[frozenset[str], ...] | None:
+    """The ancestors of the ``#id`` element in ``index.html``, or ``None``."""
+    if not selector.startswith("#"):
+        return None
+    parser = _AncestryParser(selector[1:])
+    parser.feed(html)
+    return parser.found
+
+
+def _complex_rule_applies(
+    decl: _Decl, keys: frozenset[str], ancestors: tuple[frozenset[str], ...] | None
+) -> bool:
+    """Whether a complex selector's ``display`` counts for the element (rev-77 R2).
+
+    It errs in the direction that keeps the guard STRICT, which differs by value:
+
+    - A ``display`` that would DEFEAT the hide (anything but ``none``) counts on its
+      subject alone, assuming the ancestors match: a rule that might apply is
+      treated as applying, so the guard may report a defeat that cannot happen,
+      never miss one that can.
+    - A ``display: none`` is a RESCUE, and assuming it applies would be the
+      unsafe guess: ``.no-such-ancestor .field[hidden] { display: none; }`` would
+      then pass while hiding nothing. So it counts only when every ancestor
+      compound matches a real ancestor of the element in ``index.html``, in
+      order; only descendant combinators are understood, and anything else is
+      declined, which again leaves the guard stricter.
+    """
+    subject = _subject_parts(decl.selector)
+    if subject is None or not subject <= keys | {"[hidden]"}:
+        return False
+    if decl.value != "none":
+        return True
+    selector = decl.selector.strip()
+    if ancestors is None or re.search(r"[>+~]", selector):
+        return False
+    remaining = list(ancestors)
+    for compound in selector.split()[:-1]:
+        needed = _simple_parts(compound)
+        if needed is None:
+            return False
+        while remaining and not needed <= remaining[0]:
+            remaining.pop(0)
+        if not remaining:
+            return False
+        remaining.pop(0)
+    return True
 
 
 _MAX_WIDTH = re.compile(r"^@media \((?:max|min)-width: \d+px\)$")
@@ -1466,7 +1548,11 @@ def _element_simple_selectors(selector: str, html: str) -> frozenset[str] | None
     return None
 
 
-def _winning_display(keys: frozenset[str], declarations: list[_Decl]) -> _Decl | None:
+def _winning_display(
+    keys: frozenset[str],
+    declarations: list[_Decl],
+    ancestors: tuple[frozenset[str], ...] | None = None,
+) -> _Decl | None:
     """The ``display`` an element with ``hidden`` set actually gets, or ``None``.
 
     ``None`` means no author rule matches at all, which is the SAFE state: the
@@ -1482,8 +1568,11 @@ def _winning_display(keys: frozenset[str], declarations: list[_Decl]) -> _Decl |
     matching = [
         decl for decl in declarations
         if decl.prop == "display"
-        and (parts := _subject_parts(decl.selector)) is not None
-        and parts <= (keys | {"[hidden]"})
+        and (
+            parts <= (keys | {"[hidden]"})
+            if (parts := _simple_parts(decl.selector)) is not None
+            else _complex_rule_applies(decl, keys, ancestors)
+        )
     ]
     return max(matching, key=_cascade_rank) if matching else None
 
@@ -1534,7 +1623,8 @@ def check_hidden_toggles_survive_the_cascade(bundle: str) -> None:
             keys = _element_simple_selectors(selector, parts["index.html"])
             if keys is None:
                 continue
-            winner = _winning_display(keys, declarations)
+            ancestors = _element_ancestors(selector, parts["index.html"])
+            winner = _winning_display(keys, declarations, ancestors)
             if winner is not None and winner.value != "none":
                 defeated.append(
                     f"  {path} hides {selector}, but `{winner.selector}` in "
@@ -2114,6 +2204,18 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
     ("hidden-rule-deleted-leaves-the-staged-file-visible",
      check_hidden_toggles_survive_the_cascade, "static/*",
      ".ingest-pane .ingest-staged[hidden] { display: none; }", "", 1),
+    # A RESCUE SCOPED TO AN ANCESTOR THAT DOES NOT EXIST hides nothing, and must
+    # not pass for one that does (rev-77 R2): the subject-only reading made this
+    # rewrite green, where at 0819738 (no complex rules read at all) it was red.
+    ("hidden-rule-scoped-to-a-missing-ancestor",
+     check_hidden_toggles_survive_the_cascade, "static/*",
+     ".field[hidden] { display: none; }",
+     ".no-such-ancestor .field[hidden] { display: none; }", 1),
+    # The same for RM-13's own rule: right subject, wrong pane.
+    ("ingest-hidden-rule-scoped-to-another-pane",
+     check_hidden_toggles_survive_the_cascade, "static/*",
+     ".ingest-pane .ingest-group[hidden] { display: none; }",
+     ".graph-pane .ingest-group[hidden] { display: none; }", 1),
     # ---------------------------------------------- the cross-sheet class --
     # A NEW duplicate: explorer.css starts declaring a property components.css
     # already declares for `.rail-head`, so which padding the header gets

@@ -44,8 +44,9 @@ of the Ingest tab design): `.md`, `.markdown`, `.txt`, `.pdf` or `.docx`.
   exactly that one route and method. No multipart parser is used.
 - Staged files live in a private (`0700`) per-process temporary directory and are
   deleted when their job ends however it ends (a queued job cancelled before it
-  ran included), when removed, after 15 minutes unsubmitted, and at shutdown; a
-  dead server's leftovers are swept at the next start. Filenames are never logged.
+  ran included), when removed, once 15 minutes old and unsubmitted (checked at the
+  next upload or submit), and at shutdown; a dead server's leftovers are swept at
+  the next start. Filenames are never logged.
 - An uploaded document dedups on its extracted text, not a path: the same file
   uploaded twice is **Already in your brain**, but a file once ingested with
   `brain ingest <path>` becomes a second document.

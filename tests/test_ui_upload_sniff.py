@@ -164,3 +164,34 @@ def test_the_zip64_marker_is_refused(tmp_path: Path) -> None:
     error = _refused(_write(tmp_path / "x.docx", b"PK\x03\x04" + end_record), ".docx")
 
     assert error.message == "the .docx holds too many parts to unpack safely"
+
+
+def test_a_sane_end_record_over_a_damaged_central_directory_is_refused(tmp_path: Path) -> None:
+    """The end record claims one entry at offset 4, where no central directory is."""
+    end_record = (
+        b"PK\x05\x06" + b"\0" * 4 + (1).to_bytes(2, "little") * 2
+        + (46).to_bytes(4, "little") + (4).to_bytes(4, "little") + b"\0\0"
+    )
+    path = _write(tmp_path / "x.docx", b"PK\x03\x04" + b"\xab" * 60 + end_record)
+
+    error = _refused(path, ".docx")
+
+    assert error.message == "the file is not a .docx (a damaged zip)"
+
+
+def test_an_end_record_that_under_reports_the_member_count_is_still_caught(
+    tmp_path: Path,
+) -> None:
+    """zipfile walks the central directory by its SIZE, not the end record's count, so
+    a forged low count does not get past the second, post-parse check."""
+    members = {"word/document.xml": _DOCX_BODY}
+    members.update({f"m/{i}.xml": b"" for i in range(DOCX_MAX_MEMBERS)})
+    path = _docx(tmp_path / "x.docx", members, compression=zipfile.ZIP_STORED)
+    raw = bytearray(path.read_bytes())
+    at = raw.rfind(b"PK\x05\x06")
+    raw[at + 8 : at + 12] = (1).to_bytes(2, "little") * 2  # entries on disk, and in total
+    path.write_bytes(bytes(raw))
+
+    error = _refused(path, ".docx")
+
+    assert error.message == "the .docx holds too many parts to unpack safely"

@@ -280,3 +280,47 @@ def test_a_paste_result_carries_no_filename(
     registry.run_next()
 
     assert dict(registry.get(job.id).result or {})["original_filename"] is None
+
+
+def _zip(path: Path, members: dict[str, bytes]) -> bytes:
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return path.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        # Passes the sniff (a zip holding word/document.xml) but python-docx needs
+        # [Content_Types].xml: a KeyError, not a ValueError.
+        {"word/document.xml": b"<w:document/>"},
+        # A copy of a real .docx whose document.xml is not XML: lxml's XMLSyntaxError.
+        None,
+    ],
+    ids=["no-content-types", "malformed-document-xml"],
+)
+def test_a_docx_that_passes_the_sniff_but_not_the_parser_is_unreadable(
+    test_db: psycopg.Connection[Any], tmp_path: Path, fixtures_dir: Path,
+    members: dict[str, bytes] | None,
+) -> None:
+    """Both used to end as internal_error, "may already have been saved" (rev-77 R1)."""
+    import zipfile
+
+    if members is None:
+        with zipfile.ZipFile(fixtures_dir / "sample.docx") as source:
+            members = {name: source.read(name) for name in source.namelist()}
+        members["word/document.xml"] = b"<w:document><unclosed"
+    data = _zip(tmp_path / "built.docx", members)
+    ctx, staging, _ = _setup(test_db, tmp_path)
+    upload = _stage(staging, "broken.docx", data)
+
+    snap = _run(ctx, staging, _spec(upload))
+
+    assert snap.state == "failed"
+    assert snap.error is not None and snap.error.code == "unreadable_file"
+    assert "Nothing was written" in snap.error.message
+    assert _doc_count(test_db) == 0
+    assert not upload.path.parent.exists()

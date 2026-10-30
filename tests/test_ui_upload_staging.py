@@ -354,9 +354,14 @@ def test_the_sweep_never_follows_a_symlink(tmp_path: Path) -> None:
 
 
 def test_pid_alive() -> None:
+    """Both directions (aud-77 A2): dead only on ProcessLookupError."""
     assert pid_alive(os.getpid())
     assert pid_alive(os.getppid())
+    # init/launchd: kill(1, 0) is a PermissionError for a non-root user (it exists,
+    # it is not ours) and succeeds as root; alive either way.
+    assert pid_alive(1)
     assert not pid_alive(2**22 + 12345)  # above macOS and Linux pid_max defaults
+    assert not pid_alive(_DEAD_PID)
 
 
 def test_the_sweep_never_removes_its_own_root(tmp_path: Path) -> None:
@@ -530,3 +535,53 @@ def test_opening_writing_and_sniffing_run_off_the_event_loop_thread(tmp_path: Pa
     for call, seen in threads.items():
         assert seen, call
         assert loop_thread not in seen, f"{call} ran on the event loop thread"
+
+
+def test_removing_a_regular_file_logs_by_class_and_does_not_raise(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``_remove`` expects a directory; anything else is logged, never raised (aud-77 A3)."""
+    from brain.ui.upload_staging import _remove
+
+    planted = tmp_path / "zorblax-not-a-directory"
+    planted.write_text("x")
+    with caplog.at_level("WARNING", logger="brain.ui.upload_staging"):
+        _remove(planted)
+
+    assert "NotADirectoryError" in caplog.text or "OSError" in caplog.text
+    assert "zorblax" not in caplog.text
+
+
+def test_removing_a_missing_directory_is_silent(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from brain.ui.upload_staging import _remove
+
+    with caplog.at_level("DEBUG", logger="brain.ui.upload_staging"):
+        _remove(tmp_path / "gone")
+
+    assert caplog.text == ""
+
+
+def test_the_sweep_of_a_missing_parent_returns_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("WARNING", logger="brain.ui.upload_staging"):
+        assert sweep_stale_roots(tmp_path / "missing", own_pid=os.getpid()) == []
+
+    assert "FileNotFoundError" in caplog.text and "missing" not in caplog.text
+
+
+def test_an_entry_that_cannot_be_lstat_is_left_alone(tmp_path: Path) -> None:
+    """A parent this user can list (r) but not search (x): ``iterdir`` names the
+    entry and ``lstat`` fails. The sweep skips it rather than guessing."""
+    parent = tmp_path / "listable"
+    (parent / f"{ROOT_PREFIX}{_DEAD_PID}-x").mkdir(parents=True)
+    parent.chmod(0o400)
+    try:
+        removed = sweep_stale_roots(parent, own_pid=os.getpid(), is_alive=lambda pid: False)
+    finally:
+        parent.chmod(0o700)
+
+    assert removed == []
+    assert (parent / f"{ROOT_PREFIX}{_DEAD_PID}-x").exists()

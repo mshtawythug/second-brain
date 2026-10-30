@@ -26,9 +26,12 @@ New (each planned well under 400 lines):
 | `src/brain/ui/routes_upload.py` | `POST /api/ingest/uploads`, `DELETE /api/ingest/uploads/{upload_id}`, `POST /api/ingest/file`. Thin: gate, header, caps, stream, map errors. A sibling of `routes_ingest.py` so that module stays the paste-and-config module. |
 | `src/brain/ui/static/js/upload.js` | `uploadFile(file)` and `discardUpload(id)`: a raw `fetch` with `Content-Type: application/octet-stream`, `X-Brain-Filename` (percent-encoded UTF-8) and the token header from `api.getToken()`. It sends the `File` object itself, never a `FileReader` copy. |
 | `src/brain/ui/static/js/ingest_file.js` | File mode: the labelled file input, the drop zone (a real `<button>`), the client-side extension and size checks from the config, staging on selection, Remove, and the submit. |
-| `tests/test_ui_upload_names.py` | The §7.4 sanitizer table, and the `UPLOAD_EXTENSIONS ⊆ supported_extensions()` subset test. |
-| `tests/test_ui_upload_staging.py` | Sniffing per type, the zip-bomb guard, budget, expiry, claim/release, permissions, and the pid-based startup sweep. |
-| `tests/test_ui_ingest_upload.py` | The upload routes and the file job end to end against the test DB: each extension round-trips, the stream caps, the staging budget, expiry, `DELETE`, the whitespace-only `.txt` → `empty`, and the staged directory removed on success, failure and cancel. |
+| `tests/test_ui_upload_names.py` | The §7.4 sanitizer table, the byte cap, and the `UPLOAD_EXTENSIONS ⊆ supported_extensions()` subset test. |
+| `tests/test_ui_upload_sniff.py` | Sniffing per type, the zip-bomb bounds and the end-of-central-directory pre-check. |
+| `tests/test_ui_upload_staging.py` | The staging area on disk: caps, budget, block charge, count cap, expiry, claim/release, modes, the thread offload, and the startup sweep's cases (dead, own, live, unparseable, out-of-range, unowned, symlink, unlistable). |
+| `tests/test_ui_jobs_settled.py` | `JobRegistry.submit(on_settled=)` on every terminal path; a sibling of `tests/test_ui_jobs.py`, which is at the 800-line precedent. |
+| `tests/test_ui_ingest_upload.py` | The upload routes over HTTP: statuses, envelopes, caps, budget, count cap, expiry, `DELETE`, the config, the lifespan sweep, and no filename in any log. |
+| `tests/test_ui_ingest_file_job.py` | The file job through `submit_file` + `run_next`: each extension round-trips, the title, dedup, `empty`, `unreadable_file` (parser failures too), cancel, `stop()`, the lens, and the staged directory removed on every terminal path. |
 | `tests/test_ui_browser_ingest_upload.py` | The §9.4 upload rows, hermetic on the RM-11 harness. |
 
 Touched:
@@ -136,24 +139,40 @@ staged file, which is not corpus data". The corpus and the vault are still mutat
   nothing in the temp directory.
 - **`tests/test_ui_static_behaviour.py`'s `[hidden]` cascade guard was blind to scoped selectors.**
   It declined every complex selector, so all of `ingest.css` (`.ingest-pane .x`) was invisible to it:
-  the two new `[hidden]` rules could be deleted with the guard still green. It now judges a complex
-  selector by its subject compound, assuming the ancestor matches (an over-approximation, which only
-  makes it stricter). No existing rule became a false positive, and two mutation entries now pin the
-  new rules. The `hidden-toggle-scan-finds-nothing` site count is 19 (was 16: RM-13 adds three).
+  the two new `[hidden]` rules could be deleted with the guard still green. It now reads a complex
+  selector by its subject compound, and errs toward strict in both directions: a `display` that would
+  DEFEAT the hide counts on its subject alone (the ancestors are assumed to match), while a
+  `display: none` RESCUE counts only when its ancestor compounds match real ancestors of the element
+  in `index.html`. *(Corrected in review round 1: the first version assumed the ancestors matched for
+  rescues too, so `.no-such-ancestor .field[hidden] { display: none; }` passed, which was red at
+  `0819738`. "Only makes it stricter" was true of defeats and false of rescues; rev-77 R2.)* No
+  existing rule became a false positive, and four mutation entries pin it (each new rule deleted, and
+  each rescue scoped to an ancestor that does not hold). The `hidden-toggle-scan-finds-nothing` site
+  count is 19 (was 16: RM-13 adds three).
 - **RM-11's keyboard-order browser test changed:** the mode switch is now the first tab stop, and the
   type select (paste only) moved into the paste fields, before the tags.
 - **The client ignores a configured extension without a cap** (`ingest_file.offered`), so a config
   from an older server, or a test fixture that overrides `limits`, cannot make the page throw.
+- **The test files are split differently from the Files table this plan first had** (aud-77 A5):
+  sniffing in `test_ui_upload_sniff.py`, the file job in `test_ui_ingest_file_job.py`, and
+  `on_settled` in `test_ui_jobs_settled.py` (beside the 797-line `test_ui_jobs.py`), with the sweep
+  cases in `test_ui_upload_staging.py`. The table above names the files that shipped.
+- **pypdf's floor is 6.14, not the security review's suggested 6.1.3** (accepted by team-lead):
+  6.1.3 fixes CVE-2025-62707 but still admits CVE-2026-59937, a DoS fixed in 6.14.0.
 
 ## Tests (TDD: red first)
 
 1. `test_ui_upload_names.py`: the sanitizer table (`../../x.pdf`, `..\\x.pdf`, `/etc/passwd.txt`, a NUL byte,
    a 300-character name, percent-encoding, dot-only, an unknown or missing extension, case), and the subset.
-2. `test_ui_upload_staging.py`: each sniff, the zip-bomb bounds, the budget, expiry by an injected clock,
-   claim/unclaim/release, `0700`/`0600` modes, nothing written outside the root, the sweep.
-3. `test_ui_jobs.py`: `on_settled` runs once on every terminal path (succeeded, failed, cancelled while
-   running, cancelled while queued, dropped by `stop()`), and a raising callback does not kill the worker.
-4. `test_ui_ingest_upload.py`: the routes and the file job against the test DB.
+2. `test_ui_upload_sniff.py`: each sniff, the zip-bomb bounds, the end-record pre-check.
+   `test_ui_upload_staging.py`: the budget and its block charge, the count cap, expiry by an injected
+   clock, claim/unclaim/release, `0700`/`0600` modes, nothing written outside the root, the thread
+   offload, and the sweep's cases.
+3. `test_ui_jobs_settled.py`: `on_settled` runs once on every terminal path (succeeded, failed,
+   cancelled while running, cancelled while queued, dropped by `stop()`), and a raising callback does
+   not kill the worker.
+4. `test_ui_ingest_upload.py`: the routes over HTTP. `test_ui_ingest_file_job.py`: the file job
+   against the test DB.
 5. `test_ui_ingest_security.py`: the enumeration, the Content-Type matrix, and the loopback / read-only /
    Origin rows on the new routes.
 6. `test_ui_ingest_routes.py`: `config.extensions` and the upload limits.
@@ -181,7 +200,9 @@ in 23:46; total coverage **95.90%**. New and touched modules: `ingest_service.py
 was run on its own (30 passed in its file).
 
 **Browser:** `tests/test_ui_browser_ingest.py`, `..._lifecycle.py` and `..._upload.py` together,
-59 passed (under the shared lock).
+58 tests, all passing (under the shared lock). *(Corrected in review round 1, aud-77 A4: this read
+"59". Re-derived: the combined run was 58 tests, 58 passed and one teardown error in the token test,
+which was then fixed and re-run alone; that re-run is not a 59th test.)*
 
 **Mutation proofs:** 21 of 21 killed, each in its own `git archive` copy of `HEAD`
 (`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` purged, `PYTHONPATH` pinned and `brain` resolved by

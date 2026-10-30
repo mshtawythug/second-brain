@@ -95,6 +95,11 @@ def test_a_registered_extension_outside_the_allow_list_is_not_uploadable() -> No
         (".hidden.md", SafeName("hidden", ".md")),
         ("...x.txt", SafeName("x", ".txt")),
         ("  padded.md  ", SafeName("padded", ".md")),
+        # Dots and spaces in any order, to a fixed point (aud-77 A1): one
+        # strip-then-lstrip left ". .x.md" as the hidden-file stem ".x".
+        (". .x.md", SafeName("x", ".md")),
+        (".%E3%80%80.x.md", SafeName("x", ".md")),  # U+3000, ideographic space
+        (" . . .x.md", SafeName("x", ".md")),
     ],
 )
 def test_the_sanitizer_table(header: str, expected: SafeName) -> None:
@@ -111,7 +116,8 @@ def test_a_long_name_is_capped_and_keeps_its_extension() -> None:
 
 @pytest.mark.parametrize(
     "header",
-    ["", "   ", ".", "..", "...", "%00", "%2F", "dir/", "a/..", "%FF%FE.txt", "café.txt"],
+    ["", "   ", ".", "..", "...", "%00", "%2F", "dir/", "a/..", "%FF%FE.txt", "café.txt",
+     ". ..md", ".. .txt", ".%E3%80%80..pdf"],
 )
 def test_empty_dot_only_or_undecodable_names_are_bad_filename(header: str) -> None:
     """``café.txt`` raw (not percent-encoded) is refused: the header must be ASCII."""
@@ -168,3 +174,10 @@ def test_a_long_multibyte_name_is_cut_to_the_byte_cap_on_a_character_boundary(ch
     assert len(encoded) > MAX_FILENAME_BYTES - 4 - len(char.encode("utf-8"))  # cut, not dropped
     assert name.ext == ".txt" and set(name.stem) == {char}
     encoded.decode("utf-8")  # strict: no half character
+
+
+def test_upload_kind_of_an_unregistered_extension_is_unsupported_file() -> None:
+    with pytest.raises(UiUnsupportedMedia) as caught:
+        upload_kind(".exe")
+
+    assert caught.value.code == "unsupported_file"
