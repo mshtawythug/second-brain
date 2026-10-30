@@ -154,7 +154,7 @@ convergence is a no-op.
 
 | Command | When to run |
 |---|---|
-| `brain backfill normalize-tags` | After a tag-casing/separator drift is discovered. `--dry-run` first; `--mapping <file.json>` for synonym collapses (`{"recruiters": "recruiter"}`). Rewrites both DB rows and vault frontmatter. |
+| `brain backfill normalize-tags` | After a tag-casing/separator drift is discovered. `--dry-run` first; `--mapping <file.json>` for synonym collapses (`{"recruiters": "recruiter"}`). Rewrites both DB rows and vault frontmatter. To rename or merge specific tags (saved searches' tag filters included), use `brain tags rename OLD NEW` / `brain tags merge A B --into C` (dry run unless `--apply`); `brain tags suggest-merges` finds likely pairs. |
 | `brain backfill source-rows` | Sets `source_id='manual'` for legacy markdown docs with `source_id IS NULL`. Run once after upgrading from a pre-source-row schema. |
 | `brain backfill search` | Repopulates `chunks.title_text` / `tags_text` / `search_extras` after migration 009. Auto-runs from `brain init` when that migration just landed; rerun manually if a corpus-level retitle/retag bypassed the write path. |
 

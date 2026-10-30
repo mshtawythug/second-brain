@@ -22,6 +22,25 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — tag rename, merge and suggested merges (RM-21)
+
+- **`brain tags`**: `list [--json]`, `rename OLD NEW`, `merge A B --into C` and
+  `suggest-merges [--limit N] [--json]`. `rename` and `merge` are a dry run
+  unless `--apply`: they print the mapping and every document and saved search
+  they would change.
+- `--apply` rewrites every place a tag lives: the document row, its chunks'
+  tag text (so `brain search --tag NEW` and a text query for the new tag find
+  it at once), the frontmatter of its vault file, and saved searches' `tag` /
+  `without_tag` filters. It runs per document, like
+  `brain backfill normalize-tags`, so a re-run finishes an interrupted one and
+  is otherwise a no-op. `updated_at` is not bumped.
+- `suggest-merges` ranks pairs by close spelling, singular/plural and
+  co-occurrence on the same documents, each with its evidence.
+- MCP: `brain_tags_list` and `brain_tags_suggest_merges`, read-only, with
+  confidential documents left out by default. There is no MCP rename or merge.
+- `brain backfill normalize-tags` now runs on the same engine
+  (`brain.tag_mapping`); its output is unchanged, byte for byte.
+
 ### Added — follow-up questions in the Agent tab (RM-18c)
 
 - **Follow up** on an answer in `brain ui`'s Agent tab asks the next question
