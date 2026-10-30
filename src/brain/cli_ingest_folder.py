@@ -18,7 +18,7 @@ or ``tesseract`` is missing: otherwise every run would move each file and move i
 
 **Failures.** A failure that would repeat on every run (an image that cannot be read,
 is too large or times out in OCR, another malformed file, the secret guard) is raised
-as :class:`~brain.drop_folder.RejectedFile`, so the file stays in ``imported/`` as
+as :class:`~brain.drop_folder.RejectedFileError`, so the file stays in ``imported/`` as
 ``rejected``; any other failure (the database, the embedder) moves it back for the next
 run. ``OcrUnavailableError`` is the second kind: it is configuration, not the file.
 
@@ -57,7 +57,7 @@ from .drop_folder import (
     DropFolderError,
     DropReport,
     IngestFn,
-    RejectedFile,
+    RejectedFileError,
     run,
     scan,
 )
@@ -280,11 +280,11 @@ def _ingest_step(ctx: _Context, folder: DropFolder) -> IngestFn:
             raise  # configuration, not this file: it goes back for the next run
         except (ImageError, ValueError) as exc:
             # Unreadable, too large, an OCR timeout, a malformed file: every run would fail.
-            raise RejectedFile("the file cannot be read") from exc
+            raise RejectedFileError("the file cannot be read") from exc
         try:
             result = _ingest(ctx, folder, conn, doc, title)
         except SecretGuardError as exc:
-            raise RejectedFile("the secret guard refused the file") from exc
+            raise RejectedFileError("the secret guard refused the file") from exc
         _emit_secret_notice(result.secret_notice)
         _emit_egress_notice(result.egress_notice)
         outcome, _ = classify(result)

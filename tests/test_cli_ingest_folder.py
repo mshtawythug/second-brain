@@ -630,7 +630,7 @@ def test_ocr_unavailable_inside_the_step_is_transient_not_rejected(drop: Path) -
     """The pre-check normally skips such a folder; if OCR goes missing anyway, the file is
     not rejected for good (it is configuration, not the file), so it goes back next run."""
     from brain.cli_ingest_folder import _Context, _ingest_step
-    from brain.drop_folder import DropFolder, RejectedFile
+    from brain.drop_folder import DropFolder, RejectedFileError
     from brain.ingest.image import OcrUnavailableError
 
     ctx = _Context(
@@ -644,4 +644,4 @@ def test_ocr_unavailable_inside_the_step_is_transient_not_rejected(drop: Path) -
     with pytest.raises(OcrUnavailableError) as err:
         step(None, _png(drop, "shot.png"), title="shot", timeout=5.0)  # type: ignore[arg-type]
 
-    assert not isinstance(err.value, RejectedFile)
+    assert not isinstance(err.value, RejectedFileError)

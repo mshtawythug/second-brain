@@ -33,7 +33,7 @@ documents. The title is the original stem. Three rules keep the owner's files sa
    failure (a database or embedder error): the file returns to the folder, unless a
    new file took its name meanwhile; then it stays in ``imported/`` and the failure
    says so. A failure that would repeat on every run (an unreadable or oversized
-   image, an OCR timeout, the secret guard) is :class:`RejectedFile`: the file stays
+   image, an OCR timeout, the secret guard) is :class:`RejectedFileError`: the file stays
    in ``imported/``, reported ``rejected``, so it is not retried every 10 minutes.
    ``imported/`` itself must be a real directory; a symlink there refuses the folder.
 
@@ -114,10 +114,10 @@ class MoveRaceError(BrainError):
     """A file changed identity or type between being hashed and being moved."""
 
 
-class RejectedFile(BrainError):
+class RejectedFileError(BrainError):
     """Raised by an :class:`IngestFn` for a failure that would repeat on every run.
 
-    The cause (``raise RejectedFile(...) from exc``) is what the report shows, by class.
+    The cause (``raise RejectedFileError(...) from exc``) is what the report shows, by class.
     The file stays in ``imported/`` instead of being moved back and retried.
     """
 
@@ -138,7 +138,7 @@ class IngestFn(Protocol):
     """Ingests the moved file at ``path`` titled ``title``; returns its outcome.
 
     The outcome is ``"ingested"``, ``"updated"``, ``"unchanged"`` or ``"empty"``
-    (no text: the file stays in ``imported/``). :class:`RejectedFile` means it failed
+    (no text: the file stays in ``imported/``). :class:`RejectedFileError` means it failed
     for good (the file stays in ``imported/``); any other exception means it failed for
     now, and the runner moves the file back.
     """
@@ -433,7 +433,7 @@ def _one(
             if _path_identity(dst) != moved:
                 raise MoveRaceError("imported/ changed during the run")
             status = ingest(conn, dst, title=_title(name, dst_name), timeout=timeout)
-        except RejectedFile as exc:
+        except RejectedFileError as exc:
             return FileOutcome(name, "rejected", _cause(exc))
         except Exception as exc:  # noqa: BLE001 - any other failure moves the file back
             detail = describe_failure(exc)
@@ -443,7 +443,7 @@ def _one(
         os.close(fd)
 
 
-def _cause(exc: RejectedFile) -> str:
+def _cause(exc: RejectedFileError) -> str:
     return describe_failure(exc.__cause__) if exc.__cause__ is not None else describe_failure(exc)
 
 

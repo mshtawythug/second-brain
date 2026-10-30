@@ -897,7 +897,7 @@ def test_a_rejected_file_stays_in_imported_and_is_not_retried(tmp_path: Path) ->
     body = b"unreadable"
     _drop(tmp_path, "shot.png", body)
     cause = ValueError("decoder said no")
-    rejected = drop_folder.RejectedFile("the file cannot be read")
+    rejected = drop_folder.RejectedFileError("the file cannot be read")
     rejected.__cause__ = cause
     ingest = _Ingest(answers=[rejected])
 
@@ -912,9 +912,9 @@ def test_a_rejected_file_stays_in_imported_and_is_not_retried(tmp_path: Path) ->
 def test_a_rejection_without_a_cause_reports_its_own_class(tmp_path: Path) -> None:
     _drop(tmp_path, "shot.png", b"r")
 
-    report = _run(_folder(tmp_path), _Ingest(answers=[drop_folder.RejectedFile("no")]))
+    report = _run(_folder(tmp_path), _Ingest(answers=[drop_folder.RejectedFileError("no")]))
 
-    assert report.outcomes[0].detail == "RejectedFile"
+    assert report.outcomes[0].detail == "RejectedFileError"
 
 
 def test_an_unopenable_imported_raises_its_os_error(tmp_path: Path) -> None:

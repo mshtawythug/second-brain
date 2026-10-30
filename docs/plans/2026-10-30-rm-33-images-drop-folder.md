@@ -181,7 +181,7 @@ and retried every run inside `--since`.
   swap, a source replaced before its unlink, `imported/` swapped for a symlink, and
   bytes changed before the copy fallback.
 - **L2, deterministic failures stay in `imported/`, not in a `failed/` sibling.** The
-  ingest step raises `drop_folder.RejectedFile` for a failure every run would repeat:
+  ingest step raises `drop_folder.RejectedFileError` for a failure every run would repeat:
   an `ImageError` other than `OcrUnavailableError` (unreadable, too large, an OCR
   timeout or error), another extractor's `ValueError`, or the secret guard. The file
   stays in `imported/`, reported `rejected` with its cause's class, and the run exits 1.
