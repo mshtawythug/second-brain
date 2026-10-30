@@ -30,6 +30,20 @@ def _expected_skills() -> set[str]:
     return {p.name for p in SRC_SKILLS.iterdir() if p.is_dir()}
 
 
+def _skill_reference_files() -> list[Path]:
+    """Every markdown file a skill ships besides its own SKILL.md.
+
+    ``skills/ingest-brain/sources/*.md`` are the first: an agent reads them on
+    SKILL.md's instruction, so a text guard that scans only ``*/SKILL.md`` would
+    stop covering whatever moved into them.
+    """
+    return sorted(
+        path
+        for path in SRC_SKILLS.glob("*/**/*.md")
+        if path.relative_to(SRC_SKILLS).parts[1:] != ("SKILL.md",)
+    )
+
+
 def _run(
     args: list[str],
     *,
@@ -120,6 +134,21 @@ def test_fresh_install_copies_all_skills(tmp_path: Path) -> None:
         )
 
 
+def test_fresh_install_copies_nested_reference_files_byte_for_byte(tmp_path: Path) -> None:
+    """``dircmp`` above compares one level only; a skill's subdirectories must land too."""
+    dest = tmp_path / "skills"
+    nested = [p for p in _skill_reference_files() if len(p.relative_to(SRC_SKILLS).parts) > 2]
+    assert nested, "precondition: some skill ships a reference file in a subdirectory"
+
+    result = _run(["--dest", str(dest)], home=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    for src in nested:
+        installed = dest / src.relative_to(SRC_SKILLS)
+        assert installed.is_file(), f"{installed} was not installed"
+        assert installed.read_bytes() == src.read_bytes(), f"{installed} differs from {src}"
+
+
 # ---------------------------------------------------------------------------
 # 4. Idempotency — a 2nd run reports every skill 'unchanged'
 # ---------------------------------------------------------------------------
@@ -188,6 +217,39 @@ def test_check_detects_drift_in_installed_skill(tmp_path: Path) -> None:
     assert drifted in result.stdout
     # --check copies nothing — the drifted file is left as-is.
     assert (dest / drifted / "SKILL.md").read_text(encoding="utf-8") == "DRIFTED CONTENT\n"
+
+
+def test_check_detects_drift_in_a_nested_reference_file(tmp_path: Path) -> None:
+    """A stale ``sources/*.md`` is drift even when every SKILL.md is in sync."""
+    dest = tmp_path / "skills"
+    assert _run(["--dest", str(dest)], home=tmp_path).returncode == 0
+    nested = next(
+        p for p in _skill_reference_files() if len(p.relative_to(SRC_SKILLS).parts) > 2
+    )
+    installed = dest / nested.relative_to(SRC_SKILLS)
+    installed.write_text("DRIFTED CONTENT\n", encoding="utf-8")
+    skill = nested.relative_to(SRC_SKILLS).parts[0]
+
+    result = _run(["--check", "--dest", str(dest)], home=tmp_path)
+
+    assert result.returncode != 0, "drift in a nested file must make --check exit non-zero"
+    assert f"  {skill}: STALE" in result.stdout, result.stdout
+    assert installed.read_text(encoding="utf-8") == "DRIFTED CONTENT\n"
+
+
+def test_sync_restores_a_nested_reference_file_deleted_from_the_dest(tmp_path: Path) -> None:
+    dest = tmp_path / "skills"
+    assert _run(["--dest", str(dest)], home=tmp_path).returncode == 0
+    nested = next(
+        p for p in _skill_reference_files() if len(p.relative_to(SRC_SKILLS).parts) > 2
+    )
+    installed = dest / nested.relative_to(SRC_SKILLS)
+    installed.unlink()
+
+    result = _run(["--dest", str(dest)], home=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert installed.read_bytes() == nested.read_bytes()
 
 
 # ---------------------------------------------------------------------------

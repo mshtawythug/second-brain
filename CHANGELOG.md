@@ -22,6 +22,18 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Changed — the `ingest-brain` skill keeps its per-source recipes in `sources/`
+
+- The Gmail, Krisp, Slack, Jira and GitHub recipes moved out of
+  `skills/ingest-brain/SKILL.md` into `skills/ingest-brain/sources/<source>.md`,
+  with the text unchanged. SKILL.md keeps the routing table (each row links its
+  recipe), the shared commands, the context-cost section and the safety rules,
+  and is down from 298 lines to 165 of the 300-line ceiling, so later sources
+  add a file instead of growing it. `bin/brain-skills-sync` already copies whole
+  skill directories; new tests pin that nested files install and that drift in
+  one is caught, and the skill-text guards now scan the reference files too.
+  Re-run `bin/brain-skills-sync` after pulling.
+
 ### Added — your pull requests, issues and READMEs as documents (RM-31)
 
 - `brain ingest-github` reads your code-host activity through the `gh` CLI and

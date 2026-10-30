@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.test_brain_skills_sync import SRC_SKILLS, _expected_skills
+from tests.test_brain_skills_sync import SRC_SKILLS, _expected_skills, _skill_reference_files
 
 # The observed house band is 140-300 lines: below the floor is a stub, above the
 # ceiling is an essay the agent will not read carefully.
@@ -172,4 +172,69 @@ def test_trigger_phrases_are_unique_across_skills() -> None:
     assert not collisions, (
         "trigger phrases claimed by more than one skill — the agent cannot route "
         f"deterministically: {collisions}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reference files (e.g. ``ingest-brain/sources/*.md``)
+# ---------------------------------------------------------------------------
+
+#: A markdown link target. Images use the same syntax and are covered too.
+LINK_RE = re.compile(r"\]\((?P<target>[^)\s]+)\)")
+_EXTERNAL_PREFIXES = ("http://", "https://", "mailto:", "#")
+
+
+def _relative_links(md_file: Path) -> list[str]:
+    """Link targets that name a file, anchors stripped; external and in-page links skipped."""
+    targets = (match.group("target") for match in LINK_RE.finditer(md_file.read_text("utf-8")))
+    return [
+        target.split("#", 1)[0] for target in targets if not target.startswith(_EXTERNAL_PREFIXES)
+    ]
+
+
+def _skill_markdown_files() -> list[Path]:
+    return [*(_skill_md(name) for name in SKILL_NAMES), *_skill_reference_files()]
+
+
+def test_reference_files_are_discovered() -> None:
+    """Guard the guards below: ``ingest-brain`` ships its per-source recipes this way."""
+    names = {p.relative_to(SRC_SKILLS).as_posix() for p in _skill_reference_files()}
+
+    assert "ingest-brain/sources/jira.md" in names, sorted(names)
+
+
+@pytest.mark.parametrize(
+    "md_file", _skill_markdown_files(), ids=lambda p: p.relative_to(SRC_SKILLS).as_posix()
+)
+def test_every_relative_link_resolves_inside_its_skill(md_file: Path) -> None:
+    """Only the skill directory is installed, so a link must not leave it.
+
+    A link to ``../../docs/x.md`` resolves in the repo and is a dead link in
+    ``~/.claude/skills/<name>/``, where the agent actually reads it.
+    """
+    skill_dir = SRC_SKILLS / md_file.relative_to(SRC_SKILLS).parts[0]
+    for target in _relative_links(md_file):
+        resolved = (md_file.parent / target).resolve()
+        assert resolved.is_relative_to(skill_dir.resolve()), (
+            f"{md_file.relative_to(SRC_SKILLS)} links {target!r} outside its skill directory"
+        )
+        assert resolved.exists(), f"{md_file.relative_to(SRC_SKILLS)} links missing {target!r}"
+
+
+@pytest.mark.parametrize(
+    "reference", _skill_reference_files(), ids=lambda p: p.relative_to(SRC_SKILLS).as_posix()
+)
+def test_every_reference_file_is_linked_from_its_skill_md(reference: Path) -> None:
+    """An agent reaches a reference file only through SKILL.md, one level deep.
+
+    Claude Code loads SKILL.md alone and reads a supporting file when SKILL.md
+    links it; an unlinked file is never read, and a file linked only from
+    another reference file may be read partially.
+    """
+    skill_dir = SRC_SKILLS / reference.relative_to(SRC_SKILLS).parts[0]
+    skill_md = skill_dir / "SKILL.md"
+    linked = {(skill_dir / target).resolve() for target in _relative_links(skill_md)}
+
+    assert reference.resolve() in linked, (
+        f"{reference.relative_to(SRC_SKILLS)} is not linked from {skill_md.relative_to(SRC_SKILLS)}"
     )

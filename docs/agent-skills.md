@@ -14,8 +14,10 @@ Skills cover **Claude Code** (the CLI). For **Claude Desktop**, register the
 
 ## Which skill covers what
 
-Eleven skills ship in `skills/`. Each is one directory containing a single
-`SKILL.md`.
+Eleven skills ship in `skills/`. Each is one directory containing a
+`SKILL.md`, which is what the agent loads. A skill may also ship reference
+files that its SKILL.md links: `ingest-brain` keeps one recipe per source in
+`sources/<source>.md` (see "Reference files" below).
 
 | Skill | Commands it covers | Use a sibling instead when… |
 |---|---|---|
@@ -85,8 +87,8 @@ to put a skill on disk and they share no code.
 
 ### `bin/brain-skills-sync` — all repo skills (what you want)
 
-Enumerates every immediate subdirectory of the repo's `skills/` and copies each
-into `$BRAIN_SKILLS_DEST` (default `~/.claude/skills/`). There is deliberately
+Enumerates every immediate subdirectory of the repo's `skills/` and copies each,
+with everything inside it, into `$BRAIN_SKILLS_DEST` (default `~/.claude/skills/`). There is deliberately
 no hardcoded list, so adding a directory is enough to ship a new skill.
 
 ```bash
@@ -149,6 +151,26 @@ If you have a checkout, use `bin/brain-skills-sync` — it is a strict superset.
 **No registration anywhere.** Not in `pyproject.toml`, not in the sync script,
 not in `cli_claude.py`. The sync script and its tests both discover skills by
 enumerating `skills/`, so a new directory is picked up automatically.
+
+### Reference files
+
+When a SKILL.md nears the 300-line ceiling, move long, self-contained material
+into markdown files in the same directory rather than trimming it. Claude Code
+loads only SKILL.md and reads a supporting file when SKILL.md tells it to, so:
+
+- Link every reference file **directly from SKILL.md** with a relative link
+  (`[sources/jira.md](sources/jira.md)`), and say when to read it. A file
+  linked only from another reference file may be read partially or not at all.
+- Keep links **inside the skill directory**. Only that directory is installed,
+  so `../../docs/…` works in the repo and is a dead link in `~/.claude/skills/`.
+- Keep the rules that apply to every case (safety, scope, cost) in SKILL.md.
+
+`ingest-brain` is the example: its routing table has one row per source, each
+linking `sources/<source>.md`, and a new source adds a file and a row.
+`bin/brain-skills-sync` copies and drift-checks the whole directory, and
+`tests/test_skill_frontmatter.py` fails on an unlinked reference file or a link
+that leaves the skill. The skill-text guards (`tests/test_skills_token_routing.py`,
+`tests/test_reading_surface_pointers.py`) scan reference files as well as SKILL.md.
 
 ### Frontmatter contract
 

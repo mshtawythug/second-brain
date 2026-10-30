@@ -32,6 +32,7 @@ TEST_DATABASE_URL = os.environ.get(
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATIC_JS = REPO_ROOT / "src" / "brain" / "ui" / "static" / "js"
 INGEST_SKILL = REPO_ROOT / "skills" / "ingest-brain" / "SKILL.md"
+JIRA_RECIPE = REPO_ROOT / "skills" / "ingest-brain" / "sources" / "jira.md"
 
 JIRA_KIND = "jira"
 ISSUE_EXTERNAL_ID = "example.atlassian.net/DEMO-1"
@@ -194,10 +195,22 @@ def test_jira_has_no_month_grouping() -> None:
 
 
 def _jira_section() -> str:
+    """The whole recipe file: since the skill split, it holds nothing but the recipe."""
+    assert JIRA_RECIPE.is_file(), "ingest-brain has no sources/jira.md recipe"
+    text = JIRA_RECIPE.read_text(encoding="utf-8")
+    assert text.startswith("# Jira issues"), "sources/jira.md does not open with its H1"
+    return text
+
+
+def test_the_skill_routes_jira_to_the_recipe_and_keeps_the_safety_rule() -> None:
+    """The recipe only binds an agent that is sent to it, so the routing row must link it."""
     text = INGEST_SKILL.read_text(encoding="utf-8")
-    match = re.search(r"^## Jira issues.*?(?=^## )", text, re.DOTALL | re.MULTILINE)
-    assert match, "ingest-brain has no '## Jira issues' section"
-    return match.group(0)
+
+    assert (
+        "| The user's own Jira issues | `brain ingest-stdin --source jira` | Atlassian "
+        "MCP→stdin, **confidential**. Read [sources/jira.md](sources/jira.md). |"
+    ) in text
+    assert "- **Jira: the user's own issues, time-bounded, confidential.**" in text
 
 
 def test_recipe_carries_the_parenthesized_default_jql_verbatim() -> None:
