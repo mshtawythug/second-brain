@@ -1080,6 +1080,19 @@ has listed yet, at most 5 per watch ("and N more"), and leaves out confidential
 documents. Once the page is written, those hits are marked as notified, so the
 next page does not repeat them. The section is absent when you have no watches.
 
+**Delivery (opt-in, off by default).** With `BRAIN_BRIEF_DELIVERY=email` or
+`slack` (see [configuration](configuration.md#brain_brief_delivery--send-the-daily-brief-to-yourself)),
+`brain brief --wiki` also sends the page's content to you once it is written:
+an email to `BRAIN_USER_EMAIL` through `gws gmail +send`, with the fixed subject
+`[brain brief] YYYY-MM-DD`, or a post to a Slack incoming webhook. Only what the
+page carries is sent (never a confidential title), and by default only titles and
+counts: todo text and the suggestions built from it go out only with
+`BRAIN_BRIEF_DELIVERY_INCLUDE_TODOS=true`. A delivery problem never fails the
+brief: it prints one warning and exits 0, and the watch hits stay unnotified so
+the next brief sends them again. A `gws` authorization failure names the fix,
+`bin/gws-reauth`. `brain doctor` has a `brief delivery` row. `brain ingest-gmail`
+skips the delivered briefs (every Gmail query ends with `-subject:"[brain brief]"`).
+
 ### brain watch
 
 Saved searches ("watch lists"). Save a query once, and each morning's brief lists

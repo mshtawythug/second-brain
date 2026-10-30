@@ -19,13 +19,21 @@ notified or not; the published payload lists the UNNOTIFIED ones (at most
 unnotified hit the build read is marked notified: over-cap and confidential ones too, which the
 terminal and ``brain watch hits`` still show (RM-15.D3).
 
+**Delivery (RM-16).** Once the page is written, the same published payload is sent through the
+configured channel (:mod:`brain.brief_delivery`; ``BRAIN_BRIEF_DELIVERY``, default ``none``). A
+delivery problem never fails the brief: it is one class-only WARNING. When delivery is configured
+and did not happen, the watch hits are NOT marked notified, so the next brief sends them again
+(RM-16 plan, D3); with delivery off, or sent, they are marked exactly as before.
+
 The :mod:`brain.brief` functions are looked up on the module at call time, as ``cli.brief`` did
 through its function-local import, so a test double on ``brain.brief.suggest_next_steps`` still
 reaches this code.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+import logging
+import os
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import replace
 from datetime import date
@@ -37,7 +45,9 @@ import psycopg
 from . import brief as brief_mod
 from . import db
 from .brief import BriefData
-from .config import Config
+from .brief_delivery import DeliveryChannel, deliver_brief
+from .config import Config, ConfigError
+from .errors import describe_failure
 from .ingest import Embedder
 from .saved_search import (
     UnnotifiedView,
@@ -47,6 +57,9 @@ from .saved_search import (
     watch_tables_present,
 )
 from .saved_search_check import CheckResult, build_matcher, check_enabled, limit_note
+from .settings.brief_delivery import CHANNEL_EMAIL, load_brief_delivery_settings
+
+_logger = logging.getLogger(__name__)
 
 #: Opens one database connection from a URL: :func:`brain.db.connect` in production.
 Connect = Callable[[str], AbstractContextManager[psycopg.Connection[Any]]]
@@ -62,6 +75,8 @@ def build_brief(
     wiki: bool,
     connect: Connect = db.connect,
     embedder: Embedder | None = None,
+    delivery_env: Mapping[str, str] | None = None,
+    delivery_channel: DeliveryChannel | None = None,
 ) -> tuple[BriefData, Path | None]:
     """Build the terminal brief and, under ``wiki``, write the published page.
 
@@ -71,6 +86,9 @@ def build_brief(
 
     ``embedder`` serves semantic watches; ``None`` builds the configured one, and only if an
     enabled semantic watch is checked.
+
+    ``delivery_env`` (``os.environ`` when ``None``, after ``Config.load()``) holds the delivery
+    knobs, and ``delivery_channel`` replaces the configured channel; both are test seams.
     """
     view: UnnotifiedView | None = None
     with connect(cfg.database_url) as conn:
@@ -144,11 +162,45 @@ def build_brief(
         if published is not None
         else None
     )
-    if written_path is not None and view is not None and view.pending:
+    delivered = (
+        _deliver(published, cfg, delivery_env, delivery_channel)
+        if written_path is not None and published is not None
+        else True
+    )
+    if written_path is not None and delivered and view is not None and view.pending:
         with connect(cfg.database_url) as conn:
             conn.autocommit = True
             mark_notified(conn, view.pending)
     return data, written_path
+
+
+def _deliver(
+    published: BriefData,
+    cfg: Config,
+    env: Mapping[str, str] | None,
+    channel: DeliveryChannel | None,
+) -> bool:
+    """Send the published payload; return whether its watch hits may be marked notified.
+
+    True when delivery is off or succeeded. False when the owner asked for delivery and it did
+    not happen: a knob that does not load, a recipient other than ``cfg.user_email``, or a failed
+    send. Each is one WARNING, never a raise.
+    """
+    try:
+        settings = load_brief_delivery_settings(os.environ if env is None else env)
+    except ConfigError as exc:
+        # The message names variables only, but the rule is class-only; doctor prints it.
+        _logger.warning(
+            "brief delivery skipped (%s); run `brain doctor` for the setting to fix",
+            describe_failure(exc),
+        )
+        return False
+    if settings.channel == CHANNEL_EMAIL and settings.recipient != cfg.user_email:
+        _logger.warning(
+            "brief delivery skipped: the recipient is not the configured BRAIN_USER_EMAIL"
+        )
+        return False
+    return deliver_brief(published, settings, channel).status != "failed"
 
 
 def _check_notes(checks: list[CheckResult], *, published: bool) -> list[WatchNote]:

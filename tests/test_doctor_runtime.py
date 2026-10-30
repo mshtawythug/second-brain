@@ -553,8 +553,9 @@ def test_all_healthy_yields_no_failures(
         )
 
     # R3 (phase 9): the dormant wiki's "wiki build" check is gone from the set.
-    assert [c.check for c in checks] == ["config", "daemons", "vault watcher"]
-    assert [c.status for c in checks] == ["ok", "ok", "ok"]
+    # RM-16 adds "brief delivery", off (ok) under tests/delivery_isolation_plugin.py.
+    assert [c.check for c in checks] == ["config", "daemons", "vault watcher", "brief delivery"]
+    assert [c.status for c in checks] == ["ok", "ok", "ok", "ok"]
 
 
 def test_every_failing_check_names_a_remedy(

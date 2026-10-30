@@ -46,6 +46,8 @@ class GmailError(RuntimeError):
 
 
 Runner = Callable[[list[str]], str]
+#: RM-16: the emailed brief's subject (``brief_delivery.SUBJECT_PREFIX``), kept out of every query.
+BRIEF_EXCLUSION = '-subject:"[brain brief]"'
 
 
 def _build_query(
@@ -78,6 +80,7 @@ def _build_query(
         parts.append(f"after:{since}")
     if until:
         parts.append(f"before:{until}")
+    parts.append(BRIEF_EXCLUSION)
     return " ".join(parts)
 
 

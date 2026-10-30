@@ -22,6 +22,27 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — the daily brief can be delivered to you (RM-16)
+
+- **`BRAIN_BRIEF_DELIVERY`** (`none` by default, `email` or `slack`): once
+  `brain brief --wiki` (the 07:00 job) has written the page, it sends the same
+  content to the owner, by email through `gws gmail +send` to `BRAIN_USER_EMAIL`
+  only, or to a Slack incoming webhook (`BRAIN_BRIEF_SLACK_WEBHOOK_URL`, a secret,
+  `https://hooks.slack.com/` only). The subject is always `[brain brief]
+  YYYY-MM-DD`.
+- What is sent is the published page's payload: confidential documents never
+  leave, and by default only titles and counts.
+  `BRAIN_BRIEF_DELIVERY_INCLUDE_TODOS=true` adds the todo text and the
+  suggestions built from it.
+- A delivery problem never fails the brief: one class-only warning, exit 0
+  (a `gws` authorization failure names `bin/gws-reauth`). When delivery was
+  configured and did not happen, the watch hits stay unnotified, so the next
+  brief sends them again.
+- `brain doctor` gains a `brief delivery` row (the channel and its
+  prerequisite, never the webhook URL).
+- `brain ingest-gmail` never ingests a delivered brief: every Gmail query it
+  builds ends with `-subject:"[brain brief]"`, so `q` is never empty any more.
+
 ### Added — saved searches, reported in the daily brief (RM-15)
 
 - **`brain watch`** saves a search: `add NAME QUERY` (with `--source`, `--tag`,
