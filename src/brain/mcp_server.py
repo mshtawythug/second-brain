@@ -3010,8 +3010,8 @@ def brain_brief(
     ``no_enrich`` is true or Ollama is unavailable (then ``suggestions`` is
     empty).
 
-    F6 confidentiality: confidential documents are excluded from all three
-    sections — captures, open todos and pins — unless
+    F6: confidential documents are excluded from captures, open todos, pins and
+    ``watch_hits`` (saved-search hits; this tool checks no watch) unless
     ``include_confidential=true``. Bridge: ``exclude_confidential=not
     include_confidential``. See :func:`_confidential_lens`.
 

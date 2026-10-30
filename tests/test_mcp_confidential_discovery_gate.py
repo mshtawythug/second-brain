@@ -71,6 +71,11 @@ _WRITE_TOOLS = frozenset(
         "brain_graphrag_communities_build",
         "brain_graphrag_communities_refresh",
         "brain_graphrag_aliases_apply",
+        # RM-15: both write a saved_searches row named by the caller, and return only that
+        # watch's own definition (name, query, filters) or its name. Neither names a document,
+        # and neither returns a hit or seed count (a count over both tiers would be an oracle).
+        "brain_watch_add",
+        "brain_watch_remove",
     }
 )
 
@@ -91,12 +96,16 @@ _PROMPTED = frozenset({"brain_link_proposal"})
 #:   document is identified through it).
 #: - ``brain_gaps`` — the caller's own FAILED QUERIES (``{query, count, kind}``).
 #:   Never a document; the text is the caller's own input echoed back.
+#: - ``brain_watch_list`` — the owner's saved searches (``{name, query, mode, enabled,
+#:   filters, created_at, last_checked_at}``): the owner's own text, no document and no hit
+#:   count (RM-15).
 _NO_DOCUMENT_DATA = frozenset(
     {
         "brain_status",
         "brain_graphrag_stats",
         "brain_graphrag_entities",
         "brain_gaps",
+        "brain_watch_list",
     }
 )
 
@@ -148,6 +157,8 @@ _KNOWN_GATED = frozenset(
         "brain_review_findings_list",
         "brain_review_scan",
         "brain_graphrag_communities",
+        # RM-15: a peek at each watch's new matches, lens in the search predicate.
+        "brain_watch_check",
     }
 )
 

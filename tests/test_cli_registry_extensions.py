@@ -95,8 +95,12 @@ def test_extension_command_lists_after_every_builtin_command(
     assert names == ["mmm-first", "ooo-last", "aaa-ext", "nnn-group", "aaa-ext-group"]
 
 
-def test_shipped_extension_tuple_registers_nothing_today() -> None:
-    """No command has moved behind the seam yet; RM-06 changes no command."""
+def test_shipped_extension_tuple_registers_exactly_the_watch_sub_app() -> None:
+    """The shipped tuple: RM-15's ``watch`` sub-app, listed after every built-in.
+
+    RM-06 shipped the tuple empty and this test pinned that; RM-15 is the first module behind
+    the seam. A new extension module updates the expected names here.
+    """
     # Arrange
     app = _builtin_app()
     before = _help_command_names(app)
@@ -105,8 +109,8 @@ def test_shipped_extension_tuple_registers_nothing_today() -> None:
     cli_registry.register_extensions(app)
 
     # Assert
-    assert cli_registry.EXTENSION_REGISTRARS == ()
-    assert _help_command_names(app) == before
+    assert [name for name, _ in cli_registry.EXTENSION_REGISTRARS] == ["watch"]
+    assert _help_command_names(app) == [*before, "watch"]
 
 
 def test_brain_cli_calls_the_seam_after_its_last_registration() -> None:

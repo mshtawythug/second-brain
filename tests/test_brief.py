@@ -392,3 +392,34 @@ def test_brief_command_json_and_wiki_writes_page(
     assert payload["date"] == "2026-06-09"
     written = tmp_path / "daily" / "2026" / "2026-06-09-brief.md"
     assert written.is_file()
+
+
+def test_the_suggestion_prompt_never_carries_watch_hits() -> None:
+    """D4 (RM-15): ``withheld`` leaves the watch fields out because no hit reaches the prompt.
+    Pin that, so a prompt change that adds hits must revisit the comparison."""
+    from brain.brief import _build_suggest_prompt
+    from brain.saved_search import WatchHit, WatchNote
+
+    brief = BriefData(
+        date=TODAY,
+        captures=[],
+        open_todos=[],
+        pinned=[],
+        suggestions=[],
+        watch_hits=[
+            WatchHit(
+                watch="synthetic-watch",
+                document_id="00000000-0000-0000-0000-000000000001",
+                title="SYNTHETIC-WATCH-TITLE",
+                source_kind="manual",
+                first_seen_at=datetime(2026, 6, 9, tzinfo=UTC),
+                notified=False,
+            )
+        ],
+        watch_notes=[WatchNote(watch="synthetic-watch", more=3)],
+    )
+
+    prompt = _build_suggest_prompt(brief)
+
+    assert "SYNTHETIC-WATCH-TITLE" not in prompt
+    assert "synthetic-watch" not in prompt

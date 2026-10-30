@@ -8,7 +8,8 @@ description: >
   connected, and mine failed searches. Use this skill when the user asks
   what they should look at, what happened recently, what they should
   revisit, what has gone stale, which notes should be linked, or what
-  their brain keeps failing to answer. Backs `brain brief`,
+  their brain keeps failing to answer, or wants to be told when new
+  notes match a saved search. Backs `brain brief`, `brain watch`,
   `brain resurface`, `brain review`, `brain timeline`, `brain connect`,
   and `brain gaps`. To answer a specific question use `consult-brain`;
   for one composed cited answer use `brain-ask`; for themes across a
@@ -54,6 +55,7 @@ corpus.
 | The user asks… | Reach for |
 |---|---|
 | "What should I look at today?" / "Catch me up" | `brain brief` |
+| "Tell me when something new about X lands" / "Watch for X" | `brain watch add` |
 | "What am I forgetting?" / "Show me old notes worth rereading" | `brain resurface` |
 | "How did my week go?" / "Synthesize last week" | `brain review weekly` |
 | "What in my notes contradicts itself / has gone stale?" | `brain review scan` → `review list` |
@@ -88,6 +90,20 @@ brain brief --date 2026-06-09 --json
 The suggestions leg is best-effort — it is skipped silently when Ollama
 is down or `--no-enrich` is passed. A brief with no suggestions is not
 an error.
+
+## Saved searches — `brain watch`
+
+A saved query; every brief checks the enabled ones and lists documents
+that **newly** match (new, or edited since) under "Watch hits". By words
+unless `--semantic`. `add` records current matches as already seen.
+
+```bash
+brain watch add roadmap "quarterly roadmap" [--source krisp] [--tag t] [--person P] [--semantic]
+brain watch list | check [NAME] [--peek] | hits [NAME] --since 7d | pause | resume | rm NAME
+```
+
+`check` RECORDS what it finds; to look without consuming the brief's
+notifications use `--peek` (MCP `brain_watch_check` always peeks).
 
 ## Spaced repetition — `brain resurface`
 
