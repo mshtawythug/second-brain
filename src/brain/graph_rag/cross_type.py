@@ -41,6 +41,30 @@ after ``reconcile_document`` commits) and from the ``brain graphrag build`` /
 a zero-valued no-op. Communities go stale after any merge (entity GC cascades to
 ``graph_community_members``); the rollout runs ``brain graphrag communities
 refresh`` after the collapse.
+
+**The W6/W7 window: accepted, not fixed (RM-27.D1, residual 4 of
+``docs/plans/2026-10-22-graph-entities-deadlock.md``).**
+:func:`collapse_cross_type_concepts` runs ``merge_aliases`` (writer W6 in that
+plan's closed list), then :func:`_restore_winner_display_names` (W7), in two
+transactions. Each takes the graph write lock, but the lock is released at
+W6's commit, so another graph writer can run in between. For that moment it
+sees the winning concept row's ``name`` as the humanized key W6 wrote (e.g.
+``Acmeplatform`` for ``AcmePlatform``), and an upsert of that concept by the
+other writer can refresh the name; W7 then restores the best surface form
+captured before W6. It is accepted, for three reasons:
+
+1. **Only a display name is affected.** No identity, mention, contribution,
+   relationship or watermark changes in the window: ``canonical_key``, the
+   uniqueness key and every graph edge are already final at W6's commit.
+2. **It is bounded.** W7 runs immediately after W6, in the same call, and the
+   window lasts only until W7 commits. Neither transaction waits on a model
+   call, so the window is short.
+3. **Closing it costs more than it buys.** Folding W7 into W6 would change
+   ``merge_aliases``, which the curated aliases share, or hold the tenant-wide
+   lock across both passes. Either is a larger change than a transient
+   capitalization is worth.
+
+This predates PR #53, which recorded it; RM-27 closes it as accepted.
 """
 from __future__ import annotations
 

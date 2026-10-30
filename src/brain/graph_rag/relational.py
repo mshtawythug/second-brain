@@ -10,6 +10,7 @@ is the orchestrator's concern.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import psycopg
@@ -18,12 +19,12 @@ from ..errors import GraphBackendError
 from .schema import EdgeContribution, EntityMention, EntitySummary, GraphStats
 
 __all__ = [
+    "DocInputs",
     "delete_doc_relational",
     "fetch_doc_content_at",
-    "fetch_doc_meta",
+    "fetch_doc_inputs",
     "graph_stats",
     "index_state",
-    "key_share_doc_meta",
     "list_entities",
     "read_doc_mentions",
     "rewrite_doc_relational",
@@ -35,45 +36,67 @@ _VALID_ENTITY_TYPES: frozenset[str] = frozenset({"org", "project", "tool", "topi
 _VALID_SORT_OPTIONS: frozenset[str] = frozenset({"docs", "name"})
 
 
-def fetch_doc_meta(
-    conn: psycopg.Connection[Any], document_id: str
-) -> tuple[str, str] | None:
-    """Return ``(content_hash, content_type)`` for a document, or ``None``."""
-    row = conn.execute(
-        "SELECT content_hash, content_type FROM documents WHERE id = %s",
-        (document_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    return (str(row[0]), str(row[1]))
+@dataclass(frozen=True)
+class DocInputs:
+    """Every ``documents`` / ``sources`` column a reconcile plan reads.
 
-
-def key_share_doc_meta(
-    conn: psycopg.Connection[Any], document_id: str
-) -> tuple[str, str] | None:
-    """``fetch_doc_meta`` that also takes ``FOR KEY SHARE`` on the row.
-
-    For the reconcile write transaction, as its first statement after the graph
-    write lock and BEFORE any graph row is touched. Every graph row this
-    document's reconcile then inserts (mentions, contributions, watermarks)
-    runs an FK check that needs this same lock. Taking it last, inside those
-    inserts, deadlocked against a concurrent ``DELETE FROM documents``: the
-    delete held the tuple and its cascade waited on the rewrite's deleted rows.
-    Taken first, the delete simply waits for this write transaction (which,
-    outside a bulk build, includes the tenant aggregate recompute and the AGE
-    ``CO_OCCURS`` refresh, but never the model call). ``None``
-    means the row is gone, including a delete that committed while this
-    waited. ``KEY SHARE`` does not conflict with a plain ``UPDATE`` of the
-    document: every unique index on ``documents`` but the primary key is
-    partial, so such an update takes ``FOR NO KEY UPDATE``.
+    ``source_kind`` is ``None`` when the document has no source row
+    (``documents.source_id`` is nullable). ``metadata`` is the document's JSONB
+    metadata; the plan uses only its participant keys
+    (:func:`brain.graph_rag.reconcile_plan.compute_inputs_fingerprint`).
     """
-    row = conn.execute(
-        "SELECT content_hash, content_type FROM documents WHERE id = %s FOR KEY SHARE",
-        (document_id,),
-    ).fetchone()
+
+    content_hash: str
+    content_type: str
+    source_kind: str | None
+    metadata: dict[str, Any]
+
+
+# Two frozen statements rather than one with an interpolated locking clause.
+# ``FOR KEY SHARE OF d`` locks only the ``documents`` row: ``d`` is the
+# non-nullable side of the LEFT JOIN, and the source row is never locked.
+_DOC_INPUTS_SQL = (
+    "SELECT d.content_hash, d.content_type, s.kind, d.metadata "
+    "FROM documents d LEFT JOIN sources s ON s.id = d.source_id WHERE d.id = %s"
+)
+_DOC_INPUTS_KEY_SHARE_SQL = (
+    "SELECT d.content_hash, d.content_type, s.kind, d.metadata "
+    "FROM documents d LEFT JOIN sources s ON s.id = d.source_id WHERE d.id = %s "
+    "FOR KEY SHARE OF d"
+)
+
+
+def fetch_doc_inputs(
+    conn: psycopg.Connection[Any], document_id: str, *, key_share: bool = False
+) -> DocInputs | None:
+    """Return the document's :class:`DocInputs`, or ``None`` when it does not exist.
+
+    One statement, so every field comes from one snapshot of the row.
+
+    ``key_share=True`` is for the reconcile write transaction, as its first
+    statement after the graph write lock and BEFORE any graph row is touched.
+    Every graph row this document's reconcile then inserts (mentions,
+    contributions, watermarks) runs an FK check that needs this same lock.
+    Taking it last, inside those inserts, deadlocked against a concurrent
+    ``DELETE FROM documents``: the delete held the tuple and its cascade waited
+    on the rewrite's deleted rows. Taken first, the delete simply waits for this
+    write transaction (which, outside a bulk build, includes the tenant
+    aggregate recompute and the AGE ``CO_OCCURS`` refresh, but never the model
+    call). ``None`` then means the row is gone, including a delete that
+    committed while this waited. ``KEY SHARE`` does not conflict with a plain
+    ``UPDATE`` of the document: every unique index on ``documents`` but the
+    primary key is partial, so such an update takes ``FOR NO KEY UPDATE``.
+    """
+    sql = _DOC_INPUTS_KEY_SHARE_SQL if key_share else _DOC_INPUTS_SQL
+    row = conn.execute(sql, (document_id,)).fetchone()
     if row is None:
         return None
-    return (str(row[0]), str(row[1]))
+    return DocInputs(
+        content_hash=str(row[0]),
+        content_type=str(row[1]),
+        source_kind=str(row[2]) if row[2] is not None else None,
+        metadata=dict(row[3]) if row[3] else {},
+    )
 
 
 def fetch_doc_content_at(

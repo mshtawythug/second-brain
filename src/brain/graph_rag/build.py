@@ -43,6 +43,7 @@ from .backends.base import GraphBackend
 from .extract import EntityExtractor
 from .person_resolver import prebuilt_directory_resolver
 from .reconcile import ReconcileConfig, ReconcileResult, reconcile_document
+from .reconcile_plan import DocumentNotFound
 from .schema import GraphEntity
 from .write_lock import acquire_graph_write_lock
 
@@ -55,8 +56,11 @@ class BuildResult:
 
     ``processed`` is the number of documents reconcile was attempted on (bounded
     by ``limit``); ``reconciled`` is how many did graph work; ``skipped`` is how
-    many short-circuited on an unchanged watermark (``reconciled + skipped ==
-    processed``); ``orphans_removed`` is the total zero-mention entity vertices
+    many short-circuited on an unchanged watermark; ``skipped_deleted`` is how
+    many no longer existed when the build reached them (RM-27, residual 2:
+    deleted between the id enumeration and the document's read phase), so
+    ``reconciled + skipped + skipped_deleted == processed``;
+    ``orphans_removed`` is the total zero-mention entity vertices
     GC'd across the run; ``relationship_count`` is the number of tenant
     ``graph_relationships`` edges materialized by the post-loop refresh (0 when no
     document did work, so no refresh ran). Because the per-document reconcile
@@ -69,6 +73,7 @@ class BuildResult:
     processed: int = 0
     reconciled: int = 0
     skipped: int = 0
+    skipped_deleted: int = 0
     orphans_removed: int = 0
     relationship_count: int = 0
 
@@ -162,8 +167,8 @@ def build_graph(
     only current contributions — and the AGE mirror is rebuilt fresh from the
     relational source-of-truth (entities + ``MENTIONED_IN`` + ``Document``
     vertices + ``CO_OCCURS``). A zero-document corpus ends empty in both stores.
-    No document short-circuits, so ``reconciled == processed`` and
-    ``skipped == 0``.
+    No document short-circuits, so ``reconciled + skipped_deleted == processed``
+    and ``skipped == 0``.
 
     ``force`` is incompatible with ``limit`` (a clear-then-partial-rebuild would
     permanently lose the un-rebuilt remainder) — passing both raises
@@ -243,25 +248,38 @@ def build_graph(
     processed = 0
     reconciled = 0
     skipped = 0
+    skipped_deleted = 0
     orphans_removed = 0
     for document_id in document_ids:
         if limit is not None and processed >= limit:
             break
-        result = reconcile_document(
-            conn,
-            document_id,
-            backend=backend,
-            config=config,
-            person_resolver=resolver,
-            extractor=extractor,
-            force=force,
-            defer_tenant_refresh=True,
-        )
-        processed += 1
-        if result.skipped:
-            skipped += 1
+        try:
+            result = reconcile_document(
+                conn,
+                document_id,
+                backend=backend,
+                config=config,
+                person_resolver=resolver,
+                extractor=extractor,
+                force=force,
+                defer_tenant_refresh=True,
+            )
+        except DocumentNotFound:
+            # RM-27, residual 2: deleted after the ids were enumerated. A
+            # deleted document needs no graph: the ``documents`` cascade removed
+            # its relational graph rows, and its AGE vertex is the deleter's W2.
+            # Only this subclass is tolerated; any other reconcile error stops
+            # the build as before.
+            result = ReconcileResult(
+                document_id=document_id, tenant_id=config.tenant_id, skipped=True
+            )
+            skipped_deleted += 1
         else:
-            reconciled += 1
+            if result.skipped:
+                skipped += 1
+            else:
+                reconciled += 1
+        processed += 1
         orphans_removed += result.orphans_removed
         if progress is not None:
             progress(processed, document_id, result)
@@ -302,6 +320,7 @@ def build_graph(
         processed=processed,
         reconciled=reconciled,
         skipped=skipped,
+        skipped_deleted=skipped_deleted,
         orphans_removed=orphans_removed,
         relationship_count=relationship_count,
     )
