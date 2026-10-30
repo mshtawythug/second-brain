@@ -42,6 +42,26 @@ def test_a_near_copy_is_paired_and_an_unrelated_document_is_not(
     assert report.pairs_new == 1
 
 
+def test_a_candidate_below_the_cut_is_not_recorded(test_db: psycopg.Connection[Any]) -> None:
+    # Every 25th word changed: the two share LSH bands (so they ARE candidates) but their
+    # estimated Jaccard is about 0.76, under the 0.85 cut, so nothing is recorded.
+    base = body(400, 61)
+    words = base.split()
+    for index in range(0, len(words), 25):
+        words[index] = "changed"
+    variant = " ".join(words)
+    a, b = near_dup.compute(base), near_dup.compute(variant)
+    assert a is not None and b is not None
+    assert set(a.bands) & set(b.bands)
+    assert near_dup.estimated_jaccard(a.signature, b.signature) < near_dup.JACCARD_CUT
+    insert_doc(test_db, base)
+    insert_doc(test_db, variant)
+
+    near_dup_store.scan(test_db)
+
+    assert pairs(test_db) == []
+
+
 def test_a_30_token_stub_is_skipped_and_not_revisited(test_db: psycopg.Connection[Any]) -> None:
     # AC1: the stub gets an empty row, so a second scan does not examine it again.
     stub = insert_doc(test_db, body(30, 5), title="Stub")
