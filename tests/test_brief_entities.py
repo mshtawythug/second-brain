@@ -11,6 +11,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from brain.brief_entities import (
     NewEntity,
@@ -238,10 +239,14 @@ def test_for_brief_uses_a_seven_day_window_and_the_configured_tenant(
     assert [entity.name for entity in listed] == ["Tatum Example"]
 
 
-def test_tables_absent_means_no_section_and_no_error(test_db: psycopg.Connection) -> None:
+@pytest.mark.parametrize("table", ["graph_entity_mentions", "graph_entities"])
+def test_tables_absent_means_no_section_and_no_error(
+    test_db: psycopg.Connection, table: str
+) -> None:
+    # Each half of the probe on its own: either table missing means no section.
     cfg = Config(database_url="postgresql://u:p@localhost:5/db")  # type: ignore[call-arg]
     with pytest.raises(_RolledBack), test_db.transaction():
-        test_db.execute("DROP TABLE graph_entity_mentions CASCADE")
+        test_db.execute(sql.SQL("DROP TABLE {} CASCADE").format(sql.Identifier(table)))
         assert entity_tables_present(test_db) is False
         assert for_brief(test_db, cfg, exclude_confidential=True, now=NOW) == []
         raise _RolledBack
