@@ -5,6 +5,7 @@
 **Ticket:** RM-25 in [`docs/specs/2026-10-23-roadmap-completion-design.md`](../specs/2026-10-23-roadmap-completion-design.md) (backlog H-1, rank 16).
 **Base:** `second-brain/master` `f21198f`. **Branch:** `fix/rm-25-move-identity`.
 **Builds on:** PR #52, [`2026-10-22-vault-watcher-move-identity.md`](./2026-10-22-vault-watcher-move-identity.md).
+That plan's ruling that an id-less destination keeps the in-place rename is **superseded for id-less files** by this one; its ruling for files with an id (including a non-UUID id) stands.
 
 ## Goal
 
@@ -27,6 +28,7 @@ The rename kept B's row, so `c.md` got B's id and every backlink pointing at B.
 | `src/brain/vault/move_identity.py` | `is_another_document` sends an id-less dst to the new `_differs_by_content`; the constants `MIN_IDENTITY_SHINGLES` and `MIN_IDENTITY_JACCARD`, each with its rationale. A 46-line leaf before, 97 after; far under the ceiling. |
 | `tests/test_vault_watch_move_identity.py` | Eleven tests (below); `_linked_pair` gains an optional `b_body`. |
 | `src/brain/vault/watch.py` | **Not touched.** `_handle_move` already passes `conn`, `src_rel` and `dst_abs`, and the row's stored content is one `SELECT` on `conn`. |
+| `CLAUDE.md` | The `vault/watch.py` ceiling row's id-less clause reworded (prose only; no hop, count or trail changes). Deviation 5. |
 
 ## Design, as built
 
@@ -99,4 +101,4 @@ DB. AC1 also drives the debouncer, with hand-fired timers as in
 2. **An unreadable destination, or one whose frontmatter does not parse, keeps the rename.** `read_frontmatter_id` reads both as id-less, so they reach the content check. Neither can prove anything, as in PR #52's ruling, and the sync that follows reports the error itself.
 3. **A non-string frontmatter id (`id: 123`) gets the content check.** `read_frontmatter_id` applies `sync`'s own validity test (a non-empty string), so such a file is id-less to both.
 4. **The harness has no barriers.** PR #52's tests drive `_worker_loop` synchronously with one move job, and AC1 adds hand-fired debounce timers (the `test_vault_watch_fire_race.py` pattern). Nothing runs on a second thread, so nothing needs a barrier, and there are no sleeps.
-5. **Two statements elsewhere are now partly stale and are not edited here.** The `vault/watch.py` row of `CLAUDE.md`'s ceiling table ("An id-less destination ... keeps the in-place rename") and the ruling in `docs/plans/2026-10-22-vault-watcher-move-identity.md`. The ticket scopes this PR to `vault/move_identity.py`, the plan is a record of PR #52, and `CLAUDE.md` is RM-26's file in Wave 6. The new rule is stated in `move_identity.py`'s docstrings and here.
+5. **The stale `CLAUDE.md` clause was corrected; PR #52's plan was left as history.** The `vault/watch.py` row of `CLAUDE.md`'s ceiling table said "An id-less destination ... keeps the in-place rename". That clause now says an id-less destination is compared by content since RM-25 (#90). It is prose only: `watch.py` is not touched, so the row gains no hop and no count or trail changes. `docs/plans/2026-10-22-vault-watcher-move-identity.md` is a record of PR #52 and is deliberately not edited; this plan says it is superseded for id-less files.
