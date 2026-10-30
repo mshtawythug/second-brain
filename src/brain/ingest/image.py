@@ -10,7 +10,9 @@ from RM-32's :class:`~brain.ingest.ocr.OcrEngine`; nothing leaves the machine.
 1. With OCR off or ``tesseract`` missing, :class:`OcrUnavailableError` is raised before
    the file is opened: there is nothing to read it with, and an empty document would
    consume the file.
-2. A file over ``max_file_bytes`` is refused before Pillow opens it.
+2. The file is opened once, ``O_NOFOLLOW | O_NONBLOCK``, and must be a regular file
+   (a symlink or FIFO is refused); Pillow reads that open file, never the path again.
+   A file over ``max_file_bytes`` (by ``fstat``) is refused before Pillow sees it.
 3. Only the PNG and JPEG decoders are reachable (``formats=``), whatever the bytes are.
    Pillow's own decompression-bomb check runs inside ``Image.open``; its error, and its
    warning when a caller raises warnings as errors, mean "too large". The global
@@ -31,10 +33,11 @@ from __future__ import annotations
 
 import io
 import os
+import stat
 import struct
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from . import ExtractedDoc
 from .ocr import PAGE_TIMEOUT_S, OcrError, OcrSetup, resolve_ocr
@@ -54,7 +57,7 @@ MAX_PIXELS = 70_000_000
 #: The longest side, in pixels: tesseract's own limit (as in ``ingest/pdf.py``).
 MAX_SIDE_PX = 32_767
 
-ImageOpener = Callable[[Path], "PilImage.Image"]
+ImageOpener = Callable[[BinaryIO], "PilImage.Image"]
 
 
 class ImageError(ValueError):
@@ -92,11 +95,11 @@ def ocr_unavailable_hint(setup: OcrSetup) -> str | None:
     return OCR_MISSING_HINT if setup.settings.enabled else OCR_OFF_HINT
 
 
-def _open_restricted(path: Path) -> PilImage.Image:
+def _open_restricted(fp: BinaryIO) -> PilImage.Image:
     """``Image.open`` limited to :data:`FORMATS`; reads the header only."""
     from PIL import Image
 
-    return Image.open(path, formats=FORMATS)
+    return Image.open(fp, formats=FORMATS)
 
 
 def _check_size(width: int, height: int, max_pixels: int) -> None:
@@ -109,13 +112,13 @@ def _check_size(width: int, height: int, max_pixels: int) -> None:
 
 
 def _grayscale_png(
-    path: Path, *, open_image: ImageOpener, max_pixels: int
+    fp: BinaryIO, *, open_image: ImageOpener, max_pixels: int
 ) -> tuple[bytes, dict[str, Any]]:
-    """Decode ``path`` within the caps; return a grayscale PNG and ``metadata.image``."""
+    """Decode ``fp`` within the caps; return a grayscale PNG and ``metadata.image``."""
     from PIL import Image
 
     try:
-        with open_image(path) as img:
+        with open_image(fp) as img:
             width, height = img.size
             _check_size(width, height, max_pixels)
             fmt = img.format
@@ -146,15 +149,21 @@ def extract_image(
     ``ocr`` is resolved from ``os.environ`` when not given (the extractor registry passes
     only a path, as for PDFs). No recognised text is an empty document, which ingest
     skips. Raises :class:`ImageError` subclasses (all ``ValueError``) as the module
-    docstring describes, and ``OSError`` when the file cannot be stat'ed.
+    docstring describes, and ``OSError`` when the file cannot be opened (``ELOOP``: a
+    symlink).
     ``timeout``, ``max_file_bytes``, ``max_pixels`` and ``open_image`` are seams.
     """
     setup = ocr if ocr is not None else resolve_ocr(os.environ)
     if setup.engine is None:
         raise OcrUnavailableError(OCR_MISSING_HINT if setup.settings.enabled else OCR_OFF_HINT)
-    if Path(path).stat().st_size > max_file_bytes:
-        raise ImageTooLargeError("image file too large")
-    png, image_meta = _grayscale_png(Path(path), open_image=open_image, max_pixels=max_pixels)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as fp:
+        st = os.fstat(fp.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise UnreadableImageError("not a regular file")
+        if st.st_size > max_file_bytes:
+            raise ImageTooLargeError("image file too large")
+        png, image_meta = _grayscale_png(fp, open_image=open_image, max_pixels=max_pixels)
     try:
         text = setup.engine.image_to_text(
             png, lang=setup.settings.lang, timeout=min(PAGE_TIMEOUT_S, timeout)

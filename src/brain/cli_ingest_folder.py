@@ -16,9 +16,17 @@ runs ``brain ingest-folder --configured --since 2d`` every 10 minutes.
 **OCR.** A folder that takes images is skipped, with the fix printed, when OCR is off
 or ``tesseract`` is missing: otherwise every run would move each file and move it back.
 
+**Failures.** A failure that would repeat on every run (an image that cannot be read,
+is too large or times out in OCR, another malformed file, the secret guard) is raised
+as :class:`~brain.drop_folder.RejectedFile`, so the file stays in ``imported/`` as
+``rejected``; any other failure (the database, the embedder) moves it back for the next
+run. ``OcrUnavailableError`` is the second kind: it is configuration, not the file.
+
 **Exit codes.** 0 when nothing failed (files left for the next run included); 1 when a
-file failed or a folder could not be used; 2 for the scope refusal. Failures are
-printed by class only (``describe_failure``).
+file failed or was rejected, or a folder could not be used; 2 for the scope refusal.
+Failures are printed by class only (``describe_failure``), and every file name and path
+through ``one_line``, so a name carrying an escape sequence or a newline cannot drive the
+terminal or forge a line in the LaunchAgent's log.
 """
 from __future__ import annotations
 
@@ -49,15 +57,17 @@ from .drop_folder import (
     DropFolderError,
     DropReport,
     IngestFn,
+    RejectedFile,
     run,
     scan,
 )
-from .errors import describe_failure
-from .ingest import Embedder, ingest_document
+from .errors import SecretGuardError, describe_failure
+from .ingest import Embedder, ExtractedDoc, IngestResult, ingest_document
 from .ingest.dispatch import extract_path
-from .ingest.image import extract_image, ocr_unavailable_hint
+from .ingest.image import ImageError, OcrUnavailableError, extract_image, ocr_unavailable_hint
 from .ingest.ocr import OcrSetup, resolve_ocr
 from .ingest.outcome import IngestOutcome, classify
+from .ingest.text_safety import one_line
 from .sensitivity import VALID_SENSITIVITY_LEVELS
 from .settings.drop_folders import (
     DEFAULT_EXTENSIONS,
@@ -193,7 +203,7 @@ def _check_ocr(folders: list[DropFolder], ocr: OcrSetup) -> tuple[list[DropFolde
     usable = [f for f in folders if not f.extensions & IMAGE_EXTENSIONS]
     for folder in folders:
         if folder not in usable:
-            typer.secho(f"skipped {folder.path}: {hint}", fg="red", err=True)
+            typer.secho(f"skipped {one_line(str(folder.path))}: {hint}", fg="red", err=True)
     return usable, len(usable) < len(folders)
 
 
@@ -201,9 +211,9 @@ def _dry_run(folders: list[DropFolder], cutoff: datetime) -> None:
     until = datetime.now(UTC) - timedelta(seconds=SETTLE_S)
     for folder in folders:
         found = scan(folder, since=cutoff, until=until)
-        typer.echo(f"{folder.path}: {len(found)} file(s)")
+        typer.echo(f"{one_line(str(folder.path))}: {len(found)} file(s)")
         for path in found:
-            typer.echo(f"  would ingest  {path.name}")
+            typer.echo(f"  would ingest  {one_line(path.name)}")
 
 
 @dataclass(frozen=True)
@@ -243,7 +253,8 @@ def _ingest_all(
             try:
                 report = run(conn, folder, since=cutoff, ingest=_ingest_step(ctx, folder))
             except (DropFolderError, OSError) as exc:
-                typer.secho(f"skipped {folder.path}: {_folder_error(exc)}", fg="red", err=True)
+                where = one_line(str(folder.path))
+                typer.secho(f"skipped {where}: {_folder_error(exc)}", fg="red", err=True)
                 failed = True
                 continue
             _print_report(report)
@@ -260,24 +271,20 @@ def _ingest_step(ctx: _Context, folder: DropFolder) -> IngestFn:
     def ingest(
         conn: psycopg.Connection[Any], path: Path, *, title: str, timeout: float
     ) -> str:
-        if path.suffix.lower() in IMAGE_EXTENSIONS:
-            doc = extract_image(path, ocr=ctx.ocr, timeout=timeout)
-        else:
-            doc = extract_path(path)
-        result = ingest_document(
-            conn,
-            embedder=ctx.embedder,
-            doc=replace(doc, title=title),
-            source_kind=folder.kind,
-            vault_root=ctx.cfg.vault_path,
-            enricher=ctx.enricher,
-            enrich=ctx.enrich,
-            enrich_min_tokens=ctx.cfg.enrich_min_tokens,
-            graph_syncer=ctx.graph_syncer,
-            secret_guard=ctx.cfg.secret_guard,
-            allow_secrets=ctx.allow_secrets,
-            sensitivity=folder.sensitivity,
-        )
+        try:
+            if path.suffix.lower() in IMAGE_EXTENSIONS:
+                doc = extract_image(path, ocr=ctx.ocr, timeout=timeout)
+            else:
+                doc = extract_path(path)
+        except OcrUnavailableError:
+            raise  # configuration, not this file: it goes back for the next run
+        except (ImageError, ValueError) as exc:
+            # Unreadable, too large, an OCR timeout, a malformed file: every run would fail.
+            raise RejectedFile("the file cannot be read") from exc
+        try:
+            result = _ingest(ctx, folder, conn, doc, title)
+        except SecretGuardError as exc:
+            raise RejectedFile("the secret guard refused the file") from exc
         _emit_secret_notice(result.secret_notice)
         _emit_egress_notice(result.egress_notice)
         outcome, _ = classify(result)
@@ -286,17 +293,40 @@ def _ingest_step(ctx: _Context, folder: DropFolder) -> IngestFn:
     return ingest
 
 
+def _ingest(
+    ctx: _Context,
+    folder: DropFolder,
+    conn: psycopg.Connection[Any],
+    doc: ExtractedDoc,
+    title: str,
+) -> IngestResult:
+    return ingest_document(
+        conn,
+        embedder=ctx.embedder,
+        doc=replace(doc, title=title),
+        source_kind=folder.kind,
+        vault_root=ctx.cfg.vault_path,
+        enricher=ctx.enricher,
+        enrich=ctx.enrich,
+        enrich_min_tokens=ctx.cfg.enrich_min_tokens,
+        graph_syncer=ctx.graph_syncer,
+        secret_guard=ctx.cfg.secret_guard,
+        allow_secrets=ctx.allow_secrets,
+        sensitivity=folder.sensitivity,
+    )
+
+
 def _print_report(report: DropReport) -> None:
     for outcome in report.outcomes:
-        line = f"  {outcome.status:<9} {outcome.name}"
+        line = f"  {outcome.status:<9} {one_line(outcome.name)}"
         if outcome.detail:
-            line += f" ({outcome.detail})"
+            line += f" ({one_line(outcome.detail)})"
         typer.secho(line, fg="red" if outcome.status == "failed" else None)
     counts = report.counts()
     summary = ", ".join(f"{n} {status}" for status, n in sorted(counts.items())) or "nothing new"
     if report.deferred:
         summary += f"; {report.deferred} left for the next run"
-    typer.echo(f"{report.folder}: {summary}")
+    typer.echo(f"{one_line(str(report.folder))}: {summary}")
 
 
 def register(app: typer.Typer) -> None:

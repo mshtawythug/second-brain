@@ -29,13 +29,27 @@ documents. The title is the original stem. Three rules keep the owner's files sa
    earlier import already holds that ``source_path``). A different file at that name
    (``sha8`` is 32 bits), or anything but a regular file there, is a failure that
    touches neither.
-3. **Only a move this run made is ever moved back.** When the ingest fails, the file
-   returns to the folder, unless a new file took its name meanwhile; then it stays in
-   ``imported/`` and the failure says so. ``imported/`` itself must be a real
-   directory; a symlink there refuses the whole folder.
+3. **Only a move this run made is ever moved back**, and only after a *transient*
+   failure (a database or embedder error): the file returns to the folder, unless a
+   new file took its name meanwhile; then it stays in ``imported/`` and the failure
+   says so. A failure that would repeat on every run (an unreadable or oversized
+   image, an OCR timeout, the secret guard) is :class:`RejectedFile`: the file stays
+   in ``imported/``, reported ``rejected``, so it is not retried every 10 minutes.
+   ``imported/`` itself must be a real directory; a symlink there refuses the folder.
+
+**Files are pinned by identity, not by name** (the #105 security review). Both
+directories are held open as ``O_DIRECTORY | O_NOFOLLOW`` fds and every step names files
+relative to them, so swapping ``imported/`` for a symlink later moves nothing outside
+it. A file is hashed from one fd opened ``O_NOFOLLOW | O_NONBLOCK`` and checked regular
+with ``fstat`` (a symlink or a FIFO swapped in after the scan is refused, and a FIFO
+never blocks). After the link or copy, the new name must be a regular file with that
+fd's ``(st_dev, st_ino)`` (or the copy's own), else it is removed; and the old name is
+unlinked only while it is still that file.
 
 An ingest that reads no text (the ``"empty"`` outcome) leaves the file in
-``imported/``: it was processed, and retrying it would read nothing again.
+``imported/``: it was processed, and retrying it would read nothing again. A title is
+the original stem on one line (``one_line``: no control or format characters),
+capped at :data:`MAX_TITLE_CHARS`, else the ``imported/`` stem.
 
 **Bounds.** At most ``max_files`` files and ``deadline_s`` seconds a run; files past
 either are left exactly where they are, counted as ``deferred``. The ingest step gets
@@ -54,13 +68,14 @@ import os
 import stat
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from .errors import BrainError, describe_failure
+from .ingest.text_safety import one_line
 
 if TYPE_CHECKING:
     import psycopg
@@ -75,6 +90,9 @@ RUN_DEADLINE_S = 480.0
 MAX_FILES_PER_RUN = 200
 #: The stem is cut to this many UTF-8 bytes, so ``-<sha8><ext>`` fits a 255-byte name.
 MAX_STEM_BYTES = 200
+#: A title longer than this is cut (Notion's export ingest caps titles the same way).
+MAX_TITLE_CHARS = 300
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 #: ``os.link`` errors that mean "no hard links here", not "this file cannot move".
 _NO_HARD_LINKS = frozenset(
     {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK, errno.ENOSYS}
@@ -82,13 +100,26 @@ _NO_HARD_LINKS = frozenset(
 _CHUNK = 1 << 20
 
 Lstat = Callable[[Path], Any]
-Link = Callable[[Path, Path], None]
+#: ``(from_name, to_name, from_dir_fd, to_dir_fd)``; ``FileExistsError`` when taken.
+Link = Callable[[str, str, int, int], None]
 Write = Callable[[int, bytes], int]
 Clock = Callable[[], float]
 
 
 class DropFolderError(BrainError):
     """The folder cannot be used: an unsafe ``imported/``, or a mode not built yet."""
+
+
+class MoveRaceError(BrainError):
+    """A file changed identity or type between being hashed and being moved."""
+
+
+class RejectedFile(BrainError):
+    """Raised by an :class:`IngestFn` for a failure that would repeat on every run.
+
+    The cause (``raise RejectedFile(...) from exc``) is what the report shows, by class.
+    The file stays in ``imported/`` instead of being moved back and retried.
+    """
 
 
 @dataclass(frozen=True)
@@ -107,8 +138,9 @@ class IngestFn(Protocol):
     """Ingests the moved file at ``path`` titled ``title``; returns its outcome.
 
     The outcome is ``"ingested"``, ``"updated"``, ``"unchanged"`` or ``"empty"``
-    (no text: the file stays in ``imported/``). Raising means it failed, and the
-    runner moves the file back.
+    (no text: the file stays in ``imported/``). :class:`RejectedFile` means it failed
+    for good (the file stays in ``imported/``); any other exception means it failed for
+    now, and the runner moves the file back.
     """
 
     def __call__(
@@ -121,7 +153,7 @@ class FileOutcome:
     """What happened to one dropped file. ``detail`` is class-only, never a message."""
 
     name: str
-    status: str  # an IngestFn outcome, or "duplicate", "vanished", "failed"
+    status: str  # an IngestFn outcome, or "duplicate", "vanished", "rejected", "failed"
     detail: str = ""
 
 
@@ -138,7 +170,7 @@ class DropReport:
 
     @property
     def failed(self) -> bool:
-        return any(o.status == "failed" for o in self.outcomes)
+        return any(o.status in ("failed", "rejected") for o in self.outcomes)
 
 
 def scan(
@@ -194,150 +226,261 @@ def run(
         raise DropFolderError(f"mode {folder.mode!r} is not available until RM-39")
     if folder.kind is None:
         raise DropFolderError("an ingest folder needs a source kind")
-    imported = _imported_dir(folder.path)
     wall = now if now is not None else time.time()
     until = datetime.fromtimestamp(wall - SETTLE_S, UTC)
-    files = scan(folder, since=since, until=until, lstat=lstat)
-    mover = _Mover(link=link or _hard_link, write=write)
-    start = clock()
-    outcomes: list[FileOutcome] = []
-    for index, src in enumerate(files):
-        elapsed = clock() - start
-        if index >= max_files or elapsed >= deadline_s:
-            return DropReport(folder.path, tuple(outcomes), deferred=len(files) - index)
-        outcomes.append(
-            _one(conn, src, imported, ingest=ingest, timeout=deadline_s - elapsed, mover=mover)
-        )
+    with _open_dirs(folder.path) as dirs:
+        files = scan(folder, since=since, until=until, lstat=lstat)
+        mover = _Mover(dirs, link=link or _hard_link, write=write)
+        start = clock()
+        outcomes: list[FileOutcome] = []
+        for index, src in enumerate(files):
+            elapsed = clock() - start
+            if index >= max_files or elapsed >= deadline_s:
+                return DropReport(folder.path, tuple(outcomes), deferred=len(files) - index)
+            outcomes.append(
+                _one(conn, src.name, ingest=ingest, timeout=deadline_s - elapsed, mover=mover)
+            )
     return DropReport(folder.path, tuple(outcomes), deferred=0)
 
 
-def _imported_dir(folder: Path) -> Path:
-    """``<folder>/imported``, created if missing; refuses anything but a real directory."""
-    imported = folder / IMPORTED_DIR
+@dataclass(frozen=True)
+class _Dirs:
+    """The folder and its ``imported/``, held open so a later swap of either path is moot."""
+
+    folder: int
+    imported: int
+    imported_path: Path
+
+
+@contextlib.contextmanager
+def _open_dirs(folder: Path) -> Iterator[_Dirs]:
+    """Open the folder and ``<folder>/imported`` (created if missing) as directory fds.
+
+    ``O_NOFOLLOW | O_DIRECTORY``: a symlink or a file at ``imported`` refuses the folder.
+    Every later step names files relative to these fds, so ``imported/`` swapped for a
+    symlink after this point still receives nothing.
+    """
+    folder_fd = os.open(folder, _DIR_FLAGS)
     try:
-        st = os.lstat(imported)
-    except FileNotFoundError:
-        imported.mkdir()
-        st = os.lstat(imported)
-    if not stat.S_ISDIR(st.st_mode):
-        raise DropFolderError(f"{IMPORTED_DIR}/ is not a real directory (a symlink or a file)")
-    return imported
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(IMPORTED_DIR, dir_fd=folder_fd)
+        try:
+            imported_fd = os.open(IMPORTED_DIR, _DIR_FLAGS, dir_fd=folder_fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise DropFolderError(
+                    f"{IMPORTED_DIR}/ is not a real directory (a symlink or a file)"
+                ) from None
+            raise
+        try:
+            yield _Dirs(folder_fd, imported_fd, folder / IMPORTED_DIR)
+        finally:
+            os.close(imported_fd)
+    finally:
+        os.close(folder_fd)
 
 
-def _hard_link(src: Path, dst: Path) -> None:
-    os.link(src, dst, follow_symlinks=False)
+def _hard_link(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
+    os.link(src, dst, src_dir_fd=src_dir, dst_dir_fd=dst_dir, follow_symlinks=False)
 
 
-def _imported_name(src: Path, digest: str) -> str:
-    stem = src.stem
+def _imported_name(name: str, digest: str) -> str:
+    stem, suffix = Path(name).stem, Path(name).suffix.lower()
     while len(stem.encode("utf-8", "surrogateescape")) > MAX_STEM_BYTES:
         stem = stem[:-1]
-    return f"{stem}-{digest[:8]}{src.suffix.lower()}"
+    return f"{stem}-{digest[:8]}{suffix}"
 
 
-def _sha256(path: Path) -> str:
-    """The file's SHA-256, opened without following a symlink (``ELOOP`` if it is one)."""
-    digest = hashlib.sha256()
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    try:
-        while chunk := os.read(fd, _CHUNK):
-            digest.update(chunk)
-    finally:
+def _title(name: str, dst_name: str) -> str:
+    """The document's title: the original stem on one line, capped; else the imported stem."""
+    title = one_line(Path(name).stem)[:MAX_TITLE_CHARS].strip()
+    return title or Path(dst_name).stem
+
+
+def _open_regular(name: str, dir_fd: int) -> tuple[int, os.stat_result]:
+    """Open ``name`` without following a symlink or blocking on a FIFO; regular files only."""
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
         os.close(fd)
+        raise MoveRaceError("not a regular file")
+    return fd, st
+
+
+def _sha256_fd(fd: int) -> str:
+    digest = hashlib.sha256()
+    os.lseek(fd, 0, os.SEEK_SET)
+    while chunk := os.read(fd, _CHUNK):
+        digest.update(chunk)
     return digest.hexdigest()
+
+
+def _identity(st: os.stat_result) -> tuple[int, int]:
+    return st.st_dev, st.st_ino
+
+
+def _path_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return _identity(st) if stat.S_ISREG(st.st_mode) else None
+
+
+def _same_file(name: str, dir_fd: int, identity: tuple[int, int]) -> bool:
+    """Whether ``name`` is still a regular file with ``identity`` (``lstat``, no following)."""
+    try:
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return stat.S_ISREG(st.st_mode) and _identity(st) == identity
 
 
 @dataclass(frozen=True)
 class _Mover:
-    """The no-overwrite move: hard link then unlink, or an ``O_EXCL`` copy then unlink."""
+    """The no-overwrite move between the two directory fds.
 
+    A hard link (atomic; ``FileExistsError`` when the name is taken), or an ``O_EXCL``
+    copy from the already-open source fd. Either way the new name must then be a regular
+    file with the expected identity, or it is removed and :class:`MoveRaceError` raised;
+    and the old name is unlinked only while it is still the file that was moved.
+    """
+
+    dirs: _Dirs
     link: Link
     write: Write
 
-    def move(self, src: Path, dst: Path) -> None:
-        """Move ``src`` to ``dst``; ``FileExistsError`` when ``dst`` exists (nothing moved)."""
+    def move(
+        self, name: str, to_name: str, *, fd: int, identity: tuple[int, int], digest: str,
+        back: bool = False,
+    ) -> tuple[int, int]:
+        """Move ``name`` to ``to_name``; return the identity of the file now at ``to_name``."""
+        dirs = self.dirs
+        from_dir, to_dir = (dirs.imported, dirs.folder) if back else (dirs.folder, dirs.imported)
         try:
-            self.link(src, dst)
+            self.link(name, to_name, from_dir, to_dir)
+            expected = identity
         except OSError as exc:
             if exc.errno not in _NO_HARD_LINKS:
                 raise
-            self._copy_exclusive(src, dst)
-        # A concurrent run that found ``dst`` taken may have deleted ``src`` as its
-        # duplicate; the file is safe at ``dst`` either way, and this run ingests it.
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(src)
+            expected = self._copy_exclusive(fd, to_name, to_dir, digest)
+        if not _same_file(to_name, to_dir, expected):
+            # This run created ``to_name``; what it names is not the file that was hashed
+            # (a symlink or another file was swapped in), so it goes and nothing moves.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(to_name, dir_fd=to_dir)
+            raise MoveRaceError("the file changed during the move")
+        if _same_file(name, from_dir, identity):
+            os.unlink(name, dir_fd=from_dir)
+        return expected
 
-    def _copy_exclusive(self, src: Path, dst: Path) -> None:
-        fd_in = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+    def _copy_exclusive(self, fd: int, to_name: str, to_dir: int, digest: str) -> tuple[int, int]:
+        """Copy the open ``fd`` to a new ``to_name``; the bytes must hash to ``digest``."""
+        st = os.fstat(fd)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        out = os.open(to_name, flags, stat.S_IMODE(st.st_mode), dir_fd=to_dir)
         try:
-            st = os.fstat(fd_in)
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-            fd_out = os.open(dst, flags, stat.S_IMODE(st.st_mode))
-            try:
-                while chunk := os.read(fd_in, _CHUNK):
-                    view = memoryview(chunk)
-                    while view:
-                        view = view[self.write(fd_out, bytes(view)) :]
-            except BaseException:
-                os.close(fd_out)
-                os.unlink(dst)  # O_EXCL: this run created it
-                raise
-            os.close(fd_out)
-        finally:
-            os.close(fd_in)
-        os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
+            copied = hashlib.sha256()
+            os.lseek(fd, 0, os.SEEK_SET)
+            while chunk := os.read(fd, _CHUNK):
+                copied.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    view = view[self.write(out, bytes(view)) :]
+            if copied.hexdigest() != digest:
+                raise MoveRaceError("the file changed during the copy")
+            os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns))
+            identity = _identity(os.fstat(out))
+        except BaseException:
+            os.close(out)
+            os.unlink(to_name, dir_fd=to_dir)  # O_EXCL: this run created it
+            raise
+        os.close(out)
+        return identity
 
 
 def _one(
     conn: psycopg.Connection[Any],
-    src: Path,
-    imported: Path,
+    name: str,
     *,
     ingest: IngestFn,
     timeout: float,
     mover: _Mover,
 ) -> FileOutcome:
-    """Move, ingest and (on failure) move back one file."""
-    name = src.name
+    """Move, ingest and (on a transient failure) move back one file."""
     try:
-        digest = _sha256(src)
+        fd, st = _open_regular(name, mover.dirs.folder)
     except FileNotFoundError:
         return FileOutcome(name, "vanished")
-    except OSError as exc:  # ELOOP: swapped for a symlink since the scan
+    except (OSError, MoveRaceError) as exc:  # ELOOP / FIFO: swapped since the scan
         return FileOutcome(name, "failed", describe_failure(exc))
-    dst = imported / _imported_name(src, digest)
     try:
-        mover.move(src, dst)
-    except FileExistsError:
-        return _duplicate(src, dst, digest)
+        digest = _sha256_fd(fd)
+        identity = _identity(st)
+        dst_name = _imported_name(name, digest)
+        try:
+            moved = mover.move(name, dst_name, fd=fd, identity=identity, digest=digest)
+        except FileExistsError:
+            return _duplicate(name, dst_name, identity, digest, mover.dirs)
+        except FileNotFoundError:
+            return FileOutcome(name, "vanished")
+        except (OSError, MoveRaceError) as exc:
+            return FileOutcome(name, "failed", describe_failure(exc))
+        dst = mover.dirs.imported_path / dst_name
+        try:
+            # The ingest reads by path. If ``imported/`` was swapped since it was opened,
+            # that path names some other file: refuse, and move ours back by fd.
+            if _path_identity(dst) != moved:
+                raise MoveRaceError("imported/ changed during the run")
+            status = ingest(conn, dst, title=_title(name, dst_name), timeout=timeout)
+        except RejectedFile as exc:
+            return FileOutcome(name, "rejected", _cause(exc))
+        except Exception as exc:  # noqa: BLE001 - any other failure moves the file back
+            detail = describe_failure(exc)
+            return FileOutcome(name, "failed", _move_back(dst_name, name, mover, detail, digest))
+        return FileOutcome(name, status)
+    finally:
+        os.close(fd)
+
+
+def _cause(exc: RejectedFile) -> str:
+    return describe_failure(exc.__cause__) if exc.__cause__ is not None else describe_failure(exc)
+
+
+def _duplicate(
+    name: str, dst_name: str, identity: tuple[int, int], digest: str, dirs: _Dirs
+) -> FileOutcome:
+    """``dst_name`` existed before this move: delete the drop copy only if the bytes match."""
+    different = FileOutcome(name, "failed", f"a different file holds {dst_name}")
+    try:
+        fd, _ = _open_regular(dst_name, dirs.imported)
     except FileNotFoundError:
         return FileOutcome(name, "vanished")
+    except MoveRaceError:
+        return different
     except OSError as exc:
-        return FileOutcome(name, "failed", describe_failure(exc))
+        return different if exc.errno == errno.ELOOP else FileOutcome(
+            name, "failed", describe_failure(exc)
+        )
     try:
-        status = ingest(conn, dst, title=src.stem, timeout=timeout)
-    except Exception as exc:  # noqa: BLE001 - any failure moves the file back
-        return FileOutcome(name, "failed", _move_back(dst, src, mover, describe_failure(exc)))
-    return FileOutcome(name, status)
+        if _sha256_fd(fd) != digest:
+            return different
+    finally:
+        os.close(fd)
+    if not _same_file(name, dirs.folder, identity):
+        return FileOutcome(name, "vanished")
+    os.unlink(name, dir_fd=dirs.folder)
+    return FileOutcome(name, "duplicate")
 
 
-def _duplicate(src: Path, dst: Path, digest: str) -> FileOutcome:
-    """``dst`` existed before this run: delete the drop copy only if the bytes match."""
-    try:
-        if not stat.S_ISREG(os.lstat(dst).st_mode) or _sha256(dst) != digest:
-            return FileOutcome(src.name, "failed", f"a different file holds {dst.name}")
-        os.unlink(src)
-    except FileNotFoundError:
-        return FileOutcome(src.name, "vanished")
-    except OSError as exc:
-        return FileOutcome(src.name, "failed", describe_failure(exc))
-    return FileOutcome(src.name, "duplicate")
-
-
-def _move_back(dst: Path, src: Path, mover: _Mover, detail: str) -> str:
+def _move_back(dst_name: str, name: str, mover: _Mover, detail: str, digest: str) -> str:
     """Return the file this run moved; never over a file that took its name meanwhile."""
     try:
-        mover.move(dst, src)
-    except OSError as exc:
-        return f"{detail}; left in {IMPORTED_DIR}/{dst.name} ({describe_failure(exc)})"
+        fd, st = _open_regular(dst_name, mover.dirs.imported)
+        try:
+            mover.move(dst_name, name, fd=fd, identity=_identity(st), digest=digest, back=True)
+        finally:
+            os.close(fd)
+    except (OSError, MoveRaceError) as exc:
+        return f"{detail}; left in {IMPORTED_DIR}/{dst_name} ({describe_failure(exc)})"
     return detail

@@ -8,6 +8,7 @@ double, rule 13), so ``tesseract`` is never run here.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from pathlib import Path
@@ -313,25 +314,67 @@ def test_the_same_file_dropped_twice_adds_nothing(
 # --- AC5: a failed ingest returns the file -----------------------------------------------
 
 
-def test_a_failed_ingest_leaves_the_file_back_in_the_folder(
+def test_a_transient_failure_leaves_the_file_back_in_the_folder(
     home: Path, drop: Path, engine: _Engine, embedder: CountingEmbedder,
-    test_db: psycopg.Connection[Any],
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """AC5: a failure that may pass next time (the database) returns the file."""
     _configure(home, _table(drop))
     src = _png(drop, "shot.png")
     body = src.read_bytes()
-    engine.answers = [OcrTimeoutError("tesseract ran past 60s")]
+
+    def db_down(*args: Any, **kwargs: Any) -> Any:
+        raise psycopg.OperationalError("synthetic: the database went away")
+
+    monkeypatch.setattr("brain.cli_ingest_folder.ingest_document", db_down)
 
     result = _run("--configured", "--since", "2d")
 
     assert result.exit_code == 1
     assert src.read_bytes() == body
     assert list((drop / IMPORTED_DIR).iterdir()) == []
-    assert "failed    shot.png (ImageOcrError from OcrTimeoutError)" in result.output
+    assert "failed    shot.png (OperationalError)" in result.output
+    assert "went away" not in result.output
+
+
+def test_an_ocr_timeout_is_rejected_and_stays_in_imported(
+    home: Path, drop: Path, engine: _Engine, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """L2: a failure every run would repeat is not retried every 10 minutes."""
+    _configure(home, _table(drop))
+    src = _png(drop, "shot.png")
+    sha8 = _sha8(src)
+    engine.answers = [OcrTimeoutError("tesseract ran past 60s")]
+
+    result = _run("--configured", "--since", "2d")
+
+    assert result.exit_code == 1
+    assert not src.exists()
+    assert (drop / IMPORTED_DIR / f"shot-{sha8}.png").is_file()
+    assert "rejected  shot.png (ImageOcrError from OcrTimeoutError)" in result.output
     assert _docs(test_db) == []
+    engine.answers = ["would read now"]
+    assert _run("--configured", "--since", "2d").exit_code == 0  # nothing left to retry
+    assert engine.calls == 1
 
 
-def test_a_secret_in_the_ocr_text_is_refused_and_the_file_returned(
+def test_an_unreadable_image_is_rejected(
+    home: Path, drop: Path, engine: _Engine, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    _configure(home, _table(drop))
+    (drop / "broken.png").write_bytes(b"not an image")
+    _settled(drop / "broken.png")
+
+    result = _run("--configured", "--since", "2d")
+
+    assert result.exit_code == 1
+    assert "rejected  broken.png (UnreadableImageError" in result.output
+    assert not (drop / "broken.png").exists()
+
+
+def test_a_secret_in_the_ocr_text_is_rejected_and_kept_in_imported(
     home: Path, drop: Path, engine: _Engine, embedder: CountingEmbedder,
     test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -341,14 +384,15 @@ def test_a_secret_in_the_ocr_text_is_refused_and_the_file_returned(
     monkeypatch.setenv("BRAIN_SECRET_GUARD", "reject")
     _configure(home, _table(drop))
     src = _png(drop, "creds.png")
+    sha8 = _sha8(src)
     engine.answers = [f"aws key {SYNTHETIC_AWS_KEY}"]
 
     result = _run("--configured", "--since", "2d")
 
     assert result.exit_code == 1
-    assert src.exists()
+    assert (drop / IMPORTED_DIR / f"creds-{sha8}.png").is_file()
     assert SYNTHETIC_AWS_KEY not in result.output
-    assert "failed    creds.png (SecretGuardError)" in result.output
+    assert "rejected  creds.png (SecretGuardError)" in result.output
     assert _docs(test_db) == []
 
 
@@ -522,3 +566,82 @@ def test_an_empty_run_says_nothing_new(
     _print_report(DropReport(tmp_path, (), deferred=0))
 
     assert f"{tmp_path}: nothing new" in capsys.readouterr().out
+
+
+HOSTILE = "shot\x1b]0;forged\x07\nFORGED LOG LINE\x1b[2J"
+
+
+def _assert_terminal_safe(output: str) -> None:
+    assert "\x1b" not in output and "\x07" not in output
+    assert not any(line.startswith("FORGED LOG LINE") for line in output.splitlines())
+
+
+def test_a_hostile_file_name_reaches_neither_the_terminal_nor_the_title(
+    home: Path, drop: Path, engine: _Engine, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """sec-105 M1: ESC/OSC/newline in a name cannot drive the terminal or forge a log line."""
+    _configure(home, _table(drop))
+    _png(drop, f"{HOSTILE}.png")
+
+    dry = _run("--configured", "--since", "2d", "--dry-run")
+    result = _run("--configured", "--since", "2d")
+
+    for output in (dry.output, result.output):
+        _assert_terminal_safe(output)
+    assert "would ingest  shot]0;forged FORGED LOG LINE[2J.png" in dry.output
+    assert "ingested  shot]0;forged FORGED LOG LINE[2J.png" in result.output
+    assert _docs(test_db)[0]["title"] == "shot]0;forged FORGED LOG LINE[2J"
+
+
+def test_a_hostile_name_in_a_failure_line_is_cleaned_too(
+    home: Path, drop: Path, engine: _Engine, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    _configure(home, _table(drop))
+    (drop / f"{HOSTILE}.png").write_bytes(b"not an image")
+    _settled(drop / f"{HOSTILE}.png")
+
+    result = _run("--configured", "--since", "2d")
+
+    _assert_terminal_safe(result.output)
+    assert "rejected  shot]0;forged FORGED LOG LINE[2J.png (UnreadableImageError" in (
+        result.output
+    )
+
+
+def test_a_hostile_folder_path_is_cleaned(
+    home: Path, tmp_path: Path, engine: _Engine, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    folder = tmp_path / "drop\x1b[31m\nFORGED LOG LINE"
+    folder.mkdir()
+    _png(folder, "shot.png")
+    # json.dumps escapes the controls as \uXXXX / \n, which a TOML basic string reads.
+    _configure(home, f"[[folder]]\npath = {json.dumps(str(folder))}\n")
+
+    result = _run("--configured", "--since", "2d")
+
+    assert result.exit_code == 0, result.output
+    _assert_terminal_safe(result.output)
+
+
+def test_ocr_unavailable_inside_the_step_is_transient_not_rejected(drop: Path) -> None:
+    """The pre-check normally skips such a folder; if OCR goes missing anyway, the file is
+    not rejected for good (it is configuration, not the file), so it goes back next run."""
+    from brain.cli_ingest_folder import _Context, _ingest_step
+    from brain.drop_folder import DropFolder, RejectedFile
+    from brain.ingest.image import OcrUnavailableError
+
+    ctx = _Context(
+        cfg=None, embedder=None, enricher=None, graph_syncer=None,  # type: ignore[arg-type]
+        ocr=OcrSetup(settings=AUTO, engine=None, missing_binary=True),
+        enrich=False, allow_secrets=False,
+    )
+    folder = DropFolder(drop, "ingest", "screenshot", frozenset({".png"}), "confidential")
+    step = _ingest_step(ctx, folder)
+
+    with pytest.raises(OcrUnavailableError) as err:
+        step(None, _png(drop, "shot.png"), title="shot", timeout=5.0)  # type: ignore[arg-type]
+
+    assert not isinstance(err.value, RejectedFile)

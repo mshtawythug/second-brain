@@ -6,13 +6,16 @@ needs the real ``tesseract``, which is skipped when the binary is absent.
 """
 from __future__ import annotations
 
+import errno
 import io
+import os
 import shutil
 import struct
 import warnings
 import zlib
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 from PIL import Image, ImageDraw, ImageFont
@@ -472,3 +475,39 @@ def test_an_image_with_no_pixels_is_unreadable(tmp_path: Path) -> None:
         extract_image(path, ocr=_setup(engine), open_image=lambda p: Image.new("L", (0, 10)))
 
     assert engine.calls == []
+
+
+def test_a_symlink_is_never_followed(tmp_path: Path) -> None:
+    """The file is opened ``O_NOFOLLOW``: a symlink at the path is ``ELOOP``, never read."""
+    target = _text_png(tmp_path / "real.png")
+    link = tmp_path / "link.png"
+    link.symlink_to(target)
+    engine = _Engine()
+
+    with pytest.raises(OSError) as err:
+        extract_image(link, ocr=_setup(engine))
+
+    assert err.value.errno == errno.ELOOP
+    assert engine.calls == []
+
+
+def test_a_fifo_is_refused_without_blocking(tmp_path: Path) -> None:
+    fifo = tmp_path / "pipe.png"
+    os.mkfifo(fifo)
+
+    with pytest.raises(UnreadableImageError, match="^not a regular file$"):
+        extract_image(fifo, ocr=_setup(_Engine()))
+
+
+def test_pillow_reads_the_open_file_not_the_path(tmp_path: Path) -> None:
+    path = _text_png(tmp_path / "shot.png")
+    seen: list[object] = []
+
+    def opener(fp: Any) -> Image.Image:
+        seen.append(fp)
+        return Image.open(fp, formats=("PNG",))
+
+    extract_image(path, ocr=_setup(_Engine()), open_image=opener)
+
+    assert not isinstance(seen[0], (str, Path))
+    assert hasattr(seen[0], "read")

@@ -155,3 +155,36 @@ and retried every run inside `--since`.
 - **Hostile image files.** (7); a process-level memory guard is BL-32's, shared with PDFs.
 - **The policy bump re-reconciles every `calendar_event`** once with an empty extraction (cheap:
   no model call).
+
+## Review round 1 (#105, sec-105 at `f51488d`), rulings applied
+
+- **M1, terminal-safe names.** Every file name and folder path the CLI prints (the
+  report, `--dry-run`, the skip lines) goes through `brain.ingest.text_safety.one_line`,
+  and so does the stored title: the original stem on one line, capped at 300 characters
+  (`drop_folder.MAX_TITLE_CHARS`), falling back to the `imported/` stem when nothing is
+  left. Tested with an ESC/OSC/newline name and a hostile folder path.
+- **M2, screenshots confidential on every path (supersedes ruling 14).** Spec point 6
+  wins: `ExtractorSpec.default_sensitivity` (the image spec: `confidential`) and
+  `dispatch.default_sensitivity(path)`. `brain ingest` and `brain ingest-dir` take
+  `--sensitivity` as optional and fall back to it, so `brain ingest x.png` is
+  confidential and an explicit `--sensitivity normal` is honoured. `cli_ingest.py` is
+  in the ceiling table: the change is net-zero (858 → 858) and its row gains a hop.
+- **L1, identity, not names.** The folder and `imported/` are held open as
+  `O_DIRECTORY | O_NOFOLLOW` fds and every step names files relative to them. A file is
+  hashed from one fd opened `O_NOFOLLOW | O_NONBLOCK` and checked regular with `fstat`.
+  After the link or copy, the new name must be a regular file with that fd's
+  `(st_dev, st_ino)` (the copy's own after a copy, whose bytes must hash to the digest),
+  else it is removed. The old name is unlinked only while it is still that file, and
+  before the ingest the path it reads must still resolve to the moved file.
+  `extract_image` opens the file `O_NOFOLLOW | O_NONBLOCK` and hands Pillow the open
+  file. Tested through the injected `link` and `lstat` seams: a symlink swap, a FIFO
+  swap, a source replaced before its unlink, `imported/` swapped for a symlink, and
+  bytes changed before the copy fallback.
+- **L2, deterministic failures stay in `imported/`, not in a `failed/` sibling.** The
+  ingest step raises `drop_folder.RejectedFile` for a failure every run would repeat:
+  an `ImageError` other than `OcrUnavailableError` (unreadable, too large, an OCR
+  timeout or error), another extractor's `ValueError`, or the secret guard. The file
+  stays in `imported/`, reported `rejected` with its cause's class, and the run exits 1.
+  It is never retried; `brain ingest <imported path>` (with `--allow-secrets` for the
+  guard) recovers it. Any other failure (the database, the embedder) and
+  `OcrUnavailableError` still move the file back.

@@ -25,6 +25,8 @@ brain ingest-folder --configured --since 2d
 
 Per-file verbs: `ingested`, `updated`, `unchanged`, `empty` (no text was read: the file stays
 in `imported/`), `duplicate` (the same file was imported before: the drop copy is deleted),
-`vanished`, `failed` (the file is moved back; the reason is a class name). Exit 1 means a
+`vanished`, `rejected` (a failure every run would repeat, such as an unreadable image, an
+OCR timeout or the secret guard: the file stays in `imported/` and is not retried), `failed`
+(a transient failure: the file is moved back; the reason is a class name). Exit 1 means a
 file failed or a folder was skipped. The usual cause is that OCR is off or `tesseract` is
 missing, and the command prints the fix.

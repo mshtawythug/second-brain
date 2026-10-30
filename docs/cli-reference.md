@@ -776,9 +776,12 @@ brain ingest-folder --configured --since 2d          # what the LaunchAgent runs
   no-op: the drop copy is deleted (only after its full SHA-256 matches the
   earlier import) and nothing is ingested.
 - **Your files are safe.** A move never overwrites (a hard link, or an exclusive
-  copy on a volume without hard links). A failed ingest moves the file back,
-  unless a new file took its name meanwhile; then it stays in `imported/` and
-  the failure says so. A file that already sat in `imported/` before the run is
+  copy on a volume without hard links), and files are moved by identity: the
+  folders are held open, and a file swapped for a symlink or a pipe mid-run is
+  refused. A transient failure (the database) moves the file back, unless a new
+  file took its name meanwhile; then it stays in `imported/` and the failure says
+  so. A failure every run would repeat (an unreadable or oversized image, an OCR
+  timeout, the secret guard) leaves it in `imported/` as `rejected`, never retried. A file that already sat in `imported/` before the run is
   never moved or deleted. `imported/` must be a real directory: a symlink there
   refuses the folder.
 - **What is skipped:** sub-folders (`imported/` among them), symlinks, hidden
@@ -801,8 +804,9 @@ brain ingest-folder --configured --since 2d          # what the LaunchAgent runs
 - Exit 0 when nothing failed; 1 when a file failed or a folder could not be
   used. Failures are printed by class only.
 
-`brain ingest <file>.png` works too (source `manual`, the CLI's sensitivity
-default). Images are not in `brain ingest-dir`'s default walk; `--ext png` adds
+`brain ingest <file>.png` works too (source `manual`, stored **confidential**
+unless `--sensitivity normal`; `brain ingest-dir --ext png` likewise). File names
+are printed, and titles stored, on one line with control characters removed. Images are not in `brain ingest-dir`'s default walk; `--ext png` adds
 them. The folder file and the `com.brain.dropfolders` LaunchAgent
 (`brain-install-launchd --with-dropfolders`) are in
 [guides/drop-folders.md](guides/drop-folders.md).

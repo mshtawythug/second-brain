@@ -421,7 +421,7 @@ def test_a_file_that_vanishes_before_the_move_is_reported_vanished(tmp_path: Pat
     _drop(tmp_path, "gone.png", b"g")
     ingest = _Ingest()
 
-    def link(src: Path, dst: Path) -> None:
+    def link(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
         raise FileNotFoundError(errno.ENOENT, "gone")
 
     report = _run(_folder(tmp_path), ingest, link=link)
@@ -472,7 +472,7 @@ def test_a_file_swapped_for_a_symlink_after_the_scan_is_not_read(tmp_path: Path)
 def test_any_other_move_error_is_a_failure_and_the_file_stays(tmp_path: Path) -> None:
     _drop(tmp_path, "shot.png", b"x")
 
-    def link(src: Path, dst: Path) -> None:
+    def link(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
         raise PermissionError(errno.EACCES, "denied")
 
     report = _run(_folder(tmp_path), _Ingest(), link=link)
@@ -487,8 +487,8 @@ def test_any_other_move_error_is_a_failure_and_the_file_stays(tmp_path: Path) ->
 # ---------------------------------------------------------------------------
 
 
-def _no_hard_links(code: int) -> Callable[[Path, Path], None]:
-    def link(src: Path, dst: Path) -> None:
+def _no_hard_links(code: int) -> Callable[[str, str, int, int], None]:
+    def link(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
         raise OSError(code, os.strerror(code))
 
     return link
@@ -700,7 +700,7 @@ def test_a_destination_that_vanishes_during_the_duplicate_check_is_vanished(
     """Another run moved its file back out of ``imported/`` between our link and check."""
     _drop(tmp_path, "shot.png", b"x")
 
-    def link(src: Path, dst: Path) -> None:
+    def link(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
         raise FileExistsError(errno.EEXIST, "taken")  # ... and gone again by the lstat
 
     report = _run(_folder(tmp_path), _Ingest(), link=link)
@@ -724,3 +724,251 @@ def test_an_unreadable_destination_is_a_failure_touching_neither(tmp_path: Path)
     assert report.outcomes[0].status == "failed"
     assert report.outcomes[0].detail == "PermissionError[EACCES]"
     assert _tree(tmp_path) == {"shot.png": body, f"{IMPORTED_DIR}/{final.name}": body}
+
+
+# ---------------------------------------------------------------------------
+# #105 review round: titles (M1), identity races (L1), rejected files (L2)
+# ---------------------------------------------------------------------------
+
+HOSTILE_STEM = "shot\x1b]0;forged title\x07\nFAKE LOG LINE\x1b[2J"
+
+
+def test_a_hostile_name_becomes_a_one_line_title(tmp_path: Path) -> None:
+    _drop(tmp_path, f"{HOSTILE_STEM}.png", b"h")
+    ingest = _Ingest()
+
+    _run(_folder(tmp_path), ingest)
+
+    title = ingest.calls[0][1]
+    assert "\x1b" not in title and "\x07" not in title and "\n" not in title
+    assert title == "shot]0;forged title FAKE LOG LINE[2J"
+
+
+def test_a_title_of_only_control_characters_falls_back_to_the_imported_stem(
+    tmp_path: Path,
+) -> None:
+    _drop(tmp_path, "\x1b\x07​.png", b"c")
+    ingest = _Ingest()
+
+    _run(_folder(tmp_path), ingest)
+
+    final, title, _ = ingest.calls[0]
+    assert title == final.stem
+    assert title.endswith(_sha8(b"c"))
+
+
+def test_a_long_title_is_capped(tmp_path: Path) -> None:
+    _drop(tmp_path, f"{'t' * 220}.png", b"l")
+    ingest = _Ingest()
+
+    _run(_folder(tmp_path), ingest)
+
+    assert len(ingest.calls[0][1]) == 220
+    assert drop_folder.MAX_TITLE_CHARS == 300
+    assert drop_folder._title("x" * 400 + ".png", "x-1.png") == "x" * 300
+
+
+def _real_link(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
+    os.link(src, dst, src_dir_fd=src_dir, dst_dir_fd=dst_dir, follow_symlinks=False)
+
+
+def test_a_symlink_swapped_in_before_the_link_is_never_moved_or_read(tmp_path: Path) -> None:
+    """sec-105's case: the name is swapped for a symlink between the hash and the link."""
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"secret")
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    _drop(drop, "shot.png", b"real")
+    ingest = _Ingest()
+
+    def swapping_link(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
+        (drop / src).unlink()
+        (drop / src).symlink_to(outside)
+        _real_link(src, dst, src_dir, dst_dir)
+
+    report = _run(_folder(drop), ingest, link=swapping_link)
+
+    assert report.outcomes[0].status == "failed"
+    assert report.outcomes[0].detail == "MoveRaceError"
+    assert ingest.calls == []
+    assert list((drop / IMPORTED_DIR).iterdir()) == []
+    assert (drop / "shot.png").is_symlink()
+    assert outside.read_bytes() == b"secret"
+
+
+def test_a_fifo_swapped_in_after_the_scan_is_refused_without_blocking(tmp_path: Path) -> None:
+    path = _drop(tmp_path, "shot.png", b"real")
+    ingest = _Ingest()
+
+    def lstat(p: Any) -> Any:
+        st = os.lstat(p)
+        if Path(p) == path:
+            path.unlink()
+            os.mkfifo(path)  # an open() that blocked here would hang the run
+        return st
+
+    report = _run(_folder(tmp_path), ingest, lstat=lstat)
+
+    assert report.outcomes[0].status == "failed"
+    assert report.outcomes[0].detail == "MoveRaceError"
+    assert ingest.calls == []
+    assert stat.S_ISFIFO(os.lstat(path).st_mode)
+
+
+def test_a_source_replaced_after_the_link_is_not_deleted(tmp_path: Path) -> None:
+    body = b"the hashed file"
+    _drop(tmp_path, "shot.png", body)
+    ingest = _Ingest()
+
+    def link_then_replace(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
+        _real_link(src, dst, src_dir, dst_dir)
+        (tmp_path / src).unlink()
+        (tmp_path / src).write_bytes(b"a new file under the same name")
+
+    report = _run(_folder(tmp_path), ingest, link=link_then_replace)
+
+    assert report.outcomes[0].status == "ingested"
+    assert ingest.seen_bytes == [body]
+    assert (tmp_path / "shot.png").read_bytes() == b"a new file under the same name"
+
+
+def test_a_source_replaced_before_a_duplicate_is_deleted_is_kept(tmp_path: Path) -> None:
+    body = b"same"
+    (tmp_path / IMPORTED_DIR).mkdir()
+    (tmp_path / IMPORTED_DIR / f"shot-{_sha8(body)}.png").write_bytes(body)
+    _drop(tmp_path, "shot.png", body)
+
+    def taken_then_replace(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
+        (tmp_path / src).unlink()
+        (tmp_path / src).write_bytes(b"a newer drop")
+        raise FileExistsError(errno.EEXIST, "taken")
+
+    report = _run(_folder(tmp_path), _Ingest(), link=taken_then_replace)
+
+    assert report.outcomes[0].status == "vanished"
+    assert (tmp_path / "shot.png").read_bytes() == b"a newer drop"
+
+
+def test_imported_swapped_for_a_symlink_mid_run_receives_nothing(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    body = b"stays inside"
+    _drop(drop, "shot.png", body)
+    ingest = _Ingest()
+
+    def swapping_imported(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
+        if not (drop / IMPORTED_DIR).is_symlink():  # the forward move only, not the move back
+            (drop / IMPORTED_DIR).rename(drop / "imported.real")
+            (drop / IMPORTED_DIR).symlink_to(elsewhere)
+            (elsewhere / dst).write_bytes(b"planted")  # what a path-based ingest would read
+        _real_link(src, dst, src_dir, dst_dir)
+
+    report = _run(_folder(drop), ingest, link=swapping_imported)
+
+    assert ingest.calls == []
+    assert report.outcomes[0].status == "failed"
+    assert report.outcomes[0].detail == "MoveRaceError"
+    assert (elsewhere / f"shot-{_sha8(body)}.png").read_bytes() == b"planted"
+    assert sorted(p.name for p in elsewhere.iterdir()) == [f"shot-{_sha8(body)}.png"]
+    assert (drop / "shot.png").read_bytes() == body  # moved back by fd
+
+
+def test_the_copy_fallback_refuses_bytes_that_changed_since_the_hash(tmp_path: Path) -> None:
+    src = _drop(tmp_path, "shot.png", b"hashed")
+    calls: list[int] = []
+
+    def rewrite_then_no_links(s: str, d: str, sd: int, dd: int) -> None:
+        if not calls:
+            src.write_bytes(b"changed in place")  # same inode, new bytes
+        calls.append(1)
+        raise OSError(errno.EXDEV, "cross-device")
+
+    report = _run(_folder(tmp_path), _Ingest(), link=rewrite_then_no_links)
+
+    assert report.outcomes[0].status == "failed"
+    assert report.outcomes[0].detail == "MoveRaceError"
+    assert list((tmp_path / IMPORTED_DIR).iterdir()) == []
+    assert src.read_bytes() == b"changed in place"
+
+
+def test_a_rejected_file_stays_in_imported_and_is_not_retried(tmp_path: Path) -> None:
+    body = b"unreadable"
+    _drop(tmp_path, "shot.png", body)
+    cause = ValueError("decoder said no")
+    rejected = drop_folder.RejectedFile("the file cannot be read")
+    rejected.__cause__ = cause
+    ingest = _Ingest(answers=[rejected])
+
+    report = _run(_folder(tmp_path), ingest)
+
+    assert [(o.status, o.detail) for o in report.outcomes] == [("rejected", "ValueError")]
+    assert report.failed is True
+    assert _tree(tmp_path) == {f"{IMPORTED_DIR}/shot-{_sha8(body)}.png": body}
+    assert _run(_folder(tmp_path), ingest).outcomes == ()
+
+
+def test_a_rejection_without_a_cause_reports_its_own_class(tmp_path: Path) -> None:
+    _drop(tmp_path, "shot.png", b"r")
+
+    report = _run(_folder(tmp_path), _Ingest(answers=[drop_folder.RejectedFile("no")]))
+
+    assert report.outcomes[0].detail == "RejectedFile"
+
+
+def test_an_unopenable_imported_raises_its_os_error(tmp_path: Path) -> None:
+    (tmp_path / IMPORTED_DIR).mkdir()
+    (tmp_path / IMPORTED_DIR).chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            _run(_folder(tmp_path), _Ingest())
+    finally:
+        (tmp_path / IMPORTED_DIR).chmod(0o755)
+
+
+def test_imported_swapped_for_an_empty_symlink_is_refused_before_ingest(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    _drop(drop, "shot.png", b"x")
+    ingest = _Ingest()
+
+    def swapping_imported(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
+        if not (drop / IMPORTED_DIR).is_symlink():
+            (drop / IMPORTED_DIR).rename(drop / "imported.real")
+            (drop / IMPORTED_DIR).symlink_to(elsewhere)
+        _real_link(src, dst, src_dir, dst_dir)
+
+    report = _run(_folder(drop), ingest, link=swapping_imported)
+
+    assert ingest.calls == []
+    assert report.outcomes[0].detail == "MoveRaceError"
+    assert list(elsewhere.iterdir()) == []
+    assert (drop / "shot.png").read_bytes() == b"x"
+
+
+def test_a_source_deleted_by_another_run_after_the_link_is_still_ingested(tmp_path: Path) -> None:
+    _drop(tmp_path, "shot.png", b"x")
+    ingest = _Ingest()
+
+    def link_then_gone(src: str, dst: str, src_dir: int, dst_dir: int) -> None:
+        _real_link(src, dst, src_dir, dst_dir)
+        (tmp_path / src).unlink()  # a concurrent run deleted it as its duplicate
+
+    report = _run(_folder(tmp_path), ingest, link=link_then_gone)
+
+    assert report.outcomes[0].status == "ingested"
+    assert ingest.seen_bytes == [b"x"]
+
+
+def test_a_directory_at_the_imported_name_is_a_different_file(tmp_path: Path) -> None:
+    body = b"x"
+    (tmp_path / IMPORTED_DIR / f"shot-{_sha8(body)}.png").mkdir(parents=True)
+    _drop(tmp_path, "shot.png", body)
+
+    report = _run(_folder(tmp_path), _Ingest())
+
+    assert report.outcomes[0].detail == f"a different file holds shot-{_sha8(body)}.png"
+    assert (tmp_path / "shot.png").read_bytes() == body

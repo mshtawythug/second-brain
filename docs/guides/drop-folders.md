@@ -63,10 +63,13 @@ This installs the `com.brain.dropfolders` LaunchAgent, which runs
 - The same file saved twice: the second copy is deleted, only after its full SHA-256 matches
   the first, and nothing new is ingested. Two different files with one name become two
   documents.
-- A failed ingest moves the file back, to be tried again next run. An image whose OCR reads no
-  text stays in `imported/` and adds no document.
+- A failure that may pass next time (the database was down) moves the file back, to be tried
+  again next run. A failure that would repeat (an unreadable or oversized image, an OCR
+  timeout, the secret guard) leaves it in `imported/`, reported `rejected`, and it is not
+  retried. An image whose OCR reads no text also stays in `imported/` and adds no document.
 - A move never overwrites a file. Symlinks, sub-folders, hidden files, iCloud files that are not
   downloaded, and files modified in the last 5 seconds are left alone.
 
-To read a file again, delete its document (`brain rm`), then
-`brain ingest <folder>/imported/<file>`.
+To read a file again (a `rejected` one included), delete its document if it has one
+(`brain rm`), then `brain ingest <folder>/imported/<file>`; an image is stored
+confidential unless you pass `--sensitivity normal`.

@@ -49,7 +49,7 @@ from .embeddings import is_hosted_embedder
 from .errors import SecretGuardError, SensitivityError
 from .ingest import Embedder, IngestResult, ingest_document
 from .ingest import gmail as gmail_ingest
-from .ingest.dispatch import extract_path, supported_extensions
+from .ingest.dispatch import default_sensitivity, extract_path, supported_extensions
 from .ingest.gmail import GmailError
 from .ingest.gmail_brief_skip import read_thread_messages
 from .ingest.outcome import IngestOutcome, classify
@@ -128,7 +128,7 @@ _ALLOW_SECRETS_HELP = (
 
 
 _SENSITIVITY_HELP = (
-    "Sensitivity tier for the ingested document(s): normal|confidential. "
+    "Sensitivity tier: normal|confidential (default normal; images, confidential). "
     "'confidential' keeps the body off a hosted embedder (NULL embeddings, so "
     "full-text search only), out of MCP brain_show by default, out of brain ui's "
     "unprompted listings, and out of generated vault pages (People Hub, review, brief)."
@@ -240,8 +240,8 @@ def ingest(
     allow_secrets: bool = typer.Option(
         False, "--allow-secrets", help=_ALLOW_SECRETS_HELP
     ),
-    sensitivity: str = typer.Option(
-        DEFAULT_SENSITIVITY, "--sensitivity", help=_SENSITIVITY_HELP
+    sensitivity: str | None = typer.Option(
+        None, "--sensitivity", help=_SENSITIVITY_HELP
     ),
 ) -> None:
     """Ingest a single file (TXT/MD/PDF/DOCX)."""
@@ -267,7 +267,7 @@ def ingest(
                 graph_syncer=graph_syncer,
                 secret_guard=cfg.secret_guard,
                 allow_secrets=allow_secrets,
-                sensitivity=sensitivity,
+                sensitivity=sensitivity or default_sensitivity(path),
             )
         except SecretGuardError as e:
             # Single-file ingest: a refusal is the whole command's outcome, so
@@ -305,8 +305,8 @@ def ingest_dir(
     allow_secrets: bool = typer.Option(
         False, "--allow-secrets", help=_ALLOW_SECRETS_HELP + " Applies to EVERY file in the walk."
     ),
-    sensitivity: str = typer.Option(
-        DEFAULT_SENSITIVITY,
+    sensitivity: str | None = typer.Option(
+        None,
         "--sensitivity",
         help=_SENSITIVITY_HELP + " Applies to EVERY file in the walk.",
     ),
@@ -316,7 +316,7 @@ def ingest_dir(
     # Validate ONCE, before the walk — not per file. A typo'd level must fail
     # before the first write, not on file 400 of 900 with 399 documents already
     # stored at the wrong tier.
-    sensitivity = _validate_sensitivity_or_exit(sensitivity)
+    level = _validate_sensitivity_or_exit(sensitivity) if sensitivity is not None else None
     extensions = (
         [f".{e.strip().lstrip('.').lower()}" for e in ext.split(",")]
         if ext
@@ -355,7 +355,7 @@ def ingest_dir(
                     graph_syncer=graph_syncer,
                     secret_guard=cfg.secret_guard,
                     allow_secrets=allow_secrets,
-                    sensitivity=sensitivity,
+                    sensitivity=level or default_sensitivity(f),
                 )
                 _emit_secret_notice(result.secret_notice)
                 _emit_egress_notice(result.egress_notice)
