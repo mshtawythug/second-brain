@@ -29,11 +29,15 @@ blank variable as its default, and refuses a bad value with a
 dotenv chain into the process environment (``Config._load_field_dict``, the
 ``os.environ.setdefault`` loop), so a leaf knob is read from the same ``.env``
 files as every other knob, with the process environment still winning. Tests
-pass a plain ``dict``. There is one fallback to ``os.environ``:
-``eval.runner.run_eval(stages=None, env=None)`` reads it when neither argument
-is given (§2.3's carve-out, RM-14a), and every test of ``run_eval`` passes
-``stages`` or ``env`` explicitly (``tests/test_eval_runner_stages.py`` guards
-that).
+pass a plain ``dict``. There are two fallbacks to ``os.environ``:
+
+- ``eval.runner.run_eval(stages=None, env=None)`` reads it when neither argument
+  is given (§2.3's carve-out, RM-14a), and every test of ``run_eval`` passes
+  ``stages`` or ``env`` explicitly (``tests/test_eval_runner_stages.py`` guards
+  that).
+- ``ingest.pdf.extract_pdf(ocr=None)`` calls ``resolve_ocr(os.environ)`` for a
+  PDF the OCR fallback might read (RM-32); ``tests/ocr_isolation_plugin.py``
+  sets ``BRAIN_OCR=off`` for every test, so a shell's knobs cannot reach one.
 
 **Rules a leaf keeps**, each enforced by ``tests/test_settings_leaf_guards.py``
 for every module in this package:

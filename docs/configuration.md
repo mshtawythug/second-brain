@@ -444,6 +444,64 @@ It lives in the feature settings leaf `brain/settings/watch.py`. A value outside
 0 to 1 is a `ConfigError` naming the variable, raised only when a semantic watch is
 checked: it skips those watches and never stops `brain brief`.
 
+### `BRAIN_OCR` — OCR for image-only PDFs
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BRAIN_OCR` | `auto` | `auto` OCRs an image-only PDF when the `tesseract` binary is on `PATH`; `off` never does. Roadmap ticket RM-32. |
+| `BRAIN_OCR_LANG` | `eng` | tesseract's `-l` argument: one or more language codes joined by `+` (`eng+deu`). Each code is letters, digits and underscores, so the value can never be read as an option. Codes other than `eng` and `osd` need `brew install tesseract-lang`. |
+| `BRAIN_OCR_MAX_PAGES` | `50` | How many pages of one PDF are rendered and recognised, 1 to 1,000. Later pages are not read. |
+
+They live in the feature settings leaf `brain/settings/ocr.py`. A PDF is OCR'd
+only when its text layer averages under 25 characters a page **and** a page
+within the cap (the first `BRAIN_OCR_MAX_PAGES`) carries an image object. So a
+PDF with a real text layer (25 or more characters a page on average), or with no
+image within the cap, is never OCR'd; a sparse one that carries an image is, and
+the OCR text replaces its text layer. One with a full text layer never reads
+these knobs, and with
+`BRAIN_OCR=off` the file is never opened by the second PDF parser. Each page is
+rendered at 200 dpi in grayscale (`pypdfium2`, PNG via Pillow) and passed to `tesseract stdin
+stdout -l <lang>`, with a 60-second limit per page; a page that times out or
+fails is skipped with a class-only warning.
+
+A PDF is untrusted input, so two more bounds are fixed in code. A page renders to
+at most 70 million pixels, counted as pdfium allocates them (each side rounded
+up), with no side longer than 32,767 pixels (tesseract's limit); A0 at 200 dpi is
+about 62 million. A larger page is rendered at a lower resolution, and one that
+would fit only below 50 dpi, whose long side would not fit, or whose short side
+would be under one pixel, is skipped, so a forged page size (a huge or a very thin
+MediaBox) cannot exhaust memory. Embedded images are bounded too, because pdfium
+decodes each at its own size. Before the file reaches pdfium, every image stream in
+the document is sized from its header, without decoding: masks (with or without
+`/Subtype /Image`), annotation appearances, patterns and Type3 glyphs included.
+If any one image declares more than 280 million pixels, or one cannot be sized,
+the document is not OCR'd, with one warning. The scan itself is bounded: a
+cross-reference whose entries alias one file offset is refused, and so is a walk
+past 100,000 objects, 512 MiB of objects or 10 seconds. The bound is per image, so a long scan with one page-sized image a
+page is unaffected. Each page's drawn images are also summed against the same
+bound, and annotations and form fields are not drawn.
+
+**Known residuals.** An inline image (`BI ... EI`) is not a stream object, so the
+document scan does not see it. On a page, pdfium counts it; inside a Type3 glyph or
+a tiling pattern it is in neither count. A `/JPXDecode` codestream carries its own
+size, which pdfium may decode instead of the declared one; that was not measured.
+And pypdf's own parse of a hostile file (deep arrays, for one) is not bounded by
+any of this; it predates OCR. The systemic fix is a process-level memory and time
+guard (backlog BL-32). One document gets at most
+10 minutes of OCR in total; at the deadline OCR stops, keeps the pages read so
+far, and logs a count. This matters because `brain ui` ingests on one job worker
+that cannot be cancelled. The text is stored
+as `[page N]` blocks, and the document's `metadata.ocr` records
+`{"pages": n, "engine": "tesseract"}`. OCR runs locally, and the secret guard
+scans the recognised text like any other body.
+
+Without `tesseract`, an image-only PDF still ingests as an empty document
+(`skipped (empty document)`) and one warning says how to install it. `brain
+doctor`'s `ocr` line reports the tesseract version and checks that every
+`BRAIN_OCR_LANG` language is installed; a missing binary is OK, not a warning,
+because OCR is optional. Measured with tesseract 5.5.3 (leptonica 1.87.0) from
+Homebrew on 2026-10-30.
+
 ### `BRAIN_BRIEF_DELIVERY` — send the daily brief to yourself
 
 | Env var | Default | Purpose |

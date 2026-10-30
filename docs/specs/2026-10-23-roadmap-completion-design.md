@@ -280,10 +280,12 @@ Each feature has a frozen dataclass and a loader, `load_<feature>_settings(env: 
 -> <Feature>Settings`. Callers pass `os.environ` **after** `Config.load()`, which has already
 published the dotenv chain into the process environment (`Config._load_field_dict`, the
 `os.environ.setdefault` loop). Tests pass a plain dict, so no test touches the real environment.
-**One carve-out:** `eval/runner.run_eval(stages=None, env=None)` falls back to `os.environ` when
+**Two carve-outs:** `eval/runner.run_eval(stages=None, env=None)` falls back to `os.environ` when
 neither is given (RM-14a), so `eval_cmd` needs no change. Every test of `run_eval`, existing and
 new, passes `stages` or `env` explicitly, so a variable exported in the developer's shell cannot
-change a test's result.
+change a test's result. And `ingest/pdf.extract_pdf(ocr=None)` calls `resolve_ocr(os.environ)`
+for a PDF the OCR fallback might read (RM-32), because the extractor registry's signature takes
+only a path; `tests/ocr_isolation_plugin.py` sets `BRAIN_OCR=off` for every test.
 Secrets (webhook URLs, API tokens) are fields with `repr=False`, and `brain doctor` reports only
 whether they are set.
 
@@ -3649,7 +3651,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-29 | H-6 class-only error reports | XS | 6 | — | DONE (#92) |
 | RM-30 | Calendar events | M | 7 | RM-06, RM-07 | DONE (#96) |
 | RM-31 | Code-host activity | M | 7 | RM-06, RM-07 | DONE (#100) |
-| RM-32 | OCR and image-only PDFs | M | 7 | RM-07, RM-08 | TODO |
+| RM-32 | OCR and image-only PDFs | M | 7 | RM-07, RM-08 | DONE (#99) |
 | RM-33 | Images and the drop-folder runner | M | 7 | RM-06, RM-32 | TODO |
 | RM-34 | Jira issues | S | 7 | RM-07 | DONE (#97) |
 | RM-35 | Notion export | M | 7 | RM-06, RM-07 | DONE (#104) |
