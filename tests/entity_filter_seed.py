@@ -18,6 +18,25 @@ OTHER_TENANT = "tenant-b"
 #: One word every seeded body carries, so the FTS leg matches every document.
 SHARED_TERM = "lanternfish"
 
+#: A made-up name in every bad alias file below; no error message may quote it.
+BAD_ALIAS_SENTINEL = "zephyrquill"
+
+#: Alias files ``load_alias_rules`` refuses, one per failure class, keyed by test id.
+BAD_ALIAS_FILES = {
+    "self-merge": (
+        "rules:\n"
+        f"  - from: {{type: project, key: {BAD_ALIAS_SENTINEL}}}\n"
+        f"    to:   {{type: project, key: {BAD_ALIAS_SENTINEL}}}\n"
+    ),
+    "invalid-type": (
+        "rules:\n"
+        f"  - from: {{type: {BAD_ALIAS_SENTINEL}, key: harbor}}\n"
+        "    to:   {type: project, key: harborlight}\n"
+    ),
+    "malformed-yaml": f"rules:\n  - from: {{type: project, key: {BAD_ALIAS_SENTINEL}\n",
+    "missing-key": f"rules:\n  - from: {{type: project, key: {BAD_ALIAS_SENTINEL}}}\n",
+}
+
 
 def seed_document(
     conn: psycopg.Connection[Any], embedder: Embedder, title: str

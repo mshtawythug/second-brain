@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -14,10 +15,17 @@ from mcp.types import INVALID_PARAMS
 
 from brain import mcp_server
 from brain.config import Config
-from brain.entity_filter import GRAPH_REQUIRED_MESSAGE
+from brain.entity_filter import ALIAS_FILE_MESSAGE, GRAPH_REQUIRED_MESSAGE
 from brain.ingest import Embedder
 from brain.mcp_compat import MCPError
-from tests.entity_filter_seed import SHARED_TERM, seed_document, seed_entity, seed_mention
+from tests.entity_filter_seed import (
+    BAD_ALIAS_FILES,
+    BAD_ALIAS_SENTINEL,
+    SHARED_TERM,
+    seed_document,
+    seed_entity,
+    seed_mention,
+)
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -26,10 +34,18 @@ TEST_DATABASE_URL = os.environ.get(
 
 
 def _install_state(
-    monkeypatch: pytest.MonkeyPatch, embedder: Embedder, *, graph_enabled: bool
+    monkeypatch: pytest.MonkeyPatch,
+    embedder: Embedder,
+    *,
+    graph_enabled: bool,
+    graph_aliases_path: Path | None = None,
 ) -> None:
     state = mcp_server._State(
-        cfg=Config(database_url=TEST_DATABASE_URL, graph_enabled=graph_enabled),
+        cfg=Config(
+            database_url=TEST_DATABASE_URL,
+            graph_enabled=graph_enabled,
+            graph_aliases_path=graph_aliases_path,
+        ),
         embedder=embedder,
     )
     monkeypatch.setattr(mcp_server, "_state", state)
@@ -116,3 +132,22 @@ def test_no_entity_leaves_the_search_unfiltered(corpus: dict[str, Any]) -> None:
     got = _search()
 
     assert {row["id"] for row in got["results"]} == set(corpus["docs"])
+
+
+def test_a_malformed_alias_file_is_invalid_params_that_quotes_nothing(
+    corpus: dict[str, Any],  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+    fake_embedder: Embedder,
+    tmp_path: Path,
+) -> None:
+    # chk-91: the loader's YAMLError escaped as a generic error quoting the bad line.
+    aliases = tmp_path / "graph_aliases.yml"
+    aliases.write_text(BAD_ALIAS_FILES["malformed-yaml"], encoding="utf-8")
+    _install_state(monkeypatch, fake_embedder, graph_enabled=True, graph_aliases_path=aliases)
+
+    with pytest.raises(MCPError) as exc_info:
+        _search(entity="Quillmoor")
+
+    assert exc_info.value.error.code == INVALID_PARAMS
+    assert exc_info.value.error.message.startswith(ALIAS_FILE_MESSAGE)
+    assert BAD_ALIAS_SENTINEL not in exc_info.value.error.message

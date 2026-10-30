@@ -12,15 +12,19 @@ pulls in the whole graph layer, and a search without ``--entity`` never needs it
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import psycopg
+import yaml
 
 from .errors import (
     EntityAmbiguous,
     EntityFilterError,
     EntityGraphUnavailable,
     EntityNotFound,
+    GraphReconcileError,
+    describe_failure,
 )
 
 if TYPE_CHECKING:
@@ -30,6 +34,21 @@ if TYPE_CHECKING:
 #: The error for a graph that is off or has no tables (the RM-24 ticket's wording).
 GRAPH_REQUIRED_MESSAGE = (
     "`--entity` needs the graph: set BRAIN_GRAPH_ENABLED=true and run `brain graphrag build`"
+)
+
+#: The fixed half of the error for an alias file that cannot be loaded.
+ALIAS_FILE_MESSAGE = "`--entity` could not load the alias rules in BRAIN_GRAPH_ALIASES_PATH"
+
+#: What ``load_alias_rules`` raises on a bad file: a rule it refuses, malformed YAML,
+#: an unreadable or undecodable file, or an entry of the wrong shape.
+_ALIAS_LOAD_FAILURES = (
+    GraphReconcileError,
+    yaml.YAMLError,
+    OSError,
+    ValueError,
+    KeyError,
+    TypeError,
+    AttributeError,
 )
 
 #: The ``graph_entities.entity_type`` CHECK set (migration 012).
@@ -165,6 +184,23 @@ def resolve_entity_ids(
     return sorted({row[0] for row in rows})
 
 
+def _load_rules(path: Path | None) -> list[AliasRule]:
+    """The curated alias rules, or :class:`EntityFilterError` naming the failure's class only.
+
+    Search did not read this file before RM-24, so a bad file must not turn every
+    ``--entity`` search into a traceback (CLI) or a generic error (MCP). The message
+    is a fixed sentence plus :func:`describe_failure`, never ``str(exc)``: a YAML
+    error quotes the offending line, and ``GraphReconcileError``'s invalid-type
+    message prints the file's type field unredacted. Either can carry a real name.
+    """
+    from .graph_rag.aliases import load_alias_rules
+
+    try:
+        return load_alias_rules(path)
+    except _ALIAS_LOAD_FAILURES as exc:
+        raise EntityFilterError(f"{ALIAS_FILE_MESSAGE} ({describe_failure(exc)})") from exc
+
+
 def search_kwargs(
     conn: psycopg.Connection[Any],
     cfg: Config,
@@ -179,7 +215,8 @@ def search_kwargs(
 
     Raises:
         EntityGraphUnavailable: the graph is disabled or its tables are absent.
-        EntityFilterError: ``entity_type`` without ``name``, or an unknown type.
+        EntityFilterError: ``entity_type`` without ``name``, an unknown type, or an
+            alias file that cannot be loaded.
         EntityNotFound / EntityAmbiguous: from :func:`resolve_entity_ids`.
     """
     if name is None:
@@ -188,7 +225,6 @@ def search_kwargs(
         return {}
     if not cfg.graph_enabled or not graph_tables_present(conn):
         raise EntityGraphUnavailable(GRAPH_REQUIRED_MESSAGE)
-    from .graph_rag.aliases import load_alias_rules
     from .graph_rag.tenancy import resolve_tenant
 
     tenant_id = resolve_tenant(cfg)
@@ -197,6 +233,6 @@ def search_kwargs(
         tenant_id=tenant_id,
         name=name,
         entity_type=entity_type,
-        rules=load_alias_rules(cfg.graph_aliases_path),
+        rules=_load_rules(cfg.graph_aliases_path),
     )
     return {"entity_ids": entity_ids, "entity_tenant": tenant_id}

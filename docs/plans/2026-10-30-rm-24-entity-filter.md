@@ -129,6 +129,22 @@ check dropped; the graph-off check dropped; MCP mapping to `INTERNAL_ERROR`.
 - `second-brain/master` (#88, #90) was merged in as its own commit, with both sides kept in the
   CHANGELOG, the backlog and Appendix B.
 
+## Round 4 (chk-91)
+
+- `search_kwargs` loaded the alias file unguarded, so a bad `BRAIN_GRAPH_ALIASES_PATH`
+  (`GraphReconcileError`, `yaml.YAMLError`, `KeyError` / `TypeError`, and `OSError` /
+  `ValueError` / `AttributeError` for an unreadable, undecodable or wrongly shaped file) became
+  a CLI traceback or a generic MCP error. Search never read that file before RM-24.
+  `entity_filter._load_rules` maps each to `EntityFilterError`, so the existing CLI exit 2 and
+  MCP `INVALID_PARAMS` mappings apply.
+- The message is `ALIAS_FILE_MESSAGE` plus `describe_failure(exc)`, never `str(exc)`. A YAML error
+  quotes the bad line. `GraphReconcileError` redacts keys, but its invalid-type message prints the
+  file's `type` field unredacted (measured: `alias rule has invalid type: <sentinel>:ha…`).
+- Tests: `test_a_bad_alias_file_is_a_filter_error_that_quotes_nothing` (self-merge, invalid type,
+  malformed YAML, missing key) plus one CLI and one MCP test for the malformed file. Each carries
+  a sentinel name the message must not contain. RED on a `git archive` copy of `6e2c014`: 6 failed,
+  each with the escaped loader error. GREEN: the five RM-24 test files pass 55.
+
 ## Found, not fixed
 
 MCP `brain_search`'s facet predicate omits `updated_after` / `updated_before`, so with `facets=true`

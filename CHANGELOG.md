@@ -29,8 +29,10 @@ git tag scheme:
   resolves by canonical key (plus the target of any curated alias rule), then by
   display name. Every leg, the total and `--facets` see the filter.
 - **MCP `brain_search`** takes `entity` and `entity_type`.
-- Not found, ambiguous, or the graph off or absent: exit 2 / `INVALID_PARAMS`.
-  The not-found message points at `brain graphrag entities`.
+- Not found, ambiguous, the graph off or absent, or an alias file
+  (`BRAIN_GRAPH_ALIASES_PATH`) that cannot be loaded: exit 2 / `INVALID_PARAMS`.
+  The not-found message points at `brain graphrag entities`; the alias-file
+  message names the failure's class only, never the file's text.
 - Built on the coordinator's ruling adopting the roadmap spec's §5 U4
   recommendation; no user answer yet.
 

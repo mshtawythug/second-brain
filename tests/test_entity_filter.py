@@ -12,6 +12,7 @@ import pytest
 
 from brain.config import Config
 from brain.entity_filter import (
+    ALIAS_FILE_MESSAGE,
     GRAPH_REQUIRED_MESSAGE,
     graph_tables_present,
     resolve_entity_ids,
@@ -24,7 +25,13 @@ from brain.errors import (
     EntityNotFound,
 )
 from brain.graph_rag.aliases import AliasRule
-from tests.entity_filter_seed import OTHER_TENANT, TENANT, seed_entity
+from tests.entity_filter_seed import (
+    BAD_ALIAS_FILES,
+    BAD_ALIAS_SENTINEL,
+    OTHER_TENANT,
+    TENANT,
+    seed_entity,
+)
 
 _ALIASES_YAML = """\
 rules:
@@ -295,3 +302,22 @@ def test_the_alias_file_is_read(test_db: psycopg.Connection[Any], tmp_path: Path
     cfg = _cfg(graph_enabled=True, graph_aliases_path=aliases)
 
     assert search_kwargs(test_db, cfg, "Harbor", None)["entity_ids"] == [target]
+
+
+@pytest.mark.parametrize("body", BAD_ALIAS_FILES.values(), ids=BAD_ALIAS_FILES.keys())
+def test_a_bad_alias_file_is_a_filter_error_that_quotes_nothing(
+    test_db: psycopg.Connection[Any], tmp_path: Path, body: str
+) -> None:
+    # chk-91: search never read this file before RM-24, and the loader's errors
+    # escaped as a traceback. A YAML error quotes the bad line, and an invalid
+    # type is printed unredacted, so the message names the failure's class only.
+    seed_entity(test_db, name="Quillmoor", canonical_key="quillmoor")
+    aliases = tmp_path / "graph_aliases.yml"
+    aliases.write_text(body, encoding="utf-8")
+    cfg = _cfg(graph_enabled=True, graph_aliases_path=aliases)
+
+    with pytest.raises(EntityFilterError) as exc_info:
+        search_kwargs(test_db, cfg, "Quillmoor", None)
+
+    assert str(exc_info.value).startswith(ALIAS_FILE_MESSAGE)
+    assert BAD_ALIAS_SENTINEL not in str(exc_info.value)

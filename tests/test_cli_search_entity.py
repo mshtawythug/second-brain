@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -14,9 +15,16 @@ import pytest
 from typer.testing import CliRunner
 
 from brain.cli import app
-from brain.entity_filter import GRAPH_REQUIRED_MESSAGE
+from brain.entity_filter import ALIAS_FILE_MESSAGE, GRAPH_REQUIRED_MESSAGE
 from brain.ingest import Embedder
-from tests.entity_filter_seed import SHARED_TERM, seed_document, seed_entity, seed_mention
+from tests.entity_filter_seed import (
+    BAD_ALIAS_FILES,
+    BAD_ALIAS_SENTINEL,
+    SHARED_TERM,
+    seed_document,
+    seed_entity,
+    seed_mention,
+)
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -115,3 +123,22 @@ def test_no_entity_leaves_the_search_unfiltered(corpus: dict[str, Any]) -> None:
 
     assert result.exit_code == 0, result.output
     assert {row["id"] for row in json.loads(result.stdout)} == set(corpus["docs"])
+
+
+def test_a_malformed_alias_file_is_a_usage_error_that_quotes_nothing(
+    corpus: dict[str, Any],  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # chk-91: the loader's YAMLError escaped as a traceback quoting the bad line.
+    aliases = tmp_path / "graph_aliases.yml"
+    aliases.write_text(BAD_ALIAS_FILES["malformed-yaml"], encoding="utf-8")
+    monkeypatch.setenv("BRAIN_GRAPH_ALIASES_PATH", str(aliases))
+
+    result = _search("--entity", "Quillmoor")
+
+    assert result.exit_code == 2, result.output
+    # Rich wraps the usage panel, so drop its border and collapse the whitespace.
+    assert ALIAS_FILE_MESSAGE in " ".join(result.output.replace("│", " ").split())
+    assert "ParserError" in result.output
+    assert BAD_ALIAS_SENTINEL not in result.output
