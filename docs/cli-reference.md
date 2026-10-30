@@ -92,6 +92,12 @@ All ingest paths write rows + chunks to Postgres and, when `BRAIN_VAULT_PATH`
 exists, mirror ingested documents into `_ingested/<source>/` so the vault holds the
 whole corpus as Markdown. Re-running unchanged content is a no-op unless you pass `--force`.
 
+**Scanned PDFs.** A PDF with no real text layer (a scan, a photographed receipt)
+is read with the local `tesseract` binary when it is installed (`brew install
+tesseract`): up to 50 pages at 200 dpi, stored as `[page N]` blocks. Without
+`tesseract` it is reported as `skipped (empty document)` with a hint line. Knobs
+and limits: [configuration](configuration.md#brain_ocr--ocr-for-image-only-pdfs).
+
 ## Search diagnostics and filters
 
 ```bash
@@ -766,7 +772,7 @@ brain analyze --all   # ANALYZE every table in the database
 `brain doctor` exits non-zero only for required failures: config, database, or
 active embedder. Optional integrations (`gws`, the AGE extension, the
 concept-extractor model, community materialization staleness, the local
-reranker) are warnings.
+reranker, the `tesseract` OCR probe) are warnings; a missing `tesseract` is OK.
 `brain status --json` and `brain doctor --json` are the scripting-friendly
 paths; `doctor --json` preserves the same non-zero exit on any FAIL check.
 
