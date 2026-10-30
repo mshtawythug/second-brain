@@ -35,11 +35,12 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 import psycopg.errors
 
-from ..errors import BrainError, EmbedError, SecretGuardError
+from ..errors import BrainError, EmbedError, SecretGuardError, describe_failure
 from ..ingest import Embedder, ExtractedDoc, IngestResult, ingest_document
 from ..ingest.dispatch import extract_path
 from ..ingest.outcome import IngestOutcome, classify
 from ..ingest.stdin import make_doc
+from ..near_dup_store import check_document
 from ..sensitivity import SensitivityLevel
 from ..tags import normalize_tags
 from .errors import UiForbidden, UiUnavailable
@@ -388,9 +389,27 @@ def _result_payload(
         ],
         "egress_notice": result.egress_notice,
         "graph": _graph_state(ctx),
-        # Always present so the front end's shape is fixed now; RM-19 fills it.
-        "possible_duplicates": [],
+        # RM-19: the near-copies of this document (lensed per entry by the route).
+        "possible_duplicates": _possible_duplicates(conn, result.document_id),
     }
+
+
+def _possible_duplicates(
+    conn: psycopg.Connection[Any], document_id: str | None
+) -> list[dict[str, Any]]:
+    """The document's near-duplicates; a failed check is one class-only WARNING (RM-19 R7).
+
+    Runs after ``ingest_document`` has committed, so it can never refuse or undo an ingest.
+    """
+    if document_id is None:
+        return []
+    try:
+        return [ref.to_dict() for ref in check_document(conn, document_id)]
+    except psycopg.Error as exc:
+        logger.warning(
+            "ui ingest: near-duplicate check failed (%s); none listed", describe_failure(exc)
+        )
+        return []
 
 
 def _summary_status(

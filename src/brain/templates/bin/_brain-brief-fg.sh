@@ -2,8 +2,8 @@
 # One-shot wrapper for the daily brief, intended to run under launchd's
 # StartCalendarInterval (07:00 local). Unlike _brain-watcher-fg
 # this does NOT supervise a long-running daemon and writes no pid file — it runs
-# `brain brief --wiki` once and exits. launchd's StandardOut/ErrorPath capture
-# the digest + any warnings.
+# a capped `brain dedup scan`, then `brain brief --wiki` once, and exits.
+# launchd's StandardOut/ErrorPath capture the digest + any warnings.
 #
 # Env contract:
 #   BRAIN_VAULT_PATH  not read here: `brain brief` resolves the vault itself via
@@ -31,5 +31,11 @@ fi
 # job. --log-dir is omitted deliberately: the module resolves $BRAIN_HOME/logs
 # itself, and the plist now exports BRAIN_HOME explicitly.
 "$PY" -m brain.log_rotation 2>/dev/null || true
+
+# Sign new and edited documents and record near-duplicate pairs (RM-19) before
+# the brief counts them. Its own process, and `|| true` under `set -e`, so a
+# failed or killed scan can never stop the brief (RM-19.D3). Capped per run so
+# a large backlog drains over several mornings instead of delaying this one.
+"$PY" -m brain dedup scan --limit 500 || true
 
 exec "$PY" -m brain brief --wiki

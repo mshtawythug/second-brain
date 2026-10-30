@@ -41,6 +41,29 @@ git tag scheme:
 - `brain backfill normalize-tags` now runs on the same engine
   (`brain.tag_mapping`); its output is unchanged, byte for byte.
 
+### Added — near-duplicate detection: `brain dedup` (RM-19)
+
+- **`brain dedup scan` finds pairs of near-copies** (a forwarded email, a re-sent
+  draft, one file ingested twice by two paths): word 5-gram MinHash signatures,
+  verified at an estimated Jaccard similarity of at least 0.85. Documents under
+  50 words are skipped, and two documents of one Gmail thread are never paired.
+  A scan signs only new and edited documents (`--all` re-signs everything,
+  `--limit N` caps a run). No new dependency.
+- **It flags; it never refuses, merges or deletes.** `brain dedup list` shows the
+  pairs; `dismiss A B` and `confirm A B` label one. A dismissed pair is never
+  re-opened by a later scan, an edit that breaks an open pair drops it, and
+  deleting a document deletes its pairs.
+- The daily brief job runs `brain dedup scan --limit 500` on its own line before
+  the brief, so a failed scan never stops it, and the brief gains a read-only
+  **Possible duplicates (N)** count. The `--wiki` page and the delivered message
+  count only pairs whose two documents are neither confidential nor drafts.
+- MCP **`brain_dedup_list`** (read-only) lists a pair only when neither document
+  is confidential, unless `include_confidential=true`. The Ingest tab's job result
+  fills `possible_duplicates`, with a confidential near-copy's title, id and path
+  withheld unless `brain ui` serves confidential titles.
+- **Upgrade:** migration 030 (`brain init`), and reinstall the launchd daemons,
+  because the brief job's script changed.
+
 ### Added — follow-up questions in the Agent tab (RM-18c)
 
 - **Follow up** on an answer in `brain ui`'s Agent tab asks the next question
