@@ -30,7 +30,9 @@ git tag scheme:
   `BRAIN_OCR_MAX_PAGES` (default 50) pages at 200 dpi and reads them with the
   local `tesseract` binary, 60 seconds at most per page. The text is stored as
   `[page N]` blocks, and `metadata.ocr` records the page count and engine.
-  Born-digital PDFs are never OCR'd. A page renders to at most 70 million
+  A PDF with a real text layer (25 or more characters a page on average), or
+  with no image within the cap, is never OCR'd; a sparse one that carries an
+  image is, and the OCR text replaces its text layer. A page renders to at most 70 million
   pixels (one that fits only below 50 dpi is skipped), and one document gets at
   most 10 minutes of OCR, so a forged page size or a long scan cannot exhaust
   memory or hold the `brain ui` job worker.

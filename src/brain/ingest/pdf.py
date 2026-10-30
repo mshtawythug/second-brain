@@ -71,7 +71,9 @@ def render_scale(width_pt: float, height_pt: float, *, max_pixels: int = MAX_PIX
 def render_page_png(page: pypdfium2.PdfPage, *, max_pixels: int = MAX_PIXELS) -> bytes:
     """Render ``page`` at up to 200 dpi within ``max_pixels``, and encode it as PNG."""
     width, height = page.get_size()
-    image = page.render(scale=render_scale(width, height, max_pixels=max_pixels)).to_pil()
+    scale = render_scale(width, height, max_pixels=max_pixels)
+    # Grayscale: one byte a pixel instead of three, and tesseract binarises anyway.
+    image = page.render(scale=scale, grayscale=True).to_pil()
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()

@@ -280,10 +280,12 @@ Each feature has a frozen dataclass and a loader, `load_<feature>_settings(env: 
 -> <Feature>Settings`. Callers pass `os.environ` **after** `Config.load()`, which has already
 published the dotenv chain into the process environment (`Config._load_field_dict`, the
 `os.environ.setdefault` loop). Tests pass a plain dict, so no test touches the real environment.
-**One carve-out:** `eval/runner.run_eval(stages=None, env=None)` falls back to `os.environ` when
+**Two carve-outs:** `eval/runner.run_eval(stages=None, env=None)` falls back to `os.environ` when
 neither is given (RM-14a), so `eval_cmd` needs no change. Every test of `run_eval`, existing and
 new, passes `stages` or `env` explicitly, so a variable exported in the developer's shell cannot
-change a test's result.
+change a test's result. And `ingest/pdf.extract_pdf(ocr=None)` calls `resolve_ocr(os.environ)`
+for a PDF the OCR fallback might read (RM-32), because the extractor registry's signature takes
+only a path; `tests/ocr_isolation_plugin.py` sets `BRAIN_OCR=off` for every test.
 Secrets (webhook URLs, API tokens) are fields with `repr=False`, and `brain doctor` reports only
 whether they are set.
 

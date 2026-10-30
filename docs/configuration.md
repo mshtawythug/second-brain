@@ -454,10 +454,13 @@ checked: it skips those watches and never stops `brain brief`.
 
 They live in the feature settings leaf `brain/settings/ocr.py`. A PDF is OCR'd
 only when its text layer averages under 25 characters a page **and** a page
-within the cap (the first `BRAIN_OCR_MAX_PAGES`) carries an image object, so a born-digital PDF is
-never OCR'd; one with a full text layer never reads these knobs, and with
+within the cap (the first `BRAIN_OCR_MAX_PAGES`) carries an image object. So a
+PDF with a real text layer (25 or more characters a page on average), or with no
+image within the cap, is never OCR'd; a sparse one that carries an image is, and
+the OCR text replaces its text layer. One with a full text layer never reads
+these knobs, and with
 `BRAIN_OCR=off` the file is never opened by the second PDF parser. Each page is
-rendered at 200 dpi (`pypdfium2`, PNG via Pillow) and passed to `tesseract stdin
+rendered at 200 dpi in grayscale (`pypdfium2`, PNG via Pillow) and passed to `tesseract stdin
 stdout -l <lang>`, with a 60-second limit per page; a page that times out or
 fails is skipped with a class-only warning.
 
