@@ -10,6 +10,7 @@ Reference docs for [Second Brain](../README.md). The [top-level README](../READM
 | [configuration.md](configuration.md) | Tech stack, installing from source, running `brain` from any directory, feature tuning knobs, Claude Desktop + Claude Code integrations, choosing/switching embedder backends, data-hygiene backfills, and uninstall. |
 | [agent-skills.md](agent-skills.md) | The eight Claude Code skills bundled in `skills/`: which one covers which commands, installing them with `bin/brain-skills-sync`, how that differs from `brain claude install-skill`, and the contract for adding one. |
 | [guides/brain-ui-on-your-phone.md](guides/brain-ui-on-your-phone.md) | Reading from a phone or tablet: `brain ui --lan` or `--host <LAN address> --token`, how the token travels, and the security caveats. |
+| [guides/local-reranker.md](guides/local-reranker.md) | The local cross-encoder reranker: installing `llama-server` and the `bge-reranker-v2-m3` GGUF (tested version, size, measured memory), the opt-in `com.brain.reranker` launchd job, and `brain doctor`'s `reranker` line. |
 | [guides/claude-desktop-setup.md](guides/claude-desktop-setup.md) | Step-by-step walkthrough for wiring `brain-mcp` into Claude Desktop (symlink, boot smoke-test, config, troubleshooting). |
 
 ## Project docs

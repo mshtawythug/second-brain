@@ -31,6 +31,10 @@ LLAMACPP_RERANK_DEFAULT_MODEL = "bge-reranker-v2-m3"
 VOYAGE_RERANK_DEFAULT_MODEL = "rerank-3"
 #: Where RM-14b's launchd job binds ``llama-server``.
 DEFAULT_RERANK_URL = "http://127.0.0.1:8081"
+#: The GGUF the launchd job serves when ``BRAIN_RERANK_GGUF`` is unset, under
+#: ``$BRAIN_HOME/models/`` (RM-14b; ``brain.bin.launchd.resolve_rerank_model``).
+#: The file ``docs/guides/local-reranker.md`` downloads and measured.
+DEFAULT_RERANK_GGUF_NAME = "bge-reranker-v2-m3-Q8_0.gguf"
 
 BACKEND_NONE = "none"
 BACKEND_LLAMACPP = "llamacpp"
@@ -43,6 +47,13 @@ DEFAULT_DEPTH = 20
 MAX_DEPTH = 50
 DEFAULT_TIMEOUT_S = 5.0
 DEFAULT_MAX_CHARS = 1500
+
+#: The ports RM-14b's launchd job may bind: unprivileged, so never below 1024.
+MIN_LAUNCHD_PORT = 1024
+MAX_LAUNCHD_PORT = 65535
+#: The URL hosts that reach the job, which serves plain HTTP on a literal
+#: 127.0.0.1: not ``::1`` (an IPv6 socket it never opens), and no ``https``.
+_LAUNCHD_URL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _URL_SCHEMES = frozenset({"http", "https"})
@@ -89,6 +100,37 @@ def _loopback_url(env: Mapping[str, str]) -> str:
     ):
         raise ConfigError(message)
     return raw.rstrip("/")
+
+
+def launchd_rerank_port(env: Mapping[str, str]) -> int:
+    """The port ``com.brain.reranker`` binds, taken from ``BRAIN_RERANK_URL`` (RM-14b).
+
+    A deviation from the ticket, which fixed the job at 8081: on the owner's
+    machine 8081 was already LanguageTool's, so a fixed port made the job unable
+    to bind. Only the PORT follows the URL; the job's host stays a literal
+    ``127.0.0.1`` in the template. The URL must pass the same loopback check
+    searches apply, and name an explicit port in [1024, 65535]. Unset, it is
+    :data:`DEFAULT_RERANK_URL`'s 8081.
+
+    Stricter than searches on two points (rev-98): the scheme must be ``http``
+    and the host ``127.0.0.1`` or ``localhost``, because the job serves plain
+    HTTP on IPv4 loopback. ``https://`` or ``[::1]`` would pass the search-side
+    check and then never reach it, so every search would skip the reranker.
+    """
+    parts = urlsplit(_loopback_url(env))
+    port = parts.port
+    if (
+        parts.scheme != "http"
+        or parts.hostname not in _LAUNCHD_URL_HOSTS
+        or port is None
+        or not MIN_LAUNCHD_PORT <= port <= MAX_LAUNCHD_PORT
+    ):
+        raise ConfigError(
+            f"BRAIN_RERANK_URL must be http://127.0.0.1:PORT or http://localhost:PORT, "
+            f"PORT in [{MIN_LAUNCHD_PORT}, {MAX_LAUNCHD_PORT}], for the reranker's "
+            f"launchd job"
+        )
+    return port
 
 
 def load_rerank_settings(env: Mapping[str, str]) -> RerankSettings:
