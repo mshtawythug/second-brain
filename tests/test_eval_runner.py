@@ -123,7 +123,7 @@ def test_run_eval_returns_one_result_per_query(test_db, fake_embedder):
         _make_query("beta topic", id2),
         _make_query("gamma topic", id3),
     ]
-    report = run_eval(test_db, embedder=fake_embedder, queries=queries)
+    report = run_eval(test_db, embedder=fake_embedder, queries=queries, stages=())
 
     assert isinstance(report, EvalReport)
     assert len(report.results) == 3
@@ -145,7 +145,7 @@ def test_run_eval_threads_source_filter_through(test_db, fake_embedder):
             source_filter="krisp",
         )
     ]
-    report = run_eval(test_db, embedder=fake_embedder, queries=queries)
+    report = run_eval(test_db, embedder=fake_embedder, queries=queries, stages=())
     assert len(report.results) == 1
     # All returned docs must be krisp docs (the source filter was applied).
     for doc_id in report.results[0].actual_doc_ids:
@@ -165,7 +165,7 @@ def test_run_eval_resolves_8char_prefixes(test_db, fake_embedder):
     prefix = doc_id[:8]
 
     queries = [_make_query("prefix resolution data", prefix)]
-    report = run_eval(test_db, embedder=fake_embedder, queries=queries)
+    report = run_eval(test_db, embedder=fake_embedder, queries=queries, stages=())
 
     assert len(report.results) == 1
     # The stored expected_doc_ids should be the resolved full UUID, not the prefix.
@@ -181,7 +181,7 @@ def test_run_eval_handles_ollama_failure_gracefully(test_db, fake_embedder):
     # timeout) for this test; a permanent one aborts the run instead.
     timeout = OllamaEmbedError("test", transient=True)
     with unittest.mock.patch.object(fake_embedder, "embed", side_effect=timeout):
-        report = run_eval(test_db, embedder=fake_embedder, queries=queries)
+        report = run_eval(test_db, embedder=fake_embedder, queries=queries, stages=())
 
     assert len(report.results) == 1
     r = report.results[0]
@@ -208,7 +208,7 @@ def test_run_eval_flags_only_the_query_whose_embed_failed(
         _make_query(failing, healthy_id),
     ]
 
-    report = run_eval(test_db, embedder=make_flaky_embedder({failing}), queries=queries)
+    report = run_eval(test_db, embedder=make_flaky_embedder({failing}), queries=queries, stages=())
 
     healthy, broken = report.results
     assert healthy.degraded is False
@@ -234,7 +234,7 @@ def test_degraded_flag_does_not_stick_after_a_failed_query(
         _make_query("stickyflag content last", doc_id),
     ]
 
-    report = run_eval(test_db, embedder=make_flaky_embedder({failing}), queries=queries)
+    report = run_eval(test_db, embedder=make_flaky_embedder({failing}), queries=queries, stages=())
 
     assert [r.degraded for r in report.results] == [False, True, False]
 
@@ -261,7 +261,7 @@ def test_run_eval_degrades_a_voyage_rate_limited_query(test_db, fake_embedder, c
     queries = [_make_query("voyagedeg healthy content", doc_id), _make_query(failing, doc_id)]
 
     with caplog.at_level(logging.WARNING, logger="brain.eval.runner"):
-        report = run_eval(test_db, embedder=embedder, queries=queries)
+        report = run_eval(test_db, embedder=embedder, queries=queries, stages=())
 
     # The per-query WARNING names the backend's class, not a hard-coded one.
     [warning] = [r.getMessage() for r in caplog.records if r.name == "brain.eval.runner"]
@@ -283,7 +283,7 @@ def test_run_eval_aborts_on_a_permanent_voyage_failure(test_db, fake_embedder):
     )
 
     with pytest.raises(VoyageEmbedError) as caught:
-        run_eval(test_db, embedder=embedder, queries=[_make_query(failing, doc_id)])
+        run_eval(test_db, embedder=embedder, queries=[_make_query(failing, doc_id)], stages=())
     assert caught.value.transient is False
 
 
@@ -295,7 +295,7 @@ def test_run_eval_degrades_an_ollama_timeout(test_db, fake_embedder):
     embedder = arctic_failing_on(fake_embedder, {failing: httpx.ReadTimeout})
     queries = [_make_query("ollamatimeout content", doc_id), _make_query(failing, doc_id)]
 
-    report = run_eval(test_db, embedder=embedder, queries=queries)
+    report = run_eval(test_db, embedder=embedder, queries=queries, stages=())
 
     assert [r.degraded for r in report.results] == [False, True]
 
@@ -309,7 +309,7 @@ def test_run_eval_aborts_on_an_ollama_model_not_found(test_db, fake_embedder):
     embedder = arctic_failing_on(fake_embedder, {failing: 404})
 
     with pytest.raises(OllamaEmbedError) as caught:
-        run_eval(test_db, embedder=embedder, queries=[_make_query(failing, doc_id)])
+        run_eval(test_db, embedder=embedder, queries=[_make_query(failing, doc_id)], stages=())
     assert caught.value.transient is False
     assert "404" in str(caught.value)
 
@@ -324,7 +324,7 @@ def test_run_eval_aborts_on_an_embed_context_overflow(test_db, fake_embedder):
     queries = [_make_query("overflowabort content", doc_id), _make_query(failing, doc_id)]
 
     with pytest.raises(OllamaEmbedContextOverflow) as caught:
-        run_eval(test_db, embedder=embedder, queries=queries)
+        run_eval(test_db, embedder=embedder, queries=queries, stages=())
     assert caught.value.transient is False
 
 
@@ -356,7 +356,8 @@ def test_run_eval_aborts_on_an_unclassified_embed_error(test_db, fake_embedder):
 
     with pytest.raises(_UnclassifiedEmbedError):
         run_eval(
-            test_db, embedder=embedder, queries=[_make_query("unclassified query", doc_id)]
+            test_db, embedder=embedder, queries=[_make_query("unclassified query", doc_id)],
+            stages=(),
         )
 
 
@@ -379,7 +380,8 @@ def test_embed_failure_message_wording_by_kind():
 def test_degraded_results_empty_for_a_clean_run(test_db, fake_embedder):
     doc_id = _seed(test_db, fake_embedder, "Clean Run Doc", "cleanrun content")
     report = run_eval(
-        test_db, embedder=fake_embedder, queries=[_make_query("cleanrun content", doc_id)]
+        test_db, embedder=fake_embedder, queries=[_make_query("cleanrun content", doc_id)],
+        stages=(),
     )
     assert degraded_results(report) == []
 
@@ -395,7 +397,7 @@ def test_run_eval_aggregates_per_category(test_db, fake_embedder):
         EvalQuery(query="people content beta", expected_doc_ids=[id2], category="people"),
         EvalQuery(query="email content gamma", expected_doc_ids=[id3], category="email"),
     ]
-    report = run_eval(test_db, embedder=fake_embedder, queries=queries)
+    report = run_eval(test_db, embedder=fake_embedder, queries=queries, stages=())
 
     assert "people" in report.per_category
     assert "email" in report.per_category
@@ -416,6 +418,7 @@ def test_run_eval_config_signature_captures_kwargs(test_db, fake_embedder):
         snippet_context_tokens=100,
         vector_sim_floor=0.3,
         embedder_name="arctic",
+        stages=(),
     )
 
     sig = report.config_signature
@@ -435,7 +438,7 @@ def test_run_eval_mean_aggregates_match_per_query(test_db, fake_embedder):
         _make_query(f"mean aggregate test content {i}", ids[i])
         for i in range(3)
     ]
-    report = run_eval(test_db, embedder=fake_embedder, queries=queries)
+    report = run_eval(test_db, embedder=fake_embedder, queries=queries, stages=())
 
     n = len(report.results)
     assert report.mean_ndcg_at_5 == pytest.approx(
@@ -475,9 +478,9 @@ def test_run_eval_since_days_query_drifts_under_new_ingest(test_db, fake_embedde
         query="daily digest", expected_doc_ids=[judged], category="recency", since_days=40
     )
 
-    before_ingest = run_eval(test_db, embedder=fake_embedder, queries=[query])
+    before_ingest = run_eval(test_db, embedder=fake_embedder, queries=[query], stages=())
     newcomer = _seed(test_db, fake_embedder, "Digest Newcomer", "daily digest of captures too")
-    after_ingest = run_eval(test_db, embedder=fake_embedder, queries=[query])
+    after_ingest = run_eval(test_db, embedder=fake_embedder, queries=[query], stages=())
 
     assert newcomer not in before_ingest.results[0].actual_doc_ids
     assert newcomer in after_ingest.results[0].actual_doc_ids
@@ -496,9 +499,9 @@ def test_run_eval_pinned_window_is_stable_under_new_ingest(test_db, fake_embedde
         before=date(2026, 2, 1),
     )
 
-    before_ingest = run_eval(test_db, embedder=fake_embedder, queries=[query])
+    before_ingest = run_eval(test_db, embedder=fake_embedder, queries=[query], stages=())
     _seed(test_db, fake_embedder, "Digest Newcomer", "daily digest of captures too")
-    after_ingest = run_eval(test_db, embedder=fake_embedder, queries=[query])
+    after_ingest = run_eval(test_db, embedder=fake_embedder, queries=[query], stages=())
 
     assert before_ingest.results[0].actual_doc_ids == [judged]
     assert after_ingest.results[0].actual_doc_ids == [judged]
@@ -521,7 +524,7 @@ def test_run_eval_pinned_bounds_are_half_open(test_db, fake_embedder):
         before=date(2026, 2, 1),
     )
 
-    report = run_eval(test_db, embedder=fake_embedder, queries=[query])
+    report = run_eval(test_db, embedder=fake_embedder, queries=[query], stages=())
 
     assert set(report.results[0].actual_doc_ids) == {on_after, last_inside}
 

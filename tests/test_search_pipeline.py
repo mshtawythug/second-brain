@@ -295,9 +295,9 @@ def test_stages_none_means_the_configured_stages(
     assert _ids(out.results) == ["doc-1", "doc-0"]
 
 
-def test_build_stages_is_empty_until_a_stage_ships() -> None:
+def test_build_stages_is_empty_while_the_reranker_is_off() -> None:
     assert build_stages({}) == ()
-    assert build_stages({"BRAIN_RERANKER": "llamacpp"}) == ()
+    assert build_stages({"BRAIN_RERANKER": "none"}) == ()
 
 
 # --- apply_stages --------------------------------------------------------

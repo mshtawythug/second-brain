@@ -17,7 +17,9 @@ tests/test_launchctl_isolation.py. Its growth on test/dotenv-isolation-leak is a
 second ``pytest_plugins`` entry, tests/env_isolation.py (the session-wide
 ``os.environ`` restore), with the comment giving its reason, and the
 ``brain_home_root`` keyword on :func:`isolate_config_dotenv` that let the
-copy-pasted dotenv blocks migrate onto it. No line count is given here: it
+copy-pasted dotenv blocks migrate onto it. Its growth on feat/rm-14a-reranker-stage
+is a third ``pytest_plugins`` entry, tests/rerank_isolation_plugin.py (the reranker
+forced off for every test), with its one-line comment. No line count is given here: it
 would be stale as soon as written (``wc -l tests/conftest.py``).
 """
 
@@ -46,7 +48,8 @@ from tests.db_lock import concurrent_suite_message, try_acquire_suite_lock
 # tests.env_isolation restores os.environ after every test. Config.load publishes
 # a test's .env keys into the process env, and monkeypatch cannot undo names it
 # was never given. tests/test_env_isolation.py checks that it is registered here.
-pytest_plugins = ("tests.browser_timeout", "tests.env_isolation")
+# tests.rerank_isolation_plugin forces the reranker off per test (RM-14a, that module).
+pytest_plugins = ("tests.browser_timeout", "tests.env_isolation", "tests.rerank_isolation_plugin")
 
 load_dotenv()
 

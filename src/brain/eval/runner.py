@@ -3,11 +3,20 @@
 The dataclasses are defined here and re-exported from ``brain.eval``.
 ``run_eval()`` wraps ``hybrid_search`` once per query and scores three
 metrics (nDCG@5, MRR, recall@20) against the golden corpus.
+
+**Ranking stages** (RM-14a). ``run_eval`` applies the configured stages (the
+reranker, and the later ones RM-09 composes) itself, with
+:func:`brain.search_pipeline.apply_stages` after its own ``hybrid_search``.
+It never calls ``run_search``, so it never falls back to text-only matching:
+an embed failure stays a visible degraded row (spec §2.7). Each stage's
+``signature()`` joins ``config_signature``, so with every stage off the
+signature, and any baseline recorded under it, is exactly what it was.
 """
 
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass
+import os
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -16,6 +25,7 @@ import psycopg
 from ..errors import EmbedError, describe_failure
 from ..ingest import Embedder
 from ..search import hybrid_search
+from ..search_pipeline import SearchStage, apply_stages, build_stages, size_stages
 from .corpus import EvalQuery
 from .errors import EvalCorpusError
 from .metrics import (
@@ -49,6 +59,18 @@ class EvalResult:
     # excludes it (spec docs/specs/2026-10-15-eval-record-degraded-design.md).
     # Never serialized into a baseline file, which cannot contain a degraded row.
     degraded: bool = False
+    # Each applied-or-skipped stage's time for this query, by stage name
+    # (``{"rerank": 412.0}``); ``{}`` with no stage, or on a degraded row. RM-14c
+    # reads its latency from here. In ``brain eval --json``; never in a baseline
+    # file, because latency is a property of the machine, not of the corpus.
+    # Only APPLIED stages are timed here: a skipped one is in ``stages_skipped``.
+    stage_ms: dict[str, float] = field(default_factory=dict)
+    # Names of the stages that SKIPPED for this query (a reranker that timed
+    # out). The row was then scored in hybrid order while ``config_signature``
+    # names the stage, so, like a degraded row, it is refused by
+    # ``save_baseline`` and kept out of ``diff_reports``' deltas. In ``brain
+    # eval --json``; never in a baseline file, which cannot contain one.
+    stages_skipped: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -133,6 +155,8 @@ def run_eval(
     snippet_context_tokens: int = 0,
     vector_sim_floor: float = 0.0,
     embedder_name: str = "unknown",
+    stages: Sequence[SearchStage] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> EvalReport:
     """Run the eval harness over ``queries`` and return a scored :class:`EvalReport`.
 
@@ -159,20 +183,31 @@ def run_eval(
         snippet_context_tokens: Passed to ``hybrid_search`` unchanged.
         vector_sim_floor: Passed to ``hybrid_search`` unchanged.
         embedder_name: Logged in ``config_signature`` for baseline diffs.
+        stages: The ranking stages to apply after each search. ``None`` builds
+            them with :func:`~brain.search_pipeline.build_stages` from ``env``.
+        env: Read only when ``stages`` is ``None``; ``None`` means
+            ``os.environ``, which ``eval_cmd``'s ``Config.load()`` has already
+            populated (spec §2.3's carve-out, so ``cli.py`` is not edited).
+            Tests pass ``stages`` or ``env``, never neither.
 
     Returns:
         A frozen :class:`EvalReport` with per-query and aggregate scores.
     """
     results: list[EvalResult] = []
+    if stages is None:
+        stages = build_stages(os.environ if env is None else env)
+    stages, fetch = size_stages(stages, limit_per_query)
 
     for q in queries:
         degraded = False
+        stage_ms: dict[str, float] = {}
+        skipped: tuple[str, ...] = ()
         try:
             search_results = hybrid_search(
                 conn,
                 embedder=embedder,
                 query=q.query,
-                limit=limit_per_query,
+                limit=fetch,
                 source_kind=q.source_filter,
                 tag=q.tag_filter,
                 since_days=q.since_days,
@@ -182,7 +217,10 @@ def run_eval(
                 recency_halflife_days=recency_halflife_days,
                 snippet_context_tokens=snippet_context_tokens,
             )
-            actual_ids = [r.document_id for r in search_results]
+            search_results, stage_ms, skipped = _apply_stages(
+                conn, q.query, search_results, stages
+            )
+            actual_ids = [r.document_id for r in search_results[:limit_per_query]]
         except EmbedError as exc:
             if not exc.transient:
                 raise
@@ -215,6 +253,8 @@ def run_eval(
                 mrr=mrr_score,
                 recall_at_20=recall,
                 degraded=degraded,
+                stage_ms=stage_ms,
+                stages_skipped=skipped,
             )
         )
 
@@ -245,6 +285,9 @@ def run_eval(
         "vector_sim_floor": vector_sim_floor,
         "embedder": embedder_name,
     }
+    for stage in stages:
+        # After the base keys, so an all-off run's signature is byte-identical.
+        config_signature.update(stage.signature())
 
     return EvalReport(
         results=results,
@@ -255,6 +298,49 @@ def run_eval(
         config_signature=config_signature,
         generated_at=datetime.now(tz=UTC),
     )
+
+
+def _apply_stages(
+    conn: psycopg.Connection[Any],
+    query: str,
+    results: list[Any],
+    stages: Sequence[SearchStage],
+) -> tuple[list[Any], dict[str, float], tuple[str, ...]]:
+    """Run ``stages`` over one query's rows.
+
+    Returns the rows, each APPLIED stage's time, and the names of the stages
+    that skipped. A skipped stage leaves the row in hybrid order, so it measured
+    a pipeline without that stage: the row is marked (``stages_skipped``) and
+    refused like a degraded one, and the skip is logged at WARNING by stage name
+    and failure class only (never the query, which is personal).
+    """
+    if not stages:
+        return results, {}, ()
+    staged, reports = apply_stages(
+        conn, query=query, session_id=None, results=results, stages=stages
+    )
+    for report in reports:
+        if not report.applied:
+            _logger.warning(
+                "eval: stage %s skipped for one query (%s); that row cannot be "
+                "recorded or judged",
+                report.name,
+                report.skipped_reason,
+            )
+    applied = {report.name: report.ms for report in reports if report.applied}
+    skipped = tuple(report.name for report in reports if not report.applied)
+    return staged, applied, skipped
+
+
+def skipped_stage_results(report: EvalReport) -> list[EvalResult]:
+    """The rows of *report* in which a ranking stage skipped, in result order (RM-14a).
+
+    The rows the baseline refusal reads (``save_baseline``); ``diff_reports``
+    checks each shared row's ``stages_skipped`` itself, because it compares two
+    reports row by row. Kept apart from :func:`degraded_results`, whose callers say a degraded row
+    "counted as 0.0": a skipped row is scored, in hybrid order.
+    """
+    return [r for r in report.results if r.stages_skipped]
 
 
 def degraded_results(report: EvalReport) -> list[EvalResult]:

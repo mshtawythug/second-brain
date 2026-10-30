@@ -393,6 +393,42 @@ opt-out; set a large value instead. `scripts/token_payload_report.py
 write-up — including a removed mechanism that tried to attack the wrong
 constraint — is in `brain.snippet_context`'s module docstring.
 
+### `BRAIN_RERANKER` — the cross-encoder reranker (off by default)
+
+A second ranking stage that reorders the head of every search (`brain search`,
+`brain explain`, MCP `brain_search` and `brain_explain`, `brain ui`, `brain
+recall`, `brain ask`) by a cross-encoder's score. It ships **off**, and stays
+off until `brain eval` on your own corpus shows it helps (roadmap ticket RM-14c).
+These knobs live in the feature settings leaf `brain/settings/rerank.py`.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BRAIN_RERANKER` | `none` | `none`, `llamacpp` (a local `llama-server` from llama.cpp, serving `bge-reranker-v2-m3`), or `voyage` (hosted). |
+| `BRAIN_RERANK_DEPTH` | `20` | How many top results are rescored, 2 to 50. The rest keep their order after them. |
+| `BRAIN_RERANK_TIMEOUT_S` | `5.0` | Per-call timeout, 0.1 to 120 seconds. On a timeout the results stay in hybrid order. |
+| `BRAIN_RERANK_URL` | `http://127.0.0.1:8081` | Where `llama-server` listens. **Loopback only** (`127.0.0.1`, `::1`, `localhost`): the passages are your documents' text, so any other host is a `ConfigError`. |
+| `BRAIN_RERANK_MODEL` | `bge-reranker-v2-m3` (llamacpp), `rerank-3` (voyage) | The model name sent with each request. |
+| `BRAIN_RERANK_MAX_CHARS` | `1500` | Each passage is the title, a newline and the snippet, cut to this many characters (100 to 20,000). |
+
+`voyage` uses `VOYAGE_API_KEY`, the same key the Voyage embedder reads, and is a
+`ConfigError` without it. It never receives a **confidential** document: those
+rows are not sent and keep their places in the list. The local backend sees them,
+because nothing leaves the machine.
+
+`llama-server` must be started with `--embedding --pooling rank --reranking`
+(the request is `POST {BRAIN_RERANK_URL}/v1/rerank`). Installing and running it
+is a separate step (roadmap ticket RM-14b).
+
+A bad value in any of these is a `ConfigError` the first time a search runs,
+even while `BRAIN_RERANKER=none`, as with every other knob. `brain eval` records
+the backend, model and depth in its `config_signature` only while the reranker is
+on, so a baseline recorded with it off stays valid, and each row of `brain eval
+--json` carries the stage's time in `stage_ms` (not written into baselines). If
+the reranker skips for a query during `brain eval` (a timeout, or it is not
+running), that row names it in `stages_skipped`, and the run is refused like one
+with a failed embed: `--record-baseline` writes nothing and `--fail-below` exits
+1. Start the reranker and run it again.
+
 ## Search and retrieval trust boundaries
 
 Two of the variables above decide what leaves this machine, and one design

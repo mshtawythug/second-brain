@@ -15,8 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from ..vault._atomic import atomic_write_text
-from .errors import DegradedBaselineError, EvalBaselineError
-from .runner import CategorySummary, EvalReport, EvalResult, degraded_results
+from .errors import DegradedBaselineError, EvalBaselineError, StageSkippedBaselineError
+from .runner import (
+    CategorySummary,
+    EvalReport,
+    EvalResult,
+    degraded_results,
+    skipped_stage_results,
+)
 
 _BASELINE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -47,18 +53,38 @@ def _round_floats(obj: Any, decimals: int = 4) -> Any:
 
 
 def degraded_run_message(degraded: int, total: int, *, action: str) -> str:
-    """One stderr line for a run in which *degraded* of *total* embeds failed.
+    """One stderr line for a run in which *degraded* of *total* rows measured nothing usable.
 
     Names the COUNT, never the queries: the golden corpus is gitignored because
     its queries are personal, and this is the line most likely to be pasted into
     a commit message or a chat. The per-query ``WARNING`` log already names each
     query for an operator watching the run.
+
+    Cause-neutral since RM-14a: ``cli.eval_cmd`` passes only counts, and the
+    ``--fail-below`` refusal counts ``diff_reports``' ``degraded_queries``,
+    which holds rows whose embed call failed AND rows in which a ranking stage
+    skipped. Where the cause is known to be a skip, use
+    :func:`stage_skipped_run_message`.
     """
     return (
         f"{action}: {degraded} of {total} queries are degraded (their embed call "
-        f"failed, so they scored 0.0 without measuring retrieval) — retry when "
-        f"the embedder is healthy (e.g. no other large model loaded in Ollama, or "
-        f"a hosted backend's rate limit has cleared)."
+        f"failed, so they scored 0.0, or a ranking stage such as the reranker was "
+        f"skipped, so they were scored without it) — retry when the embedder and "
+        f"any configured stage are healthy (e.g. no other large model loaded in "
+        f"Ollama, a hosted backend's rate limit has cleared, the reranker is running)."
+    )
+
+
+def stage_skipped_run_message(skipped: int, total: int, *, action: str) -> str:
+    """One stderr line for a run in which a ranking stage skipped for *skipped* of *total* rows.
+
+    Count only, for the reason :func:`degraded_run_message` gives.
+    """
+    return (
+        f"{action}: in {skipped} of {total} queries a ranking stage such as the "
+        f"reranker was skipped (it timed out or was unreachable), so they were "
+        f"scored without it while the report names it — retry when the reranker "
+        f"is running and answering within BRAIN_RERANK_TIMEOUT_S."
     )
 
 
@@ -73,7 +99,8 @@ def save_baseline(report: EvalReport, *, path: Path) -> None:
     file at *path* is left exactly as it was. The per-row ``degraded`` flag is
     not serialized: a saved baseline cannot contain a degraded row, so the
     field would be a constant, and leaving it out keeps the file format (and
-    ``ci.json``'s byte layout) unchanged.
+    ``ci.json``'s byte layout) unchanged. ``stage_ms`` is left out too, for the
+    reason given where it is deleted.
 
     Args:
         report: The eval report to persist.
@@ -81,6 +108,8 @@ def save_baseline(report: EvalReport, *, path: Path) -> None:
 
     Raises:
         DegradedBaselineError: When any row of *report* is degraded.
+        StageSkippedBaselineError: When a ranking stage skipped for any row
+            (RM-14a); a subclass of :class:`DegradedBaselineError`.
     """
     degraded = degraded_results(report)
     if degraded:
@@ -91,10 +120,24 @@ def save_baseline(report: EvalReport, *, path: Path) -> None:
                 action=f"refusing to record baseline {path.stem!r}",
             )
         )
+    skipped = skipped_stage_results(report)
+    if skipped:
+        raise StageSkippedBaselineError(
+            stage_skipped_run_message(
+                len(skipped),
+                len(report.results),
+                action=f"refusing to record baseline {path.stem!r}",
+            )
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     raw: dict[str, Any] = dataclasses.asdict(report)
     for result in raw["results"]:
         del result["degraded"]
+        # Latency is a property of the machine, not of the corpus: written into
+        # a baseline it would change the file on every re-record (RM-14a).
+        del result["stage_ms"]
+        # Always empty here (refused above), so a constant, like ``degraded``.
+        del result["stages_skipped"]
     raw = _round_floats(raw)
     # datetime → ISO-8601 with Z suffix for UTC.
     raw["generated_at"] = report.generated_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -227,8 +270,9 @@ def diff_reports(baseline: EvalReport, current: EvalReport) -> BaselineDiff:
     ``current - 0`` positive delta into the mean, masking regressions on the
     shared queries).
 
-    A shared query that is degraded in EITHER report (its embed call failed) is
-    excluded the same way and listed in :attr:`~BaselineDiff.degraded_queries`.
+    A shared query that is degraded in EITHER report (its embed call failed), or
+    in which a ranking stage skipped (RM-14a), is excluded the same way and
+    listed in :attr:`~BaselineDiff.degraded_queries`.
 
     Args:
         baseline: The reference (earlier) eval report.
@@ -250,9 +294,16 @@ def diff_reports(baseline: EvalReport, current: EvalReport) -> BaselineDiff:
         curr_r = curr_by_q.get(q_str)
         if curr_r is None:
             continue  # removed query — reported separately, not in the aggregate
-        if base_r.degraded or curr_r.degraded:
+        if (
+            base_r.degraded
+            or curr_r.degraded
+            or base_r.stages_skipped
+            or curr_r.stages_skipped
+        ):
             # A 0.0 from a failed embed is not a score; a delta against it is
-            # not a delta. Reported separately, never in the aggregate.
+            # not a delta. A row in which a stage skipped (RM-14a) measured a
+            # pipeline the report does not describe. Reported separately,
+            # never in the aggregate, so ``--fail-below`` refuses to judge.
             degraded_queries.append(q_str)
             continue
         per_query.append(

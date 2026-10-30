@@ -29,10 +29,11 @@ blank variable as its default, and refuses a bad value with a
 dotenv chain into the process environment (``Config._load_field_dict``, the
 ``os.environ.setdefault`` loop), so a leaf knob is read from the same ``.env``
 files as every other knob, with the process environment still winning. Tests
-pass a plain ``dict``. One fallback to ``os.environ`` is planned, not built:
-RM-14a will let ``eval.runner.run_eval(stages=None, env=None)`` read it when
-neither argument is given (§2.3's carve-out), and every test of ``run_eval``
-will pass ``stages`` or ``env`` explicitly.
+pass a plain ``dict``. There is one fallback to ``os.environ``:
+``eval.runner.run_eval(stages=None, env=None)`` reads it when neither argument
+is given (§2.3's carve-out, RM-14a), and every test of ``run_eval`` passes
+``stages`` or ``env`` explicitly (``tests/test_eval_runner_stages.py`` guards
+that).
 
 **Rules a leaf keeps**, each enforced by ``tests/test_settings_leaf_guards.py``
 for every module in this package:

@@ -43,6 +43,7 @@ from .baseline import (
     load_baseline,
     mean_metrics_regressed,
     save_baseline,
+    stage_skipped_run_message,
 )
 from .concept_extraction import (
     ConceptF1Report,
@@ -59,6 +60,7 @@ from .errors import (
     EvalCorpusError,
     EvalError,
     EvalMetricError,
+    StageSkippedBaselineError,
 )
 from .graph_baseline import (
     GraphBaselineDiff,
@@ -87,6 +89,7 @@ from .runner import (
     degraded_results,
     embed_failure_message,
     run_eval,
+    skipped_stage_results,
 )
 
 __all__ = [
@@ -107,6 +110,7 @@ __all__ = [
     "CategorySummary",
     "run_eval",
     "degraded_results",
+    "skipped_stage_results",
     "embed_failure_message",
     # Baseline I/O
     "BaselineDiff",
@@ -117,6 +121,7 @@ __all__ = [
     "changed_config_keys",
     "mean_metrics_regressed",
     "degraded_run_message",
+    "stage_skipped_run_message",
     # GraphRAG concept-extractor eval gate (G2-j)
     "ConceptF1Report",
     "ConceptFixtureDoc",
@@ -147,4 +152,5 @@ __all__ = [
     "EvalCorpusError",
     "EvalBaselineError",
     "DegradedBaselineError",
+    "StageSkippedBaselineError",
 ]
