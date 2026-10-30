@@ -27,6 +27,11 @@ row that the facet panel counts but the facet click never returns.
 through ``ingest.gmail_brief_skip.read_thread_messages``, which drops the owner's own
 delivered briefs; a thread left empty is skipped (reasoned inline at both sites).
 
+**RM-37 grew it:** ``ingest_dir`` takes ``--sync`` / ``--apply`` / ``--allow-empty``, which prune
+the documents of files gone from the imported tree. The rules are in
+:mod:`brain.ingest.import_sync` and the output in :mod:`brain.cli_import_sync`; only the options
+and the wiring are here (reasoned inline at the ``DirSync`` start).
+
 That this module cannot import from ``cli`` -- the cycle described above -- is
 exactly why the kind set now lives in :mod:`brain.source_kinds` rather than in
 either file.
@@ -42,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 import typer
 
+from . import cli_import_sync as dir_sync
 from .agent import resolve_agent_id
 from .cli_extract import extract_or_exit
 from .config import Config
@@ -310,8 +316,12 @@ def ingest_dir(
         "--sensitivity",
         help=_SENSITIVITY_HELP + " Applies to EVERY file in the walk.",
     ),
+    sync: bool = typer.Option(False, "--sync", help=dir_sync.SYNC_HELP),
+    apply: bool = typer.Option(False, "--apply", help=dir_sync.APPLY_HELP),
+    allow_empty: bool = typer.Option(False, "--allow-empty", help=dir_sync.ALLOW_EMPTY_HELP),
 ) -> None:
     """Recursively ingest a directory of files."""
+    dir_sync.check_sync_flags(sync=sync, apply=apply, allow_empty=allow_empty, dry_run=dry_run)
     cfg = Config.load()
     # Validate ONCE, before the walk — not per file. A typo'd level must fail
     # before the first write, not on file 400 of 900 with 399 documents already
@@ -328,9 +338,18 @@ def ingest_dir(
         if p.is_file() and p.suffix.lower() in extensions
     ]
     typer.echo(f"found {len(files)} file(s)")
+    # RM-37 growth (over the ceiling): `--sync` prunes the documents of files gone from the
+    # tree. The rules live in `ingest.import_sync`, the output in `cli_import_sync`; every
+    # refusal fires before the walk, so a refused run writes nothing.
+    sync_run = dir_sync.DirSync.start_or_exit(
+        path, vault_root=cfg.vault_path, extensions=extensions, supported_files=len(files),
+        apply=apply, allow_empty=allow_empty,
+    ) if sync else None
     if dry_run:
         for f in files:
             typer.echo(f"  would ingest: {f}")
+        if sync_run is not None:
+            sync_run.dry_run_or_exit(cfg.database_url)
         return
 
     embedder = _build_embedder(cfg)
@@ -339,6 +358,8 @@ def ingest_dir(
     wrote = 0
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
+        if sync_run is not None:
+            sync_run.preflight_or_exit(conn)
         for f in files:
             try:
                 doc = extract_path(f)
@@ -374,9 +395,11 @@ def ingest_dir(
                 typer.secho(str(e), fg="red", err=True)
             except (ValueError, OSError, psycopg.Error) as e:
                 typer.secho(f"  failed: {f.name} — {e}", fg="red")
-        # Refresh planner stats once, after the batch, only if anything landed.
-        if wrote:
+        pruned = sync_run.prune(conn, graph_syncer=graph_syncer) if sync_run else None
+        # Refresh planner stats once, after the batch, only if anything landed (or went).
+        if wrote or (pruned is not None and pruned.deleted):
             _analyze_after_bulk_write(conn, context="ingest-dir")
+    dir_sync.exit_if_prune_failed(pruned)
 
 
 def ingest_stdin(

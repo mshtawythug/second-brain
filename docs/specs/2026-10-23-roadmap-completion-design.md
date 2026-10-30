@@ -3656,7 +3656,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-34 | Jira issues | S | 7 | RM-07 | DONE (#97) |
 | RM-35 | Notion export | M | 7 | RM-06, RM-07 | DONE (#104) |
 | RM-36 | Apple Notes | M | 7 | RM-06, RM-07 | DONE (#103) |
-| RM-37 | External vault sync with deletions | M | 7 | RM-07 | TODO |
+| RM-37 | External vault sync with deletions | M | 7 | RM-07 | DONE (#108) |
 | RM-38 | Voice memos | M | 7 | RM-33 | DONE (#107) |
 | RM-39 | Mobile share-sheet capture | S | 7 | RM-33 | TODO |
 | RM-40 | Ingest tab phase 4: inbox folder | S | 7 | RM-13, RM-33 | TODO |

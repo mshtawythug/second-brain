@@ -85,6 +85,26 @@ git tag scheme:
     prints a class-only warning and carries on. A memo's count is cleared only once it
     is stored.
 
+### Added — `brain ingest-dir --sync`: an imported directory's deletions are mirrored (RM-37)
+
+- `brain ingest-dir <dir> --sync` lists, after the walk, the documents imported from files under
+  `<dir>` that are no longer on disk; `--apply` deletes them through the same path as `brain rm`
+  (row, chunks, graph entry, vault mirror). Dry run by default. Only `manual` documents with a
+  `source_path` under `<dir>` (by path components) and in this run's extensions are candidates;
+  vault notes and stdin documents never are, documents under a nested brain vault are skipped,
+  and a file that cannot be checked is kept. On a case- or normalization-insensitive volume a
+  case-variant `<dir>` matches only when the file system confirms it is the same directory.
+- A file whose folder may be on an unmounted volume is kept, not pruned: its nearest existing
+  folder is (or sits below) a mount point, is on another device, is an empty folder below
+  `<dir>`, or holds a mount point. `--apply` re-reads each row and skips one that changed since
+  the listing (`kept (row changed)`).
+- Refusals (exit 1, nothing written): a missing `<dir>`, a `<dir>` inside the brain vault, an
+  empty walk while documents were imported from `<dir>`, and, with `--apply`, more than half of
+  the documents under `<dir>` and more than 5. `--allow-empty` overrides the last two. The
+  mass-deletion refusal is stricter than the ticket and was added at plan approval.
+- New leaves `brain/ingest/import_sync.py` (the rules) and `brain/cli_import_sync.py` (the
+  output); `cli_ingest.py` gains the three options and the wiring. No migration, no new kind.
+
 ### Added — screenshots from a drop folder become searchable (RM-33)
 
 - `brain ingest-folder --dir PATH --since 7d` (one folder) or

@@ -71,6 +71,12 @@ Useful after a chunker / embedder upgrade.
 `brain ingest-dir` has no `--force` flag — it always UPDATEs in-place when the
 file changed and skips otherwise.
 
+To mirror deletions from a directory imported earlier, add `--sync`: it lists the
+documents whose files are gone (`would delete: …`, then `N of M documents under
+<dir> would be removed`). Show the user that list and run `--sync --apply` only
+when they confirm it. Never add `--allow-empty` on your own: it overrides the
+refusals for an empty tree (an unmounted drive) and a mass deletion.
+
 ## The context cost of the MCP→stdin chain
 
 Read this before running any MCP→stdin recipe in `sources/`: Krisp, Slack, Jira, and GitHub
