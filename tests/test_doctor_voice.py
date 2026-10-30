@@ -16,7 +16,7 @@ BINARY = "/fake/bin/whisper-cli"
 
 def _check(
     env: dict[str, str], *, files: set[str] | None = None, binary: str | None = BINARY,
-    model_bytes: int = 147_964_211,
+    model_bytes: int = 147_964_211, model_problem: str | None = None,
 ) -> Any:
     present = files if files is not None else {AFINFO_PATH, AFCONVERT_PATH, "/m/ggml-base.en.bin"}
     (check,) = voice_doctor_check(
@@ -24,6 +24,7 @@ def _check(
         which=lambda _: binary,
         is_file=lambda p: str(p) in present,
         file_size=lambda p: model_bytes,
+        model_problem=lambda p: model_problem,
     )
     return check
 
@@ -96,3 +97,31 @@ def test_the_default_file_size_reads_the_model(tmp_path: Path) -> None:
     model.write_bytes(b"x" * 2_500_000)
 
     assert _file_size(model) == 2_500_000
+
+
+def test_a_model_anyone_can_write_warns(tmp_path: Path) -> None:
+    """sec-107 F6, through the doctor's row."""
+    from brain.ingest.whisper import HINT_MODEL_WRITABLE
+
+    check = _check(
+        {"BRAIN_WHISPER_MODEL": "/m/ggml-base.en.bin"}, model_problem=HINT_MODEL_WRITABLE
+    )
+
+    assert check.status == "warn"
+    assert check.detail == HINT_MODEL_WRITABLE
+
+
+def test_the_default_model_check_is_the_real_one(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
+    model = tmp_path / "ggml.bin"
+    model.write_bytes(b"x")
+    model.chmod(0o666)
+
+    (check,) = voice_doctor_check(
+        env={"BRAIN_WHISPER_MODEL": str(model)}, which=lambda _: BINARY, is_file=lambda p: True
+    )
+
+    assert check.status == "warn"
+    assert "writable" in check.detail

@@ -13,16 +13,36 @@ as stdout passes ``max_stdout_bytes``, because a child it started (an
 extension, a credential helper) would otherwise keep stdout open and the read
 would wait for it. stdout is read in chunks, so an oversized answer is refused
 before it is held.
+
+**Any exception kills the group too** (rev-107 F1). A ``KeyboardInterrupt`` or a
+``SystemExit`` raised while the child runs SIGKILLs its group before it propagates;
+otherwise ``Popen.__exit__`` would wait for the child (forever, on ``SystemExit``) and an
+interrupted run would leave it running. :func:`sigterm_as_system_exit` turns SIGTERM (a
+``launchctl bootout``) into that ``SystemExit``, so a caller's ``finally`` blocks and
+temporary directories are cleaned up instead of the process dying where it stands.
+
+**Two opt-in options**, both added for voice memos (RM-38) and passed to ``Popen`` only
+when set, so the other runners' calls are unchanged: ``pass_fds`` lets the child read a
+file the caller has already opened (as ``/dev/fd/N``), and ``max_file_bytes`` sets the
+child's ``RLIMIT_FSIZE``, so no file it writes can grow past that size. What the tool
+then does varies (killed by SIGXFSZ, an error exit, or, as ``afconvert`` does, a quiet
+exit 0 with the file cut at the limit), so a caller judges the file, not the exit code.
+The limit is set by a ``preexec_fn`` that makes one ``setrlimit`` call on a value
+computed before the fork.
 """
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
+import resource
 import signal
 import subprocess
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from types import FrameType
+from typing import Any
 
 _READ_CHUNK_BYTES = 65536
 
@@ -47,11 +67,24 @@ def run_capped(
     max_stdout_bytes: int,
     env: Mapping[str, str],
     popen: Popen = subprocess.Popen,
+    pass_fds: Sequence[int] = (),
+    max_file_bytes: int | None = None,
 ) -> CappedRun:
-    """Run ``argv`` (``argv[0]`` an absolute binary path) under the timeout and the cap."""
+    """Run ``argv`` (``argv[0]`` an absolute binary path) under the timeout and the cap.
+
+    ``pass_fds`` and ``max_file_bytes`` are the opt-in options of the module docstring.
+    """
     timed_out = threading.Event()
     oversized = False
     chunks: list[bytes] = []
+    options: dict[str, Any] = {}
+    if pass_fds:
+        options["pass_fds"] = tuple(pass_fds)
+    if max_file_bytes is not None:
+        limit = file_size_limit(max_file_bytes)
+        options["preexec_fn"] = functools.partial(
+            resource.setrlimit, resource.RLIMIT_FSIZE, (limit, limit)
+        )
     with popen(
         argv,
         stdin=subprocess.DEVNULL,
@@ -59,6 +92,7 @@ def run_capped(
         stderr=subprocess.DEVNULL,
         env=dict(env),
         start_new_session=True,
+        **options,
     ) as proc:
         def _kill() -> None:
             timed_out.set()
@@ -77,6 +111,9 @@ def run_capped(
                     break
                 chunks.append(chunk)
             returncode = proc.wait()
+        except BaseException:
+            kill_group(proc)  # an interrupt or SIGTERM must not leave the child running
+            raise
         finally:
             timer.cancel()
     if oversized or timed_out.is_set():
@@ -88,3 +125,32 @@ def kill_group(proc: subprocess.Popen[bytes]) -> None:
     """SIGKILL ``proc``'s process group (it leads one: ``start_new_session``)."""
     with contextlib.suppress(ProcessLookupError):  # already gone
         os.killpg(proc.pid, signal.SIGKILL)
+
+
+def file_size_limit(requested: int) -> int:
+    """``requested``, lowered to the current hard ``RLIMIT_FSIZE`` (a child cannot raise it)."""
+    _, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    return requested if hard == resource.RLIM_INFINITY else min(requested, hard)
+
+
+@contextlib.contextmanager
+def sigterm_as_system_exit() -> Iterator[None]:
+    """While inside, SIGTERM raises ``SystemExit(143)`` in the main thread.
+
+    The exception unwinds through :func:`run_capped` (which kills its child) and every
+    ``finally`` and ``with`` above it. Outside the main thread, where Python cannot set a
+    handler, nothing changes. The previous handler is restored on the way out; one set
+    outside Python reads as ``None`` and is restored as the default.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(signal.SIGTERM, _raise_system_exit)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous or signal.SIG_DFL)
+
+
+def _raise_system_exit(signum: int, frame: FrameType | None) -> None:
+    raise SystemExit(128 + signum)

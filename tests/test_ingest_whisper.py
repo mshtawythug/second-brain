@@ -19,11 +19,17 @@ from brain.ingest.whisper import (
     ENV_KEYS,
     HINT_MISSING_BINARY,
     HINT_MISSING_MODEL,
+    HINT_MODEL_IN_DROP_FOLDER,
+    HINT_MODEL_OWNER,
+    HINT_MODEL_WRITABLE,
     HINT_NOT_MACOS,
     HINT_OFF,
+    HINT_RELATIVE_BINARY,
     WHISPER_CLI,
     WhisperSetup,
+    configured_drop_folder_paths,
     minimal_env,
+    model_file_problem,
     resolve_whisper,
     run_audio_tool,
 )
@@ -52,8 +58,12 @@ def _files(*present: str) -> Any:
 ALL_FILES = _files(MODEL, AFINFO_PATH, AFCONVERT_PATH)
 
 
+def _model_ok(path: Path) -> str | None:
+    return None
+
+
 def test_off_when_no_model_is_configured() -> None:
-    setup = resolve_whisper({}, which=_which(BINARY), is_file=ALL_FILES)
+    setup = resolve_whisper({}, which=_which(BINARY), is_file=ALL_FILES, model_problem=_model_ok)
 
     assert setup.unavailable == HINT_OFF
     assert setup.ready is False
@@ -76,14 +86,16 @@ def test_model_missing_when_the_file_is_not_there() -> None:
 
 def test_binary_missing_when_whisper_cli_is_not_on_path() -> None:
     which = _which(None)
-    setup = resolve_whisper(READY_ENV, which=which, is_file=ALL_FILES)
+    setup = resolve_whisper(READY_ENV, which=which, is_file=ALL_FILES, model_problem=_model_ok)
 
     assert setup.unavailable == HINT_MISSING_BINARY
     assert which.seen == [WHISPER_CLI]
 
 
 def test_ready_when_everything_is_present() -> None:
-    setup = resolve_whisper(READY_ENV, which=_which(BINARY), is_file=ALL_FILES)
+    setup = resolve_whisper(
+        READY_ENV, which=_which(BINARY), is_file=ALL_FILES, model_problem=_model_ok
+    )
 
     assert setup.ready is True
     assert setup.unavailable is None
@@ -96,7 +108,9 @@ def test_a_given_runner_is_kept() -> None:
     def runner(argv: list[str], timeout: float, max_stdout_bytes: int) -> CappedRun:
         raise AssertionError("not called")
 
-    setup = resolve_whisper(READY_ENV, which=_which(BINARY), is_file=ALL_FILES, runner=runner)
+    setup = resolve_whisper(
+        READY_ENV, which=_which(BINARY), is_file=ALL_FILES, runner=runner, model_problem=_model_ok
+    )
 
     assert setup.runner is runner
 
@@ -212,3 +226,148 @@ def test_run_audio_tool_reports_an_oversized_answer() -> None:
 
     assert run.oversized is True
     assert run.stdout == b""
+
+
+# --- review round 1 (PR #107): the binary's path and the model file ---------------------
+
+
+def test_a_relative_whisper_cli_is_refused() -> None:
+    """sec-107 F3: a relative PATH entry resolves against whatever the cwd is."""
+    setup = resolve_whisper(
+        READY_ENV, which=_which("bin/whisper-cli"), is_file=ALL_FILES, model_problem=_model_ok
+    )
+
+    assert setup.unavailable == HINT_RELATIVE_BINARY
+    assert setup.binary is None
+
+
+def test_a_model_problem_makes_whisper_unavailable() -> None:
+    setup = resolve_whisper(
+        READY_ENV,
+        which=_which(BINARY),
+        is_file=ALL_FILES,
+        model_problem=lambda path: HINT_MODEL_WRITABLE if path == Path(MODEL) else None,
+    )
+
+    assert setup.unavailable == HINT_MODEL_WRITABLE
+
+
+def _model(tmp_path: Path, mode: int = 0o644) -> Path:
+    path = tmp_path / "models" / "ggml-base.en.bin"
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(b"synthetic model")
+    path.chmod(mode)
+    return path
+
+
+def _no_folders() -> list[Path]:
+    return []
+
+
+def test_a_private_model_file_has_no_problem(tmp_path: Path) -> None:
+    assert model_file_problem(_model(tmp_path), drop_folders=_no_folders) is None
+
+
+@pytest.mark.parametrize("mode", [0o664, 0o646, 0o666])
+def test_a_group_or_world_writable_model_is_refused(tmp_path: Path, mode: int) -> None:
+    """sec-107 F6: anyone who can write the model can change what whisper runs."""
+    problem = model_file_problem(_model(tmp_path, mode), drop_folders=_no_folders)
+
+    assert problem == HINT_MODEL_WRITABLE
+
+
+def test_a_model_owned_by_another_user_is_refused(tmp_path: Path) -> None:
+    import os
+
+    model = _model(tmp_path)
+
+    assert (
+        model_file_problem(model, uid=os.getuid() + 1, drop_folders=_no_folders)
+        == HINT_MODEL_OWNER
+    )
+
+
+def test_a_root_owned_model_is_accepted(tmp_path: Path) -> None:
+    """``/usr/local`` installs are root's; only root could change them."""
+    model = Path("/usr/bin/afinfo")
+    if not model.is_file():  # pragma: no cover — macOS only
+        pytest.skip("needs a root-owned regular file")
+
+    assert model_file_problem(model, drop_folders=_no_folders) is None
+
+
+def test_a_model_inside_a_drop_folder_is_refused(tmp_path: Path) -> None:
+    model = _model(tmp_path)
+
+    problem = model_file_problem(model, drop_folders=lambda: [tmp_path.resolve()])
+
+    assert problem == HINT_MODEL_IN_DROP_FOLDER
+
+
+def test_a_model_beside_a_drop_folder_is_accepted(tmp_path: Path) -> None:
+    model = _model(tmp_path)
+    folder = tmp_path / "models-drop"
+    folder.mkdir()
+
+    assert model_file_problem(model, drop_folders=lambda: [folder.resolve()]) is None
+
+
+def test_a_missing_or_non_regular_model_is_missing(tmp_path: Path) -> None:
+    assert model_file_problem(tmp_path / "gone.bin", drop_folders=_no_folders) == (
+        HINT_MISSING_MODEL
+    )
+    assert model_file_problem(tmp_path, drop_folders=_no_folders) == HINT_MISSING_MODEL
+
+
+def test_the_drop_folders_come_from_brain_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    folder = tmp_path / "drop"
+    folder.mkdir()
+    (home / "drop-folders.toml").write_text(f'[[folder]]\npath = "{folder}"\n')
+    monkeypatch.setenv("BRAIN_HOME", str(home))
+
+    assert configured_drop_folder_paths() == [folder.resolve()]
+
+
+def test_a_broken_drop_folder_file_checks_no_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The drop-folder run reports the broken file itself; the model check moves on."""
+    (tmp_path / "drop-folders.toml").write_text("[[folder]]\nkind = 3\n")
+    monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
+
+    assert configured_drop_folder_paths() == []
+
+
+def test_the_default_model_check_reads_the_real_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
+    model = _model(tmp_path, 0o666)
+    env = {"BRAIN_WHISPER_MODEL": str(model)}
+
+    setup = resolve_whisper(env, which=_which(BINARY), is_file=lambda p: True)
+
+    assert setup.unavailable == HINT_MODEL_WRITABLE
+
+
+def test_hints_for_the_model_never_name_its_path() -> None:
+    for hint in (HINT_MODEL_OWNER, HINT_MODEL_WRITABLE, HINT_MODEL_IN_DROP_FOLDER):
+        assert "BRAIN_WHISPER_MODEL" in hint
+
+
+def test_run_audio_tool_forwards_the_fd_and_the_file_size_limit() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def popen(argv: list[str], **kwargs: Any) -> _FakeProc:
+        calls.append(kwargs)
+        return _FakeProc(b"", 0)
+
+    run_audio_tool([AFCONVERT_PATH], 10.0, 10, popen=popen, pass_fds=(7,), max_file_bytes=99)
+
+    (call,) = calls
+    assert call["pass_fds"] == (7,)
+    assert callable(call["preexec_fn"])

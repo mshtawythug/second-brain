@@ -865,8 +865,11 @@ brain ingest-folder --configured --since 2d          # what the LaunchAgent runs
   into a `voice_memo` document (source `voice`, stored **confidential** unless the
   folder or `--sensitivity` says otherwise); only the transcript enters the brain.
   A memo over `BRAIN_WHISPER_MAX_MINUTES`, one that is not audio, and any timeout
-  are `rejected`; whisper failing on the converted audio moves it back, with a
-  warning naming its `imported/` name and the error class. A memo's transcription
+  are `rejected`, and so is one whose WAV reaches the file-size limit (`afconvert`
+  runs under one), or whose transcript is over 4 MiB. Whisper failing on the converted
+  audio moves it back, with a warning naming its `imported/` name, the error class, and
+  `failure N of 3`. The third failure on the same memo content is `rejected` instead
+  (the count is in `$BRAIN_HOME/state/voice-failures.json`). A memo's transcription
   runs on its own timeout (twice its length plus a minute), not the run's 8
   minutes. With voice memos off or `whisper-cli` missing, voice folders are
   skipped with the fix printed, and exit 1.

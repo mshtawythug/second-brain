@@ -52,6 +52,28 @@ git tag scheme:
   folder cannot be transcribed. No real whisper model is run by the test suite; one
   `live_whisper` test runs the real tools when `BRAIN_LIVE_WHISPER_MODEL` names a model.
   Guide: `docs/guides/drop-folders.md#voice-memos-rm-38`.
+- Hardening from the PR #107 review:
+  - The memo is opened once, without following a symlink, and `afinfo` and `afconvert`
+    both read that open file (`/dev/fd/N`). A file swapped in after the check is never read,
+    and neither tool sees the memo's name. Before this, a name holding a newline and a fake
+    `estimated duration` line could set the duration.
+  - `afconvert` runs under a file-size limit of the cap plus a second, so a memo whose
+    header understates its length cannot fill the disk. A WAV cut off at that limit is
+    `rejected` as too long. The stored duration is measured from the WAV, not read from the
+    header.
+  - Whisper printing more than 4 MiB is `rejected`; it is not retried.
+  - A memo whisper fails on three times is `rejected` instead of being retried every run.
+    The count is kept per memo content in `$BRAIN_HOME/state/voice-failures.json`, and a
+    success clears it. A tool that cannot start is not counted.
+  - `whisper-cli` found through a relative `PATH` entry is refused.
+  - The model file must be owned by you (or root), not group- or world-writable, and not
+    inside a drop folder. Otherwise voice memos are off, and `brain doctor` says why.
+  - Stopping a run (Ctrl-C, or SIGTERM from `launchctl bootout`) kills the tool's whole
+    process group and deletes the temporary WAV. This also applies to the image-OCR,
+    Apple Notes and GitHub tool runners.
+  - A run that was killed outright leaves its temporary folder behind. The next run with a
+    voice folder deletes this user's such folders once they are older than 3 hours (longer
+    if the cap allows longer memos).
 
 ### Added — screenshots from a drop folder become searchable (RM-33)
 

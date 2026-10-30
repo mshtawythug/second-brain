@@ -32,7 +32,16 @@ run. ``OcrUnavailableError`` is the second kind: it is configuration, not the fi
 are :data:`~brain.ingest.voice.TRANSIENT_VOICE_ERRORS` (RM-38.D4): whisper failing on the
 WAV this run converted points at the model or the binary. Each prints a WARNING naming the
 file's ``imported/`` name (its content hash) and the class, so a memo that fails every run
-is visible in every run's log.
+is visible in every run's log. A :class:`~brain.ingest.voice.WhisperFailedError` is also
+counted per memo (:mod:`brain.ingest.voice_failures`, in ``$BRAIN_HOME/state``): the
+third one rejects the memo instead (sec-107 F5), and a success clears the count. A tool
+that cannot start is not counted: that is the machine, never the memo.
+
+**A run with an audio folder** first removes temporary directories a crashed run left
+(:func:`~brain.ingest.voice.sweep_stale_tempdirs`, sec-107 F4), and runs with SIGTERM
+turned into ``SystemExit`` (:func:`~brain.ingest.capped_process.sigterm_as_system_exit`,
+rev-107 F1), so a ``launchctl bootout`` mid-whisper kills whisper's process group and
+removes the decoded WAV instead of leaving both behind.
 
 **Exit codes.** 0 when nothing failed (files left for the next run included); 1 when a
 file failed or was rejected, or a folder could not be used; 2 for the scope refusal.
@@ -74,13 +83,20 @@ from .drop_folder import (
     scan,
 )
 from .errors import SecretGuardError, describe_failure
-from .ingest import Embedder, ExtractedDoc, IngestResult, ingest_document
+from .ingest import Embedder, ExtractedDoc, IngestResult, ingest_document, voice_failures
+from .ingest.capped_process import sigterm_as_system_exit
 from .ingest.dispatch import extract_path
 from .ingest.image import ImageError, OcrUnavailableError, extract_image, ocr_unavailable_hint
 from .ingest.ocr import OcrSetup, resolve_ocr
 from .ingest.outcome import IngestOutcome, classify
 from .ingest.text_safety import one_line
-from .ingest.voice import TRANSIENT_VOICE_ERRORS, VoiceError, extract_voice
+from .ingest.voice import (
+    TRANSIENT_VOICE_ERRORS,
+    VoiceError,
+    WhisperFailedError,
+    extract_voice,
+    sweep_stale_tempdirs,
+)
 from .ingest.whisper import WhisperSetup, resolve_whisper
 from .sensitivity import VALID_SENSITIVITY_LEVELS
 from .settings.drop_folders import (
@@ -165,15 +181,16 @@ def ingest_folder(
     if dry_run:
         failed = _dry_run(usable, cutoff) or failed
     elif usable:
-        run_failed = _ingest_all(
-            cfg,
-            usable,
-            cutoff,
-            ocr=ocr,
-            whisper=whisper if isinstance(whisper, WhisperSetup) else None,
-            enrich=enrich,
-            allow_secrets=allow_secrets,
-        )
+        with sigterm_as_system_exit():  # a bootout unwinds, killing whisper (rev-107 F1)
+            run_failed = _ingest_all(
+                cfg,
+                usable,
+                cutoff,
+                ocr=ocr,
+                whisper=whisper if isinstance(whisper, WhisperSetup) else None,
+                enrich=enrich,
+                allow_secrets=allow_secrets,
+            )
         failed = failed or run_failed
     if failed:
         raise typer.Exit(code=1)
@@ -304,6 +321,8 @@ def _ingest_all(
     allow_secrets: bool,
 ) -> bool:
     """Run every folder; ``True`` when any file or folder failed."""
+    if whisper is not None:
+        sweep_stale_tempdirs(max_seconds=whisper.settings.max_seconds)  # sec-107 F4
     ctx = _Context(
         cfg=cfg,
         embedder=_build_embedder(cfg),
@@ -344,7 +363,7 @@ def _ingest_step(ctx: _Context, folder: DropFolder) -> IngestFn:
         except OcrUnavailableError:
             raise  # configuration, not this file: it goes back for the next run
         except TRANSIENT_VOICE_ERRORS as exc:
-            _warn_retry(path, exc)
+            _retry_or_reject(path, exc)
             raise  # the machine, not this memo (RM-38.D4): it goes back too
         except (ImageError, ValueError) as exc:
             # Unreadable, too large, an OCR timeout, a malformed file: every run would fail.
@@ -367,14 +386,31 @@ def _extract(ctx: _Context, path: Path, timeout: float) -> ExtractedDoc:
         return extract_image(path, ocr=ctx.ocr, timeout=timeout)
     if suffix in VOICE_EXTENSIONS:
         # Whisper's own timeout, not the run's remainder (RM-38.D1, module docstring).
-        return extract_voice(path, whisper=ctx.whisper)
+        doc = extract_voice(path, whisper=ctx.whisper)
+        voice_failures.forget(_voice_state_dir(), path)
+        return doc
     return extract_path(path)
 
 
-def _warn_retry(path: Path, exc: VoiceError) -> None:
+def _voice_state_dir() -> Path:
+    return _brain_home_root() / "state"
+
+
+def _retry_or_reject(path: Path, exc: VoiceError) -> None:
+    """Warn that ``path`` goes back; reject it instead at whisper's third failure on it."""
+    failures = None
+    if isinstance(exc, WhisperFailedError):
+        failures = voice_failures.record_failure(_voice_state_dir(), path)
+        if failures >= voice_failures.MAX_FAILURES:
+            raise RejectedFileError("whisper failed on the memo every time") from exc
+    _warn_retry(path, exc, failures)
+
+
+def _warn_retry(path: Path, exc: VoiceError, failures: int | None) -> None:
     """Name the memo (its ``imported/`` name carries its hash) and the class, never more."""
+    count = "" if failures is None else f", failure {failures} of {voice_failures.MAX_FAILURES}"
     typer.secho(
-        f"warning: {one_line(path.name)} was not transcribed ({describe_failure(exc)}); "
+        f"warning: {one_line(path.name)} was not transcribed ({describe_failure(exc)}{count}); "
         f"it goes back to the folder and is retried next run (see {GUIDE})",
         fg="yellow",
         err=True,

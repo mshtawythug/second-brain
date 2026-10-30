@@ -162,3 +162,47 @@ recovery), `docs/configuration.md` (two knobs, the `voice` defaults), `docs/cli-
 row + `skills/ingest-brain/sources/drop-folders.md`, the spec's Appendix B row,
 `docs/plans/2026-10-23-backlog-reconciliation.md` item 5.2. Memory: `cli.md`, `extractors.md`,
 `types.md`, each marked "verify merged".
+
+## Review round 1 (PR #107)
+
+The security review (sec-107) and the code review (rev-107) found nine items. All are fixed
+in one commit on this branch, with the rulings below.
+
+**Checked on this macOS before coding.** These checks used a 2 s synthetic WAV in a scratch
+directory:
+
+- `/usr/bin/afinfo` and `/usr/bin/afconvert` both read `/dev/fd/N` from an fd opened
+  `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`. `afinfo` prints `File: /dev/fd/N`, not the name.
+- `/dev/fd/N` shares the fd's offset. After `afinfo` reads, `afconvert` on the same fd fails
+  with `Couldn't open input file`. Rewinding the fd (`lseek(fd, 0)`) before each tool fixes
+  this. So the fixed-name hardlink fallback was not needed.
+- Under `RLIMIT_FSIZE`, `afconvert` writes exactly up to the limit, then exits **0**. It is
+  not killed by SIGXFSZ. A truncated WAV is therefore judged by its size, never by the exit
+  code.
+
+| Item | Fix | Where |
+|---|---|---|
+| sec F1 (HIGH) disk fill, faked duration | `afconvert` runs with `max_file_bytes = wav_byte_limit(cap) = (cap + 1 s) × 32,000 + 4,096`, set as `RLIMIT_FSIZE` through `run_capped`. The WAV-length check comes before the exit-code check, so a cut WAV is `AudioTooLongError` (rejected). Neither tool gets the name (see F2). The stored `duration_s` is the WAV's length. | `ingest/voice.py`, `ingest/capped_process.py` |
+| sec F2 TOCTOU | The memo is opened once `O_NOFOLLOW \| O_NONBLOCK`, checked with `fstat`, and handed to both tools as `/dev/fd/N` with `pass_fds`, rewound before each one. `ELOOP` raises `UnreadableAudioError`. | `ingest/voice.py` |
+| sec F3 relative binary | A non-absolute `which("whisper-cli")` is unavailable, with `HINT_RELATIVE_BINARY`. | `ingest/whisper.py` |
+| sec F4 stale WAVs | `sweep_stale_tempdirs` runs at the start of an `ingest-folder` run that has an audio folder. It removes this user's `brain-voice-*` real directories older than `max(3 h, the longest a memo can run at the cap)`. The longer bound means a live run at a 600-minute cap is never swept. | `ingest/voice.py`, `cli_ingest_folder.py` |
+| sec F5 endless retry | A new `WhisperFailedError(TranscriptionError)` is the only failure counted. The count is per SHA-256 in `$BRAIN_HOME/state/voice-failures.json` (`ingest/voice_failures.py`: atomic write, `0o700` directory, at most 1,000 entries, a malformed file starts over). The third failure raises `RejectedFileError`, and a success clears the count. A tool that cannot start is not counted. This supersedes the D4 "minimum" follow-up. | `ingest/voice_failures.py`, `cli_ingest_folder.py` |
+| sec F6 model file | `model_file_problem` requires a regular file owned by this user or root, with no group/other write bit, and not under a configured drop folder. A broken `drop-folders.toml` checks no folder, since the run reports it anyway. Otherwise the model is unavailable, and `brain doctor` warns with the hint. Root is allowed as an owner on purpose: only root could change such a file. | `ingest/whisper.py`, `doctor_voice.py` |
+| rev F1 orphaned child | `run_capped` kills the process group on any `BaseException`. Before, `Popen.__exit__` waited out the child: forever on `SystemExit`, and it left the child running on `KeyboardInterrupt`. The new `sigterm_as_system_exit()` wraps the `ingest-folder` run, so a bootout unwinds through the `TemporaryDirectory` and the fd `finally`. This is shared code. The image-OCR, Apple Notes and GitHub runners gain the kill, and their `Popen` calls are otherwise unchanged (`pass_fds` and `preexec_fn` are passed only when set). | `ingest/capped_process.py`, `cli_ingest_folder.py` |
+| rev F2 oversized stdout | `TranscriptTooLargeError` (rejected). | `ingest/voice.py` |
+
+**Proof.**
+
+- New regression tests cover each item.
+  - The name-injection test fails on the old code.
+  - The SystemExit kill test hung for 30 s on the old code.
+  - Two real-tool tests run `afinfo` and `afconvert` (skipped off macOS). One covers the
+    `/dev/fd` path with the injected name; the other is the `RLIMIT_FSIZE` stop at 20 kB.
+- Line and branch coverage is 100% on `capped_process.py`, `voice.py`, `whisper.py`,
+  `voice_failures.py`, `doctor_voice.py` and `cli_ingest_folder.py`.
+- 30 mutations were run in git-archive copies with `PYTHONPATH` pinned, in batches of 5, and
+  all 30 were killed. One, removing the ledger's value check, first survived, because the
+  test stored the bad values under a digest no memo had. The test now uses the memo's own
+  digest.
+- The `O_NONBLOCK` flag was not mutated: removing it would block the FIFO test forever,
+  rather than fail it.

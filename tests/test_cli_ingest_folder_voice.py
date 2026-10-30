@@ -8,7 +8,10 @@ standard test double, rule 13), so no audio tool is ever run here.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import signal
+import tempfile
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,6 +27,7 @@ from brain.drop_folder import IMPORTED_DIR, DropFolder, run
 from brain.ingest.capped_process import CappedRun
 from brain.ingest.ocr import OcrSetup
 from brain.ingest.voice import whisper_timeout
+from brain.ingest.voice_failures import STATE_NAME
 from brain.ingest.whisper import HINT_MISSING_BINARY, WhisperSetup
 from brain.settings.ocr import OcrSettings
 from brain.settings.voice import VoiceSettings
@@ -47,6 +51,15 @@ def tools(monkeypatch: pytest.MonkeyPatch) -> FakeTools:
         ),
     )
     return fake
+
+
+@pytest.fixture(autouse=True)
+def private_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The extractor's temporary directories, and the startup sweep, stay in ``tmp_path``."""
+    root = tmp_path / "tmp"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    return root
 
 
 @pytest.fixture
@@ -268,10 +281,10 @@ def test_a_whisper_failure_moves_the_memo_back_with_a_warning(
     assert not _imported(drop, src.name).exists()
     imported_name = _imported(drop, src.name).name
     assert (
-        f"warning: {imported_name} was not transcribed (TranscriptionError); "
+        f"warning: {imported_name} was not transcribed (WhisperFailedError, failure 1 of 3); "
         "it goes back to the folder and is retried next run"
     ) in result.output
-    assert "failed    New Recording 1.m4a (TranscriptionError)" in result.output
+    assert "failed    New Recording 1.m4a (WhisperFailedError)" in result.output
     assert _docs(test_db) == []
 
 
@@ -374,13 +387,13 @@ def test_a_long_memo_finishes_past_the_deadline_and_the_next_file_is_deferred(
     os.utime(first, (stamp, stamp))
     _memo(drop, "b-second.m4a", b"second memo")
     clock = [0.0]
-    tools = FakeTools(duration=40 * 60.0)
+    tools = FakeTools(duration=40 * 60.0, wav_seconds=1.0)  # a small WAV on disk
     original = tools.__call__
 
-    def slow_whisper(argv: list[str], timeout: float, cap: int) -> CappedRun:
+    def slow_whisper(argv: list[str], timeout: float, cap: int, **options: Any) -> CappedRun:
         if argv[0] == BINARY:
             clock[0] += 900.0  # this memo outlasts the whole 480 s run deadline
-        return original(argv, timeout, cap)
+        return original(argv, timeout, cap, **options)
 
     setup = WhisperSetup(VoiceSettings(MODEL, 60), BINARY, None, runner=slow_whisper)
     ctx = cli_ingest_folder._Context(
@@ -444,3 +457,118 @@ def test_brain_ingest_of_a_memo_with_voice_off_is_one_line(
     assert "cannot read memo.m4a: WhisperUnavailableError: voice memos are off" in result.output
     assert "Traceback" not in result.output
 
+
+
+# --- review round 1 (PR #107): a memo whisper always fails on is rejected (sec-107 F5) ----
+
+
+def _ledger(home: Path) -> dict[str, int]:
+    path = home / "state" / STATE_NAME
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def test_a_memo_whisper_fails_on_three_times_is_rejected_on_the_third(
+    home: Path, drop: Path, vault: Path, tools: FakeTools, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    src = _memo(drop)
+    _configure(home, drop)
+    tools.whisper = CappedRun(b"", 3, False, False)
+    digest = hashlib.sha256(AUDIO_BYTES).hexdigest()
+
+    first = _run("--configured", "--since", "2d")
+    assert "failure 1 of 3" in first.output and src.is_file()
+    assert _ledger(home) == {digest: 1}
+    second = _run("--configured", "--since", "2d")
+    assert "failure 2 of 3" in second.output and src.is_file()
+    third = _run("--configured", "--since", "2d")
+
+    assert third.exit_code == 1
+    assert "rejected  New Recording 1.m4a (WhisperFailedError)" in third.output
+    assert not src.exists()
+    assert _imported(drop, src.name).is_file()
+    assert _ledger(home) == {}
+    assert _docs(test_db) == []
+
+
+def test_a_tool_that_cannot_start_is_not_counted(
+    home: Path, drop: Path, vault: Path, tools: FakeTools, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """A broken binary is the machine, not the memo: no memo is rejected for it."""
+    src = _memo(drop)
+    _configure(home, drop)
+    tools.whisper = PermissionError(13, "denied")
+
+    result = _run("--configured", "--since", "2d")
+
+    assert "was not transcribed (TranscriptionError from PermissionError[EACCES]);" in (
+        result.output
+    )
+    assert src.is_file()
+    assert _ledger(home) == {}
+
+
+def test_a_success_clears_the_memo_s_count(
+    home: Path, drop: Path, vault: Path, tools: FakeTools, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    src = _memo(drop)
+    _configure(home, drop)
+    tools.whisper = CappedRun(b"", 3, False, False)
+    _run("--configured", "--since", "2d")
+    assert _ledger(home) != {}
+    tools.whisper = None
+
+    result = _run("--configured", "--since", "2d")
+
+    assert result.exit_code == 0, result.output
+    assert _ledger(home) == {}
+    assert len(_docs(test_db)) == 1
+    assert not src.exists()
+
+
+# --- review round 1: the run sweeps stale temp dirs and turns SIGTERM into SystemExit ------
+
+
+def test_a_voice_run_sweeps_stale_temp_dirs_first(
+    home: Path, drop: Path, vault: Path, tools: FakeTools, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any], private_tmp: Path,
+) -> None:
+    stale = private_tmp / "brain-voice-crashed"
+    stale.mkdir()
+    (stale / "memo.wav").write_bytes(b"\0" * 10)
+    old = time.time() - 4 * 3600
+    os.utime(stale, (old, old))
+    _memo(drop)
+    _configure(home, drop)
+
+    result = _run("--configured", "--since", "2d")
+
+    assert result.exit_code == 0, result.output
+    assert not stale.exists()
+
+
+def test_sigterm_is_a_system_exit_while_memos_are_transcribed(
+    home: Path, drop: Path, vault: Path, tools: FakeTools, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    before = signal.getsignal(signal.SIGTERM)
+    seen: list[Any] = []
+    original = tools._answer
+
+    def record(scripted: Any, default: CappedRun) -> CappedRun:
+        seen.append(signal.getsignal(signal.SIGTERM))
+        return original(scripted, default)
+
+    tools._answer = record  # type: ignore[method-assign]
+    _memo(drop)
+    _configure(home, drop)
+
+    result = _run("--configured", "--since", "2d")
+
+    assert result.exit_code == 0, result.output
+    assert seen and all(h not in (before, signal.SIG_DFL) for h in seen)
+    with pytest.raises(SystemExit):
+        seen[0](signal.SIGTERM, None)
+    assert signal.getsignal(signal.SIGTERM) == before

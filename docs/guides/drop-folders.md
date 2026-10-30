@@ -81,8 +81,10 @@ confidential unless you pass `--sensitivity normal`.
 
 A drop folder can also take voice memos (`.m4a`, `.mp3`, `.wav`). Each memo is transcribed
 on this machine by whisper.cpp, and only the transcript enters the brain: the audio stays in
-the folder's `imported/`, and the 16 kHz WAV made for whisper is deleted straight after.
-Nothing leaves the machine.
+the folder's `imported/`, and the 16 kHz WAV made for whisper is deleted straight after, even
+when the run is stopped with Ctrl-C or `launchctl bootout`. If the process is killed outright
+(a crash, a power cut), the WAV's temporary folder stays. The next run with a voice folder
+deletes it once it is older than 3 hours. Nothing leaves the machine.
 
 ### 1. Install whisper.cpp and a model
 
@@ -107,6 +109,11 @@ brain doctor                    # the `voice memos` line should be OK
 
 `afinfo` and `afconvert`, which read and convert the audio, are built into macOS.
 
+whisper loads the model into its own process, so the model file has to be yours: owned by
+you (or root), not writable by your group or by everyone (`chmod go-w` it), and not inside
+a drop folder. Otherwise voice memos stay off and `brain doctor` says which rule failed.
+`whisper-cli` must be found through an absolute `PATH` entry.
+
 ### 2. Configure a folder
 
 ```toml
@@ -122,23 +129,31 @@ folder. brain never reads the Voice Memos app's own store.
 
 ### What happens to a memo
 
+- The memo is opened once, without following a symlink, and both audio tools read that open
+  file. A file swapped in after the check is never read, and the tools never see the
+  memo's name.
 - `afinfo` reads its length (10 s timeout). A memo longer than `BRAIN_WHISPER_MAX_MINUTES` is
   `rejected` and left in `imported/`.
-- `afconvert` makes a 16 kHz mono WAV (60 s timeout); the WAV's size is checked against the
-  cap again.
+- `afconvert` makes a 16 kHz mono WAV (60 s timeout). It cannot write more than the cap plus
+  a second of audio, so a memo whose header understates its length cannot fill the disk.
+  The WAV's size is checked against the cap again, and a WAV cut off at that limit is
+  `rejected` as too long. The stored duration is the WAV's.
 - `whisper-cli` transcribes it, with a timeout of twice the memo's length plus a minute. The
   run's own 8-minute limit stops *new* files from starting, never a memo already being
   transcribed, so at the 60-minute cap one run can last about **two hours** (at most 2 × 60 +
   1 minutes of transcription, plus the run's 8 minutes). The LaunchAgent never starts a second
   run while one is still going.
 - A memo of silence adds no document and stays in `imported/`.
-- **Rejected, never retried:** too long, not readable as audio, or any timeout. To try one
-  again, `brain ingest <folder>/imported/<file>`. It is stored confidential, under source
+- **Rejected, never retried:** too long, not readable as audio, any timeout, or a transcript
+  over 4 MiB. To try one again, `brain ingest <folder>/imported/<file>`. It is stored confidential, under source
   `manual`, unless you pass `--sensitivity normal`.
 - **Moved back, retried next run:** whisper failing on the converted WAV, which points at the
   model or the binary rather than the memo. Each time, the run prints a warning naming the
-  memo's `imported/` name (it carries the content hash) and the error class. A memo that
-  shows up in that warning run after run is the one to look at: check `brain doctor`, then
-  try `brain ingest` on it by hand.
+  memo's `imported/` name (it carries the content hash), the error class, and
+  `failure N of 3`. The third failure on the same memo content rejects it, so it stays in
+  `imported/` instead of being retried every 10 minutes. The counts are kept in
+  `$BRAIN_HOME/state/voice-failures.json`, and a success clears a memo's count. A tool that
+  cannot start at all is not counted, since that is the machine, not the memo. To look at a
+  rejected memo, check `brain doctor`, then try `brain ingest` on it by hand.
 - With voice memos off (no `BRAIN_WHISPER_MODEL`), no model file, or no `whisper-cli`, voice
   folders are skipped with the fix printed, and their files are not moved.

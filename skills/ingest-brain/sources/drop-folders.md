@@ -37,4 +37,4 @@ OCR timeout or the secret guard: the file stays in `imported/` and is not retrie
 file failed or a folder was skipped. The usual cause is that OCR is off or `tesseract` is
 missing (or, for a voice folder, `BRAIN_WHISPER_MODEL` is unset or `whisper-cli` is missing), and
 the command prints the fix. A memo longer than `BRAIN_WHISPER_MAX_MINUTES` is `rejected`; a
-`warning: … was not transcribed` line means whisper failed and the memo goes back to be retried.
+`warning: … was not transcribed (…, failure N of 3)` line means whisper failed and the memo goes back to be retried; the third failure on the same memo rejects it.
