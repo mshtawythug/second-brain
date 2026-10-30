@@ -19,6 +19,7 @@ const SOURCE_ICONS = {
   jira: "🎫",
   github: "🔀",
   applenotes: "🗒️",
+  notion: "📓",
 };
 
 /* `vault` is the fallback, matching `sourceIconFor`. It is a real glyph rather

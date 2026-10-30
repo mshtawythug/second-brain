@@ -61,10 +61,16 @@ CAST = frozenset(
 # showcase the wrong tier (the ``jira`` reason); the ``osascript`` read cannot
 # run from a manifest seed either. ``tests/test_cli_ingest_apple_notes.py``
 # covers the path. Keeping it out also keeps the 22-doc count.
+# ``notion`` (RM-35): a Notion page is a Markdown note of the shape the corpus
+# already shows (the vault notes), so seeding one adds no search behaviour, while
+# the export path itself (the folder or zip reader, page ids from file names,
+# database row pages) cannot run from a manifest seed;
+# ``tests/test_cli_ingest_notion.py`` covers it. Keeping it out also keeps the
+# 22-doc count that the demo tests, docs and recorded demo tape pin.
 # The exemption is checked against the canonical set below, so it cannot outlive
 # the kind, and any kind added later still fails this guard until it is either
 # seeded or exempted here.
-DEMO_EXEMPT_KINDS = frozenset({"calendar", "jira", "github", "applenotes"})
+DEMO_EXEMPT_KINDS = frozenset({"calendar", "jira", "github", "applenotes", "notion"})
 EXPECTED_SOURCES = VALID_SOURCE_KINDS - DEMO_EXEMPT_KINDS
 
 # Real-provider email domains that must NEVER appear (generic provider domains,

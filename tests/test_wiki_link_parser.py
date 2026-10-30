@@ -105,9 +105,9 @@ def test_manual_external_id() -> None:
 
 def test_unknown_prefix_falls_back_to_title() -> None:
     """Obsidian allows colons inside titles. Unknown prefixes stay as titles."""
-    [link] = parse_wiki_links("[[notion:something]]")
+    [link] = parse_wiki_links("[[pigeonpost:something]]")
     assert link.target_type == "title"
-    assert link.target_value == "notion:something"
+    assert link.target_value == "pigeonpost:something"
     assert link.target_source is None
 
 

@@ -76,7 +76,7 @@ def test_default_limit_is_applied() -> None:
 
 def test_unknown_source_is_rejected_with_the_legal_values() -> None:
     with pytest.raises(UiBadRequest) as exc:
-        parse_search_params({"q": "x", "source": "notion"})
+        parse_search_params({"q": "x", "source": "carrier-pigeon"})
     assert exc.value.code == "invalid_source"
     assert "krisp" in str(exc.value)
 

@@ -48,8 +48,9 @@ class InvalidSourceKind(BrainError):
 #: ``github`` (RM-31): ``brain ingest-github`` (``gh``), or the ``ingest-brain``
 #: skill's recipe through the GitHub MCP connector into ``brain ingest-stdin``.
 #: ``applenotes`` (RM-36): ``brain ingest-apple-notes`` (``osascript``, macOS).
+#: ``notion`` (RM-35): pages from a Notion export, ``brain ingest-notion``.
 VALID_SOURCE_KINDS: frozenset[str] = frozenset(
-    {"manual", "krisp", "gmail", "slack", "calendar", "jira", "github", "applenotes"}
+    {"manual", "krisp", "gmail", "slack", "calendar", "jira", "github", "applenotes", "notion"}
 )
 
 

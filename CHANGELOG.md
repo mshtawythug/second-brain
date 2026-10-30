@@ -22,6 +22,38 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — Notion pages from Notion's Markdown export (RM-35)
+
+- **`brain ingest-notion <export-path>`** reads a Notion "Export → Markdown & CSV" folder or
+  `.zip` and stores each page as a `notion_page` document under the new `notion` source kind. No
+  Notion API, no token: the export you chose is the scope. Titles lose Notion's 32-hex id suffix.
+- Each page is deduplicated by its page id, parsed from the export's file names, not by its path:
+  re-export to a new folder or zip and re-run, and every page updates in place. A file whose
+  name carries no id, and every copy of an id that appears twice, is skipped and counted, never
+  guessed.
+- Images and attachments are skipped and counted; so are nested archives (unzip the outer one and
+  pass the inner one). Database rows are ingested, one document per row page, only with
+  `--with-databases`; a row's last-edited property dates it. `--since YYYY-MM-DD` keeps pages
+  last edited on or after that day (pages without the property are kept and counted).
+- `--max` (default 200) caps the pages written a run and prints how many remain, so a large
+  workspace drains over several runs; unchanged pages do not count. `--sensitivity`, `--tag`,
+  `--no-enrich` and `--allow-secrets` as for the other ingest commands.
+- The export is read as untrusted input: a zip is read member by member in memory and never
+  extracted; a member name that is absolute or leaves the archive, a symbolic-link, encrypted or
+  duplicate member, more than 100,000 entries, or more than 512 MiB of pages and tables refuses
+  the whole archive; a page over 8 MiB is skipped. The central directory is found as `zipfile`
+  will find it (ZIP64 included) and its entries are counted header by header, in constant memory,
+  before `zipfile` parses it; a ZIP64 layout that Python releases with and without the
+  CVE-2025-8291 zipfile fix would read differently is refused. A
+  folder is walked without following links; hard-linked files are skipped, and a file replaced
+  between listing and reading (by a link, a FIFO, a folder or another file) is refused.
+- A new page whose text matches an existing document's, and an empty page, are reported by id
+  and counted as not stored, never as unchanged or as remaining under `--max`. Files are read
+  as UTF-8 with a leading byte-order mark dropped.
+- Titles have control and format characters removed and are cut at 300 characters. Output names
+  pages by id, never by title, including the secret guard's notices (`refused <id>: N
+  finding(s)`).
+
 ### Fixed — a duplicated calendar invite no longer rewrites the other event (BL-34)
 
 - `brain ingest-calendar` and `brain ingest-github`: a new event or item whose

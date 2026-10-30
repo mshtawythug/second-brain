@@ -83,7 +83,7 @@ def test_valid_kind_passes_through_unchanged(kind: str) -> None:
     assert _source_from_frontmatter({"source": kind}, "ingested", path="f.md") == kind
 
 
-@pytest.mark.parametrize("kind", ["notion", "none", "Krisp", "", "  ", "manual x"])
+@pytest.mark.parametrize("kind", ["pigeonpost", "none", "Krisp", "", "  ", "manual x"])
 def test_unknown_kind_is_dropped_to_none(kind: str) -> None:
     """Anything outside the set degrades to ``None`` — never to a substitute.
 
@@ -135,10 +135,10 @@ def test_missing_and_non_string_source_still_return_none() -> None:
 def test_unknown_kind_is_logged_at_warning(caplog: pytest.LogCaptureFixture) -> None:
     """A dropped source is loud: the file, the bad value, and the legal set."""
     with caplog.at_level("WARNING", logger="brain.vault.sync"):
-        _source_from_frontmatter({"source": "notion"}, "ingested", path="a/b.md")
+        _source_from_frontmatter({"source": "pigeonpost"}, "ingested", path="a/b.md")
     assert len(caplog.records) == 1
     message = caplog.records[0].getMessage()
-    assert "notion" in message
+    assert "pigeonpost" in message
     assert "a/b.md" in message
     for kind in VALID_SOURCE_KINDS:
         assert kind in message
@@ -159,9 +159,9 @@ def test_valid_kind_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
 def test_unknown_source_kind_writes_no_sources_row(
     test_db: psycopg.Connection, fake_embedder, tmp_path: Path
 ) -> None:
-    """THE DEFECT. A hand-authored ``source: notion`` must not reach the column."""
+    """THE DEFECT. A hand-authored ``source: pigeonpost`` must not reach the column."""
     vault = tmp_path / "vault"
-    doc_id = _author_ingested(vault, source="notion", external_id="n-1")
+    doc_id = _author_ingested(vault, source="pigeonpost", external_id="n-1")
 
     report = _sync(test_db, fake_embedder, vault)
 
@@ -200,7 +200,7 @@ def test_unknown_source_kind_still_syncs_the_document(
     note whose body indexed perfectly well.
     """
     vault = tmp_path / "vault"
-    doc_id = _author_ingested(vault, source="notion", external_id="n-2")
+    doc_id = _author_ingested(vault, source="pigeonpost", external_id="n-2")
 
     report = _sync(test_db, fake_embedder, vault)
 
@@ -219,7 +219,7 @@ def test_one_bad_file_does_not_stop_the_walk(
 ) -> None:
     """Scale argument: a bad note among good ones costs only its own source row."""
     vault = tmp_path / "vault"
-    bad_id = _author_ingested(vault, source="notion", external_id="bad-1")
+    bad_id = _author_ingested(vault, source="pigeonpost", external_id="bad-1")
     good_id = _author_ingested(vault, source="krisp", external_id="good-1")
 
     report = _sync(test_db, fake_embedder, vault)
@@ -251,17 +251,17 @@ def test_unknown_kind_does_not_break_wiki_link_resolution_for_valid_ones(
     """``[[krisp:ok-1]]`` still resolves while a sibling file carries a bad kind.
 
     Also pins the converse the docstring's open-set promise could not deliver:
-    ``[[notion:bad-3]]`` was never resolvable — ``brain.vault.links._SOURCE_KINDS``
+    ``[[pigeonpost:bad-3]]`` was never resolvable — ``brain.vault.links._SOURCE_KINDS``
     does not parse it as a source link — so the dropped ``sources`` row costs no
     link that ever worked.
     """
     vault = tmp_path / "vault"
-    _author_ingested(vault, source="notion", external_id="bad-3")
+    _author_ingested(vault, source="pigeonpost", external_id="bad-3")
     _author_ingested(vault, source="krisp", external_id="ok-1")
     _write(
         vault / "refs.md",
         {"id": str(uuid.uuid4()), "title": "Refs"},
-        "see [[krisp:ok-1]] and [[notion:bad-3]]\n",
+        "see [[krisp:ok-1]] and [[pigeonpost:bad-3]]\n",
     )
 
     report = _sync(test_db, fake_embedder, vault)

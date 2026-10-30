@@ -20,8 +20,8 @@ PRE_RM07_KINDS = frozenset({"manual", "krisp", "gmail", "slack"})
 
 # Every kind added since, one per source ticket, so a kind cannot appear (or
 # vanish) without a line here naming the ticket that did it.
-# RM-30, RM-34, RM-31, RM-36
-ADDED_KINDS = frozenset({"calendar", "jira", "github", "applenotes"})
+# RM-30, RM-34, RM-31, RM-36, RM-35
+ADDED_KINDS = frozenset({"calendar", "jira", "github", "applenotes", "notion"})
 
 
 def test_source_kind_set_is_pre_rm07_plus_the_named_additions() -> None:

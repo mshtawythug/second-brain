@@ -99,7 +99,7 @@ def test_an_unknown_source_still_names_every_legal_value() -> None:
     from brain.ui.errors import UiBadRequest
 
     with pytest.raises(UiBadRequest) as excinfo:
-        parse_search_params({"q": "anything", "source": "notion"})
+        parse_search_params({"q": "anything", "source": "carrier-pigeon"})
 
     message = str(excinfo.value)
     for value in SOURCE_FILTER_VALUES:
