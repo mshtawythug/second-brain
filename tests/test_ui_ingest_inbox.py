@@ -736,3 +736,42 @@ def test_a_name_now_holding_another_file_never_reaches_run_one(
 
     assert snap.error is not None and snap.error.code == "inbox_file_changed"
     assert called == []
+
+
+# ------------------------------- #110 round 2: the read-back runs after run_one --
+
+
+def test_a_failed_read_back_after_the_commit_is_a_success_and_nothing_moves_back(
+    client: TestClient, registry: JobRegistry, inbox: Path, test_db: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rev-110b F1: the payload's DB read ran inside the IngestFn, so a failure there made
+    run_one move a committed file back to the inbox."""
+    import brain.ui.ingest_service as service
+
+    calls: list[str] = []
+
+    def read_back_fails(conn: Any, document_id: str) -> Any:
+        calls.append(document_id)
+        raise psycopg.OperationalError("synthetic: the connection dropped")
+
+    monkeypatch.setattr(service, "_read_back", read_back_fails)
+    _drop(inbox, "kept.md")
+
+    snap = _run(client, registry, {"name": "kept.md", "enrich": False})
+
+    assert snap.state == "succeeded", snap.error
+    result = dict(snap.result or {})
+    assert result["outcome"] == "ingested"
+    assert result["details_unavailable"] == "OperationalError"
+    assert result["sensitivity"] is None  # unknown: the lens withholds the title
+    assert "details_unavailable" in [e.code for e in snap.events]
+    assert calls == [result["document_id"]]
+    assert sorted(_tree(inbox)) == [f"{IMPORTED_DIR}/kept-{_sha8(BODY)}.md"]
+    imported = str(inbox / IMPORTED_DIR / f"kept-{_sha8(BODY)}.md")
+    assert [row[1] for row in _documents(test_db)] == [imported]
+    from brain.ui.routes_jobs import lensed_result
+
+    lensed = lensed_result(snap.result, serve_confidential_titles=False)
+    assert lensed is not None  # unknown level: withheld wherever titles are not served
+    assert lensed["title"] is None and lensed["title_withheld"] is True

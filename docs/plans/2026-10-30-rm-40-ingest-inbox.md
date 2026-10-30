@@ -210,3 +210,21 @@ findings, each reachable only by someone who can write the inbox's `imported/`:
 RM-33's and RM-38's tests are unchanged. There are five new tests in
 `tests/test_drop_folder_run_one.py`, five mutations were killed, and `drop_folder.py` keeps
 100% line and branch coverage.
+
+**rev-110b F1 (LOW), in the same round:** the result payload's read-back (`_read_back`, a DB
+read) ran inside the IngestFn after `ingest_document` had committed. A failure there made
+`run_one` move a committed file back to the inbox, while its document kept a `source_path` in
+`imported/`.
+
+- `_ingest_on` is split into `_write` (the commit) and `_payload` (the reads after it). The
+  inbox step returns right after `_write`.
+- The job builds the payload after `run_one` returns, on the same connection, through
+  `_inbox_payload`. If the read fails, the job still succeeds, with
+  `details_unavailable: "<Class>"`, a `details_unavailable` event and `sensitivity: null`, so
+  the lens withholds the title (fail-closed). The tab shows "Saved; its details could not be
+  read back." and no counts.
+- To keep `ingest_service.py` under the ceiling (751), the refusal type and its fixed
+  code/message tables moved to the new pure leaf `ui/inbox_errors.py`. The mutating code stays
+  in `ingest_service`, per the confinement rule.
+- A regression test makes `_read_back` raise, and a browser row covers the result. Four
+  mutations were killed.

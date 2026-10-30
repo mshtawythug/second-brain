@@ -1438,6 +1438,8 @@ name again, moves the file into the inbox's `imported/` folder and ingests it fr
 `inbox_unreadable`, `inbox_move_failed`, `inbox_unusable`, or the ingest codes above). The
 job ingests the file the submit checked or nothing: the opened file must have that identity,
 one link, and a size within the cap, and it is hashed reading at most the cap plus a byte.
+If the result cannot be read back after the commit, the job still succeeds, with
+`details_unavailable` (an error class) and no counts; the file stays in `imported/`.
 
 The Agent tab's backend asks a question as a job
 on the same worker, one at a time with ingest. `POST /api/ask` with JSON

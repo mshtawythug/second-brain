@@ -166,6 +166,14 @@ SCRIPTS: dict[str, list[Frame]] = {
               Frame("succeeded", [("finishing", None, None, None)],
                     _result(original_filename="zibbit plan.md", title="zibbit plan",
                             sensitivity="confidential"), cancellable=False)],
+    # RM-40 round 2: committed, but the read-back failed: no counts, title withheld.
+    "inbox-unavailable": [Frame("succeeded", [("finishing", None, None, "details_unavailable")],
+                                _result(title=None, vault_path=None, document_id=None,
+                                        original_filename=None, chunk_count=None,
+                                        sensitivity=None, summary_status=None,
+                                        title_withheld=True,
+                                        details_unavailable="OperationalError"),
+                                cancellable=False)],
     "fails": [Frame("failed", [], None, {
         "code": "embedder_busy",
         "message": "The embedding model did not answer. Nothing was written; retry.",
@@ -208,6 +216,7 @@ class FakeJobs:
         self.inbox_lists = 0
         self.inbox_posts: list[dict[str, Any]] = []
         self.inbox_error: tuple[int, str, str] | None = None
+        self.inbox_script = "inbox"
 
     def snapshot(self, job: FakeJob, after: int = 0) -> dict[str, Any]:
         frame = job.frame
@@ -328,7 +337,7 @@ class FakeJobs:
             status, code, message = self.inbox_error
             _json(route, status, {"error": {"code": code, "message": message}})
             return
-        job = FakeJob(id=f"{len(self.jobs) + 1:032x}", script=SCRIPTS["inbox"],
+        job = FakeJob(id=f"{len(self.jobs) + 1:032x}", script=SCRIPTS[self.inbox_script],
                       kind="ingest.inbox")
         job.events.append({"seq": 1, "at": STAMP, "phase": "queued",
                            "done": None, "total": None, "code": None})

@@ -71,7 +71,9 @@ git tag scheme:
   with a second hard link is refused; the listing reads at most 5,000 entries off the event
   loop and is fetched only when the user picks Inbox mode. A file already in `imported/`
   under the same content-addressed name is held to the same checks before it counts as the
-  same file, and the copy used on a volume without hard links is bounded by the cap too.
+  same file, and the copy used on a volume without hard links is bounded by the cap too. A
+  result that cannot be read back after the commit is reported as saved, never as a failure
+  that would put the file back in the inbox.
 
 ### Added — voice memos, transcribed on this machine (RM-38)
 

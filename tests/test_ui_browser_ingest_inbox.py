@@ -230,3 +230,18 @@ def test_a_refusal_refreshes_the_list(harness: Harness) -> None:
     page.wait_for_function(
         "() => document.querySelectorAll('#ingest-inbox-list li').length === 1"
     )
+
+
+def test_a_success_whose_details_could_not_be_read_back_says_so(harness: Harness) -> None:
+    """#110 round 2: no "null chunks", and a plain note that it was saved."""
+    harness.jobs.inbox_script = "inbox-unavailable"
+    page = _inbox_mode(harness)
+    page.wait_for_selector("#ingest-inbox-list li")
+
+    page.check("#ingest-inbox-file-0")
+    page.click("#ingest-submit")
+    row = harness.settled()
+
+    facts = row.locator(".job-facts").inner_text()
+    assert "Saved; its details could not be read back." in facts
+    assert "null" not in facts and "chunk" not in facts
