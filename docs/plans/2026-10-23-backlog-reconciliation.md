@@ -183,7 +183,7 @@ residues, recorded with their repairs.
 |---|---|---|
 | H-1 | Move-identity residue: a brand-new, never-synced, id-less file that replaces P and is renamed within one debounce window still adopts the previous document's id. | #52 |
 | H-2 | A closed watcher drops late events. The next startup sync reconciles them, but a delete is pruned only with prune on. | #51 |
-| H-3 | Graph-lock residuals 2–4: `build_graph` raises for a document deleted mid-enumeration; the plan re-check compares `content_hash` only; the cross-type collapse window is cosmetic. | #53 |
+| H-3 | **SHIPPED (#93, RM-27).** Graph-lock residuals 2–4: `build_graph` counts a document deleted mid-enumeration as `skipped_deleted` instead of raising; the plan re-check compares an `inputs_fingerprint` over every input it read, not only `content_hash`; the cosmetic cross-type collapse window is accepted, its reason recorded in `graph_rag/cross_type.py`. ~~`build_graph` raises for a document deleted mid-enumeration; the plan re-check compares `content_hash` only; the cross-type collapse window is cosmetic.~~ | #53 |
 | H-4 | Watcher reconnect residue: a delete committed just before the connection died leaves a ghost AGE vertex (repair: `brain graphrag remove`); a delete not applied at shutdown is redone only by `brain vault sync --prune`. | #56 |
 | H-5 | Log-privacy blind spots of the G1 guard: a value derived from an exception and logged outside its handler; an exception stored on an attribute; a nested `def` or `lambda` inside a handler. | #58 |
 | H-6 | Two terminal error reports still carry exception text: `vault/export.py` `summary.errors` and `cli_sensitivity.py` `result.errors`. Both were judged content-free. | #58 |
@@ -257,7 +257,7 @@ eval only now that the eval has just been re-judged.
 | 13 | **7.4: tag merge / rename** | S | SHIPPED (#87, RM-21). ~~Housekeeping. Normalization already prevents new drift.~~ |
 | 14 | **1.3 phase 2: interactions-aware ranking** | M | Only worth doing once `brain usage` shows enough opens to learn from. Gate it on the data. |
 | 15 | **BL-4: copy-path / external-editor affordance** | XS | SHIPPED (#89, RM-23): the note pane's Copy path button, `abs_path` on loopback only. ~~Small. Its default was already decided.~~ |
-| 16 | **H-1 to H-6, BL-12: watcher / graph / log residues, and the stale ingest docstring** | XS–S each | Each has a known repair, and none loses data. Take them when their module is next opened (Scout rule). |
+| 16 | **H-1 to H-6, BL-12: watcher / graph / log residues, and the stale ingest docstring** | XS–S each | Each has a known repair, and none loses data. Take them when their module is next opened (Scout rule). H-3 SHIPPED (#93, RM-27). |
 | 17 | **3.3 leg: `--entity` search filter** | S | Mostly covered by `brain graphrag` today. Ask whether it is wanted before building it. |
 | 18 | **Source breadth: 2.1, 2.3, 3.5 / 5.1, 2.8, 2.4 (Apple Notes), 5.2** | M–L each | Each is a new extractor and a new source kind. Order them by what the owner actually generates. Each needs its own design for scope and PII. |
 | 19 | **2.5 browser history, 2.6 + 7.3 code ingestion, 2.9 long tail** | L | The heaviest privacy load, or the least evidence of need. Keep them, because the owner accepted them, but last. |
