@@ -49,7 +49,16 @@ explained below.
      characters and decodes `%40` and HTML entities; dash variants (U+2010–U+2015) count as phone
      separators; `pwd` / `pw` (with a value) and `Kennung` are keywords; addresses may have spaces
      around `@` and the dots; `tel:` / `sip:` links are removed with the other links. The date
-     mask covers `M/D/YYYY`, `D.M.YYYY`, `YYYY.MM.DD`, `YYYY/MM/DD` and two-digit years.
+     mask covers `M/D/YYYY`, `D.M.YYYY`, `YYYY.MM.DD`, `YYYY/MM/DD`, two-digit years and year
+     ranges (`2026-2028`), but masks a candidate only when it is a WHOLE number group (nothing
+     numeric glued on either side, one separator throughout) and a valid date or time, with a
+     four-digit year in 1900–2099. The first widening (V1) masked date-shaped slices of European
+     numbers ("01.70.37.22.46", "+49 30 12-34-5678"), which then survived every field; the
+     bounds and the validation close that (rev-96, HIGH), and a test table pins both directions.
+   - **The directory is updated once per document per run** (aud-96 D1): attendees are recorded
+     before the write when the document is new or its participants changed, and after it only
+     when the body changed and they were not recorded already. A first ingest had counted every
+     attendee twice, which skews `resolve_name_to_email` (it picks by summed count).
    - **Titles keep the words before the secret** (`clean_title`, sec-96 T1–T4). A title's lines
      are joined into one. A credential keyword (passcode, password, Passwort, Kennwort, Kennung,
      access code, meeting ID, conference ID, `pwd`, `pw`) truncates the title from the keyword to

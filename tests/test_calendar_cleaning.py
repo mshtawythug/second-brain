@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 
 from brain.ingest import calendar as cal
+from brain.ingest.calendar_text import clean_description, clean_line, clean_title
 from tests import calendar_fixtures as fx
 
 PLACEHOLDER = "(calendar event)"
@@ -358,3 +360,47 @@ def test_a_longer_line_after_a_dial_in_line_is_kept() -> None:
     body = _only_doc(_event_with("Planning", description=text)).doc.content
 
     assert "Next topic: budget planning" in body
+
+
+# --- the date mask cannot hide a phone number (rev-96 HIGH at 6402da9) --------------
+
+PHONES_THAT_LOOK_LIKE_DATES = [
+    ("France: 01.70.37.22.46", "70.37"),
+    ("+33 1.70.37.22.46", "70.37"),
+    ("+49 30 12-34-5678", "5678"),
+    ("Italy 02-87-33-62-39", "87-33"),
+    ("Germany 069 12-34-56", "12-34"),
+    ("2026.10.06 and 01.70.37.22.46", "70.37"),
+    ("Line 12:99 12345", "12345"),  # not a valid time, so not masked
+    ("Tel 9123.12.10", "9123"),  # a valid date slice with a digit glued before
+    ("Tel 12.10.26.5555", "5555"),  # ... and with digits glued after
+    ("Fax 01.12-26 3344", "3344"),  # mixed separators: not one date
+]
+DATES_THAT_STAY = [
+    "Team offsite 10/06/2026 - 10/08/2026",
+    "Release 2026.10.06 go/no-go",
+    "Planning 6.10.26 to 2026/10/30",
+    "Due 10/30/2026",  # M/D/Y: only the month-first reading is a date
+    "Due 30.10.2026",  # D.M.Y: only the day-first reading is a date
+    "Kickoff 31.12.00 4455",  # a two-digit year, then a room number
+    "Planning 2026-2028",  # a year range
+    "Deadline 2026-10-06 at 10:30",
+]
+
+
+@pytest.mark.parametrize(("text", "phone"), PHONES_THAT_LOOK_LIKE_DATES)
+@pytest.mark.parametrize("clean", [clean_line, clean_title, clean_description])
+def test_a_phone_number_shaped_like_a_date_is_removed(
+    clean: Callable[[object], str], text: str, phone: str
+) -> None:
+    assert phone not in clean(text)
+
+
+def test_a_phone_line_between_description_lines_is_dropped() -> None:
+    assert clean_description("Agenda\nFrance: 01.70.37.22.46\nNotes") == "Agenda\nNotes"
+
+
+@pytest.mark.parametrize("text", DATES_THAT_STAY)
+@pytest.mark.parametrize("clean", [clean_line, clean_title, clean_description])
+def test_a_date_is_not_a_phone_number(clean: Callable[[object], str], text: str) -> None:
+    assert clean(text) == text

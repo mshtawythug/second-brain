@@ -658,3 +658,26 @@ def test_a_cancelled_future_occurrence_stops_dating_the_series(
     after = _calendar_docs(test_db)[fx.SERIES_ID]
     assert after["sent_at"] == datetime(2026, 10, 27, 16, 0, tzinfo=UTC)
     assert "2026-11-03T09:00:00-07:00" not in after["metadata"]["occurrences"]["last"]
+
+
+
+def test_a_first_run_counts_each_attendee_once_per_document(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
+) -> None:
+    """aud-96 D1: a first ingest recorded every attendee twice, skewing the
+    directory's name resolution, which picks by the summed count."""
+    assert _run().exit_code == 0
+
+    rows = test_db.execute(
+        "SELECT email, occurrence_count FROM directory_entries WHERE source = 'calendar'"
+    ).fetchall()
+    counts = {str(r[0]): int(r[1]) for r in rows}
+    # Avery: the single event and the series. Blake: the series and the all-day
+    # event. The owner attends those three (the private event lists no one).
+    assert counts == {fx.AVERY[1]: 2, fx.BLAKE[1]: 2, fx.OWNER[1]: 3}
+
+    assert _run().exit_code == 0
+    rows = test_db.execute(
+        "SELECT email, occurrence_count FROM directory_entries WHERE source = 'calendar'"
+    ).fetchall()
+    assert {str(r[0]): int(r[1]) for r in rows} == counts  # an unchanged re-run adds nothing

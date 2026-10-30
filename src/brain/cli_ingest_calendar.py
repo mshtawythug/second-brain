@@ -249,7 +249,10 @@ def _ingest_one(conn: psycopg.Connection[Any], cd: CalendarDoc, run: _Run) -> st
     # An earlier window must not move a series backwards, and an occurrence the
     # window no longer holds is dropped (calendar.merge_volatile).
     metadata = calendar_ingest.merge_volatile(stored_meta, cd.doc.metadata, window=run.window)
-    if stored is None or stored_meta.get("participants") != metadata.get("participants"):
+    # Each attendee is recorded at most once per run: ``upsert_pair`` bumps an
+    # occurrence count, and the directory resolves a name by the summed count.
+    recorded = stored is None or stored_meta.get("participants") != metadata.get("participants")
+    if recorded:
         # Before the write, so the graph reconcile it triggers resolves the
         # attendees through the directory.
         _record_attendees(conn, cd)
@@ -281,7 +284,8 @@ def _ingest_one(conn: psycopg.Connection[Any], cd: CalendarDoc, run: _Run) -> st
     _emit_egress_notice(result.egress_notice)
     assert result.document_id is not None  # every non-replace path returns the row id
     if result.created or result.body_changed:
-        _record_attendees(conn, cd)  # display names live in the body
+        if not recorded:
+            _record_attendees(conn, cd)  # a changed body can mean changed names
         return "ingested" if result.created else "updated"
     return _refresh_metadata(conn, result.document_id, stored_meta, metadata, run)
 

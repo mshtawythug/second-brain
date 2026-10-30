@@ -27,7 +27,10 @@ Per line, in this order:
    - a phone-like run of 7 or more digits, with spaces, dots, slashes,
      brackets, ``+``, ``x`` and any hyphen or dash (U+2010 to U+2015) between
      them. Dates (``2026-10-06``, ``10/06/2026``, ``6.10.26``, ``2026.10.06``,
-     ``2026/10/06``) and times (``10:30``) are masked first;
+     ``2026/10/06``), year ranges (``2026-2028``) and times (``10:30``) are
+     masked first, but only as a whole number group that is a valid date or
+     time, so "01.70.37.22.46" (no date is a whole group in it) and
+     "+49 30 12-34-5678" (month 34) are still phone numbers;
    - the ``,,digits`` / ``digits#`` forms of a one-tap number.
 
    In a description, a location or a display name **the whole line is
@@ -72,6 +75,7 @@ from __future__ import annotations
 import html
 import re
 import unicodedata
+from datetime import datetime
 
 __all__ = ["clean_description", "clean_line", "clean_title"]
 
@@ -114,8 +118,18 @@ _DIAL_WITH_VALUE = re.compile(
     re.IGNORECASE,
 )
 # Masked before the digit-run check: a date or a time is not a phone number.
+# A candidate counts only as a WHOLE number group (nothing numeric glued on
+# either side, one separator throughout), and only if it is a valid date or
+# time (``_mask_dates``), with a four-digit year in 1900-2099. Without these,
+# European numbers such as "01.70.37.22.46" or "+49 30 12-34-5678" contain a
+# "date" slice and survive.
 _DATE_OR_TIME = re.compile(
-    r"\b\d{4}[-./]\d{1,2}[-./]\d{1,2}\b|\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b|\b\d{1,2}:\d{2}\b"
+    r"(?<![\d.\-/+:])(?:"
+    r"(?P<y>(?:19|20)\d{2})(?P<s1>[-./])(?P<m>\d{1,2})(?P=s1)(?P<d>\d{1,2})"
+    r"|(?P<a>\d{1,2})(?P<s2>[-./])(?P<b>\d{1,2})(?P=s2)(?P<yy>\d{2}|(?:19|20)\d{2})"
+    r"|(?P<y1>(?:19|20)\d{2})\s*[-\u2013]\s*(?:19|20)\d{2}"
+    r"|(?P<h>\d{1,2}):(?P<mi>\d{2})"
+    r")(?![.\-/:]?\d)"
 )
 _SEPARATOR = r"\s().\-/+‐-―"
 _DIGIT_RUN = re.compile(rf"\+?\d(?:[{_SEPARATOR}x]*\d){{6,}}", re.IGNORECASE)
@@ -229,7 +243,7 @@ def _clean_title_line(line: str) -> str:
     text = _DIAL_WITH_VALUE.sub(" ", text)
     # Digit runs, with dates and times masked in place so positions line up;
     # then what is left of a one-tap form.
-    masked = _DATE_OR_TIME.sub(lambda m: "§" * len(m.group()), text)
+    masked = _mask_dates(text)
     for match in reversed(list(_DIGIT_RUN.finditer(masked))):
         text = f"{text[:match.start()]} {text[match.end():]}"
     text = _EMAIL.sub(" ", _ONE_TAP_TOKEN.sub(" ", text))
@@ -263,5 +277,38 @@ def _tidy(text: str) -> str:
 def _is_dial_in(line: str) -> bool:
     if _KEYWORD.search(line) or _ONE_TAP.search(line):
         return True
-    masked = _DATE_OR_TIME.sub(" ", line)
+    masked = _mask_dates(line)
     return _DIGIT_RUN.search(masked) is not None
+
+
+def _mask_dates(text: str) -> str:
+    """``text`` with each valid date, year range and time overwritten in place.
+
+    The fill keeps positions, so a digit run found in the result maps back to
+    ``text`` (title mode removes it from there).
+    """
+    return _DATE_OR_TIME.sub(
+        lambda m: "§" * len(m.group()) if _is_valid_date(m) else m.group(), text
+    )
+
+
+def _is_valid_date(match: re.Match[str]) -> bool:
+    if match["y"]:
+        return _is_date(int(match["y"]), int(match["m"]), int(match["d"]))
+    if match["a"]:
+        year = int(match["yy"])
+        year = year + 2000 if year < 100 else year
+        first, second = int(match["a"]), int(match["b"])
+        # D.M.Y or M/D/Y: either reading will do.
+        return _is_date(year, second, first) or _is_date(year, first, second)
+    if match["y1"]:
+        return True
+    return int(match["h"]) < 24 and int(match["mi"]) < 60
+
+
+def _is_date(year: int, month: int, day: int) -> bool:
+    try:
+        datetime(year, month, day)
+    except ValueError:
+        return False
+    return True
