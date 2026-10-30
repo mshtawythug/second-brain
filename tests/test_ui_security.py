@@ -473,6 +473,34 @@ def test_cross_site_sec_fetch_is_rejected(tmp_path: Path) -> None:
     assert response.json()["error"]["code"] == "cross_site"
 
 
+@pytest.mark.parametrize(
+    ("headers", "status", "code"),
+    [
+        ({"Origin": "https://evil.example"}, 403, "origin_mismatch"),
+        ({}, 403, "origin_missing"),
+        ({"Origin": ORIGIN, "Sec-Fetch-Site": "cross-site"}, 403, "cross_site"),
+    ],
+)
+def test_an_ask_is_guarded_like_every_mutation(
+    tmp_path: Path, headers: dict[str, str], status: int, code: str
+) -> None:
+    """RM-18a: an ask spends minutes of the chat model, so it is a guarded write."""
+    with _client(_context(tmp_path)) as client:
+        response = client.post("/api/ask", json={"question": "q"}, headers=headers)
+    assert response.status_code == status
+    assert response.json()["error"]["code"] == code
+
+
+def test_a_form_cannot_submit_an_ask(tmp_path: Path) -> None:
+    with _client(_context(tmp_path)) as client:
+        response = client.post(
+            "/api/ask",
+            content="question=q",
+            headers={"Origin": ORIGIN, "Content-Type": "application/x-www-form-urlencoded"},
+        )
+    assert response.status_code == 415
+
+
 def test_form_content_type_cannot_reach_a_write_handler(tmp_path: Path) -> None:
     """An HTML form can only send these types, so requiring JSON blocks form CSRF."""
     with _client(_context(tmp_path)) as client:
@@ -500,6 +528,7 @@ def test_form_content_type_cannot_reach_a_write_handler(tmp_path: Path) -> None:
         ("DELETE", "/api/notes/abcdef"),
         ("POST", "/api/notes/abcdef/draft"),
         ("POST", "/api/notes/abcdef/move"),
+        ("POST", "/api/ask"),
     ],
 )
 def test_read_only_blocks_every_write(
@@ -575,7 +604,8 @@ def test_token_does_not_gate_the_shell(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "path",
-    ["/api/health", "/api/status", "/api/facets", "/api/search", "/api/tree"],
+    ["/api/health", "/api/status", "/api/facets", "/api/search", "/api/tree",
+     "/api/ask/config"],
 )
 @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE"])
 def test_read_endpoints_reject_mutating_methods(
@@ -587,7 +617,7 @@ def test_read_endpoints_reject_mutating_methods(
 
 
 @pytest.mark.parametrize(
-    "path", ["/api/notes", "/api/notes/abcdef/draft", "/api/notes/abcdef/move"]
+    "path", ["/api/notes", "/api/notes/abcdef/draft", "/api/notes/abcdef/move", "/api/ask"]
 )
 def test_write_endpoints_reject_get(tmp_path: Path, path: str) -> None:
     with _client(_context(tmp_path)) as client:

@@ -8,15 +8,19 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ._http import context_of, json_body, ok
+from .ask_service import ASK_KIND
 from .errors import UiBadRequest, UiConflict, UiNotFound
 from .ingest_service import require_ingest, require_jobs
 from .jobs import JobSnapshot, JobUnknown, NotCancellable
+
+if TYPE_CHECKING:  # pragma: no cover — typing only
+    from .context import UiContext
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -72,8 +76,51 @@ def lensed_result(
     return payload
 
 
+#: What a withheld citation loses: everything that names or quotes its document.
+_CITATION_NAMING_KEYS = ("document_id", "title", "snippet")
+
+
+def lens_ask_result(
+    result: Mapping[str, Any] | None, *, serve_confidential_bodies: bool
+) -> dict[str, Any] | None:
+    """An ask result as this server may show it: each CITATION lensed (RM-18a).
+
+    :func:`lensed_result` reads top-level keys only, and an ask names its documents
+    one level down, in ``citations``. Unless the server serves confidential bodies,
+    a citation whose ``sensitivity`` is not ``normal`` (a missing one included:
+    fail-closed) has :data:`_CITATION_NAMING_KEYS` withheld and ``withheld: true``;
+    if any is, ``answer`` and ``sub_queries`` are withheld too, since both can
+    paraphrase it. Keyed on the BODIES flag, not the titles one: an ask is a
+    requested surface, unlisted and read only by its id (A7, A10; plan doc D1).
+    With bodies withheld, retrieval already excluded confidential documents, so
+    this is the second, fail-closed layer.
+    """
+    if result is None:
+        return None
+    payload: dict[str, Any] = _thaw(result)
+    citations: list[dict[str, Any]] = payload.get("citations") or []
+    for citation in citations:
+        withhold = (
+            not serve_confidential_bodies and citation.get("sensitivity") != "normal"
+        )
+        if withhold:
+            for key in _CITATION_NAMING_KEYS:
+                citation[key] = None
+        citation["withheld"] = withhold
+    any_withheld = any(c["withheld"] for c in citations)
+    if any_withheld:
+        payload["answer"] = None
+        payload["sub_queries"] = None
+    payload["title_withheld"] = any_withheld
+    return payload
+
+
 def snapshot_payload(
-    snap: JobSnapshot, *, serve_confidential_titles: bool, listing: bool = False
+    snap: JobSnapshot,
+    *,
+    serve_confidential_titles: bool,
+    serve_confidential_bodies: bool = False,
+    listing: bool = False,
 ) -> dict[str, Any]:
     """The wire shape of a :class:`JobSnapshot`, with the result lensed.
 
@@ -100,9 +147,16 @@ def snapshot_payload(
     }
     if listing:
         return payload
-    payload["result"] = lensed_result(
-        snap.result, serve_confidential_titles=serve_confidential_titles
-    )
+    if snap.kind == ASK_KIND:
+        # Fail-closed default: a caller that does not say bodies are served gets
+        # every non-normal citation withheld.
+        payload["result"] = lens_ask_result(
+            snap.result, serve_confidential_bodies=serve_confidential_bodies
+        )
+    else:
+        payload["result"] = lensed_result(
+            snap.result, serve_confidential_titles=serve_confidential_titles
+        )
     payload["events"] = [
         {
             "seq": e.seq,
@@ -139,7 +193,10 @@ def _after(request: Request) -> int:
 
 
 async def list_jobs(request: Request) -> JSONResponse:
-    """Recent jobs, newest first, without their event logs or results."""
+    """Recent jobs, newest first, without their event logs or results.
+
+    Ask jobs are left out (A10): a client reads an ask only by the id it submitted.
+    """
     ctx = context_of(request)
     jobs = require_jobs(ctx)
     titles = ctx.serve_confidential_titles
@@ -148,6 +205,7 @@ async def list_jobs(request: Request) -> JSONResponse:
             "jobs": [
                 snapshot_payload(s, serve_confidential_titles=titles, listing=True)
                 for s in jobs.list_recent()
+                if s.kind != ASK_KIND
             ]
         }
     )
@@ -162,7 +220,7 @@ async def get_job(request: Request) -> JSONResponse:
         snap = jobs.get(request.path_params["job_id"], after=after)
     except JobUnknown as exc:
         raise _unknown() from exc
-    return ok(snapshot_payload(snap, serve_confidential_titles=ctx.serve_confidential_titles))
+    return ok(job_payload(ctx, snap))
 
 
 async def cancel_job(request: Request) -> JSONResponse:
@@ -178,7 +236,13 @@ async def cancel_job(request: Request) -> JSONResponse:
         raise UiConflict(
             "writing has started; the job will finish", code="not_cancellable"
         ) from exc
-    return ok(
-        snapshot_payload(snap, serve_confidential_titles=ctx.serve_confidential_titles),
-        status=202 if snap.state == "running" else 200,
+    return ok(job_payload(ctx, snap), status=202 if snap.state == "running" else 200)
+
+
+def job_payload(ctx: UiContext, snap: JobSnapshot) -> dict[str, Any]:
+    """:func:`snapshot_payload` with both of this server's confidential lenses."""
+    return snapshot_payload(
+        snap,
+        serve_confidential_titles=ctx.serve_confidential_titles,
+        serve_confidential_bodies=ctx.serve_confidential_bodies,
     )

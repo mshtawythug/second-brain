@@ -26,6 +26,7 @@ import psycopg
 from ..config import Config
 from ..db import connect
 from ..errors import BrainError
+from .ask_service import ASK_KIND, ASK_RETAIN_FOR, AskRuntime
 from .context import (
     Resolved,
     UiContext,
@@ -370,6 +371,7 @@ def build_context(
     (:func:`resolve_bind_addresses`); the loopback test, the Origin and the Host
     allowlist all follow it, so a hostname is judged by where it points.
     """
+    from ..chat import chat_json
     from ..search import hybrid_search
 
     logging_enabled, notices = preflight(cfg)
@@ -434,8 +436,12 @@ def build_context(
             max_queued=MAX_QUEUED_JOBS,
             retain=RETAIN_JOBS,
             retain_for=RETAIN_FOR,
+            # A10: an ask result quotes bodies, so it is kept for 10 minutes.
+            retain_for_by_kind={ASK_KIND: ASK_RETAIN_FOR},
         ),
         ingest_runtime=IngestRuntime.from_config(cfg),
+        # The Agent tab (RM-18a) asks on the same worker and the same bind rule.
+        ask_runtime=AskRuntime(chat=chat_json),
         ingest_enabled=loopback and not read_only,
         # Lazy: no directory exists until the first upload (upload_staging).
         uploads=(

@@ -22,6 +22,35 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — the Agent tab's backend: ask over HTTP
+
+`brain ui` can now answer a question as a job (roadmap ticket RM-18a, the server
+half of the Agent tab; the tab itself ships in RM-18b).
+
+- `POST /api/ask` with `{question, no_loop?}` queues an ask (202) on the Ingest
+  tab's single worker, so an ask and an ingest never run at once. It runs the same
+  plan, retrieve, reflect and synthesize loop as `brain ask`, in `hybrid` mode.
+  `GET /api/ask/config` reports whether asking is available and why not.
+- Progress, result and cancel reuse `/api/jobs/{id}`: each step is an event, the
+  result is `brain ask --json`'s shape plus each citation's stored sensitivity and
+  `elapsed_ms`, and a cancel is honoured at every step, chat call and embed until
+  the answer is recorded. A cancelled ask records nothing.
+- The whole ask is capped at `BRAIN_ASK_MAX_ITERATIONS` × 3 ×
+  `BRAIN_ASK_TIMEOUT_SECONDS` (`timeout`). Failures carry fixed, class-only
+  messages (`chat_unavailable`, `context_overflow`, `output_truncated`,
+  `synthesis_failed`, `embedder_unavailable`, `database_error`, `internal_error`).
+- Privacy: answers draw on confidential documents only where the server serves
+  confidential bodies; a citation of a confidential or unknown-level document is
+  withheld, with the answer, where it does not. Ask results quote document text,
+  so they are never listed by `GET /api/jobs` and are kept for 10 minutes.
+- Asking is refused on `--read-only` and over `--host` / `--lan`, like ingest.
+
+### Fixed — a finished UI job outlived its retention
+
+`GET /api/jobs/{id}` and its cancel now drop a job past its retention. Before,
+expiry ran only when a job was submitted or the list was read, so a finished job
+stayed readable by id for as long as neither happened.
+
 ### Added — the Ingest tab: upload a file
 
 The **Ingest** tab can now upload one file per job (roadmap ticket RM-13, phase 3
