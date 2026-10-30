@@ -30,7 +30,10 @@ git tag scheme:
   `BRAIN_OCR_MAX_PAGES` (default 50) pages at 200 dpi and reads them with the
   local `tesseract` binary, 60 seconds at most per page. The text is stored as
   `[page N]` blocks, and `metadata.ocr` records the page count and engine.
-  Born-digital PDFs are never OCR'd.
+  Born-digital PDFs are never OCR'd. A page renders to at most 70 million
+  pixels (one that fits only below 50 dpi is skipped), and one document gets at
+  most 10 minutes of OCR, so a forged page size or a long scan cannot exhaust
+  memory or hold the `brain ui` job worker.
 - New knobs `BRAIN_OCR` (`auto` or `off`), `BRAIN_OCR_LANG` (default `eng`) and
   `BRAIN_OCR_MAX_PAGES`, in `brain/settings/ocr.py`; `brain doctor` gains an
   `ocr` line. Without `tesseract` (`brew install tesseract`), an image-only PDF

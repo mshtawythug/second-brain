@@ -1,8 +1,11 @@
 """PDF extractor — pypdf primary, pdfplumber fallback, OCR for image-only pages (RM-32)."""
 import io
 import logging
+import math
 import os
+import time
 from collections.abc import Callable
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -28,13 +31,47 @@ TESSERACT_HINT = (
     "(brew install tesseract), or set BRAIN_OCR=off to silence this"
 )
 
+#: The most pixels one page may render to (pdfium rounds each side up, so to within one row
+#: and one column): A0 at 200 dpi is about 62 Mpx. A page's MediaBox
+#: is the untrusted file's to set (200,000 pt square asks for ~309 Gpx), and neither pdfium
+#: nor ``to_pil()`` applies Pillow's decompression-bomb limit, so the cap is enforced here.
+MAX_PIXELS = 70_000_000
+#: A page that only fits under :data:`MAX_PIXELS` below 50 dpi is skipped: text that small
+#: is not legible to tesseract, so rendering it would cost memory and read nothing.
+MIN_RENDER_DPI = 50
+#: The total OCR time one document may take. ``brain ui`` runs ingest on one job worker
+#: that cannot be cancelled, so 50 pages at the 60 s page limit (or 1,000 at the knob's
+#: maximum) must not hold it for hours. Each page's timeout is cut to what remains.
+OCR_DEADLINE_S = 600.0
+
 PageRenderer = Callable[[pypdfium2.PdfPage], bytes]
 PdfiumOpener = Callable[[Path], pypdfium2.PdfDocument]
+Clock = Callable[[], float]
 
 
-def render_page_png(page: pypdfium2.PdfPage) -> bytes:
-    """Render ``page`` at :data:`~brain.ingest.ocr.RENDER_DPI` and encode it as PNG."""
-    image = page.render(scale=RENDER_DPI / 72).to_pil()
+class PageTooLargeError(OcrError):
+    """A page would render below :data:`MIN_RENDER_DPI` to fit :data:`MAX_PIXELS`."""
+
+
+def render_scale(width_pt: float, height_pt: float, *, max_pixels: int = MAX_PIXELS) -> float:
+    """The render scale for a page of this size: 200 dpi, cut so the bitmap fits ``max_pixels``.
+
+    Raises :class:`PageTooLargeError` when that scale is below :data:`MIN_RENDER_DPI`, or when
+    the size is not a positive finite area (a degenerate MediaBox).
+    """
+    area = width_pt * height_pt
+    if not (math.isfinite(area) and area > 0):
+        raise PageTooLargeError("page has no positive area")
+    scale = min(RENDER_DPI / 72, math.sqrt(max_pixels / area))
+    if scale < MIN_RENDER_DPI / 72:
+        raise PageTooLargeError("page too large to render legibly")
+    return scale
+
+
+def render_page_png(page: pypdfium2.PdfPage, *, max_pixels: int = MAX_PIXELS) -> bytes:
+    """Render ``page`` at up to 200 dpi within ``max_pixels``, and encode it as PNG."""
+    width, height = page.get_size()
+    image = page.render(scale=render_scale(width, height, max_pixels=max_pixels)).to_pil()
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
@@ -50,6 +87,7 @@ def extract_pdf(
     ocr: OcrSetup | None = None,
     render: PageRenderer = render_page_png,
     open_pdfium: PdfiumOpener = _open_pdfium,
+    clock: Clock = time.monotonic,
 ) -> ExtractedDoc:
     """Extract an :class:`ExtractedDoc` from a PDF file on disk.
 
@@ -58,9 +96,10 @@ def extract_pdf(
     repeated header/footer lines that appear on a majority of pages.
 
     When the text still averages under :data:`MIN_CHARS_PER_PAGE` per page and a
-    page carries an image, the pages are OCR'd (:func:`_ocr_pages`). ``ocr`` is
-    resolved from ``os.environ`` only then, so a born-digital PDF never reads the
-    ``BRAIN_OCR*`` knobs; ``ocr``, ``render`` and ``open_pdfium`` are test seams.
+    page within the cap carries an image, the pages are OCR'd (:func:`_ocr_pages`).
+    ``ocr`` is resolved from ``os.environ`` only then, so a PDF with a real text layer
+    never reads the ``BRAIN_OCR*`` knobs, and with ``BRAIN_OCR=off`` pdfium never
+    opens the file. ``ocr``, ``render``, ``open_pdfium`` and ``clock`` are test seams.
     """
     reader = PdfReader(str(path))
     pages_text: list[str] = []
@@ -77,7 +116,9 @@ def extract_pdf(
     content = full_text.strip()
     metadata: dict[str, Any] = {"page_count": page_count}
     if len(content) < MIN_CHARS_PER_PAGE * max(page_count, 1):
-        recognised = _ocr_fallback(path, ocr, render=render, open_pdfium=open_pdfium)
+        recognised = _ocr_fallback(
+            path, ocr, render=render, open_pdfium=open_pdfium, clock=clock
+        )
         if recognised is not None:
             content, metadata["ocr"] = recognised
 
@@ -96,29 +137,36 @@ def _ocr_fallback(
     *,
     render: PageRenderer,
     open_pdfium: PdfiumOpener,
+    clock: Clock,
 ) -> tuple[str, dict[str, Any]] | None:
     """OCR an image-bearing PDF: ``(text, metadata.ocr)``, or ``None`` when nothing was read."""
+    setup = ocr if ocr is not None else resolve_ocr(os.environ)
+    if not setup.settings.enabled:
+        # Before pdfium: with OCR off, the untrusted file is never handed to a second parser.
+        return None
     try:
         document = open_pdfium(path)
     except pypdfium2.PdfiumError as exc:
         logger.warning("OCR could not open a PDF: %s", describe_failure(exc))
         return None
     try:
-        if not _has_image(document):
+        if not _has_image(document, setup.settings.max_pages):
             return None
-        setup = ocr if ocr is not None else resolve_ocr(os.environ)
         if setup.engine is None:
             if setup.missing_binary:
                 logger.warning(TESSERACT_HINT)
             return None
-        return _ocr_pages(document, setup.engine, setup, render)
+        return _ocr_pages(document, setup.engine, setup, render, clock)
     finally:
         document.close()
 
 
-def _has_image(document: pypdfium2.PdfDocument) -> bool:
-    """True when any page carries an image object; a page with none has nothing to recognise."""
-    for page in document:
+def _has_image(document: pypdfium2.PdfDocument, max_pages: int) -> bool:
+    """True when a page within the cap carries an image object; one with none has nothing to read.
+
+    Only the first ``max_pages`` pages are loaded: those are the only ones OCR would render.
+    """
+    for page in islice(document, max_pages):
         if next(page.get_objects(filter=(pdfium_c.FPDF_PAGEOBJ_IMAGE,)), None) is not None:
             return True
     return False
@@ -129,16 +177,29 @@ def _ocr_pages(
     engine: OcrEngine,
     setup: OcrSetup,
     render: PageRenderer,
+    clock: Clock,
 ) -> tuple[str, dict[str, Any]] | None:
-    """Render and recognise pages up to the cap; a failed page is skipped, class-only."""
+    """Render and recognise pages up to the cap and the deadline; a failed page is skipped."""
     total = len(document)
     limit = min(total, setup.settings.max_pages)
+    deadline = clock() + OCR_DEADLINE_S
     blocks: list[str] = []
     for index in range(limit):
+        remaining = deadline - clock()
+        if remaining <= 0:
+            logger.warning(
+                "OCR stopped at its %gs deadline: %d of %d pages tried",
+                OCR_DEADLINE_S,
+                index,
+                total,
+            )
+            break
         try:
             png = render(document[index])
-            text = engine.image_to_text(png, lang=setup.settings.lang, timeout=PAGE_TIMEOUT_S)
-        except (OcrError, pypdfium2.PdfiumError, OSError) as exc:
+            text = engine.image_to_text(
+                png, lang=setup.settings.lang, timeout=min(PAGE_TIMEOUT_S, remaining)
+            )
+        except (OcrError, pypdfium2.PdfiumError, OSError, MemoryError) as exc:
             # Class only: an OcrError never carries recognised text, and nothing else may.
             logger.warning("OCR skipped page %d of %d: %s", index + 1, total, describe_failure(exc))
             continue

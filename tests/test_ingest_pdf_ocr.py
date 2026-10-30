@@ -278,15 +278,17 @@ def test_the_default_setup_is_resolved_from_the_environment(
     assert caplog.records == []
 
 
-def test_a_born_digital_pdf_never_reads_the_ocr_settings(
-    fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_pdf_with_a_real_text_layer_never_reads_the_ocr_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An invalid knob would raise if it were read; a born-digital PDF must not read it."""
+    """An invalid knob would raise if it were read; a full text layer must not read it."""
+    lines = ["Synthetic quarterly memo about the widget programme and its budget."] * 3
+    path = _text_pdf(tmp_path / "memo.pdf", lines, with_image=True)
     monkeypatch.setenv("BRAIN_OCR", "not-a-mode")
 
-    doc = extract_pdf(fixtures_dir / "sample.pdf")
+    doc = extract_pdf(path)
 
-    assert "Page two content here" in doc.content
+    assert "widget programme" in doc.content
 
 
 # ---------------------------------------------------------------------------

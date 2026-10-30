@@ -453,11 +453,21 @@ checked: it skips those watches and never stops `brain brief`.
 | `BRAIN_OCR_MAX_PAGES` | `50` | How many pages of one PDF are rendered and recognised, 1 to 1,000. Later pages are not read. |
 
 They live in the feature settings leaf `brain/settings/ocr.py`. A PDF is OCR'd
-only when its text layer averages under 25 characters a page **and** a page
-carries an image, so a born-digital PDF is never OCR'd and never reads these
-knobs. Each page is rendered at 200 dpi (`pypdfium2`, PNG via Pillow) and passed
-to `tesseract stdin stdout -l <lang>`, with a 60-second limit per page; a page
-that times out or fails is skipped with a class-only warning. The text is stored
+only when its text layer averages under 25 characters a page **and** one of the
+first `BRAIN_OCR_MAX_PAGES` pages carries an image, so a born-digital PDF is
+never OCR'd; one with a full text layer never reads these knobs, and with
+`BRAIN_OCR=off` the file is never opened by the second PDF parser. Each page is
+rendered at 200 dpi (`pypdfium2`, PNG via Pillow) and passed to `tesseract stdin
+stdout -l <lang>`, with a 60-second limit per page; a page that times out or
+fails is skipped with a class-only warning.
+
+A PDF is untrusted input, so two more bounds are fixed in code. A page renders to
+at most 70 million pixels (A0 at 200 dpi is about 62 million): a larger page is
+rendered at a lower resolution, and one that would fit only below 50 dpi is
+skipped, so a forged page size cannot exhaust memory. One document gets at most
+10 minutes of OCR in total; at the deadline OCR stops, keeps the pages read so
+far, and logs a count. This matters because `brain ui` ingests on one job worker
+that cannot be cancelled. The text is stored
 as `[page N]` blocks, and the document's `metadata.ocr` records
 `{"pages": n, "engine": "tesseract"}`. OCR runs locally, and the secret guard
 scans the recognised text like any other body.
