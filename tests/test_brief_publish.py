@@ -346,9 +346,11 @@ def test_a_bad_min_cosine_without_migration_029_still_builds(
     assert [doc.title for doc in data.captures] == ["Still here"] and written is not None
 
 
-def test_a_check_over_the_limit_is_noted_with_its_count_only_in_the_terminal(
+def test_a_check_over_the_limit_is_noted_in_the_terminal_and_never_on_the_page(
     test_db: psycopg.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The limit line's total spans both tiers, so on the gated page even its presence would
+    say that withheld documents exist (aud-78, coordinator's ruling)."""
     from brain import saved_search_check
 
     monkeypatch.setattr(saved_search_check, "CHECK_LIMIT", 3)
@@ -360,13 +362,13 @@ def test_a_check_over_the_limit_is_noted_with_its_count_only_in_the_terminal(
     data, written = _build(tmp_path, wiki=True)
 
     terminal = "2 more matched than a check can record (`brain search zephyr` lists them)"
-    page = "more matched than a check can record (`brain search zephyr` lists them)"
     assert data.watch_notes == [WatchNote(watch="zephyr", limit=terminal)]
     assert data.to_dict()["watch_notes"][0]["limit"] == terminal
     assert written is not None
-    lines = _page_watch_lines(written.read_text())
-    assert f"- [zephyr] {page}" in lines
-    assert not any("2 more" in line for line in lines)
+    page = written.read_text()
+    assert "matched than a check can record" not in page
+    assert "more may exist" not in page
+    assert len([line for line in _page_watch_lines(page) if "Zephyr" in line]) == 3
 
 
 def test_enrich_without_wiki_calls_the_model_once_and_keeps_empty_suggestions(

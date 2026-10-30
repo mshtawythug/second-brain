@@ -127,7 +127,8 @@
 - **A check fetches at most 50 documents** (`CHECK_LIMIT`, each leg's candidate cap). When more
   newly match in one window (a bulk import), the rest are never recorded: the window moves on.
   A lexical check counts them exactly (`SearchDiagnostics.total_documents`) and a semantic one
-  says it filled the limit; the brief, `brain watch check` and MCP report it (review round, D14).
+  says it filled the limit; the terminal brief, `brain watch check` and MCP report it, never the
+  published page (review round, D14).
 - A semantic check holds its row lock for one embed (accepted by the ticket).
 - A match outside the seed's top 50 that is later edited is reported once (it is new in the
   window, and was never reported before).
@@ -143,10 +144,11 @@
   any more: a semantic `add` is refused through the existing seed-failure path (exit 1 /
   `INVALID_PARAMS`, naming the variable, never the value), and a semantic check reports the skip.
 - **D14, the fetch limit is reported** (the risk above). `CheckResult.unrecorded` / `capped`,
-  `saved_search_check.limit_note`, `WatchNote.limit`. The published page gives the line without
-  its count, because the count is taken over both tiers (the F6 membership oracle); the coordinator accepted
-  this. No `ConfigError` handler was added to the CLI or MCP: with the knob lazy it would be
-  unreachable (ruling).
+  `saved_search_check.limit_note`, `WatchNote.limit`, in the terminal brief, `brain watch check`
+  and MCP `brain_watch_check` (permissive or lensed surfaces). **Never on the published page**
+  (aud-78, ruling reversed by the coordinator): the total spans both tiers, so even a count-free
+  line would be a 1-bit F6 oracle. No `ConfigError` handler was added to the CLI or MCP: with the
+  knob lazy it would be unreachable (ruling).
 - **D13 revised, the seed marker is a column.** Migration 029 (unshipped, never applied to prod,
   confirmed by the coordinator) gains `saved_search_hits.seeded BOOLEAN NOT NULL DEFAULT FALSE`,
   written by `add`'s seed; `NOT_SEED_SQL` is `NOT h.seeded`. The earlier marker
@@ -211,6 +213,6 @@ Run at `90c7b18`, with the same harness as above. The baseline of 9 target tests
 | R1c | `build_brief` checks watches without migration 029 | `test_a_bad_min_cosine_without_migration_029_still_builds` |
 | R2a | the lexical overflow count is dropped | `test_a_lexical_check_over_the_limit_counts_what_it_could_not_record` |
 | R2b | `capped` is never set | `test_a_semantic_check_that_fills_the_limit_says_more_may_exist` |
-| R2c | the page gets the count | `test_a_check_over_the_limit_is_noted_with_its_count_only_in_the_terminal` |
+| R2c | the page gets the limit line | `test_a_check_over_the_limit_is_noted_in_the_terminal_and_never_on_the_page` (re-run after the aud-78 ruling) |
 | R3a | `NOT_SEED_SQL` reverts to `notified_at IS DISTINCT FROM first_seen_at` | `test_a_real_hit_marked_in_its_checks_transaction_is_still_a_hit` |
 | R3b | the seed is written with `seeded = FALSE` | `test_seeded_matches_are_not_hits_in_the_terminal_set` |

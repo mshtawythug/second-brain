@@ -585,11 +585,8 @@ def test_a_lexical_check_over_the_limit_counts_what_it_could_not_record(
     result = check_watch(test_db, "zephyr", _lexical_matcher())
 
     assert (len(result.matches), result.unrecorded, result.capped) == (3, 2, False)
-    assert limit_note(result, with_count=True) == (
+    assert limit_note(result) == (
         "2 more matched than a check can record (`brain search zephyr` lists them)"
-    )
-    assert limit_note(result, with_count=False) == (
-        "more matched than a check can record (`brain search zephyr` lists them)"
     )
 
 
@@ -608,7 +605,7 @@ def test_a_semantic_check_that_fills_the_limit_says_more_may_exist(
     result = check_watch(test_db, "orbit", _matcher(words))
 
     assert result.capped is True and result.unrecorded == 0
-    assert limit_note(result, with_count=True) == "2 checked, more may exist"
+    assert limit_note(result) == "2 checked, more may exist"
 
 
 def test_a_check_within_the_limit_has_no_limit_note(test_db: psycopg.Connection[Any]) -> None:
@@ -619,7 +616,7 @@ def test_a_check_within_the_limit_has_no_limit_note(test_db: psycopg.Connection[
 
     result = check_watch(test_db, "zephyr", _lexical_matcher())
 
-    assert (result.unrecorded, result.capped, limit_note(result, with_count=True)) == (
+    assert (result.unrecorded, result.capped, limit_note(result)) == (
         0,
         False,
         None,

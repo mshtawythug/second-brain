@@ -238,7 +238,7 @@ def check(
         typer.echo(f"{result.watch} ({result.mode}): {len(result.matches)} new")
         for match in result.matches:
             typer.echo(f"  • [{match.source_kind or 'manual'}] {match.title}")
-        if (limit := limit_note(result, with_count=True)) is not None:
+        if (limit := limit_note(result)) is not None:
             typer.echo(f"  {limit}")
 
 

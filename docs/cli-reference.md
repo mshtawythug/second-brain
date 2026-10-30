@@ -1115,7 +1115,7 @@ brain watch pause NAME | resume NAME | rm NAME
   `BRAIN_WATCH_MIN_COSINE` skips semantic watches the same way and never stops
   the brief.
 - **A check records at most 50 documents.** When more match at once (a bulk
-  import), `check` and the brief say how many more matched than it could record
+  import), `check` and the terminal brief say how many more matched than it could record
   (a semantic check says "50 checked, more may exist"); `brain search` lists them.
 - Saved searches need migration 029: run `brain init` after upgrading.
 

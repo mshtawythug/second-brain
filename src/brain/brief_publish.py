@@ -152,13 +152,14 @@ def build_brief(
 
 
 def _check_notes(checks: list[CheckResult], *, published: bool) -> list[WatchNote]:
-    """One note per watch whose check was skipped or hit the fetch limit.
+    """One note per watch whose check was skipped or (terminal only) hit the fetch limit.
 
-    The page gets the limit line without its count: the count is taken over both tiers.
+    The published page never gets the limit line: its total spans both tiers, so even the
+    line's presence would say that withheld documents exist (the F6 oracle).
     """
     notes = []
     for check in checks:
-        limit = limit_note(check, with_count=not published)
+        limit = None if published else limit_note(check)
         if check.skipped is not None or limit is not None:
             notes.append(WatchNote(watch=check.watch, skipped=check.skipped, limit=limit))
     return notes

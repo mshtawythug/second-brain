@@ -159,16 +159,15 @@ def build_matcher(
     )
 
 
-def limit_note(result: CheckResult, *, with_count: bool) -> str | None:
-    """The brief's and ``brain watch check``'s line for a check that hit :data:`CHECK_LIMIT`.
+def limit_note(result: CheckResult) -> str | None:
+    """The terminal brief's and ``brain watch check``'s line for a check that hit the limit.
 
-    ``with_count=False`` is for the published page: the count is taken over both tiers, so it
-    would say that withheld documents exist (the membership oracle F6 avoids).
+    Never on the published page: the count, and even the line's presence, comes from a total
+    taken over both tiers, so it would say that withheld documents exist (the F6 oracle).
     """
     if result.unrecorded:
-        more = f"{result.unrecorded} more" if with_count else "more"
         return (
-            f"{more} matched than a check can record "
+            f"{result.unrecorded} more matched than a check can record "
             f"(`brain search {shlex.quote(result.query)}` lists them)"
         )
     if result.capped:
