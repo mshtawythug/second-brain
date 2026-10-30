@@ -58,6 +58,10 @@ class InvalidOwedEntry(BrainError):
     """A journal line parsed as JSON but is not an entry this module wrote."""
 
 
+class TornJournalWrite(BrainError):
+    """``os.write`` wrote only part of a journal line."""
+
+
 def default_journal_path() -> Path:
     """``$BRAIN_HOME/state/watcher-owed.jsonl``.
 
@@ -111,10 +115,9 @@ def delete_vault_rows(
     """Delete the vault-tier row at ``relative`` and hand its id to the graph.
 
     With ``capture``, the row's id is read BEFORE the delete, on the first run
-    that finds one. A re-run whose ``DELETE`` returns nothing (the first run's
-    committed and its reply was lost with the connection) still hands every
-    captured id to the graph, if it was never handed and has no ``documents``
-    row: the "deleted documents only" ruling of ``brain graphrag remove``.
+    that finds one, so a re-run that finds the row already gone (the first run's
+    ``DELETE`` committed and its reply was lost with the connection) still knows
+    it: :func:`settle_capture`, run after the job, hands it to the graph.
 
     Returns the ids this call deleted. More than one row means the
     ``documents_vault_path_idx`` uniqueness invariant broke: every row is still
@@ -133,20 +136,27 @@ def delete_vault_rows(
     if graph_syncer is None:
         return deleted
     # Wave G1-c: best-effort, never raises; the delete above already committed.
-    for doc_id in deleted + _ghost_ids(conn, capture, deleted):
+    for doc_id in deleted:
         graph_syncer.remove(conn, doc_id)
         if capture is not None:
             capture.handed.add(doc_id)
     return deleted
 
 
-def _ghost_ids(
-    conn: psycopg.Connection[Any], capture: DeleteCapture | None, deleted: list[str]
-) -> list[str]:
-    if capture is None:
-        return []
-    candidates = [doc_id for doc_id in capture.unhanded() if doc_id not in deleted]
-    return _without_live_rows(conn, candidates)
+def settle_capture(
+    conn: psycopg.Connection[Any], capture: DeleteCapture, graph_syncer: GraphSyncTarget
+) -> None:
+    """After a job: hand the graph every captured id whose row is gone, once.
+
+    Covers every path that captured an id, whichever branch its re-run took: a
+    move whose source was "another document" re-runs as a rename (the source
+    row is gone, so it no longer looks like one) and never deletes again. A
+    live id is never handed: the "deleted documents only" ruling of
+    ``brain graphrag remove``. No query when nothing is unhanded.
+    """
+    for doc_id in _without_live_rows(conn, capture.unhanded()):
+        graph_syncer.remove(conn, doc_id)
+        capture.handed.add(doc_id)
 
 
 def _without_live_rows(conn: psycopg.Connection[Any], ids: list[str]) -> list[str]:
@@ -162,7 +172,10 @@ class OwedJournal:
     Appends come from the observer thread (a closed watcher's dropped event),
     the worker (unapplied jobs) and the main thread (the lane's leftover
     removes). One ``os.write`` on an ``O_APPEND`` descriptor keeps their lines
-    whole. A failed append is logged by class and swallowed: the watcher must
+    whole; a short write is a failure. A file left ending mid-line (a crash
+    during a write) gets a newline first, so the torn line cannot swallow the
+    next entry. A new file's directory is fsynced so the file itself survives a
+    crash. A failed append is logged by class and swallowed: the watcher must
     never die because it could not write down what it owes.
     """
 
@@ -186,14 +199,21 @@ class OwedJournal:
         line = (json.dumps(entry, sort_keys=True) + "\n").encode("utf-8")
         try:
             self.path.parent.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
-            fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, _FILE_MODE)
+            created = not self.path.exists()
+            fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, _FILE_MODE)
             try:
                 os.fchmod(fd, _FILE_MODE)
-                os.write(fd, line)
+                size = os.fstat(fd).st_size
+                if size and os.pread(fd, 1, size - 1) != b"\n":
+                    line = b"\n" + line
+                if os.write(fd, line) != len(line):
+                    raise TornJournalWrite("short write")
                 os.fsync(fd)
             finally:
                 os.close(fd)
-        except OSError as exc:
+            if created:
+                _fsync_dir(self.path.parent)
+        except (OSError, TornJournalWrite) as exc:
             logger.warning(
                 "vault watcher: could not journal owed %s work (%s); it is lost",
                 entry["action"],
@@ -201,6 +221,14 @@ class OwedJournal:
             )
             return
         logger.info("vault watcher: owed one %s to the next start", entry["action"])
+
+
+def _fsync_dir(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 @dataclass(frozen=True)

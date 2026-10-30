@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
+import pytest
 from watchdog.events import FileDeletedEvent, FileMovedEvent
 
 from brain.db import connect_raw
@@ -369,3 +370,185 @@ def test_graph_removes_the_lane_could_not_apply_are_replayed(
         second.stop()
     finally:
         factory.close_all()
+
+
+# --------------------------------------------------------------------------- #
+# Round 2 (PR #95 review)
+# --------------------------------------------------------------------------- #
+
+
+def test_removes_a_replay_queued_survive_a_setup_failure(
+    test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path
+) -> None:
+    """M1: the replay rotated the journal and queued a remove on the unstarted lane.
+
+    Then the worker's connect (the second ``conn_factory`` call) fails, before
+    the stop-wait whose ``finally`` journals the lane's leftovers. The remove
+    must be owed again, not lost with the rotated journal.
+    """
+    vault, journal = tmp_path / "vault", tmp_path / "state" / JOURNAL_NAME
+    vault.mkdir()
+    owed_id = str(uuid.uuid4())
+    OwedJournal(journal, vault).owe_graph_removes([owed_id])
+    factory = _Factory(refuse_from=2)
+    try:
+        with pytest.raises(psycopg.OperationalError):
+            run_watcher(
+                factory,
+                embedder=fake_embedder,
+                config=WatchConfig(vault_path=vault, debounce_ms=10),
+                observer_factory=_Observer,  # type: ignore[arg-type]
+                install_signal_handlers=False,
+                graph_syncer=_Remover(),
+                owed_journal=journal,
+            )
+    finally:
+        factory.close_all()
+
+    assert journal.exists(), "the queued remove was lost with the rotated journal"
+    assert {"action": "graph_remove", "id": owed_id} in _journal_entries(journal)
+
+
+class _RemoveOnly:
+    """The real graph syncer's ``remove``; ``reconcile`` is a no-op, so the count is exact."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def reconcile(self, conn: Any, document_id: str) -> None:
+        return None
+
+    def remove(self, conn: Any, document_id: str) -> None:
+        self._inner.remove(conn, document_id)
+
+
+def _age_vault_row(conn: psycopg.Connection[Any], embedder: Any, vault_path: str) -> Any:
+    """A vault row at ``vault_path`` with an AGE ``Document`` vertex; returns the syncer."""
+    _seed_directory(conn, [("ana", "ana@example.com"), ("ben", "ben@example.com")])
+    syncer = _enabled_syncer()
+    result = ingest_document(
+        conn,
+        embedder=embedder,
+        doc=_gmail_doc("m1", [("ana", "ana@example.com"), ("ben", "ben@example.com")]),
+        source_kind="gmail",
+        source_external_id="m1",
+        graph_syncer=syncer,
+    )
+    assert result.document_id is not None
+    conn.execute(
+        "UPDATE documents SET kind = 'vault', vault_path = %s WHERE id = %s",
+        (vault_path, result.document_id),
+    )
+    assert _age_document_count(conn) == 1, "fixture: no AGE Document vertex"
+    return syncer
+
+
+def _run_dying(vault: Path, embedder: Any, job: _Job, syncer: Any) -> _Factory:
+    """Run ``job`` on a connection whose first ``DELETE FROM documents`` commits, then dies."""
+    factory = _Factory()
+    inner = factory()
+    inner.autocommit = True
+    state = _WatcherState()
+    link = ReconnectingConnection(
+        factory, label="worker", sleep=lambda _d: None, stopping=lambda: False,
+        conn=_DiesAfterTheDelete(inner),  # type: ignore[arg-type]
+    )
+    try:
+        state.jobs.put(job)
+        state.jobs.put(None)
+        _worker_loop(
+            link, embedder, WatchConfig(vault_path=vault, debounce_ms=10), state,
+            _RemoveOnly(syncer),
+        )
+        assert (state.errors, len(factory.made)) == (0, 2), "fixture: no clean re-run"
+    finally:
+        link.close()
+        factory.close_all()
+    return factory
+
+
+def test_a_move_whose_destination_is_gone_removes_the_vertex_on_rerun(
+    test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path
+) -> None:
+    """M2 (H-4a): the move's destination-gone branch deletes its source row."""
+    syncer = _age_vault_row(test_db, fake_embedder, "src.md")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    _run_dying(vault, fake_embedder, _Job("move", vault / "src.md", vault / "dst.md"), syncer)
+
+    assert _row_at(test_db, "src.md") is None
+    assert _age_document_count(test_db) == 0, "the re-run left a ghost AGE Document vertex"
+
+
+def test_a_move_onto_another_document_removes_the_vertex_on_rerun(
+    test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path
+) -> None:
+    """M2 (H-4a): the re-run no longer sees "another document" and takes the rename path."""
+    syncer = _age_vault_row(test_db, fake_embedder, "src.md")
+    vault = tmp_path / "vault"
+    _write(vault / "dst.md", "Another document", doc_id=str(uuid.uuid4()))
+
+    _run_dying(vault, fake_embedder, _Job("move", vault / "src.md", vault / "dst.md"), syncer)
+
+    assert _row_at(test_db, "src.md") is None
+    assert _row_at(test_db, "dst.md") is not None, "the destination was not synced"
+    assert _age_document_count(test_db) == 0, "the re-run left a ghost AGE Document vertex"
+
+
+class _BlockingEmbedder:
+    """Blocks its first ``embed`` until ``release``; delegates everything else."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.dim = inner.dim
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def embed(self, texts: list[str], input_type: str = "document") -> list[list[float]]:
+        if not self.entered.is_set():
+            self.entered.set()
+            self.release.wait(WAIT_FOR_BACKSTOP_S * 3)
+        return self._inner.embed(texts, input_type=input_type)
+
+    def count_tokens(self, text: str) -> int:
+        return int(self._inner.count_tokens(text))
+
+
+def test_a_worker_past_its_join_owes_its_queued_deletes(
+    test_db: psycopg.Connection[Any],
+    fake_embedder: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L4: the worker is still busy after its join; the delete queued behind it is owed."""
+    from watchdog.events import FileCreatedEvent
+
+    monkeypatch.setattr("brain.vault.watch._WORKER_JOIN_TIMEOUT_S", 0.05)
+    vault, journal = tmp_path / "vault", tmp_path / "state" / JOURNAL_NAME
+    vault.mkdir()
+    embedder = _BlockingEmbedder(fake_embedder)
+    factory = _Factory()
+    before = set(threading.enumerate())
+    worker: threading.Thread | None = None
+    try:
+        watcher = _Watcher(vault, journal, embedder, factory)
+        worker = next(
+            t for t in threading.enumerate()
+            if t.name == "brain-vault-watcher-worker" and t not in before
+        )
+        _write(vault / "busy.md", "Busy")
+        watcher.observer.handler.on_any_event(FileCreatedEvent(str(vault / "busy.md")))
+        assert embedder.entered.wait(WAIT_FOR_BACKSTOP_S), "fixture: the worker never blocked"
+        watcher.observer.handler.on_any_event(FileDeletedEvent(str(vault / "queued.md")))
+        state = watcher.observer.handler._state
+        wait_for(lambda: state.jobs.qsize() >= 1)
+        watcher.stop()
+        entries = _journal_entries(journal) if journal.exists() else []
+    finally:
+        embedder.release.set()
+        if worker is not None:
+            wait_for(lambda: not worker.is_alive())
+        factory.close_all()
+
+    assert {"action": "delete", "path": "queued.md"} in entries, entries

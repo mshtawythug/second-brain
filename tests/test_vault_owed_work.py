@@ -27,6 +27,7 @@ from brain.vault.owed_work import (
     default_journal_path,
     delete_vault_rows,
     replay_owed,
+    settle_capture,
     vault_relative_posix,
 )
 from tests.conftest import TEST_DATABASE_URL
@@ -124,10 +125,12 @@ def test_entries_are_vault_relative_json_lines(tmp_path: Path) -> None:
 def test_each_entry_is_one_write_then_an_fsync(tmp_path: Path, mocker: Any) -> None:
     """Concurrent appenders (observer, worker, main) cannot interleave a line."""
     vault = tmp_path / "vault"
+    journal = tmp_path / JOURNAL_NAME
+    journal.write_text("")  # existing: no directory fsync to count
     write = mocker.spy(os, "write")
     fsync = mocker.spy(os, "fsync")
 
-    OwedJournal(tmp_path / JOURNAL_NAME, vault).owe_deletes([vault / "a.md", vault / "b.md"])
+    OwedJournal(journal, vault).owe_deletes([vault / "a.md", vault / "b.md"])
 
     payloads = [call.args[1] for call in write.call_args_list]
     assert len(payloads) == 2 and all(p.endswith(b"\n") and p.count(b"\n") == 1 for p in payloads)
@@ -147,6 +150,52 @@ def test_a_failed_append_is_logged_by_class_and_not_raised(
     logged = " ".join(r.getMessage() for r in caplog.records)
     assert "could not journal owed delete" in logged
     assert "private-name" not in logged, f"the warning carried the path: {logged!r}"
+
+
+def test_a_torn_last_line_cannot_swallow_the_next_entry(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    """L3: a crash mid-write left a partial line; the next append starts a new one."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    doc_id = _seed(test_db, "a.md")
+    journal = tmp_path / JOURNAL_NAME
+    journal.write_bytes(b'{"action": "del')
+
+    OwedJournal(journal, vault).owe_deletes([vault / "a.md"])
+    report = replay_owed(test_db, vault, _Recorder(), journal=journal)
+
+    assert _row_ids(test_db, "a.md") == [] and doc_id, "the entry after the torn line was lost"
+    assert (report.skipped, report.rows_deleted) == (1, 1)
+
+
+def test_a_short_write_is_a_failure_logged_by_class(
+    tmp_path: Path, mocker: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """L3: ``os.write`` returning fewer bytes than the line is not a success."""
+    vault = tmp_path / "vault"
+    mocker.patch("brain.vault.owed_work.os.write", side_effect=lambda _fd, data: len(data) - 1)
+
+    with caplog.at_level(logging.INFO, logger="brain.vault.owed_work"):
+        OwedJournal(tmp_path / JOURNAL_NAME, vault).owe_deletes([vault / "a.md"])
+
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "could not journal owed delete work (TornJournalWrite)" in logged, logged
+    assert "owed one delete" not in logged, "a short write was reported as journaled"
+
+
+def test_a_new_journal_fsyncs_its_directory(tmp_path: Path, mocker: Any) -> None:
+    """L3: the new file's directory entry is made durable too, once."""
+    vault = tmp_path / "vault"
+    journal = tmp_path / "state" / JOURNAL_NAME
+    opened = mocker.spy(os, "open")
+
+    owed = OwedJournal(journal, vault)
+    owed.owe_deletes([vault / "a.md"])
+    owed.owe_deletes([vault / "b.md"])
+
+    dir_opens = [c for c in opened.call_args_list if Path(c.args[0]) == journal.parent]
+    assert len(dir_opens) == 1, f"directory fsync opens: {dir_opens}"
 
 
 def test_default_journal_path_is_under_brain_home_state(
@@ -172,13 +221,14 @@ def test_replay_deletes_an_owed_row_and_rotates_the_journal(
     vault.mkdir()
     doc_id = _seed(test_db, "gone.md")
     journal = tmp_path / JOURNAL_NAME
-    _write_journal(journal, _delete("gone.md"))
+    _write_journal(journal, "", _delete("gone.md"), "   ")  # blank lines are not entries
     lane = _Recorder()
 
     report = replay_owed(test_db, vault, lane, journal=journal)
 
     assert _row_ids(test_db, "gone.md") == []
     assert lane.removed == [doc_id]
+    assert report.skipped == 0, "a blank line was counted as a corrupt entry"
     assert (report.rows_deleted, report.completed) == (1, True)
     assert not journal.exists() and (tmp_path / f"{JOURNAL_NAME}.1").exists()
 
@@ -369,7 +419,7 @@ def test_a_first_run_captures_and_hands_the_id_once(
     assert capture.ids == [doc_id] and capture.unhanded() == []
 
 
-def test_a_rerun_after_a_committed_delete_hands_the_captured_id(
+def test_settling_a_rerun_after_a_committed_delete_hands_the_captured_id_once(
     test_db: psycopg.Connection[Any],
 ) -> None:
     """H-4a: the row is already gone, so only the capture knows its id."""
@@ -379,6 +429,8 @@ def test_a_rerun_after_a_committed_delete_hands_the_captured_id(
     graph = _Recorder()
 
     deleted = delete_vault_rows(test_db, "note.md", graph_syncer=graph, capture=capture)
+    settle_capture(test_db, capture, graph)
+    settle_capture(test_db, capture, graph)
 
     assert deleted == [] and graph.removed == [doc_id]
 
@@ -391,7 +443,7 @@ def test_a_rerun_does_not_hand_an_id_twice_or_remove_a_live_document(
     capture = DeleteCapture(ids=[handed, live], handed={handed})
     graph = _Recorder()
 
-    delete_vault_rows(test_db, "note.md", graph_syncer=graph, capture=capture)
+    settle_capture(test_db, capture, graph)
 
     assert graph.removed == []
 

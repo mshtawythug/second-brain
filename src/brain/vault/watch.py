@@ -45,7 +45,9 @@ Concurrency invariants worth restating:
   shutdown windows. A delete (or a move's source) dropped after close or left
   unapplied at shutdown, a delete's id lost with its connection, and a graph
   remove the lane could not apply are journaled and replayed at the next start
-  (``owed_work``, RM-26); CLAUDE.md's ceiling table records that wiring.
+  (``owed_work``, RM-26), as are the lane's removes after a setup failure and the
+  jobs a worker past its join never reached; every job settles its captured ids
+  (``settle_capture``). CLAUDE.md's ceiling table records that wiring.
   These are the 2026-10-22 race fixes, reasoned at ``_fire``,
   ``_supersede_pending`` and the drain; CLAUDE.md's ceiling table records them.
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
@@ -109,7 +111,13 @@ from .debounce_timer import DebounceTimer, TimerFactory, daemon_timer
 from .derived_links.fence import strip_fence
 from .graph_lane import LOST_REMOVES_REPAIR, GraphLane
 from .move_identity import is_another_document
-from .owed_work import DeleteCapture, OwedJournal, delete_vault_rows, replay_owed
+from .owed_work import (
+    DeleteCapture,
+    OwedJournal,
+    delete_vault_rows,
+    replay_owed,
+    settle_capture,
+)
 from .owed_work import vault_relative_posix as _vault_relative_posix
 from .sync import SyncReport, sync_one_file, sync_vault
 
@@ -320,93 +328,100 @@ def run_watcher(
     finally:
         startup_conn.close()
 
-    # 2. Worker thread. Owns the long-lived DB connection and consumes
-    #    jobs from the queue. ``daemon=True`` so a crashing worker
-    #    doesn't prevent process exit; we still join below for clean
-    #    shutdown.
-    worker_conn = conn_factory()
-    worker_conn.autocommit = True
-    # brain (2026-10-22, DB reconnect): re-opened after a Postgres restart. The
-    # first connect stays here, so a DB that is down at startup still fails fast;
-    # the backoff sleep is the stop event, so shutdown wakes it.
-    worker_link = ReconnectingConnection(
-        conn_factory,
-        label="worker",
-        sleep=state.stop_event.wait,
-        stopping=state.stop_event.is_set,
-        conn=worker_conn,
-    )
-    worker_thread = threading.Thread(
-        target=_worker_loop,
-        args=(worker_link, embedder, config, state, lane),
-        name="brain-vault-watcher-worker",
-        daemon=True,
-    )
-    worker_thread.start()
+    # RM-26: the replay may have queued graph removes on the unstarted lane and
+    # rotated the journal; a setup failure from here to lane.start() re-owes them.
+    try:
+        # 2. Worker thread. Owns the long-lived DB connection and consumes
+        #    jobs from the queue. ``daemon=True`` so a crashing worker
+        #    doesn't prevent process exit; we still join below for clean
+        #    shutdown.
+        worker_conn = conn_factory()
+        worker_conn.autocommit = True
+        # brain (2026-10-22, DB reconnect): re-opened after a Postgres restart. The
+        # first connect stays here, so a DB that is down at startup still fails fast;
+        # the backoff sleep is the stop event, so shutdown wakes it.
+        worker_link = ReconnectingConnection(
+            conn_factory,
+            label="worker",
+            sleep=state.stop_event.wait,
+            stopping=state.stop_event.is_set,
+            conn=worker_conn,
+        )
+        worker_thread = threading.Thread(
+            target=_worker_loop,
+            args=(worker_link, embedder, config, state, lane),
+            name="brain-vault-watcher-worker",
+            daemon=True,
+        )
+        worker_thread.start()
 
-    # 3. Observer + handler. The handler is a thin shim that turns
-    #    watchdog events into ``_Job``s via the debounce path. The
-    #    Observer runs on its own thread (managed by watchdog).
-    factory = observer_factory or Observer
-    observer = factory()
-    # ``scheduled_dirs`` (shared by reference with the handler) tracks every
-    # top-level directory that already has a recursive watch, so the handler
-    # can schedule one for a NEW top-level dir created after startup without
-    # double-scheduling the ones we set up here.
-    scheduled_dirs: set[Path] = set()
-    handler = _Handler(
-        config=config,
-        state=state,
-        observer=observer,
-        scheduled_dirs=scheduled_dirs,
-    )
-    # brain (2026-05-08): schedule per non-hidden top-level subdir + root
-    # non-recursively, instead of `recursive=True` on the vault root.
-    # PollingObserver snapshots every file in the watched tree on every
-    # poll cycle; with `recursive=True` on a vault that contains
-    # `<vault>/.quartz/node_modules` (~60k+ files) the snapshot work
-    # starves the polling thread and edits stop being detected. The
-    # event filter (_filter_path) already drops paths under hidden dirs,
-    # so excluding them from the WATCHED tree is correct + cheap.
-    #
-    # brain (2026-07-12, Task 3.1): a NEW top-level dir created after this
-    # loop runs is scheduled on the fly by the handler (see
-    # _Handler._maybe_watch_new_directory), so files inside it are no longer
-    # invisible until restart.
-    scheduled_names: list[str] = []
-    observer.schedule(handler, str(config.vault_path), recursive=False)
-    for child in config.vault_path.iterdir():
-        if child.is_dir() and not child.name.startswith("."):
-            observer.schedule(handler, str(child), recursive=True)
-            # A subdir that vanished between iterdir and resolve leaves the
-            # watch above standing; just skip the dedup bookkeeping for it.
-            with contextlib.suppress(OSError):
-                scheduled_dirs.add(child.resolve())
-            scheduled_names.append(child.name)
-    logger.info(
-        "vault watcher: scoped polling on top-level dirs: %s",
-        ", ".join(scheduled_names) or "(none)",
-    )
-    observer.start()
+        # 3. Observer + handler. The handler is a thin shim that turns
+        #    watchdog events into ``_Job``s via the debounce path. The
+        #    Observer runs on its own thread (managed by watchdog).
+        factory = observer_factory or Observer
+        observer = factory()
+        # ``scheduled_dirs`` (shared by reference with the handler) tracks every
+        # top-level directory that already has a recursive watch, so the handler
+        # can schedule one for a NEW top-level dir created after startup without
+        # double-scheduling the ones we set up here.
+        scheduled_dirs: set[Path] = set()
+        handler = _Handler(
+            config=config,
+            state=state,
+            observer=observer,
+            scheduled_dirs=scheduled_dirs,
+        )
+        # brain (2026-05-08): schedule per non-hidden top-level subdir + root
+        # non-recursively, instead of `recursive=True` on the vault root.
+        # PollingObserver snapshots every file in the watched tree on every
+        # poll cycle; with `recursive=True` on a vault that contains
+        # `<vault>/.quartz/node_modules` (~60k+ files) the snapshot work
+        # starves the polling thread and edits stop being detected. The
+        # event filter (_filter_path) already drops paths under hidden dirs,
+        # so excluding them from the WATCHED tree is correct + cheap.
+        #
+        # brain (2026-07-12, Task 3.1): a NEW top-level dir created after this
+        # loop runs is scheduled on the fly by the handler (see
+        # _Handler._maybe_watch_new_directory), so files inside it are no longer
+        # invisible until restart.
+        scheduled_names: list[str] = []
+        observer.schedule(handler, str(config.vault_path), recursive=False)
+        for child in config.vault_path.iterdir():
+            if child.is_dir() and not child.name.startswith("."):
+                observer.schedule(handler, str(child), recursive=True)
+                # A subdir that vanished between iterdir and resolve leaves the
+                # watch above standing; just skip the dedup bookkeeping for it.
+                with contextlib.suppress(OSError):
+                    scheduled_dirs.add(child.resolve())
+                scheduled_names.append(child.name)
+        logger.info(
+            "vault watcher: scoped polling on top-level dirs: %s",
+            ", ".join(scheduled_names) or "(none)",
+        )
+        observer.start()
 
-    # 4. Signal handlers. SIGINT for Ctrl-C, SIGTERM for systemd /
-    #    process managers. We can only install these from the main
-    #    thread — Python enforces this — and the CLI calls run_watcher
-    #    from the main thread, so this is fine. Tests set
-    #    ``install_signal_handlers=False`` to skip this.
-    previous_handlers: dict[signal.Signals, Any] = {}
-    if install_signal_handlers:
-        def _signal_handler(signum: int, _frame: Any) -> None:
-            logger.info("vault watcher: received signal %s, shutting down", signum)
-            state.stop_event.set()
+        # 4. Signal handlers. SIGINT for Ctrl-C, SIGTERM for systemd /
+        #    process managers. We can only install these from the main
+        #    thread — Python enforces this — and the CLI calls run_watcher
+        #    from the main thread, so this is fine. Tests set
+        #    ``install_signal_handlers=False`` to skip this.
+        previous_handlers: dict[signal.Signals, Any] = {}
+        if install_signal_handlers:
+            def _signal_handler(signum: int, _frame: Any) -> None:
+                logger.info("vault watcher: received signal %s, shutting down", signum)
+                state.stop_event.set()
 
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            previous_handlers[sig] = signal.signal(sig, _signal_handler)
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                previous_handlers[sig] = signal.signal(sig, _signal_handler)
 
-    # Start the lane LAST, right before the stop-wait whose finally closes it,
-    # so no setup failure can leak its thread; requests just queue until now.
-    if lane is not None:
-        lane.start()
+        # Start the lane LAST, right before the stop-wait whose finally closes it,
+        # so no setup failure can leak its thread; requests just queue until now.
+        if lane is not None:
+            lane.start()
+    except BaseException:
+        if state.owed is not None and lane is not None:
+            state.owed.owe_graph_removes(lane.undrained_removes())
+        raise
     try:
         # Block until a signal (or test) flips the stop_event.
         state.stop_event.wait()
@@ -437,6 +452,7 @@ def run_watcher(
                 "or reconnecting to the DB); leaving its connection to it, not racing a close",
                 _WORKER_JOIN_TIMEOUT_S,
             )
+            _owe(state, _take_queued(state))  # RM-26: it may never reach them
         else:
             try:
                 # The CURRENT connection: a reconnect may have replaced worker_conn.
@@ -744,7 +760,7 @@ def _schedule_debounced(
         if state.closed:
             # brain (2026-10-22): an observer that outlived observer.join(5.0)
             # delivered this after the drain. Drop it, logged once; the next
-            # startup sync_vault reconciles the path (deletes only with prune).
+            # startup sync_vault reconciles an upsert, and a delete is owed.
             state.dropped_after_close += 1
             if state.dropped_after_close == 1:
                 logger.warning("vault watcher: dropping events after shutdown")
@@ -922,6 +938,17 @@ def _report_unapplied(state: _WatcherState, job: _Job, exc: ReconnectAbandoned) 
     )
 
 
+def _take_queued(state: _WatcherState) -> list[_Job]:
+    """Take every job still queued, without blocking; put the sentinel back."""
+    taken: list[_Job] = []
+    with contextlib.suppress(queue.Empty):
+        while True:
+            if (job := state.jobs.get_nowait()) is not None:
+                taken.append(job)
+    state.jobs.put(None)
+    return taken
+
+
 def _owe(state: _WatcherState, jobs: list[_Job]) -> None:
     """Journal each dropped or unapplied delete (a move by its source) and lost id."""
     if state.owed is not None:
@@ -950,7 +977,7 @@ def _job_runner(
     def run(conn: psycopg.Connection[Any]) -> bool:
         nonlocal runs
         runs += 1
-        return _run_job(
+        counted = _run_job(
             conn,
             job=job,
             embedder=embedder,
@@ -959,6 +986,9 @@ def _job_runner(
             graph_syncer=graph_syncer,
             rerun=runs > 1,
         )
+        if graph_syncer is not None:  # RM-26 (H-4a): whichever branch the re-run took
+            settle_capture(conn, job.capture, graph_syncer)
+        return counted
 
     return run
 
@@ -1004,6 +1034,7 @@ def _run_job(
             src_abs=job.abs_path,
             dst_abs=job.dest_path,
             graph_syncer=graph_syncer,
+            capture=job.capture,
         )
     elif job.action == "delete":
         # Defensive re-stat: a "deleted" fsevent can fire spuriously
@@ -1224,6 +1255,7 @@ def _handle_move(
     src_abs: Path,
     dst_abs: Path,
     graph_syncer: GraphSyncTarget | None = None,
+    capture: DeleteCapture | None = None,
 ) -> None:
     """Handle a within-vault markdown rename WITHOUT destroying incoming links.
 
@@ -1252,7 +1284,7 @@ def _handle_move(
     """
     if not dst_abs.exists():
         _handle_delete(
-            conn, src_abs, config.vault_path, graph_syncer=graph_syncer
+            conn, src_abs, config.vault_path, graph_syncer=graph_syncer, capture=capture
         )
         state.body_cache.pop(src_abs, None)
         state.body_cache.pop(dst_abs, None)
@@ -1266,7 +1298,9 @@ def _handle_move(
             # before the rename (a coalesced delete/upsert + move). Renaming the
             # old row onto dst would give dst the wrong identity and collide on
             # documents_vault_path_idx: delete it instead; dst syncs by its own id.
-            _handle_delete(conn, src_abs, config.vault_path, graph_syncer=graph_syncer)
+            _handle_delete(
+                conn, src_abs, config.vault_path, graph_syncer=graph_syncer, capture=capture
+            )
         else:
             # Preserve the document id (and every incoming ``links`` row) by
             # moving ``vault_path`` in place instead of delete + re-insert. The
