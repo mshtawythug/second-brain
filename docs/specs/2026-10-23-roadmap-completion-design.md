@@ -2283,8 +2283,8 @@ design.
   3. *Dedup:* `(calendar, <event id>)` for single events, and **one document per recurring
      series**, keyed `(calendar, <recurringEventId>)` (one document per instance would create dozens
      of near-identical rows, which RM-19 would then flag). The body holds the title, the series rule
-     or the event's time, the location text with URLs removed, the description and the attendees'
-     display names. The **occurrence dates are volatile**, so they go in `metadata.occurrences` (the
+     or the event's time, the location text, the description and the attendees' display names, each
+     with every URL removed (RM-30 security round). The **occurrence dates are volatile**, so they go in `metadata.occurrences` (the
      count and the last ten), never in the body; a re-run whose body is unchanged applies them with
      `update_document(metadata_patch=…)`, so no re-chunk and no re-extraction.
   4. *Credentials:* `gws`'s own login; none stored.
@@ -2295,8 +2295,8 @@ design.
   6. *PII and sensitivity:* attendee addresses go only into `metadata.participants` (the field
      `--person` resolves through, as Gmail's do), never into the body. Conference links and dial-in
      blocks are dropped (they carry meeting PINs). Declined events, events with no title, and
-     working-location or out-of-office entries are skipped. Events whose visibility is `private` are
-     stored as `confidential`; others default to `normal`. `sent_at` is the start time, so date
+     working-location or out-of-office entries are skipped. Events whose visibility is `private` (or
+     Google's legacy `confidential`) are stored as `confidential`; others default to `normal`. `sent_at` is the start time, so date
      filters and the recency boost use it. A future event's age is clamped to zero by the recency
      boost (`search.py`), so it gets the maximum boost; the 14-day limit bounds that, and the docs
      say so.
@@ -3647,7 +3647,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-27 | H-3 graph-lock residuals | S | 6 | — | DONE (#93) |
 | RM-28 | H-5 log-privacy guard | S | 6 | — | DONE (#94) |
 | RM-29 | H-6 class-only error reports | XS | 6 | — | DONE (#92) |
-| RM-30 | Calendar events | M | 7 | RM-06, RM-07 | TODO |
+| RM-30 | Calendar events | M | 7 | RM-06, RM-07 | DONE (#96) |
 | RM-31 | Code-host activity | M | 7 | RM-06, RM-07 | TODO |
 | RM-32 | OCR and image-only PDFs | M | 7 | RM-07, RM-08 | TODO |
 | RM-33 | Images and the drop-folder runner | M | 7 | RM-06, RM-32 | TODO |

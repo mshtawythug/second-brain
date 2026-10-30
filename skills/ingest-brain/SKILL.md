@@ -35,6 +35,7 @@ notes, see `brain-authoring`.
 | One local file (PDF / DOCX / MD / TXT) | `brain ingest <path>` | Dedup by `source_path`. `--force` reapplies. |
 | A directory of files | `brain ingest-dir <dir>` | Recursive. `--ext md,pdf` to scope. `--dry-run` first. |
 | Gmail messages | `brain ingest-gmail` | **REFUSES without a scope flag.** See Gmail section. |
+| Google Calendar events | `brain ingest-calendar --since YYYY-MM-DD --until YYYY-MM-DD` | **REFUSES without both dates.** At most 92 days, ending at most 14 days ahead. `--dry-run` first. |
 | Krisp transcript / Slack thread / arbitrary text | `brain ingest-stdin` | The MCP→stdin chain. See Krisp + Slack sections. |
 | The user's own Jira issues | `brain ingest-stdin --source jira` | Atlassian MCP→stdin, **confidential**. See Jira section. |
 | Krisp action items as a separate doc | `brain enrich --krisp-action-items` (handoff) + `brain ingest-stdin --content-type krisp_action_items` | See `brain-todo` for the full flow. |

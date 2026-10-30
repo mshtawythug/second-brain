@@ -648,6 +648,56 @@ Dates passed to `--since` / `--until` are converted into Gmail `after:` /
 `before:` query terms, so use Gmail's `YYYY/MM/DD` shape. Raw `--query` is
 passed through and can use any Gmail search syntax.
 
+## Calendar ingest
+
+`brain ingest-calendar` (RM-30) stores Google Calendar events as documents
+through the `gws` CLI and its own login. Both `--since` and `--until`
+(`YYYY-MM-DD`; `--since` inclusive, `--until` exclusive) are required. The
+window is at most 92 days, and `--until` is at most 14 days after today (UTC).
+Otherwise the command exits 2 with "ingest-calendar requires --since and
+--until (at most 92 days, ending at most 14 days ahead)".
+
+```bash
+brain ingest-calendar --since 2026-09-01 --until 2026-10-01 --dry-run
+brain ingest-calendar --since 2026-10-01 --until 2026-10-31 --calendar primary --tag meetings
+```
+
+- **One document per event, and one per recurring series** (source `calendar`,
+  content type `calendar_event`, deduplicated by the event id or the series id).
+  A series takes its title, description and attendees from the series itself,
+  so a re-run over a different window does not change its text.
+- **What the body holds:** the title, the time (or, for a series, its
+  recurrence rule and time of day), the location, the attendees' names, and
+  the description, all with every link and address removed. Attendee addresses
+  are stored only as participants, which is what `--person` matches. Google's
+  joining block and any line carrying a dial-in number, a PIN, a passcode or a
+  meeting ID are dropped. A title keeps the words before the secret: "Weekly
+  sync, passcode is 7Hk2pQ" is stored as "Weekly sync", and a keyword with no
+  value ("Password manager rollout") stays. The rules prefer privacy to
+  recall: an ordinary description line that looks like a dial-in ("Discuss the
+  access code rollout") is dropped too.
+- **What metadata holds:** the start time, which dates the document (`sent_at`,
+  used by date filters and the recency boost; for a series, its latest known
+  occurrence), and for a series the latest ten start times known and how many
+  occurrences the most recent run's window held. Each run is merged into what is
+  stored, so backfilling an earlier window never moves a series backwards. When
+  only these change, a re-run updates the metadata without re-chunking or
+  re-embedding. If a series' own record cannot be read, a stored series keeps its
+  text and only its dates are refreshed; the command prints how many.
+- **Skipped:** events you declined, events with no title, cancelled events, and
+  working-location and out-of-office entries. **Private** events (and Google's legacy
+  `confidential` visibility) are stored as `confidential`; the rest as `normal`.
+- **Future events.** The recency boost treats a future date as today, so an
+  upcoming event ranks as the newest document. The 14-day limit on `--until`
+  bounds that.
+- **Cost.** No summary unless `--enrich` is passed, and when the graph is on,
+  no concept extraction: `calendar_event` is in
+  `graph_rag.extract_policy.CONCEPT_SKIP_CONTENT_TYPES` (the people aspect still
+  runs). Attendee names and addresses are recorded in the people directory, so
+  `brain search --source calendar --person "<name>"` finds the event.
+- `--dry-run` lists the titles and dates and writes nothing. There is no daemon
+  run; schedule the command yourself if you want one.
+
 ## Status and health
 
 ```bash

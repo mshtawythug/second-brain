@@ -41,6 +41,9 @@ the site's table of contents, on every participant's page. Reasons inline at
 the SQL variants, at the parameter, and at each of the three call sites.
 **Class-only logging (PR #58)** adds the ``describe_failure`` import and wraps
 one DEBUG line that no longer fits: reasons inline at the import.
+**Calendar participants (RM-30)** add a ``calendar`` branch to
+:func:`_doc_participant_keys`, so the graph's people aspect resolves a
+calendar event's attendees: reasons inline at the branch.
 """
 import logging
 from dataclasses import dataclass, field
@@ -265,7 +268,8 @@ def _doc_participant_keys(
 
     For Krisp, reads ``metadata['_participant_keys']`` (a sorted list set at
     ingest time by :func:`extract_krisp_speakers`). Strings are returned
-    as-is; bridging from name to email happens during resolution.
+    as-is; bridging from name to email happens during resolution. For a
+    calendar event (RM-30), reads the addresses in ``metadata['participants']``.
     """
     keys: set[str] = set()
     if source_kind == "gmail":
@@ -279,6 +283,17 @@ def _doc_participant_keys(
             for entry in raw:
                 if isinstance(entry, str) and entry.strip():
                     keys.add(entry.strip())
+    elif source_kind == "calendar":
+        # RM-30 growth (over the ceiling): a calendar event's attendees are only
+        # in ``metadata.participants`` (lowercased addresses; never in the body),
+        # and ``brain ingest-calendar`` records each name/address pair in the
+        # directory, so the addresses resolve. Without this branch the graph's
+        # people aspect indexed every calendar document with zero persons.
+        raw = metadata.get("participants")
+        if isinstance(raw, list):
+            for entry in raw:
+                if isinstance(entry, str) and "@" in entry:
+                    keys.add(entry.strip().lower())
     return keys
 
 
