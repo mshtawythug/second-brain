@@ -158,3 +158,23 @@ def test_normalize_tags_bad_mapping_is_a_usage_error(
     # whitespace and the panel's border characters collapsed.
     flat = " ".join(result.output.replace("│", " ").split())
     assert message in flat
+
+
+def test_normalize_tags_reports_a_bad_file_class_only_finishes_and_exits_1(
+    scenario: Path, tmp_path: Path
+) -> None:
+    # Alpha's file is unparseable: Alpha's row is still normalized, the run carries on to the
+    # later documents, the failure names the class only, and the exit code is 1.
+    (tmp_path / "vault" / "alpha.md").write_text(
+        '---\ntags:\n- x\nnote: "unterminated canary-5e1a\n---\nbody\n', encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(app, ["backfill", "normalize-tags", "--mapping", str(scenario)])
+
+    assert result.exit_code == 1, result.output
+    assert "Traceback" not in result.output and "canary-5e1a" not in result.output
+    assert result.stderr.startswith("file rewrite failed for a1000000 (alpha.md): ")
+    assert result.stdout == (
+        "normalized 4 doc(s), rewrote 0 file(s), 1 file-missing skipped, "
+        "1 already-canonical skipped, 1 file(s) failed\n"
+    )

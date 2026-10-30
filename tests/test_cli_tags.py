@@ -378,3 +378,69 @@ def test_rename_without_migration_029_still_retags_documents(
     assert result.exit_code == 0, result.output
     assert "updated 0 watch filter(s)" in result.stdout
     assert _row(test_db, doc)[0] == ["quasar"]
+
+
+# --- round 1: a bad file is a per-document failure, and paths stay in the vault ----------------
+
+#: A token that appears only inside the broken file. A YAML error message quotes the offending
+#: line, so finding it in the output would mean file content leaked into the report.
+_CANARY = "canary-77f3"
+
+
+def _break_frontmatter(path: Path) -> None:
+    path.write_text(
+        f'---\ntitle: Broken\ntags:\n- nebula\nnote: "unterminated {_CANARY}\n---\nbody\n',
+        encoding="utf-8",
+    )
+
+
+def test_a_bad_vault_file_is_reported_class_only_and_everything_else_is_rewritten(
+    test_db: psycopg.Connection[Any], vault: Path, fake_embedder: object
+) -> None:
+    good_a = _seed(
+        test_db, fake_embedder, vault, title="Good A", body="zephyr a", tags=["nebula"],
+        vault_path="notes/good-a.md",
+    )
+    bad = _seed(
+        test_db, fake_embedder, vault, title="Bad", body="zephyr bad", tags=["nebula"],
+        vault_path="notes/bad.md",
+    )
+    good_c = _seed(
+        test_db, fake_embedder, vault, title="Good C", body="zephyr c", tags=["nebula"],
+        vault_path="_ingested/manual/good-c.md", kind="ingested",
+    )
+    _break_frontmatter(vault / "notes/bad.md")
+    _add_watch(test_db, "w", {"tag": "nebula"})
+
+    result = runner.invoke(app, ["tags", "rename", "nebula", "quasar", "--apply"])
+
+    assert result.exit_code == 1, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "Traceback" not in result.output
+    assert _CANARY not in result.output
+    assert f"{bad[:8]} (notes/bad.md)" in result.stderr
+    assert "Error" in result.stderr  # the class, e.g. ScannerError[4:7]
+    assert "1 file(s) failed" in result.stdout
+    for doc, rel in ((good_a, "notes/good-a.md"), (good_c, "_ingested/manual/good-c.md")):
+        assert _row(test_db, doc)[0] == ["quasar"]
+        assert _file_tags(vault / rel) == ["quasar"]
+    assert _row(test_db, bad)[0] == ["quasar"]
+    assert _watch_filters(test_db, "w") == {"tag": "quasar"}
+
+
+def test_a_vault_path_outside_the_vault_is_refused_and_left_untouched(
+    test_db: psycopg.Connection[Any], vault: Path, fake_embedder: object, tmp_path: Path
+) -> None:
+    outside = tmp_path / "elsewhere" / "victim.md"
+    outside.parent.mkdir()
+    outside.write_text(dump_frontmatter({"title": "V", "tags": ["nebula"]}, "v\n"), "utf-8")
+    before = outside.read_bytes()
+    doc = _seed(test_db, fake_embedder, vault, title="Escapes", body="zephyr", tags=["nebula"])
+    test_db.execute("UPDATE documents SET vault_path = %s WHERE id = %s", (str(outside), doc))
+
+    result = runner.invoke(app, ["tags", "rename", "nebula", "quasar", "--apply"])
+
+    assert result.exit_code == 1, result.output
+    assert outside.read_bytes() == before
+    assert "VaultPathEscape" in result.stderr
+    assert "1 file(s) failed" in result.stdout

@@ -13,6 +13,12 @@ documents SET tags``, calls :func:`~brain.queries.sync_chunk_search_metadata` (w
 (RM-21.D2): a crash part-way leaves some documents done, and a re-run finishes the rest. The
 ``UPDATE`` does not touch ``updated_at``: tag maintenance is not new knowledge (migration 025).
 
+**A bad file fails that document's file write, not the run.** The file path is checked to stay
+inside the vault (:func:`~brain.vault.paths.assert_within_vault`), and an unreadable file, bad
+frontmatter or an escaping path is counted in :attr:`MappingReport.files_failed` and passed to
+``on_file_error``, and the loop goes on. The row was already updated, so a re-run will NOT retry
+that file: the caller reports it so the owner can fix it.
+
 **Saved searches** (:func:`rewrite_watch_filters`) keep matching after a rename or merge: a watch
 whose ``tag`` or ``without_tag`` filter names a mapped tag is rewritten to the new tag.
 
@@ -26,7 +32,7 @@ with its evidence.
 from __future__ import annotations
 
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -35,17 +41,20 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
+import yaml
 
-from .errors import BrainError
+from .errors import BrainError, VaultPathEscape
 from .queries import sync_chunk_search_metadata
 from .set_similarity import jaccard
 from .tags import normalize_tag, normalize_tags
 from .vault.frontmatter import rewrite_tags
+from .vault.paths import assert_within_vault
 
 __all__ = [
     "JACCARD_THRESHOLD",
     "MIN_SHARED_DOCS",
     "SIMILARITY_THRESHOLD",
+    "FILE_ERRORS",
     "MappingReport",
     "MergeSuggestion",
     "TagChange",
@@ -198,6 +207,19 @@ class MappingReport:
     files_rewritten: int
     files_missing: int
     unchanged: int
+    #: Documents whose row was updated but whose file could not be rewritten (``on_file_error``).
+    files_failed: int = 0
+
+
+#: What a file rewrite can raise for one bad file: unreadable (``OSError``), not UTF-8, bad YAML,
+#: frontmatter that is not a mapping (``ValueError``), or a ``vault_path`` outside the vault.
+FILE_ERRORS: tuple[type[Exception], ...] = (
+    OSError,
+    UnicodeDecodeError,
+    yaml.YAMLError,
+    ValueError,
+    VaultPathEscape,
+)
 
 
 _TAGGED_DOCS_SQL = (
@@ -208,23 +230,30 @@ _TAGGED_DOCS_SQL = (
 )
 
 
-def _write_document(
-    conn: psycopg.Connection[Any], change: TagChange, vault_root: Path
-) -> bool | None:
-    """Write one change: the row, its chunks, then its file.
-
-    Returns ``True`` when the file was rewritten, ``False`` when it was already in sync or the
-    document has no file, and ``None`` when ``vault_path`` names a file that is not on disk.
-    """
+def _write_row(conn: psycopg.Connection[Any], change: TagChange) -> None:
+    """Write one change's row and its chunks."""
     conn.execute("UPDATE documents SET tags = %s WHERE id = %s", (change.after, change.doc_id))
     # Migration 009 denormalizes documents.tags onto chunks.tags_text so the weighted tsv
     # reflects tag changes. This loop is a full replace (not apply_tags' add/remove diff), so
     # the chunk sync happens here. The helper's IS DISTINCT FROM guards make it a no-op when
     # only the order changed.
     sync_chunk_search_metadata(conn, change.doc_id)
+
+
+def _write_file(change: TagChange, vault_root: Path) -> bool | None:
+    """Rewrite one change's file.
+
+    Returns ``True`` when the file was rewritten, ``False`` when it was already in sync or the
+    document has no file, and ``None`` when ``vault_path`` names a file that is not on disk.
+
+    Raises:
+        VaultPathEscape: ``vault_path`` resolves outside ``vault_root`` (checked before any
+            read or write), or anything else in :data:`FILE_ERRORS` for a bad file.
+    """
     if change.vault_path is None:
         return False
     abs_path = vault_root / change.vault_path
+    assert_within_vault(abs_path, vault_root)
     if not abs_path.exists():
         return None
     return rewrite_tags(abs_path, change.after)
@@ -239,6 +268,7 @@ def run_mapping(
     only_mapped: bool = False,
     on_change: Callable[[TagChange], None] | None = None,
     on_missing_file: Callable[[TagChange], None] | None = None,
+    on_file_error: Callable[[TagChange, Exception], None] | None = None,
 ) -> MappingReport:
     """Map and normalize every tagged document's tags; write the ones that change if ``apply``.
 
@@ -247,10 +277,12 @@ def run_mapping(
     tag the mapping names, so a rename touches nothing else; without it every document is
     normalized too (``brain backfill normalize-tags``). ``on_change`` is called for each
     changed document, before its writes, and ``on_missing_file`` for each one whose
-    ``vault_path`` is not on disk (only when applying). A document skipped by ``only_mapped``
-    is not counted.
+    ``vault_path`` is not on disk (only when applying). ``on_file_error`` is called with the
+    exception for each document whose file could not be rewritten (:data:`FILE_ERRORS`); the
+    row stays updated and the loop goes on. A document skipped by ``only_mapped`` is not
+    counted.
     """
-    changed = files_rewritten = files_missing = unchanged = 0
+    changed = files_rewritten = files_missing = unchanged = files_failed = 0
     for doc_id, title, current_tags, vault_path in conn.execute(_TAGGED_DOCS_SQL).fetchall():
         current = list(current_tags or [])
         if only_mapped and not any(normalize_tag(tag) in mapping for tag in current):
@@ -265,14 +297,21 @@ def run_mapping(
             on_change(change)
         if not apply:
             continue
-        outcome = _write_document(conn, change, vault_root)
+        _write_row(conn, change)
+        try:
+            outcome = _write_file(change, vault_root)
+        except FILE_ERRORS as exc:
+            files_failed += 1
+            if on_file_error is not None:
+                on_file_error(change, exc)
+            continue
         if outcome is None:
             files_missing += 1
             if on_missing_file is not None:
                 on_missing_file(change)
         elif outcome:
             files_rewritten += 1
-    return MappingReport(changed, files_rewritten, files_missing, unchanged)
+    return MappingReport(changed, files_rewritten, files_missing, unchanged, files_failed)
 
 
 # ---------------------------------------------------------------------------
@@ -420,8 +459,10 @@ def _singular_candidates(tag: str) -> list[str]:
 def _spelling_pairs(tags: Sequence[str]) -> dict[tuple[str, str], float]:
     """Pairs whose ratio reaches the threshold, with the ratio.
 
-    Sorted by length, so the length bound ``2·min/(la+lb)`` (an upper bound on the ratio) ends
-    each inner loop early; ``real_quick_ratio`` and ``quick_ratio`` prune before ``ratio``.
+    **O(T²) in the number of distinct tags T** in the worst case (every pair of tags of similar
+    length is compared). Sorted by length, so the length bound ``2·min/(la+lb)`` (an upper bound
+    on the ratio) ends each inner loop early, and ``real_quick_ratio`` and ``quick_ratio`` prune
+    before ``ratio``; a personal corpus has hundreds to a few thousand tags.
     """
     ordered = sorted(tags, key=lambda t: (len(t), t))
     out: dict[tuple[str, str], float] = {}
@@ -440,6 +481,19 @@ def _spelling_pairs(tags: Sequence[str]) -> dict[tuple[str, str], float]:
                 if ratio >= SIMILARITY_THRESHOLD:
                     out[_pair(a, b)] = ratio
     return out
+
+
+def _shared_counts(doc_tags: Mapping[str, Sequence[str]]) -> Counter[tuple[str, str]]:
+    """How many documents each co-occurring pair of tags shares, in ONE pass over the documents.
+
+    Cost: the sum over documents of (tags on it)², not a set intersection per pair per document.
+    Intersecting the two tags' document sets for every document carrying both cost |D|² for one
+    pair on every document (20,000 such documents took about a minute).
+    """
+    counts: Counter[tuple[str, str]] = Counter()
+    for tags in doc_tags.values():
+        counts.update(combinations(sorted(set(tags)), 2))
+    return counts
 
 
 def _pair(a: str, b: str) -> tuple[str, str]:
@@ -467,13 +521,10 @@ def suggest_merges(
         for singular in _singular_candidates(tag):
             if singular in docs_by_tag:
                 reasons[_pair(tag, singular)].add(REASON_PLURAL)
-    for tags in doc_tags.values():
-        for a, b in combinations(sorted(set(tags)), 2):
-            shared = len(docs_by_tag[a] & docs_by_tag[b])
-            if shared >= MIN_SHARED_DOCS and (
-                jaccard(docs_by_tag[a], docs_by_tag[b]) >= JACCARD_THRESHOLD
-            ):
-                reasons[(a, b)].add(REASON_COOCCURRENCE)
+    for (a, b), shared in _shared_counts(doc_tags).items():
+        union = len(docs_by_tag[a]) + len(docs_by_tag[b]) - shared
+        if shared >= MIN_SHARED_DOCS and shared / union >= JACCARD_THRESHOLD:
+            reasons[(a, b)].add(REASON_COOCCURRENCE)
     suggestions = [
         _suggestion(a, b, why, docs_by_tag, ratios) for (a, b), why in reasons.items()
     ]

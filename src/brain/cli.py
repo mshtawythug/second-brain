@@ -131,6 +131,7 @@ import psycopg
 import typer
 from rich.table import Table
 
+from . import cli_tags
 from . import config as _config_module
 from .backfill import backfill_search, backfill_source_rows
 from .config import Config, ConfigError
@@ -7651,14 +7652,6 @@ def backfill_normalize_tags(
     def _plan_line(change: TagChange) -> None:
         typer.echo(f"{change.doc_id[:8]}  {change.title}  {change.before} → {change.after}")
 
-    def _missing(change: TagChange) -> None:
-        typer.secho(
-            f"file missing on disk for {change.doc_id[:8]} ({change.vault_path}); "
-            "DB updated, file skipped.",
-            fg=typer.colors.YELLOW,
-            err=True,
-        )
-
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         report = run_mapping(
@@ -7667,7 +7660,10 @@ def backfill_normalize_tags(
             vault_root=cfg.vault_path,
             apply=not dry_run,
             on_change=_plan_line if dry_run else None,
-            on_missing_file=_missing,
+            # Shared with `brain tags` so both print the same lines; a bad file is reported
+            # class-only and the run goes on (RM-21 round 1).
+            on_missing_file=cli_tags.echo_missing_file,
+            on_file_error=cli_tags.echo_file_failure,
         )
 
     prefix = "would normalize" if dry_run else "normalized"
@@ -7675,8 +7671,9 @@ def backfill_normalize_tags(
         f"{prefix} {report.changed} doc(s), "
         f"rewrote {report.files_rewritten} file(s), "
         f"{report.files_missing} file-missing skipped, "
-        f"{report.unchanged} already-canonical skipped"
+        f"{report.unchanged} already-canonical skipped{cli_tags.failed_clause(report)}"
     )
+    cli_tags.exit_if_files_failed(report)
 
 # ---------------------------------------------------------------------------
 # brain people — terminal view onto the People Hub aggregation.

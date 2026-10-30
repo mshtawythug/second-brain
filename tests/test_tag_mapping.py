@@ -6,10 +6,13 @@ No database. The per-document loop and the saved-search rewrite are exercised th
 
 from __future__ import annotations
 
+import itertools
+import random
 from pathlib import Path
 
 import pytest
 
+from brain.set_similarity import jaccard
 from brain.tag_mapping import (
     JACCARD_THRESHOLD,
     MIN_SHARED_DOCS,
@@ -191,3 +194,51 @@ def test_to_json_carries_the_evidence() -> None:
 
 def test_no_tags_no_suggestions() -> None:
     assert suggest_merges({}) == []
+
+
+def _brute_force_co_occurrence(
+    doc_tags: dict[str, list[str]],
+) -> dict[tuple[str, str], tuple[float, int]]:
+    """Reference: every pair of tags, document sets intersected directly (the pre-round-1 rule)."""
+    docs_by_tag: dict[str, set[str]] = {}
+    for doc_id, tags in doc_tags.items():
+        for tag in tags:
+            docs_by_tag.setdefault(tag, set()).add(doc_id)
+    out: dict[tuple[str, str], tuple[float, int]] = {}
+    for a, b in itertools.combinations(sorted(docs_by_tag), 2):
+        shared = len(docs_by_tag[a] & docs_by_tag[b])
+        overlap = jaccard(docs_by_tag[a], docs_by_tag[b])
+        if shared >= MIN_SHARED_DOCS and overlap >= JACCARD_THRESHOLD:
+            out[(a, b)] = (overlap, shared)
+    return out
+
+
+@pytest.mark.parametrize("seed", [7, 19, 2026])
+def test_co_occurrence_equals_the_brute_force_rule_on_a_random_corpus(seed: int) -> None:
+    rng = random.Random(seed)
+    noise = [f"n{i:02d}" for i in range(20)]
+    # Partner tags that appear only beside their lead, at strengths either side of the 0.8 cut,
+    # so the rule fires for some pairs and not for others; plus independent noise tags.
+    strengths = {f"p{i}": rng.choice([0.6, 0.75, 0.85, 0.95, 1.0]) for i in range(8)}
+    doc_tags: dict[str, list[str]] = {}
+    for d in range(400):
+        tags = set(rng.sample(noise, rng.randint(0, 3)))
+        for lead, strength in strengths.items():
+            if rng.random() < 0.15:
+                tags.add(f"{lead}-lead")
+                if rng.random() < strength:
+                    tags.add(f"{lead}-partner")
+        doc_tags[f"d{d:03d}"] = sorted(tags)
+
+    expected = _brute_force_co_occurrence(doc_tags)
+    got = {
+        tuple(sorted((s.keep, s.merge))): (s.overlap, s.shared)
+        for s in suggest_merges(doc_tags)
+        if "co-occurrence" in s.reasons
+    }
+
+    assert expected  # the corpus is built so the rule fires
+    assert got.keys() == expected.keys()
+    for pair, (overlap, shared) in expected.items():
+        assert got[pair][1] == shared
+        assert got[pair][0] == pytest.approx(overlap)

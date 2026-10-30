@@ -172,3 +172,25 @@ def test_a_database_failure_is_a_class_only_internal_error(
         assert excinfo.value.error.code == INTERNAL_ERROR  # type: ignore[attr-defined]
         assert "OperationalError" in str(excinfo.value)
         assert secret_detail not in str(excinfo.value)
+
+
+def test_read_only_is_set_on_the_transaction_and_postgres_refuses_a_write(
+    mcp_state: mcp_server._State, corpus: psycopg.Connection[Any]
+) -> None:
+    """Pins RM-21.D1 at the database: the tools' session is a READ ONLY transaction.
+
+    Driven through the REAL context ``mcp_server`` bound at import (no stand-in), so this is the
+    connection a tool call gets.
+    """
+    ctx = tags_tool._CONTEXT.get()
+    before = _snapshot(corpus)
+
+    with tags_tool._read_only(ctx, mcp_state) as conn:
+        mode = conn.execute("SHOW transaction_read_only").fetchone()
+    with pytest.raises(MCPError) as excinfo, tags_tool._read_only(ctx, mcp_state) as conn:
+        conn.execute("UPDATE documents SET tags = tags || ARRAY['written']")
+
+    assert mode is not None and mode[0] == "on"
+    assert excinfo.value.error.code == INTERNAL_ERROR  # type: ignore[attr-defined]
+    assert "ReadOnlySqlTransaction" in str(excinfo.value)
+    assert _snapshot(corpus) == before

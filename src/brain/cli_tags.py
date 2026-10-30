@@ -27,8 +27,10 @@ import typer
 
 from .config import Config, ConfigError
 from .db import connect
+from .errors import describe_failure
 from .format import emit_json
 from .tag_mapping import (
+    MappingReport,
     TagChange,
     TagMappingError,
     build_merge_mapping,
@@ -64,6 +66,43 @@ def _config() -> Config:
         _fail(f"Configuration error: {exc}")
 
 
+def echo_missing_file(change: TagChange) -> None:
+    """Warn that a changed document's ``vault_path`` is not on disk (row updated, file skipped)."""
+    typer.secho(
+        f"file missing on disk for {change.doc_id[:8]} ({change.vault_path}); "
+        "DB updated, file skipped.",
+        fg=typer.colors.YELLOW,
+        err=True,
+    )
+
+
+def echo_file_failure(change: TagChange, exc: Exception) -> None:
+    """Report a file that could not be rewritten, by exception CLASS only.
+
+    A YAML error's message quotes the offending line of the file, which is document content,
+    so only :func:`~brain.errors.describe_failure` is printed. The row is already updated, so a
+    re-run will not retry the file: the line says so and gives the tags to set by hand.
+    """
+    typer.secho(
+        f"file rewrite failed for {change.doc_id[:8]} ({change.vault_path}): "
+        f"{describe_failure(exc)}; DB updated, file not rewritten. Fix it by hand "
+        f"(tags: {change.after}); a re-run will not retry it.",
+        fg=typer.colors.RED,
+        err=True,
+    )
+
+
+def failed_clause(report: MappingReport) -> str:
+    """``", N file(s) failed"`` for a summary line, or nothing when every file was written."""
+    return f", {report.files_failed} file(s) failed" if report.files_failed else ""
+
+
+def exit_if_files_failed(report: MappingReport) -> None:
+    """Exit 1 after a run that left any file unwritten; everything else has been done."""
+    if report.files_failed:
+        raise typer.Exit(code=1)
+
+
 @contextmanager
 def _session(cfg: Config) -> Iterator[psycopg.Connection[Any]]:
     """An autocommit connection, so each document's writes commit on their own (RM-21.D2)."""
@@ -81,14 +120,6 @@ def _run_rewrite(mapping: dict[str, str], *, apply: bool) -> None:
     def _show(change: TagChange) -> None:
         typer.echo(f"{change.doc_id[:8]}  {change.title}  {change.before} → {change.after}")
 
-    def _missing(change: TagChange) -> None:
-        typer.secho(
-            f"file missing on disk for {change.doc_id[:8]} ({change.vault_path}); "
-            "DB updated, file skipped.",
-            fg=typer.colors.YELLOW,
-            err=True,
-        )
-
     with _session(cfg) as conn:
         report = run_mapping(
             conn,
@@ -97,7 +128,8 @@ def _run_rewrite(mapping: dict[str, str], *, apply: bool) -> None:
             apply=apply,
             only_mapped=True,
             on_change=_show,
-            on_missing_file=_missing,
+            on_missing_file=echo_missing_file,
+            on_file_error=echo_file_failure,
         )
         watches = rewrite_watch_filters(conn, mapping, apply=apply)
     for w in watches:
@@ -110,9 +142,10 @@ def _run_rewrite(mapping: dict[str, str], *, apply: bool) -> None:
         return
     typer.echo(
         f"retagged {report.changed} doc(s), rewrote {report.files_rewritten} file(s), "
-        f"{report.files_missing} file-missing skipped; "
+        f"{report.files_missing} file-missing skipped{failed_clause(report)}; "
         f"updated {len(watches)} watch filter(s)"
     )
+    exit_if_files_failed(report)
 
 
 @tags_app.command("list")
