@@ -17,6 +17,7 @@ import psycopg
 import pytest
 from typer.testing import CliRunner, Result
 
+from brain import cli_ingest_calendar as calendar_cli
 from brain.cli import app
 from brain.enrichment import SummaryResult
 from brain.errors import DirectoryRefreshError
@@ -294,8 +295,14 @@ def test_a_changed_description_updates_in_place(
 def test_new_occurrences_change_only_the_metadata_without_re_chunking(
     test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
 ) -> None:
-    """Criterion 2, and the test plan's "a metadata-only re-run does not call the embedder"."""
+    """Criterion 2, and the test plan's "a metadata-only re-run does not call the embedder".
+
+    BL-34 (aud-106 F1): an occurrences-only refresh records no attendee again, so no
+    directory count moves. Before BL-34 that call sat inside the write branch; it is now
+    a string condition on settle's outcome, and this pins its exclusion of "refreshed".
+    """
     assert _run().exit_code == 0
+    counts = _directory_counts(test_db)
     before = _calendar_docs(test_db)[fx.SERIES_ID]
     chunks = _chunk_ids(test_db, before["id"])
     embed_calls = embedder.embed_calls
@@ -318,6 +325,41 @@ def test_new_occurrences_change_only_the_metadata_without_re_chunking(
     assert after["sent_at"] == datetime(2026, 11, 3, 16, 0, tzinfo=UTC)
     assert _chunk_ids(test_db, before["id"]) == chunks
     assert embedder.embed_calls == embed_calls
+    assert _directory_counts(test_db) == counts
+
+
+def _directory_counts(conn: psycopg.Connection[Any]) -> dict[str, int]:
+    rows = conn.execute(
+        "SELECT email, occurrence_count FROM directory_entries WHERE source = 'calendar'"
+    ).fetchall()
+    return {str(r[0]): int(r[1]) for r in rows}
+
+
+def test_a_same_body_result_for_a_stored_event_records_no_attendee_again(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BL-34 (aud-106 F1): a stored event whose ingest returns another row is same_body,
+    and records nothing. The residual D2 case (an event with NO row of its own) records
+    before ingest by design; this is the one with a row, where the exclusion is the guard.
+    """
+    from brain.ingest import IngestResult
+
+    assert _run().exit_code == 0
+    counts = _directory_counts(test_db)
+    real = calendar_cli.ingest_document
+
+    def double(conn: psycopg.Connection[Any], **kwargs: Any) -> Any:
+        if kwargs["source_external_id"] == fx.SERIES_ID:
+            return IngestResult(document_id="00000000-0000-4000-8000-0000000000bb", created=False)
+        return real(conn, **kwargs)
+
+    monkeypatch.setattr("brain.cli_ingest_calendar.ingest_document", double)
+
+    result = _run()
+
+    assert f"same body as another event: {fx.SERIES_ID}" in result.output
+    assert _directory_counts(test_db) == counts
 
 
 def test_an_event_turning_private_becomes_confidential(
