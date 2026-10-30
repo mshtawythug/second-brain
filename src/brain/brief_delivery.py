@@ -15,7 +15,14 @@ stderr, or the webhook URL.
 INFO with its full URL. :class:`SlackWebhookChannel` therefore calls the transport's
 ``handle_request`` directly, which no httpx logger sees, and carries the timeout on the request's
 ``timeout`` extension (a transport has no default timeout of its own). A transport also never
-follows a redirect.
+follows a redirect. The timeout does not cover the DNS lookup (``getaddrinfo``), which the OS
+resolver bounds (plan, Deviations).
+
+**Drafts never leave** (sec-82 1): the published payload still lists draft documents on the local
+page, so :func:`without_drafts` removes them from what is sent (plan D13).
+
+**The email body is in ``gws``'s argv** (visible to a local ``ps`` for at most the 30 s timeout):
+``gws gmail +send`` takes the body only as ``--body`` (plan, Deviations).
 
 Plan: ``docs/plans/2026-10-30-rm-16-brief-delivery.md``.
 """
@@ -25,7 +32,7 @@ import logging
 import re
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
@@ -112,6 +119,7 @@ def run_gws(
             [executable, *argv[1:]],
             capture_output=True,
             text=True,
+            errors="replace",  # aud-82 4: gws output that is not UTF-8 is not a crash
             stdin=subprocess.DEVNULL,
             timeout=timeout_s,
             check=False,
@@ -142,12 +150,13 @@ class GwsEmailChannel:
         return "GwsEmailChannel()"
 
     def send(self, *, subject: str, body: str) -> None:
+        # Each value glued to its flag (sec-82 3): no value can be read as an option.
         self._runner(
             [
                 "gws", "gmail", "+send",
-                "--to", self._recipient,
-                "--subject", subject,
-                "--body", body,
+                f"--to={self._recipient}",
+                f"--subject={subject}",
+                f"--body={body}",
             ]
         )
 
@@ -172,26 +181,32 @@ class SlackWebhookChannel:
         return "SlackWebhookChannel(<webhook hidden>)"
 
     def send(self, *, subject: str, body: str) -> None:
-        request = httpx.Request(
-            "POST",
-            self._url,
-            json={"text": slack_escape(body)},
-            extensions={"timeout": httpx.Timeout(self._timeout_s).as_dict()},
-        )
-        transport = self._transport if self._transport is not None else httpx.HTTPTransport()
+        # Everything that can raise is inside the guard (rev-82 H2): ``httpx.Request`` raises
+        # ``InvalidURL`` (not an ``HTTPError``) for a control character, and building the real
+        # transport raises an ``OSError`` for a bad ``SSL_CERT_FILE``.
+        built: httpx.BaseTransport | None = None
         try:
+            request = httpx.Request(
+                "POST",
+                self._url,
+                json={"text": slack_escape(body), "unfurl_links": False, "unfurl_media": False},
+                extensions={"timeout": httpx.Timeout(self._timeout_s).as_dict()},
+            )
+            transport = self._transport
+            if transport is None:
+                built = transport = httpx.HTTPTransport()
             response = transport.handle_request(request)
             try:
                 response.read()
             finally:
                 response.close()
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, OSError) as exc:
             raise DeliveryError(
                 "Slack webhook request failed", log_detail=type(exc).__name__
             ) from exc
         finally:
-            if self._transport is None:
-                transport.close()
+            if built is not None:
+                built.close()
         if not response.is_success:
             raise DeliveryError(
                 "Slack webhook refused the message", log_detail=f"HTTP {response.status_code}"
@@ -213,6 +228,19 @@ def make_channel(
     if settings.channel == CHANNEL_SLACK and settings.slack_webhook_url is not None:
         return SlackWebhookChannel(settings.slack_webhook_url, transport=transport)
     return None
+
+
+def without_drafts(brief: BriefData, draft_ids: Collection[str]) -> BriefData:
+    """``brief`` without any capture, pin, todo or watch hit from a draft document (plan D13)."""
+    if not draft_ids:
+        return brief
+    return replace(
+        brief,
+        captures=[doc for doc in brief.captures if doc.id not in draft_ids],
+        pinned=[pin for pin in brief.pinned if pin.document_id not in draft_ids],
+        open_todos=[row for row in brief.open_todos if row.document_id not in draft_ids],
+        watch_hits=[hit for hit in brief.watch_hits if hit.document_id not in draft_ids],
+    )
 
 
 def slack_escape(text: str) -> str:

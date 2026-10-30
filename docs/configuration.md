@@ -444,17 +444,20 @@ checked: it skips those watches and never stops `brain brief`.
 | Env var | Default | Purpose |
 |---|---|---|
 | `BRAIN_BRIEF_DELIVERY` | `none` | Where `brain brief --wiki` (the 07:00 job) sends the brief once the page is written: `none`, `email` (through `gws gmail +send`, to `BRAIN_USER_EMAIL` only) or `slack` (an incoming webhook). Roadmap ticket RM-16. |
-| `BRAIN_BRIEF_SLACK_WEBHOOK_URL` | unset | The Slack incoming-webhook URL, needed by `slack`. **A secret** (its path is the credential): it must start `https://hooks.slack.com/`, it is never logged, and `brain doctor` says only that it is set. Bind it to a private channel or a DM, never a shared channel. |
+| `BRAIN_BRIEF_SLACK_WEBHOOK_URL` | unset | The Slack incoming-webhook URL, needed by `slack`. **A secret** (its path is the credential): it must start `https://hooks.slack.com/` (that exact host, no port, no credentials, no whitespace or control characters, at most 65,536 characters), it is never logged, and `brain doctor` says only that it is set. Bind it to a private channel or a DM, never a shared channel. |
 | `BRAIN_BRIEF_DELIVERY_INCLUDE_TODOS` | `false` | Also send the open todo items and the suggested next steps. Both come from document text, so they are a second opt-in; by default the message carries the todo count only. |
 
 They live in the feature settings leaf `brain/settings/brief_delivery.py`.
-`email` needs `BRAIN_USER_EMAIL` (one address, no list) and `gws` on `PATH`;
-the subject is always `[brain brief] YYYY-MM-DD`, so a mail filter can label it,
-and `brain ingest-gmail` never ingests it back. What is sent is the published
-page's content, built with confidential documents excluded: the date, counts,
-capture and pinned titles, and the watch hits. A bad value (an unknown channel, a
-non-Slack URL, `email` without one `BRAIN_USER_EMAIL`) does not stop the brief:
-it logs one warning, and `brain doctor`'s `brief delivery` row names the variable.
+`email` needs `BRAIN_USER_EMAIL` (one address, no list, not starting with `-`)
+and `gws` on `PATH`; the subject is always `[brain brief] YYYY-MM-DD`, so a mail
+filter can label it, and `brain ingest-gmail` never ingests your own copy back.
+What is sent is the published page's content, built with confidential documents
+excluded, and with draft documents removed: the date, counts, capture and pinned
+titles, and the watch hits. The Slack post turns link previews off. With
+`BRAIN_BRIEF_DELIVERY` unset or `none`, the other two knobs are not read by the
+brief at all. A bad value with delivery on (an unknown channel, a non-Slack URL,
+`email` without one `BRAIN_USER_EMAIL`) does not stop the brief: it logs one
+warning, and `brain doctor`'s `brief delivery` row names the variable.
 A failed send is one warning too, and the watch hits it carried stay unnotified,
 so the next brief sends them again. If `gws` is not authorized to send, run
 `bin/gws-reauth`.

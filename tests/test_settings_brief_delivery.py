@@ -55,6 +55,9 @@ def test_email_without_an_owner_address_names_the_variable() -> None:
         "two@@example.invalid",
         "a@b@example.invalid",
         "owner@example.invalid;other@example.invalid",
+        # sec-82 3: a leading dash could be read by gws as an option.
+        "-owner@example.invalid",
+        "--bcc=other@example.invalid",
     ],
 )
 def test_email_refuses_anything_but_one_address(address: str) -> None:
@@ -93,6 +96,16 @@ def test_slack_without_a_webhook_names_the_variable() -> None:
         # Userinfo; split so the pre-commit PII gate does not read it as an address.
         "https://user:pw" + "@" + "hooks.slack.com/services/T0/B0/X",
         "https://hooks.slack.com/",
+        # aud-82 2 / sec-82 2: other Slack hosts, and look-alikes that end in slack.com.
+        "https://api.slack.com/services/T0/B0/X",
+        "https://evilhooks.slack.com/services/T0/B0/X",
+        "https://hooks.evil-slack.com/services/T0/B0/X",
+        # aud-82 1b: control characters and whitespace anywhere, and an oversized path.
+        "https://hooks.slack.com/services/T0/B0/x\x7fy",
+        "https://hooks.slack.com/services/T0/B0/x?a=\x01",
+        "https://hooks.slack.com/services/T0/B0/x y",
+        "https://hooks.slack.com/services/T0/B0/x\ty",
+        "https://hooks.slack.com/services/" + "x" * 65_537,
     ],
 )
 def test_a_non_slack_webhook_url_is_a_config_error(url: str) -> None:
@@ -126,3 +139,20 @@ def test_include_todos_is_opt_in() -> None:
 def test_an_unknown_channel_names_the_variable() -> None:
     with pytest.raises(ConfigError, match="BRAIN_BRIEF_DELIVERY"):
         load_brief_delivery_settings({"BRAIN_BRIEF_DELIVERY": "carrier-pigeon"})
+
+
+def test_the_longest_accepted_url_is_65536_characters() -> None:
+    # httpx's own cap on a whole URL; one character more is refused (the parametrized case
+    # above refuses a PATH of 65,537 characters).
+    prefix = "https://hooks.slack.com/services/"
+    url = prefix + "x" * (65_536 - len(prefix))
+
+    settings = load_brief_delivery_settings(
+        {"BRAIN_BRIEF_DELIVERY": "slack", "BRAIN_BRIEF_SLACK_WEBHOOK_URL": url}
+    )
+
+    assert settings.slack_webhook_url == url
+    with pytest.raises(ConfigError, match="BRAIN_BRIEF_SLACK_WEBHOOK_URL"):
+        load_brief_delivery_settings(
+            {"BRAIN_BRIEF_DELIVERY": "slack", "BRAIN_BRIEF_SLACK_WEBHOOK_URL": url + "x"}
+        )

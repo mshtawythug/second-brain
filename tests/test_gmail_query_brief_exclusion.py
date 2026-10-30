@@ -24,8 +24,20 @@ _SCOPES = {
 
 
 def test_the_exclusion_names_the_delivered_subject() -> None:
-    expected = f'-subject:"{SUBJECT_PREFIX}"'
+    # sec-82 6: only the owner's OWN brief mail is excluded, not a stranger's with that subject.
+    expected = f'-(from:me subject:"{SUBJECT_PREFIX}")'
     assert expected == BRIEF_EXCLUSION
+
+
+def test_ingest_gmail_help_names_the_exclusion() -> None:
+    from typer.testing import CliRunner
+
+    from brain import cli
+
+    result = CliRunner().invoke(cli.app, ["ingest-gmail", "--help"], terminal_width=200)
+
+    assert result.exit_code == 0
+    assert "[brain brief]" in result.output
 
 
 @pytest.mark.parametrize(

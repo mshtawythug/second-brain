@@ -46,8 +46,9 @@ class GmailError(RuntimeError):
 
 
 Runner = Callable[[list[str]], str]
-#: RM-16: the emailed brief's subject (``brief_delivery.SUBJECT_PREFIX``), kept out of every query.
-BRIEF_EXCLUSION = '-subject:"[brain brief]"'
+#: RM-16: the owner's own emailed briefs (``brief_delivery.SUBJECT_PREFIX``), kept out of every
+#: query; a stranger's mail with that subject is still ingested (sec-82 6).
+BRIEF_EXCLUSION = '-(from:me subject:"[brain brief]")'
 
 
 def _build_query(
@@ -103,9 +104,7 @@ def list_messages(
     q = _build_query(
         query=query, label=label, since=since, until=until, from_addr=from_addr
     )
-    params: dict[str, Any] = {"userId": "me", "maxResults": max_results}
-    if q:
-        params["q"] = q
+    params: dict[str, Any] = {"userId": "me", "maxResults": max_results, "q": q}
     out = _run(
         [
             "gws", "gmail", "users", "messages", "list",

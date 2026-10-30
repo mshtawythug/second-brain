@@ -23,7 +23,9 @@ terminal and ``brain watch hits`` still show (RM-15.D3).
 configured channel (:mod:`brain.brief_delivery`; ``BRAIN_BRIEF_DELIVERY``, default ``none``). A
 delivery problem never fails the brief: it is one class-only WARNING. When delivery is configured
 and did not happen, the watch hits are NOT marked notified, so the next brief sends them again
-(RM-16 plan, D3); with delivery off, or sent, they are marked exactly as before.
+(RM-16 plan, D3); with delivery off, or sent, they are marked exactly as before. Delivery off is
+decided by ``BRAIN_BRIEF_DELIVERY`` alone, so a malformed other knob cannot make it warn. Draft
+documents stay on the page and are removed from what is sent (plan D13).
 
 The :mod:`brain.brief` functions are looked up on the module at call time, as ``cli.brief`` did
 through its function-local import, so a test double on ``brain.brief.suggest_next_steps`` still
@@ -45,7 +47,7 @@ import psycopg
 from . import brief as brief_mod
 from . import db
 from .brief import BriefData
-from .brief_delivery import DeliveryChannel, deliver_brief
+from .brief_delivery import DeliveryChannel, deliver_brief, without_drafts
 from .config import Config, ConfigError
 from .errors import describe_failure
 from .ingest import Embedder
@@ -57,7 +59,12 @@ from .saved_search import (
     watch_tables_present,
 )
 from .saved_search_check import CheckResult, build_matcher, check_enabled, limit_note
-from .settings.brief_delivery import CHANNEL_EMAIL, load_brief_delivery_settings
+from .settings.brief_delivery import (
+    CHANNEL_EMAIL,
+    CHANNEL_NONE,
+    load_brief_delivery_settings,
+    load_delivery_channel,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -163,7 +170,7 @@ def build_brief(
         else None
     )
     delivered = (
-        _deliver(published, cfg, delivery_env, delivery_channel)
+        _deliver(published, cfg, delivery_env, delivery_channel, connect)
         if written_path is not None and published is not None
         else True
     )
@@ -179,15 +186,20 @@ def _deliver(
     cfg: Config,
     env: Mapping[str, str] | None,
     channel: DeliveryChannel | None,
+    connect: Connect,
 ) -> bool:
     """Send the published payload; return whether its watch hits may be marked notified.
 
     True when delivery is off or succeeded. False when the owner asked for delivery and it did
-    not happen: a knob that does not load, a recipient other than ``cfg.user_email``, or a failed
-    send. Each is one WARNING, never a raise.
+    not happen: a knob that does not load, a recipient other than ``cfg.user_email``, the draft
+    lookup failing, or a failed send. Each is one WARNING, never a raise.
     """
+    source = os.environ if env is None else env
     try:
-        settings = load_brief_delivery_settings(os.environ if env is None else env)
+        # The channel alone first (rev-82 H1): off is silent whatever the other knobs say.
+        if load_delivery_channel(source) == CHANNEL_NONE:
+            return True
+        settings = load_brief_delivery_settings(source)
     except ConfigError as exc:
         # The message names variables only, but the rule is class-only; doctor prints it.
         _logger.warning(
@@ -200,7 +212,31 @@ def _deliver(
             "brief delivery skipped: the recipient is not the configured BRAIN_USER_EMAIL"
         )
         return False
-    return deliver_brief(published, settings, channel).status != "failed"
+    try:
+        drafts = _draft_ids(connect, cfg, published)
+    except psycopg.Error as exc:
+        # Fail closed: without the lookup a draft could be sent.
+        _logger.warning("brief delivery skipped (%s): drafts unchecked", describe_failure(exc))
+        return False
+    return deliver_brief(without_drafts(published, drafts), settings, channel).status != "failed"
+
+
+def _draft_ids(connect: Connect, cfg: Config, brief: BriefData) -> frozenset[str]:
+    """The ids, among the documents ``brief`` names, of drafts (plan D13)."""
+    ids = sorted(
+        {doc.id for doc in brief.captures}
+        | {pin.document_id for pin in brief.pinned}
+        | {row.document_id for row in brief.open_todos}
+        | {hit.document_id for hit in brief.watch_hits}
+    )
+    if not ids:
+        return frozenset()
+    with connect(cfg.database_url) as conn:
+        rows = conn.execute(
+            "SELECT id::text FROM documents WHERE id = ANY(%s::uuid[]) AND draft",
+            (ids,),
+        ).fetchall()
+    return frozenset(row[0] for row in rows)
 
 
 def _check_notes(checks: list[CheckResult], *, published: bool) -> list[WatchNote]:

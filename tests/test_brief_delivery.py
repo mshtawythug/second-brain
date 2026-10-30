@@ -176,12 +176,13 @@ def test_email_channel_runs_one_gws_send_to_the_owner() -> None:
 
     channel.send(subject="[brain brief] 2026-06-09", body="hello")
 
+    # sec-82 3: each value is glued to its flag, so none can be read as an option.
     assert calls == [
         [
             "gws", "gmail", "+send",
-            "--to", OWNER,
-            "--subject", "[brain brief] 2026-06-09",
-            "--body", "hello",
+            f"--to={OWNER}",
+            "--subject=[brain brief] 2026-06-09",
+            "--body=hello",
         ]
     ]
 
@@ -278,7 +279,11 @@ def test_slack_channel_posts_once() -> None:
     request = seen[0]
     assert request.method == "POST"
     assert str(request.url) == WEBHOOK
-    assert json.loads(request.content) == {"text": "a &lt;b&gt; &amp; c"}
+    assert json.loads(request.content) == {
+        "text": "a &lt;b&gt; &amp; c",
+        "unfurl_links": False,
+        "unfurl_media": False,
+    }
     assert request.extensions["timeout"] == httpx.Timeout(SLACK_TIMEOUT_S).as_dict()
 
 
@@ -451,5 +456,57 @@ def test_the_real_transport_posts_and_logs_no_url(
 
     SlackWebhookChannel(url).send(subject="s", body="hello")
 
-    assert [json.loads(body) for body in received] == [{"text": "hello"}]
+    assert [json.loads(body)["text"] for body in received] == ["hello"]
     assert SECRET_PATH not in caplog.text
+
+
+# --- review round 1 (rev-82 / aud-82 / sec-82) ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://hooks.slack.com/services/T0/B0/x\x7fy",
+        "https://hooks.slack.com/services/T0/B0/x?a=\x01",
+    ],
+)
+def test_a_url_httpx_refuses_is_a_failed_delivery_not_a_raise(
+    caplog: pytest.LogCaptureFixture, url: str
+) -> None:
+    # rev-82 H2: httpx.InvalidURL is not an httpx.HTTPError.
+    caplog.set_level(logging.DEBUG)
+    channel = SlackWebhookChannel(url, transport=_mock())
+
+    outcome = deliver_brief(_brief(), _settings("slack"), channel)
+
+    assert outcome.status == "failed"
+    assert outcome.failure is not None and "InvalidURL" in outcome.failure
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "T0" not in caplog.text
+
+
+def test_a_bad_ssl_cert_file_is_a_failed_delivery_not_a_raise(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    # aud-82 1 / sec-82 2: building the real transport reads SSL_CERT_FILE (an OSError).
+    # Loopback, so even a transport that did build would reach nothing off the machine.
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing-ca.pem"))
+    channel = SlackWebhookChannel(f"https://127.0.0.1:9/services/{SECRET_PATH}")
+
+    outcome = deliver_brief(_brief(), _settings("slack"), channel)
+
+    assert outcome.status == "failed"
+    assert len(caplog.records) == 1
+    assert "FileNotFoundError" in caplog.records[0].getMessage()
+    assert SECRET_PATH not in caplog.text
+
+
+def test_run_gws_survives_output_that_is_not_utf8(tmp_path: Path) -> None:
+    # aud-82 4: a decode error must not escape run_gws.
+    gws = _fake_gws(tmp_path, "printf '\\377\\376 not utf-8'")
+
+    out = run_gws(["gws", "gmail", "+send"], which=lambda _name: str(gws))
+
+    assert "not utf-8" in out

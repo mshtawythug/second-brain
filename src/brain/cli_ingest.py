@@ -531,7 +531,7 @@ def ingest_gmail(
     a thread that has grown by one message updates the existing row in place
     so downstream links / derived_links continue to point at a stable UUID.
 
-    At least one scope flag is required (no bulk-inbox ingests).
+    One scope flag is required (no bulk ingests); your own `\\[brain brief]` mail is skipped.
     """
     if not any([query, label, from_addr, since, until]):
         typer.secho(
