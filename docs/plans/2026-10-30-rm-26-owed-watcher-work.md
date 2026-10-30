@@ -163,3 +163,11 @@ the slot before reading the flag. A job that finished before the flag was set
 handed its removes before `lane.close()` (which runs after this branch), so the
 lane drains or reports them. Every other interleaving owes the id at least once,
 and the replay de-duplicates and checks for a live row.
+
+### Round 3 residual (aud-95)
+
+If in-flight job A finished while shutdown was still inside `_owe_in_flight` (an
+fsync), the worker could take queued job B before `_take_queued` did. B's
+`finally` owed only B's captured ids, so a B that then hung past exit lost its
+delete. Once `worker_abandoned` is set, the worker now owes each job it dequeues
+(`_owe`: path and unhanded ids) and starts none (`305b9a4`).
