@@ -22,6 +22,17 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Fixed — two terminal error reports no longer quote exception text (RM-29)
+
+- **`brain vault export`** reports a file it could not write as `<path>: <class>`,
+  for example `OSError[ENOSPC]` for a full disk. It used to print the exception's
+  message.
+- **`brain backfill scan-secrets --action redact`** reports a document it could
+  not rewrite by the failure's class, in the text report and in `--json`. The
+  usual case, a redacted body identical to another document's, reads "redacted
+  body collides with another document's content hash"; it used to name the
+  other document's id.
+
 ### Added — `brain ui`: Copy path (RM-23)
 
 - **The note pane has a Copy path button**, so a note can be opened in any editor.

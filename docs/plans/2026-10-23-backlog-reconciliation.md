@@ -186,7 +186,7 @@ residues, recorded with their repairs.
 | H-3 | Graph-lock residuals 2–4: `build_graph` raises for a document deleted mid-enumeration; the plan re-check compares `content_hash` only; the cross-type collapse window is cosmetic. | #53 |
 | H-4 | Watcher reconnect residue: a delete committed just before the connection died leaves a ghost AGE vertex (repair: `brain graphrag remove`); a delete not applied at shutdown is redone only by `brain vault sync --prune`. | #56 |
 | H-5 | Log-privacy blind spots of the G1 guard: a value derived from an exception and logged outside its handler; an exception stored on an attribute; a nested `def` or `lambda` inside a handler. | #58 |
-| H-6 | Two terminal error reports still carry exception text: `vault/export.py` `summary.errors` and `cli_sensitivity.py` `result.errors`. Both were judged content-free. | #58 |
+| H-6 | **SHIPPED (RM-29, this PR).** `vault/export.py`'s `summary.errors` and `cli_sensitivity.py`'s `_apply_redact` now record `describe_failure` (an `OSError` keeps its errno), and the documented hash collision records a fixed sentence. **Residue:** `scan-secrets --action mark-confidential` writes `PropagationFailure.message` into the same report, and three of `vault/sensitivity_propagate.py`'s messages still interpolate `{exc}`. That path was outside RM-29's scope. | #58 |
 | H-7 | **SHIPPED (#61, merged at `02c2abc`).** Decided 2026-10-23: search falls back to text-only (FTS) matching when the query embed fails. The follow-ups that PR records are BL-13 to BL-15. | #61 |
 | — | `graph_runner` has no `degraded` tolerance. | By design (its module docstring). Not backlog. |
 | — | The graph lags while a startup backlog drains. | By design (PR #54): the lane catches up by itself. Not backlog. |

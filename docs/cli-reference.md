@@ -685,6 +685,12 @@ non-`report` action **and** pass `--apply`; either alone is a no-op report.
 `redact` is by far the slowest option for that reason. An unrecognized
 `--action` is a usage error (**exit 2**).
 
+A document that `redact` could not rewrite is listed under `error(s)` (and in
+`--json`'s `errors`) and keeps its secret. The reason names the failure's class
+only, never the exception's text. The usual case, where the redacted body is
+identical to another document's, reads "redacted body collides with another
+document's content hash".
+
 One limit worth stating plainly: this finds what is *already stored*. It cannot
 un-send anything that was already transmitted to a hosted embedder before the
 scan ran.
