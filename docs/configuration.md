@@ -453,8 +453,8 @@ checked: it skips those watches and never stops `brain brief`.
 | `BRAIN_OCR_MAX_PAGES` | `50` | How many pages of one PDF are rendered and recognised, 1 to 1,000. Later pages are not read. |
 
 They live in the feature settings leaf `brain/settings/ocr.py`. A PDF is OCR'd
-only when its text layer averages under 25 characters a page **and** one of the
-first `BRAIN_OCR_MAX_PAGES` pages carries an image, so a born-digital PDF is
+only when its text layer averages under 25 characters a page **and** a page
+within the cap (the first `BRAIN_OCR_MAX_PAGES`) carries an image object, so a born-digital PDF is
 never OCR'd; one with a full text layer never reads these knobs, and with
 `BRAIN_OCR=off` the file is never opened by the second PDF parser. Each page is
 rendered at 200 dpi (`pypdfium2`, PNG via Pillow) and passed to `tesseract stdin

@@ -26,7 +26,7 @@ git tag scheme:
 
 - A scanned PDF or a photographed receipt used to ingest as an empty document
   ("skipped (empty document)"). When a PDF's text layer averages under 25
-  characters a page and a page carries an image, `brain` now renders up to
+  characters a page and a page within the cap carries an image object, `brain` now renders up to
   `BRAIN_OCR_MAX_PAGES` (default 50) pages at 200 dpi and reads them with the
   local `tesseract` binary, 60 seconds at most per page. The text is stored as
   `[page N]` blocks, and `metadata.ocr` records the page count and engine.

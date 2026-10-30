@@ -37,6 +37,8 @@ notes, see `brain-authoring`.
 | Krisp transcript / Slack thread / arbitrary text | `brain ingest-stdin` | The MCP→stdin chain. See Krisp + Slack sections. |
 | Krisp action items as a separate doc | `brain enrich --krisp-action-items` (handoff) + `brain ingest-stdin --content-type krisp_action_items` | See `brain-todo` for the full flow. |
 
+Scanned / image-only PDFs are OCR'd when `tesseract` is on PATH (`brew install tesseract`; `brain doctor`'s `ocr` line); without it, a hint plus "skipped (empty document)". Knobs: `BRAIN_OCR` / `BRAIN_OCR_LANG` / `BRAIN_OCR_MAX_PAGES`.
+
 ## Files and directories
 
 ```bash
