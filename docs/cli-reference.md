@@ -802,6 +802,54 @@ brain ingest-notion ~/Downloads/Export-abc123.zip --max 50 --tag notion
   refuses prints `refused <page id>: N finding(s)`, and its warn and redact notices are labelled
   with the page id.
 
+## Apple Notes ingest
+
+`brain ingest-apple-notes` (RM-36, macOS only) stores the notes of the Apple
+Notes folders you name, read through `osascript -l JavaScript` (a macOS
+built-in); brain stores no credential. It requires `--folder NAME`
+(repeatable); "all notes" is not offered. Otherwise it exits 2 with
+`ingest-apple-notes requires --folder NAME (repeatable); "all notes" is not
+offered`. On any other platform it exits 1. The first run triggers macOS's
+Automation permission prompt for Notes; see
+[guides/apple-notes.md](guides/apple-notes.md).
+
+```bash
+brain ingest-apple-notes --folder Reading --dry-run
+brain ingest-apple-notes --folder Reading --folder Projects --since 2026-10-01
+brain ingest-apple-notes --folder Recipes --sensitivity normal --tag cooking
+```
+
+- **Scope.** Folders are matched by exact name in every account. A name that
+  matches no folder is warned about; if none matches, the command exits 1.
+  `--since YYYY-MM-DD` keeps notes modified on or after that day (local time).
+- **One document per note** (source `applenotes`, content type `apple_note`,
+  deduplicated by the note's Notes id). An edited note updates in place; a
+  note moved to another folder, or touched without a text change, updates
+  only its metadata (`folder`, `modified`) without re-chunking. The creation
+  time dates the document (`sent_at`).
+- **What the body holds:** the note converted from Notes' HTML to Markdown
+  (headings, lists, checklists as `- [ ]` / `- [x]`, links). Attachments are
+  not ingested, and **locked notes are never read**: the command counts them.
+  A note with no text left is counted as `empty` and not stored. A note whose
+  converted body is identical to another stored note's (two copies of one
+  template) is reported by id as `same body as another note` and not stored;
+  the other note's document is left untouched.
+- **Sensitivity.** `confidential` by default (personal notes are private by
+  nature); `--sensitivity normal` overrides it.
+- **Cap and cost.** At most `--max` notes a run (default 200), newest
+  modification first; the command says how many more matched. Every new note
+  gets a summary (`--no-enrich` skips it), and when the graph is on, concept
+  extraction takes minutes per note in the watcher's graph lane, so a full
+  200-note run keeps it busy for more than a day. Start with `--since`.
+- **Safety.** The `osascript` program is fixed; folder names reach it only as
+  JSON data, never as code, and it only reads. It always runs
+  `/usr/bin/osascript` (never a `PATH` lookup), stopped after 120 s; its error
+  output is never shown. A body over 2,000,000 characters is skipped (counted
+  as `skipped`), the Markdown kept from a note stops at 1,000,000 characters,
+  and a note that fails to convert costs that note only. `brain doctor`'s
+  `apple notes` row says whether `/usr/bin/osascript` exists.
+- `--dry-run` lists `folder / title` for each note and writes nothing.
+
 ## Status and health
 
 ```bash

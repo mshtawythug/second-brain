@@ -49,6 +49,24 @@ class _FakeCompleted:
         self.returncode = returncode
 
 
+@pytest.fixture(autouse=True)
+def _healthy_osascript(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every check here sees a present ``osascript``, whatever the host.
+
+    The ``apple notes`` row (RM-36) checks that ``/usr/bin/osascript`` exists, so a
+    ``platform="darwin"`` run read the HOST: OK on a Mac, WARN on CI's Ubuntu, which
+    broke ``test_every_failing_check_names_a_remedy`` there (#103, CI run
+    41081074460). The row's own seam, ``doctor_apple_notes.OSASCRIPT_PATH``, is
+    pointed at a file that exists; ``tests/test_doctor_apple_notes.py`` covers the
+    missing case.
+    """
+    present = tmp_path_factory.mktemp("osascript") / "osascript"  # not in any test's tmp_path
+    present.write_text("")
+    monkeypatch.setattr("brain.doctor_apple_notes.OSASCRIPT_PATH", str(present))
+
+
 def _install_plists(
     launchd_dir: Path,
     *labels: str,
@@ -558,10 +576,12 @@ def test_all_healthy_yields_no_failures(
     # RM-14b adds "reranker", not configured (ok) under tests/rerank_isolation_plugin.py.
     # RM-31 adds "github", ok here because ``gh`` is found (``shutil.which`` is pinned above).
     # RM-32 adds "ocr", off (ok) under tests/ocr_isolation_plugin.py.
+    # RM-36 adds "apple notes", ok here because _healthy_osascript pins its path to a file.
     assert [c.check for c in checks] == [
-        "config", "daemons", "vault watcher", "brief delivery", "reranker", "github", "ocr"
+        "config", "daemons", "vault watcher", "brief delivery", "reranker", "github", "ocr",
+        "apple notes",
     ]
-    assert [c.status for c in checks] == ["ok", "ok", "ok", "ok", "ok", "ok", "ok"]
+    assert [c.status for c in checks] == ["ok"] * 8
 
 
 def test_every_failing_check_names_a_remedy(

@@ -38,7 +38,7 @@ from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
 from . import ExtractedDoc
-from .github_docs import one_line
+from .text_safety import one_line
 
 SOURCE_KIND = "notion"
 CONTENT_TYPE = "notion_page"

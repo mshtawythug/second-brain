@@ -52,6 +52,7 @@ const SOURCE_ICONS = {
   krisp: "🎙️", slack: "💬", gmail: "📧", calendar: "📅", manual: "✍️", vault: "🌱",
   jira: "🎫",
   github: "🔀",
+  applenotes: "🗒️",
   notion: "📓",
 };
 const sourceIconFor = (kind) => SOURCE_ICONS[kind] || SOURCE_ICONS.vault;
