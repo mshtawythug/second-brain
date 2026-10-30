@@ -17,6 +17,14 @@ fields (a series' occurrences, its latest date, the attendees' addresses) are
 then applied with ``update_document(metadata_patch=…)``, which neither
 re-chunks nor calls the embedder.
 
+**Errors are printed by class only** (``describe_failure``): a ``gws`` failure
+can quote its stderr, and a database error's DETAIL can quote row values.
+
+**The ``gws`` read** gets :data:`GWS_TIMEOUT_SECONDS` and a
+:data:`GWS_MAX_STDOUT_BYTES` cap (:func:`calendar_gws_runner`), because a
+``--page-all`` read over 92 days is far larger than the single page the
+runner's 30-second default was sized for.
+
 **People.** ``--person`` resolves through ``directory_entries``, so when a
 document is created, its body changes, or its addresses change, each
 attendee's ``(name, address)`` pair is recorded there with ``source='calendar'``,
@@ -40,7 +48,7 @@ from .cli_ingest import (
 )
 from .config import Config
 from .db import connect
-from .errors import SecretGuardError
+from .errors import SecretGuardError, describe_failure
 from .ingest import Embedder, ingest_document, update_document
 from .ingest import calendar as calendar_ingest
 from .ingest.calendar import CalendarDoc, CalendarError
@@ -60,6 +68,16 @@ SCOPE_REFUSAL = (
 )
 #: Metadata keys that change without the body changing (module docstring).
 _VOLATILE_KEYS = ("occurrences", "date", "participants")
+#: One ``--page-all`` read of up to 92 days of events (module docstring).
+GWS_TIMEOUT_SECONDS = 120
+GWS_MAX_STDOUT_BYTES = 16 * 1024 * 1024
+
+
+def calendar_gws_runner(args: list[str]) -> str:
+    """The production ``gws`` runner, with this command's timeout and stdout cap."""
+    return real_gws_runner(
+        args, timeout=GWS_TIMEOUT_SECONDS, max_stdout_bytes=GWS_MAX_STDOUT_BYTES
+    )
 
 
 def ingest_calendar(
@@ -83,11 +101,11 @@ def ingest_calendar(
     """
     window = _window_or_exit(since, until, today=datetime.now(UTC).date())
     try:
-        events = calendar_ingest.list_events(calendar, *window, runner=real_gws_runner)
+        events = calendar_ingest.list_events(calendar, *window, runner=calendar_gws_runner)
         batch = calendar_ingest.build_documents(
             events,
             master_lookup=lambda series_id: calendar_ingest.get_event(
-                calendar, series_id, runner=real_gws_runner
+                calendar, series_id, runner=calendar_gws_runner
             ),
         )
     except CalendarError as exc:
@@ -182,7 +200,9 @@ def _ingest_all(
                 typer.secho(str(exc), fg="red", err=True)
                 outcome = "failed"
             except (psycopg.Error, ValueError, KeyError) as exc:
-                typer.secho(f"  failed {cd.doc.title}: {exc}", fg="red", err=True)
+                typer.secho(
+                    f"  failed {cd.doc.title}: {describe_failure(exc)}", fg="red", err=True
+                )
                 outcome = "failed"
             counts[outcome] += 1
             if outcome != "unchanged":

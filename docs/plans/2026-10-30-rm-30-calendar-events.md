@@ -29,16 +29,22 @@ explained below.
 
 1. **Document body** (the deduped, chunked, embedded text). It holds the title; a `When:` line
    (single event: start–end in the event's own offset, or `(all day)`; series: the master's
-   `RRULE` lines, or `Recurring series` if the master cannot be read); `Location:` with URLs
-   removed; `Visibility: private` only when private; `Attendees:` with display names only
+   `RRULE` lines, or `Recurring series` if the master cannot be read); `Location:`; `Visibility: private` only when private; `Attendees:` with display names only
    (attendees with no display name, and resource rooms, are left out); then the description.
    - The `Visibility` line exists so that an event that turns private changes the body. The
      re-ingest then goes through the pipeline's escalate-only update path, which also applies the
      F6 hosted-egress veto, instead of a hand-written sensitivity update.
-2. **Description cleaning.** HTML is converted to text. Google's inserted invitation block
-   (between `-::~:~::~` delimiter lines) is dropped. URLs on conference hosts (Zoom, Meet, Teams,
-   Webex, GoToMeeting, Chime, BlueJeans) are removed, and so are dial-in, PIN and passcode lines.
-   `conferenceData` and `hangoutLink` are never read.
+2. **One cleaner for every free-text field** (`ingest/calendar_text.py`, from the PR #96 security
+   review): the title, the location, the description and each display name. Per line it applies
+   NFKC, removes every URL (scheme, `www.` and scheme-less `host.tld/path` forms), drops the line
+   if what is left looks like dial-in material (a PIN / passcode / code / meeting-ID /
+   conference-ID / bridge / Passwort keyword, a phone-like run of 7+ digits, or a one-tap
+   `,,digits#` form), and removes every email address, including obfuscated `[at]` / `(at)` /
+   `at … dot` forms and `user@host` with no dot. In the description, HTML is converted to text
+   first and Google's invitation block (between `-::~` delimiter lines) is dropped whole.
+   `conferenceData` and `hangoutLink` are never read. A title the cleaner empties is stored as
+   `(calendar event)` rather than skipped: the ticket skips events with *no* title, and such an
+   event still has a time and attendees. A display name the cleaner empties is dropped.
 3. **Series.** Instances come from `singleEvents=true`; the series document reads title,
    description, location, attendees and visibility from the **master** (`events get`), so the
    body does not depend on the run's window. If the master cannot be read, it falls back to the
@@ -66,8 +72,8 @@ explained below.
    is inclusive and `--until` exclusive, the same as `ingest-gmail`'s `before:`. The window must
    be ≤ 92 days, and `--until` ≤ today + 14 days (UTC). Every refusal exits 2.
 8. **Options.** `--calendar` (default `primary`), `--dry-run`, `--tag`, `--enrich` (opt-in summary;
-   the default is none), `--allow-secrets`. Sensitivity: `confidential` for `visibility ==
-   "private"`, otherwise `normal`.
+   the default is none), `--allow-secrets`. Sensitivity: `confidential` for `visibility` `private`
+   or Google's legacy `confidential`, otherwise `normal`.
 9. **Skipped.** Events the owner declined (an attendee with `self: true`, `responseStatus ==
    "declined"`), events with no title, `eventType` `workingLocation` or `outOfOffice`, and
    `status == "cancelled"`.

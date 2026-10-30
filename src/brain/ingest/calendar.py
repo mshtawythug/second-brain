@@ -15,35 +15,39 @@ What a document holds (spec RM-30, protocol points 3 and 6):
   run's window. If the master cannot be read, the series' first instance in the
   window stands in.
 - **The body** is the title, a ``When:`` line (the event's time, or the
-  master's ``RRULE`` lines and its time of day), the location with URLs
-  removed, ``Visibility: private`` for a private event, the attendees' display
-  names, and the cleaned description. ``EXDATE`` lines and occurrence dates are
-  left out of the body because they change often, and a body change re-chunks,
-  re-embeds and re-extracts. The ``Visibility`` line exists so that an event
-  that turns private changes the body, and the re-ingest then goes through the
-  pipeline's escalate-only sensitivity update.
+  master's ``RRULE`` lines and its time of day), the location,
+  ``Visibility: private`` for a private event (Google's ``private`` or legacy
+  ``confidential`` visibility), the attendees' display names, and the
+  description. Every free-text field (title, location, description, display
+  names) goes through the one cleaner in :mod:`brain.ingest.calendar_text`,
+  which removes every URL and address and drops dial-in lines. ``EXDATE``
+  lines and occurrence dates are left out of the body because they change
+  often, and a body change re-chunks, re-embeds and re-extracts. The
+  ``Visibility`` line exists so that an event that turns private changes the
+  body, and the re-ingest then goes through the pipeline's escalate-only
+  sensitivity update.
 - **Metadata**: ``date`` (promoted to ``sent_at``: the start, or for a series
   its latest occurrence in the window), ``participants`` (the attendees'
   addresses, lowercased; the field ``--person`` matches), and for a series
   ``occurrences`` (``count`` in the window and the ``last`` ten start times).
-- **Never stored**: attendee addresses in the body (every address-shaped string
-  is removed from the description and the location), ``conferenceData`` and
-  ``hangoutLink``, conference-host URLs, Google's inserted invitation block, and
-  dial-in, PIN and passcode lines (they carry meeting PINs).
+- **Never stored**: attendee addresses in the body, any URL (join links carry
+  passcodes in their query strings), ``conferenceData`` and ``hangoutLink``,
+  Google's inserted invitation block, and dial-in, PIN and passcode lines.
 - **Skipped**: cancelled events, events the owner declined, events with no
-  title, and working-location and out-of-office entries.
+  title, and working-location and out-of-office entries. A title that the
+  cleaner empties (it held only a link or a dial-in) is NOT a reason to skip:
+  the event existed and has attendees and a time, so it is stored under
+  :data:`PLACEHOLDER_TITLE`.
 """
 from __future__ import annotations
 
-import html
 import json
-import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from brain.errors import DirectoryRefreshError
+from brain.errors import DirectoryRefreshError, describe_failure
 
 # ``_parse_gws_pages`` is private to ``directory.py``, but it is exactly the
 # parser for this call's output (NDJSON pages under ``items``). Reusing it keeps
@@ -52,16 +56,16 @@ from brain.errors import DirectoryRefreshError
 from brain.vault.derived_links.directory import GwsRunner, _parse_gws_pages
 
 from . import ExtractedDoc
+from .calendar_text import clean_description, clean_line
 
 __all__ = [
     "CONTENT_TYPE",
+    "PLACEHOLDER_TITLE",
     "SOURCE_KIND",
     "CalendarBatch",
     "CalendarDoc",
     "CalendarError",
     "build_documents",
-    "clean_description",
-    "clean_location",
     "get_event",
     "list_events",
 ]
@@ -77,29 +81,10 @@ _SKIPPED_EVENT_TYPES = frozenset({"workingLocation", "outOfOffice"})
 #: The failures a ``GwsRunner`` may raise (its Protocol docstring).
 _RUNNER_FAILURES = (OSError, DirectoryRefreshError, RuntimeError)
 
-_URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
-# Any URL on a conference host: the link itself carries the meeting's PIN.
-_CONFERENCE_URL = re.compile(
-    r"\S*(?:zoom\.us|meet\.google\.com|teams\.microsoft\.com|teams\.live\.com|webex\.com|"
-    r"gotomeeting\.com|goto\.com|chime\.aws|bluejeans\.com)\S*",
-    re.IGNORECASE,
-)
-_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-_HTML_BREAK = re.compile(r"<\s*(?:br|/p|/div|/li|/h\d)\s*/?\s*>", re.IGNORECASE)
-_HTML_TAG = re.compile(r"<[^>]+>")
-# Lines that carry a dial-in, a PIN or a join instruction. Matched per line, and
-# the whole line is dropped.
-_DIAL_IN_LINE = re.compile(
-    r"meeting id|passcode|password|\bpin\s*[:#]|dial[- ]?in|join by phone|"
-    r"one tap mobile|phone numbers?|access code|conference id|\btel:|"
-    r"^\s*join\b.*\b(?:meeting|meet|zoom|teams|webex|call)\b",
-    re.IGNORECASE,
-)
-# A line that is only a phone number (with separators, commas and a `#`).
-_PHONE_LINE = re.compile(r"^[\s+(]*\d[\d\s().,#*-]{6,}$")
-_INVITATION_DELIMITER = "-::~"
-_BLANK_RUN = re.compile(r"\n{3,}")
-_SPACE_RUN = re.compile(r" {2,}")
+#: Google's ``private`` and its legacy ``confidential`` both mean "only me".
+_PRIVATE_VISIBILITIES = frozenset({"private", "confidential"})
+#: The title of an event whose own title held nothing the cleaner keeps.
+PLACEHOLDER_TITLE = "(calendar event)"
 
 
 class CalendarError(RuntimeError):
@@ -143,7 +128,10 @@ def list_events(
     try:
         raw = runner([*args, "--format", "json", "--page-all"])
     except _RUNNER_FAILURES as exc:
-        raise CalendarError(f"gws calendar events list failed: {exc}") from exc
+        # Class only: the runner's message can quote gws's stderr (account data).
+        raise CalendarError(
+            f"gws calendar events list failed ({describe_failure(exc)})"
+        ) from exc
     events = _parse_gws_pages(raw, key="items")
     if events is None:
         raise CalendarError("could not parse the gws calendar events list output")
@@ -247,11 +235,11 @@ def _series_document(
 def _document(
     external_id: str, event: dict[str, Any], *, when: str, metadata: dict[str, Any]
 ) -> CalendarDoc:
-    title = str(event.get("summary") or "").strip()
+    title = clean_line(event.get("summary")) or PLACEHOLDER_TITLE
     attendees = _attendees(event)
-    private = event.get("visibility") == "private"
+    private = event.get("visibility") in _PRIVATE_VISIBILITIES
     lines = [title, f"When: {when}"]
-    location = clean_location(event.get("location"))
+    location = clean_line(event.get("location"))
     if location:
         lines.append(f"Location: {location}")
     if private:
@@ -303,9 +291,7 @@ def _attendees(event: dict[str, Any]) -> tuple[tuple[str | None, str], ...]:
         email = a.get("email")
         if not isinstance(email, str) or "@" not in email:
             continue
-        name = a.get("displayName")
-        display = name.strip() if isinstance(name, str) and "@" not in name else None
-        out.append((display or None, email.strip().lower()))
+        out.append((clean_line(a.get("displayName")) or None, email.strip().lower()))
     return tuple(out)
 
 
@@ -382,40 +368,3 @@ def _offset(moment: datetime) -> str:
     sign = "-" if delta < timedelta(0) else "+"
     minutes = abs(int(delta.total_seconds())) // 60
     return f"UTC{sign}{minutes // 60:02d}:{minutes % 60:02d}"
-
-
-def clean_location(location: Any) -> str:
-    """The location with URLs and addresses removed, whitespace collapsed."""
-    if not isinstance(location, str):
-        return ""
-    text = _EMAIL.sub("", _URL.sub("", location))
-    return " ".join(text.split()).strip(" ,;")
-
-
-def clean_description(description: Any) -> str:
-    """The description as plain text, with conference and dial-in content dropped.
-
-    HTML is turned into text; Google's inserted invitation block (between two
-    ``-::~`` delimiter lines, or from one to the end) is dropped; so are lines
-    that carry a dial-in, a PIN or a join instruction, lines that are only a
-    phone number, every URL on a conference host (the line's other text stays),
-    and every address-shaped string.
-    """
-    if not isinstance(description, str):
-        return ""
-    text = html.unescape(_HTML_TAG.sub("", _HTML_BREAK.sub("\n", description)))
-    kept: list[str] = []
-    in_invitation = False
-    for line in text.splitlines():
-        if line.strip().startswith(_INVITATION_DELIMITER):
-            in_invitation = not in_invitation
-            continue
-        if in_invitation or _DIAL_IN_LINE.search(line) or _PHONE_LINE.match(line):
-            continue
-        cleaned, removed = _EMAIL.subn("", _CONFERENCE_URL.sub("", line))
-        if removed:
-            cleaned = _SPACE_RUN.sub(" ", cleaned)
-        if cleaned.strip() or not line.strip():
-            kept.append(cleaned.rstrip())
-    return _BLANK_RUN.sub("\n\n", "\n".join(kept)).strip()
-

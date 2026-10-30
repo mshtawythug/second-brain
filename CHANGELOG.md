@@ -31,9 +31,12 @@ git tag scheme:
   `--tag`, `--enrich` (no summary by default) and `--allow-secrets`.
 - Meetings without a transcript are now searchable, filterable with `--source calendar` and
   `--person`, and dated by their start time. Attendee addresses are stored only as participants,
-  never in the body; conference links and dial-in, PIN and passcode lines are dropped. Declined,
-  untitled, cancelled, working-location and out-of-office entries are skipped, and private events
-  are stored as `confidential`.
+  never in the body. One cleaner treats the title, location, description and attendee names: it
+  removes every link and address (obfuscated forms included) and drops any line with a dial-in
+  number, PIN, passcode or meeting ID. Declined, untitled, cancelled, working-location and
+  out-of-office entries are skipped, and private events (or Google's legacy `confidential`
+  visibility) are stored as `confidential`. The `gws` read gets a 120-second timeout and a 16 MiB
+  output cap, and errors are printed by class only.
 - A series' occurrence dates live in its metadata, so a re-run that only finds new occurrences
   updates the metadata without re-chunking or re-embedding.
 - `brain ui` shows a calendar glyph for the new kind, and groups `_ingested/calendar` by month.

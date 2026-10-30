@@ -11,6 +11,7 @@ import pytest
 
 from brain.ingest import calendar as cal
 from brain.ingest.calendar import CalendarDoc, CalendarError
+from brain.ingest.calendar_text import clean_description, clean_line
 from tests import calendar_fixtures as fx
 
 _MIN = datetime(2026, 10, 1, tzinfo=UTC)
@@ -132,7 +133,8 @@ def test_a_recurring_series_is_one_document_with_occurrences_in_metadata() -> No
     assert "When: recurring, RRULE:FREQ=WEEKLY;BYDAY=TU, 09:00–09:30 (UTC-07:00)" in body
     assert "EXDATE" not in body  # a cancelled instance must not change the body
     assert "Status round." in body
-    assert "Notes doc: https://docs.example.com/notes" in body
+    assert "Notes doc" in body.splitlines()  # every URL is removed, the words stay
+    assert "docs.example.com" not in body
     for day in ("2026-10-06", "2026-10-13", "2026-10-27"):
         assert day not in body  # occurrence dates are volatile: metadata only
     meta = doc.doc.metadata
@@ -267,15 +269,19 @@ def test_non_dict_records_are_ignored() -> None:
     assert [d.external_id for d in batch.documents] == [fx.SINGLE_ID]
 
 
-# --- text cleaning ------------------------------------------------------------
+# --- text cleaning (the adversarial table is tests/test_calendar_cleaning.py) ------
 
 
-def test_clean_description_drops_the_invitation_block_even_when_unterminated() -> None:
-    text = "Keep this.\n-::~:~::~:~::-\nJoin: https://meet.google.com/x\nPIN: 1#"
+def test_clean_line_of_a_location_that_is_only_a_link_is_empty() -> None:
+    assert clean_line("https://example.zoom.us/j/1") == ""
+    assert clean_line("zoom.us/j/5550100?pwd=XYZ") == ""
+    assert clean_line(None) == ""
 
-    assert cal.clean_description(text) == "Keep this."
+
+def test_clean_description_of_a_non_string_is_empty() -> None:
+    assert clean_description(None) == ""
+    assert clean_description(42) == ""
 
 
-def test_clean_location_with_only_a_link_is_empty() -> None:
-    assert cal.clean_location("https://example.zoom.us/j/1") == ""
-    assert cal.clean_location(None) == ""
+def test_clean_line_joins_an_embedded_newline() -> None:
+    assert clean_line("Room 4\nPIN 4321\nfloor 2") == "Room 4 floor 2"

@@ -17,6 +17,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from brain.cli import app
+from brain.errors import DirectoryRefreshError
 from tests import calendar_fixtures as fx
 from tests.conftest import CountingEmbedder
 
@@ -31,7 +32,7 @@ def _all_events() -> list[dict[str, Any]]:
 @pytest.fixture
 def gws(monkeypatch: pytest.MonkeyPatch) -> fx.FakeGws:
     fake = fx.FakeGws(_all_events(), masters={fx.SERIES_ID: fx.series_master()})
-    monkeypatch.setattr("brain.cli_ingest_calendar.real_gws_runner", fake)
+    monkeypatch.setattr("brain.cli_ingest_calendar.calendar_gws_runner", fake)
     return fake
 
 
@@ -156,16 +157,50 @@ def test_dry_run_lists_titles_and_dates_and_writes_nothing(
     assert embedder.embed_calls == 0
 
 
-def test_a_gws_failure_exits_1(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_gws_failure_exits_1_and_prints_the_class_not_the_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def failing(args: list[str]) -> str:
-        raise RuntimeError("gws is not logged in")
+        raise DirectoryRefreshError(
+            "gws command failed (exit 2): token=SECRETTOKEN for owner@example.com",
+            log_detail="exit 2",
+        )
 
-    monkeypatch.setattr("brain.cli_ingest_calendar.real_gws_runner", failing)
+    monkeypatch.setattr("brain.cli_ingest_calendar.calendar_gws_runner", failing)
 
     result = _run()
 
     assert result.exit_code == 1
-    assert "gws calendar events list failed" in result.output
+    assert "gws calendar events list failed (DirectoryRefreshError[exit 2])" in result.output
+    assert "SECRETTOKEN" not in result.output
+    assert "owner@example.com" not in result.output
+
+
+class _EmbedderThatLeaks:
+    """Raises a ``ValueError`` whose message stands in for quoted row content."""
+
+    dim = 1024
+
+    def embed(self, texts: list[str], *, input_type: str = "document") -> list[list[float]]:
+        raise ValueError("row value SECRETROW")
+
+    def count_tokens(self, text: str) -> int:
+        return len(text.split())
+
+
+def test_a_per_document_failure_prints_the_class_not_the_message(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, patch_embedder: Any
+) -> None:
+    patch_embedder(_EmbedderThatLeaks())
+
+    result = _run()
+
+    assert result.exit_code == 0, result.output
+    assert f"failed {fx.SINGLE_TITLE}: ValueError" in result.output
+    assert "SECRETROW" not in result.output
+    assert "0 ingested, 0 updated, 0 occurrences refreshed, 0 unchanged, 4 failed" in (
+        result.output
+    )
 
 
 # --- end to end ------------------------------------------------------------------
