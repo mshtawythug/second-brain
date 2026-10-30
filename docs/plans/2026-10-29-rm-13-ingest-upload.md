@@ -337,6 +337,23 @@ full-suite evidence): every non-browser `tests/test_ui_*.py` plus log privacy, d
 docx, 1,395 passed; the three ingest browser modules, 60 passed, under the lock; `ruff` and
 `mypy src/` clean.
 
+## Review round 2: the security re-review (sec-77, at `97eedaf`)
+
+All five first-round findings confirmed fixed; one LOW, fixed in `645d056`.
+
+- **S1 (LOW).** The end-record pre-check read only the entry count, which an archive can
+  under-report: `zipfile` parses the central directory by its declared byte SIZE and ignores the
+  count (sec-77 measured 270,001 entries, ~0.9 s, ~156 MiB for a forged count of 1). The post-parse
+  count check still refused the file, but the comment claimed the pre-check bounded the parse. Now
+  the same 22 bytes also yield the central directory's size, refused over
+  `DOCX_MAX_CENTRAL_DIRECTORY_BYTES` (4 MiB, room for `DOCX_MAX_MEMBERS` entries with ~370-byte
+  names) with the same message and code. The size is the field `zipfile` trusts, so bounding it
+  bounds the parse. Regression test: a real archive over the bound, built from FEWER than
+  `DOCX_MAX_MEMBERS` long-named members and holding `word/document.xml`, its count forged to 1;
+  every later check would pass it, so the refusal can only come from the end record.
+  **Mutation proof:** the size check dropped is killed by that test; the count check dropped
+  (re-anchored) is killed by the forged-count test; both other docx checks still killed.
+
 ## End-to-end
 
 A real `brain ui` against a scratch DB on 5434 (`second_brain_test_rm13_e2e`), a scratch `BRAIN_HOME` and a
