@@ -32,6 +32,9 @@ from brain.drop_folder import (
 IMAGES = frozenset({".png", ".jpg", ".jpeg"})
 NOW = 1_800_000_000.0  # a fixed wall clock, seconds since the epoch
 SINCE = datetime.fromtimestamp(NOW, UTC) - timedelta(days=2)
+#: For entries whose mtime is the real "now" (symlinks, directories): no time filter at all,
+#: so only the guard under test can leave them out.
+EPOCH = datetime.fromtimestamp(0, UTC)
 
 
 def _folder(path: Path, **kw: Any) -> DropFolder:
@@ -123,7 +126,7 @@ def test_scan_never_follows_or_returns_a_symlink(tmp_path: Path) -> None:
     (drop / "link.png").symlink_to(target)
     (drop / "dangling.png").symlink_to(outside / "gone.png")
 
-    assert scan(_folder(drop), since=SINCE) == []
+    assert scan(_folder(drop), since=EPOCH) == []
 
 
 def test_scan_skips_icloud_stubs_and_hidden_files(tmp_path: Path) -> None:
@@ -183,7 +186,7 @@ def test_scan_never_enters_subdirectories(tmp_path: Path) -> None:
     _drop(tmp_path / "sub", "nested.png", b"n")
     (tmp_path / "dir.png").mkdir()
 
-    assert scan(_folder(tmp_path), since=SINCE) == []
+    assert scan(_folder(tmp_path), since=EPOCH) == []
 
 
 def test_scan_honours_since(tmp_path: Path) -> None:
@@ -343,6 +346,8 @@ def test_a_symlink_at_the_imported_name_is_never_followed_or_removed(tmp_path: P
     report = _run(_folder(drop), _Ingest())
 
     assert report.outcomes[0].status == "failed"
+    # Refused by the regular-file check itself, not by O_NOFOLLOW's ELOOP further on.
+    assert report.outcomes[0].detail == f"a different file holds {link.name}"
     assert (drop / "shot.png").read_bytes() == body
     assert link.is_symlink()
     assert outside.read_bytes() == body

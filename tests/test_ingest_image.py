@@ -468,7 +468,7 @@ def test_an_image_with_no_pixels_is_unreadable(tmp_path: Path) -> None:
     path = _text_png(tmp_path / "shot.png")
     engine = _Engine()
 
-    with pytest.raises(UnreadableImageError):
+    with pytest.raises(UnreadableImageError, match="^image has no pixels$"):
         extract_image(path, ocr=_setup(engine), open_image=lambda p: Image.new("L", (0, 10)))
 
     assert engine.calls == []

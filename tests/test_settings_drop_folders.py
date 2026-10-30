@@ -188,6 +188,17 @@ def test_a_bad_path_names_the_key(home: Path, path_line: str) -> None:
     assert SECRET_LOOKING not in str(err.value)
 
 
+def test_a_relative_path_is_refused_even_when_it_exists_under_the_cwd(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "relative" / "dir").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    _write(home, '[[folder]]\npath = "relative/dir"\n')
+
+    with pytest.raises(ConfigError, match=r"folder\[0\]\.path must be absolute"):
+        load_drop_folders(home)
+
+
 def test_a_file_path_is_not_a_folder(home: Path, tmp_path: Path) -> None:
     plain = tmp_path / "plain.txt"
     plain.write_text("x", encoding="utf-8")
