@@ -12,7 +12,12 @@ from pathlib import Path
 import pytest
 
 from brain.ui.errors import UiUnsupportedMedia
-from brain.ui.ingest_limits import DOCX_MAX_EXPANDED_BYTES, DOCX_MAX_MEMBERS, DOCX_MAX_RATIO
+from brain.ui.ingest_limits import (
+    DOCX_MAX_CENTRAL_DIRECTORY_BYTES,
+    DOCX_MAX_EXPANDED_BYTES,
+    DOCX_MAX_MEMBERS,
+    DOCX_MAX_RATIO,
+)
 from brain.ui.upload_checks import sniff
 
 _DOCX_BODY = b"<w:document>synthetic</w:document>"
@@ -195,3 +200,35 @@ def test_an_end_record_that_under_reports_the_member_count_is_still_caught(
     error = _refused(path, ".docx")
 
     assert error.message == "the .docx holds too many parts to unpack safely"
+
+
+def test_a_large_central_directory_is_refused_before_zipfile_whatever_the_count_says(
+    tmp_path: Path,
+) -> None:
+    """A real archive whose central directory is over the bound, built from fewer
+    members than DOCX_MAX_MEMBERS (long names), holding word/document.xml, with its
+    end record's count forged to 1. Without the size check every LATER check passes
+    (the count, word/document.xml, the expanded total, the ratio), so this refusal
+    can only have come from the end record, before zipfile parsed anything
+    (sec-77 re-review)."""
+    name_bytes = 480
+    count = DOCX_MAX_CENTRAL_DIRECTORY_BYTES // (46 + name_bytes) + 50
+    assert count < DOCX_MAX_MEMBERS
+    members = {"word/document.xml": _DOCX_BODY}
+    members.update({f"m/{i:08d}" + "x" * (name_bytes - 11) + ".xml": b"" for i in range(count)})
+    path = _docx(tmp_path / "x.docx", members, compression=zipfile.ZIP_STORED)
+    raw = bytearray(path.read_bytes())
+    at = raw.rfind(b"PK\x05\x06")
+    assert int.from_bytes(raw[at + 12 : at + 16], "little") > DOCX_MAX_CENTRAL_DIRECTORY_BYTES
+    raw[at + 8 : at + 12] = (1).to_bytes(2, "little") * 2  # the count under-reported
+    path.write_bytes(bytes(raw))
+
+    error = _refused(path, ".docx")
+
+    assert error.message == "the .docx holds too many parts to unpack safely"
+
+
+def test_the_central_directory_bound_fits_the_member_bound() -> None:
+    """4 MiB holds DOCX_MAX_MEMBERS entries of 46 bytes plus a ~370-byte name."""
+    assert DOCX_MAX_CENTRAL_DIRECTORY_BYTES == 4 * 1024 * 1024
+    assert DOCX_MAX_CENTRAL_DIRECTORY_BYTES >= DOCX_MAX_MEMBERS * (46 + 370)

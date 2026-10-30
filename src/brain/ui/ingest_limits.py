@@ -87,3 +87,11 @@ DOCX_MAX_EXPANDED_BYTES = 200 * 1024 * 1024
 DOCX_MAX_RATIO = 100
 DOCX_MAX_MEMBERS = 10_000
 
+#: The central directory's declared size, read from the end record before the
+#: zip is opened. zipfile reads exactly this many bytes of central directory and
+#: parses every entry in them, WHATEVER the end record's entry count says, so a
+#: count check alone can be bypassed by under-reporting it (sec-77 re-review: a
+#: forged count of 1 still parsed 270,001 entries, ~156 MiB). Each entry is 46
+#: bytes plus its name: 4 MiB fits DOCX_MAX_MEMBERS entries with ~370-byte names.
+DOCX_MAX_CENTRAL_DIRECTORY_BYTES = 4 * 1024 * 1024
+

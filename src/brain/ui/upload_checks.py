@@ -25,6 +25,7 @@ from ..ingest.dispatch import ExtractorRegistry, spec_for, supported_extensions
 from .errors import UiBadRequest, UiUnsupportedMedia
 from .ingest_limits import (
     BINARY_UPLOAD_EXTENSIONS,
+    DOCX_MAX_CENTRAL_DIRECTORY_BYTES,
     DOCX_MAX_EXPANDED_BYTES,
     DOCX_MAX_MEMBERS,
     DOCX_MAX_RATIO,
@@ -40,11 +41,13 @@ _ZIP_MAGIC = b"PK\x03\x04"
 _DOCX_BODY = "word/document.xml"
 
 #: The zip end-of-central-directory record: its signature, its fixed size, the
-#: offset of its "total entries" field, and how far from the end it can start
-#: (a trailing comment is at most 65,535 bytes).
+#: offsets of its "total entries" (2 bytes) and "central directory size" (4 bytes)
+#: fields, and how far from the end it can start (a trailing comment is at most
+#: 65,535 bytes).
 _EOCD_SIGNATURE = b"PK\x05\x06"
 _EOCD_SIZE = 22
 _EOCD_TOTAL_ENTRIES = 10
+_EOCD_CD_SIZE = 12
 _EOCD_SEARCH = _EOCD_SIZE + 0xFFFF
 
 #: Every leading run of dots and whitespace (Unicode whitespace too: U+3000), so a
@@ -180,12 +183,14 @@ def _sniff_text(path: Path) -> None:
         raise _unsupported("the file is not UTF-8 text") from exc
 
 
-def _declared_entries(path: Path) -> int | None:
-    """The zip's declared entry count, read from its end record WITHOUT opening it.
+def _declared_directory(path: Path) -> tuple[int, int] | None:
+    """The zip's declared ``(entry count, central directory bytes)``, read from its
+    end record WITHOUT opening it.
 
-    ``None`` when no end record is found. ``0xFFFF`` is the zip64 marker: a real
-    count past 65,534, or a zip64 archive, which no ``.docx`` under the 25 MiB cap
-    needs; either way it is past :data:`DOCX_MAX_MEMBERS` and refused.
+    ``None`` when no end record is found. A count of ``0xFFFF`` (or a size of
+    ``0xFFFFFFFF``) is the zip64 marker: a real value past the 16- or 32-bit field,
+    or a zip64 archive, which no ``.docx`` under the 25 MiB cap needs; either way it
+    is past the bounds and refused.
     """
     with path.open("rb") as handle:
         handle.seek(0, 2)
@@ -195,18 +200,25 @@ def _declared_entries(path: Path) -> int | None:
     at = tail.rfind(_EOCD_SIGNATURE)
     if at < 0 or at + _EOCD_SIZE > len(tail):
         return None
-    field = tail[at + _EOCD_TOTAL_ENTRIES : at + _EOCD_TOTAL_ENTRIES + 2]
-    return int.from_bytes(field, "little")
+    entries = tail[at + _EOCD_TOTAL_ENTRIES : at + _EOCD_TOTAL_ENTRIES + 2]
+    size_cd = tail[at + _EOCD_CD_SIZE : at + _EOCD_CD_SIZE + 4]
+    return int.from_bytes(entries, "little"), int.from_bytes(size_cd, "little")
 
 
 def _sniff_docx(path: Path) -> None:
     _sniff_magic(path, _ZIP_MAGIC, "the file is not a .docx (not a zip)")
-    # Before ZipFile parses the central directory into memory: a crafted archive
-    # declaring millions of entries is refused from 22 bytes of its end record.
-    declared = _declared_entries(path)
+    # Before ZipFile parses the central directory into memory, from 22 bytes of
+    # the end record. BOTH fields: zipfile parses the directory by its declared
+    # BYTE SIZE and ignores the declared count, so an archive that under-reports
+    # its count would pass a count check alone and still make zipfile build an
+    # entry for every record (sec-77 re-review). The size field is the one
+    # zipfile trusts, so bounding it bounds the parse; the count is refused too,
+    # and re-checked after the parse.
+    declared = _declared_directory(path)
     if declared is None:
         raise _unsupported("the file is not a .docx (a damaged zip)")
-    if declared > DOCX_MAX_MEMBERS:
+    entries, directory_bytes = declared
+    if entries > DOCX_MAX_MEMBERS or directory_bytes > DOCX_MAX_CENTRAL_DIRECTORY_BYTES:
         raise _unsupported("the .docx holds too many parts to unpack safely")
     try:
         with zipfile.ZipFile(path) as archive:
