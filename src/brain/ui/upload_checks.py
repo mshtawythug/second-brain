@@ -28,6 +28,7 @@ from .ingest_limits import (
     DOCX_MAX_MEMBERS,
     DOCX_MAX_RATIO,
     MAX_BINARY_UPLOAD_BYTES,
+    MAX_FILENAME_BYTES,
     MAX_FILENAME_CHARS,
     MAX_TEXT_UPLOAD_BYTES,
     UPLOAD_EXTENSIONS,
@@ -36,6 +37,14 @@ from .ingest_limits import (
 _PDF_MAGIC = b"%PDF-"
 _ZIP_MAGIC = b"PK\x03\x04"
 _DOCX_BODY = "word/document.xml"
+
+#: The zip end-of-central-directory record: its signature, its fixed size, the
+#: offset of its "total entries" field, and how far from the end it can start
+#: (a trailing comment is at most 65,535 bytes).
+_EOCD_SIGNATURE = b"PK\x05\x06"
+_EOCD_SIZE = 22
+_EOCD_TOTAL_ENTRIES = 10
+_EOCD_SEARCH = _EOCD_SIZE + 0xFFFF
 
 #: Unicode categories removed from a filename: controls (NUL included) and format
 #: characters, among them the bidi overrides that make ``evil<RLO>fdp.txt`` render
@@ -96,7 +105,8 @@ def sanitize_filename(header: str, registry: ExtractorRegistry | None = None) ->
     Percent-decoded as strict UTF-8 (the raw header must be ASCII), reduced to its
     final component (anything up to the last ``/`` or ``\\`` is dropped), stripped of
     control and format characters, surrounding space and leading dots, and capped at
-    :data:`MAX_FILENAME_CHARS` with the extension kept. 400 ``bad_filename`` when
+    :data:`MAX_FILENAME_CHARS` characters and :data:`MAX_FILENAME_BYTES` UTF-8 bytes
+    (cut on a character boundary) with the extension kept. 400 ``bad_filename`` when
     nothing is left; 415 ``unsupported_file`` when the extension is not uploadable.
     """
     if not header.isascii():
@@ -115,10 +125,18 @@ def sanitize_filename(header: str, registry: ExtractorRegistry | None = None) ->
     ext = path.suffix.lower()
     if ext not in uploadable_extensions(registry):
         raise _unsupported()
-    stem = path.name[: -len(ext)][: MAX_FILENAME_CHARS - len(ext)]
+    stem = _fit(path.name[: -len(ext)][: MAX_FILENAME_CHARS - len(ext)], ext)
     if not stem.strip(". "):
         raise _bad_filename()
     return SafeName(stem=stem, ext=ext)
+
+
+def _fit(stem: str, ext: str) -> str:
+    """``stem`` shortened, a whole character at a time, until the name fits in bytes."""
+    budget = MAX_FILENAME_BYTES - len(ext.encode("utf-8"))
+    while len(stem.encode("utf-8")) > budget:
+        stem = stem[:-1]
+    return stem
 
 
 def sniff(path: Path, ext: str) -> None:
@@ -155,8 +173,34 @@ def _sniff_text(path: Path) -> None:
         raise _unsupported("the file is not UTF-8 text") from exc
 
 
+def _declared_entries(path: Path) -> int | None:
+    """The zip's declared entry count, read from its end record WITHOUT opening it.
+
+    ``None`` when no end record is found. ``0xFFFF`` is the zip64 marker: a real
+    count past 65,534, or a zip64 archive, which no ``.docx`` under the 25 MiB cap
+    needs; either way it is past :data:`DOCX_MAX_MEMBERS` and refused.
+    """
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        handle.seek(max(0, size - _EOCD_SEARCH))
+        tail = handle.read()
+    at = tail.rfind(_EOCD_SIGNATURE)
+    if at < 0 or at + _EOCD_SIZE > len(tail):
+        return None
+    field = tail[at + _EOCD_TOTAL_ENTRIES : at + _EOCD_TOTAL_ENTRIES + 2]
+    return int.from_bytes(field, "little")
+
+
 def _sniff_docx(path: Path) -> None:
     _sniff_magic(path, _ZIP_MAGIC, "the file is not a .docx (not a zip)")
+    # Before ZipFile parses the central directory into memory: a crafted archive
+    # declaring millions of entries is refused from 22 bytes of its end record.
+    declared = _declared_entries(path)
+    if declared is None:
+        raise _unsupported("the file is not a .docx (a damaged zip)")
+    if declared > DOCX_MAX_MEMBERS:
+        raise _unsupported("the .docx holds too many parts to unpack safely")
     try:
         with zipfile.ZipFile(path) as archive:
             members = archive.infolist()

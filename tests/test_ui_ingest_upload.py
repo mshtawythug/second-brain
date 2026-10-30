@@ -27,6 +27,7 @@ from brain.ui.ingest_limits import (
     MAX_BINARY_UPLOAD_BYTES,
     MAX_STAGED_BYTES,
     MAX_TEXT_UPLOAD_BYTES,
+    STAGING_BLOCK_BYTES,
     UPLOAD_EXTENSIONS,
     UPLOAD_TTL,
 )
@@ -241,7 +242,7 @@ def test_a_huge_declared_length_is_413_not_a_crash(
 
 
 def test_the_staging_budget_is_429(test_db: psycopg.Connection[Any], tmp_path: Path) -> None:
-    staging = UploadStaging(clock=_Clock(), parent=tmp_path, budget=len(_TEXT) + 10)
+    staging = UploadStaging(clock=_Clock(), parent=tmp_path, budget=STAGING_BLOCK_BYTES)
     ctx = _ctx(test_db, tmp_path, staging=staging)
     client = _client(ctx)
     assert _upload(client, "a.txt", _TEXT).status_code == 201
@@ -441,7 +442,7 @@ def test_the_lifespan_sweeps_dead_roots_and_removes_its_own(
 ) -> None:
     parent = tmp_path / "tmp"
     parent.mkdir()
-    dead = parent / f"brain-ui-ingest-{2**22 + 12345}-old"
+    dead = parent / f"brain-ui-ingest-{2**22 - 1}-old"
     (dead / "u").mkdir(parents=True)
     staging = UploadStaging(clock=_Clock(), parent=parent)
     ctx = _ctx(test_db, tmp_path, staging=staging)
@@ -470,3 +471,84 @@ def test_no_log_line_carries_the_filename(
 
     assert "zorblax" not in caplog.text
     assert upload_id in caplog.text
+
+
+# --- sec-77 (PR #77 security review) regressions over HTTP ------------------------
+
+
+def test_a_long_multibyte_filename_stages_instead_of_a_500(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    ctx = _ctx(test_db, tmp_path)
+
+    response = _upload(_client(ctx), "😀" * 120 + ".txt", _TEXT)
+
+    assert response.status_code == 201, response.json()
+    (staged,) = _staged(ctx)
+    assert len(staged.name.encode("utf-8")) <= 200
+
+
+def test_a_filesystem_refusal_is_503_and_no_log_names_the_file(
+    test_db: psycopg.Connection[Any], tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The unhandled-error handler logs a traceback; a staging OSError must never get
+    there, or its message would print the staged path (sec-77 #2)."""
+    ctx = _ctx(test_db, tmp_path)
+    assert ctx.uploads is not None
+    root = ctx.uploads.root
+    root.chmod(0o500)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            response = _upload(_client(ctx), "zorblax-private.txt", _TEXT)
+    finally:
+        root.chmod(0o700)
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "staging_failed"
+    assert "zorblax" not in caplog.text and "zorblax" not in response.text
+    assert "Traceback" not in caplog.text
+
+
+def test_too_many_staged_uploads_is_429(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    staging = UploadStaging(clock=_Clock(), parent=tmp_path, max_uploads=2)
+    ctx = _ctx(test_db, tmp_path, staging=staging)
+    client = _client(ctx)
+    for name in ("a.txt", "b.txt"):
+        assert _upload(client, name, _TEXT).status_code == 201
+
+    response = _upload(client, "c.txt", _TEXT)
+
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "too_many_uploads"
+
+
+def test_a_failing_startup_sweep_does_not_stop_the_server(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    def exploding(*args: object, **kwargs: object) -> list[Path]:
+        raise OverflowError("synthetic")
+
+    staging = UploadStaging(clock=_Clock(), parent=tmp_path, sweeper=exploding)
+    ctx = _ctx(test_db, tmp_path, staging=staging)
+
+    with TestClient(create_app(ctx), base_url=ORIGIN) as client:
+        assert client.get("/api/health").status_code == 200
+        assert _upload(client, "a.txt", _TEXT).status_code == 201
+
+
+def test_a_planted_huge_pid_root_does_not_stop_the_server(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    """The real sweep, end to end through the lifespan (sec-77 #1)."""
+    parent = tmp_path / "tmp"
+    parent.mkdir()
+    (parent / "brain-ui-ingest-9999999999-x").mkdir()
+    staging = UploadStaging(clock=_Clock(), parent=parent)
+    ctx = _ctx(test_db, tmp_path, staging=staging)
+
+    with TestClient(create_app(ctx), base_url=ORIGIN) as client:
+        assert client.get("/api/health").status_code == 200
+
+    assert (parent / "brain-ui-ingest-9999999999-x").exists()

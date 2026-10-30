@@ -9,14 +9,27 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import threading
 from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from brain.ui.errors import UiNotFound, UiPayloadTooLarge, UiTooManyRequests, UiUnsupportedMedia
-from brain.ui.ingest_limits import MAX_TEXT_UPLOAD_BYTES, UPLOAD_TTL
+from brain.ui.errors import (
+    UiNotFound,
+    UiPayloadTooLarge,
+    UiTooManyRequests,
+    UiUnavailable,
+    UiUnsupportedMedia,
+)
+from brain.ui.ingest_limits import (
+    MAX_STAGED_UPLOADS,
+    MAX_TEXT_UPLOAD_BYTES,
+    STAGING_BLOCK_BYTES,
+    UPLOAD_TTL,
+)
 from brain.ui.upload_checks import SafeName
 from brain.ui.upload_staging import (
     ROOT_PREFIX,
@@ -26,6 +39,10 @@ from brain.ui.upload_staging import (
 )
 
 _NAME = SafeName("synthetic", ".txt")
+_B = STAGING_BLOCK_BYTES
+#: In range (≤ 2**22) and above every real pid_max on macOS; on Linux a pid this
+#: high is possible only on a host configured to the maximum, and is not in use.
+_DEAD_PID = 2**22 - 1
 
 
 class _Clock:
@@ -79,7 +96,7 @@ def test_a_staged_file_lands_at_root_id_basename_with_private_modes(tmp_path: Pa
     assert len(up.upload_id) == 32 and int(up.upload_id, 16) >= 0
     assert stat.S_IMODE(up.path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(up.path.stat().st_mode) == 0o600
-    assert staging.used_bytes() == 15
+    assert staging.used_bytes() == _B  # charged a whole block (sec-77 #3)
 
 
 def test_an_honest_length_over_the_cap_is_refused_before_anything_is_written(
@@ -136,9 +153,9 @@ def test_a_failing_stream_deletes_the_partial_file(tmp_path: Path) -> None:
 
     async def broken() -> AsyncIterator[bytes]:
         yield b"partial"
-        raise ConnectionResetError("client went away")
+        raise RuntimeError("client went away")
 
-    with pytest.raises(ConnectionResetError):
+    with pytest.raises(RuntimeError):
         asyncio.run(staging.stage(_NAME, None, broken()))
 
     assert list(staging.root.iterdir()) == []
@@ -146,43 +163,43 @@ def test_a_failing_stream_deletes_the_partial_file(tmp_path: Path) -> None:
 
 
 def test_the_budget_is_checked_from_the_declared_length(tmp_path: Path) -> None:
-    staging, _ = _staging(tmp_path, budget=100)
-    _stage(staging, b"a" * 60)
+    staging, _ = _staging(tmp_path, budget=2 * _B)
+    _stage(staging, b"a" * (_B + 1))  # charged two blocks: the whole budget
 
     async def never() -> AsyncIterator[bytes]:
         raise AssertionError("the body was read")
         yield b""  # pragma: no cover
 
     with pytest.raises(UiTooManyRequests) as caught:
-        asyncio.run(staging.stage(_NAME, 41, never()))
+        asyncio.run(staging.stage(_NAME, 1, never()))
 
     assert caught.value.code == "staging_full"
     assert len(list(staging.root.iterdir())) == 1
 
 
 def test_the_budget_is_rechecked_by_the_counter(tmp_path: Path) -> None:
-    staging, _ = _staging(tmp_path, budget=100)
-    _stage(staging, b"a" * 60)
+    staging, _ = _staging(tmp_path, budget=2 * _B)
+    _stage(staging, b"a" * _B)
 
     with pytest.raises(UiTooManyRequests):
-        _stage(staging, b"b" * 41, declared=None, parts=4)
+        _stage(staging, b"b" * (_B + 1), declared=None, parts=4)
 
     assert len(list(staging.root.iterdir())) == 1
-    assert staging.used_bytes() == 60
+    assert staging.used_bytes() == _B
 
 
 def test_claimed_uploads_count_against_the_budget_until_released(tmp_path: Path) -> None:
-    staging, _ = _staging(tmp_path, budget=100)
-    up = _stage(staging, b"a" * 60)
+    staging, _ = _staging(tmp_path, budget=2 * _B)
+    up = _stage(staging, b"a" * (_B + 1))
     staging.claim(up.upload_id)
 
     with pytest.raises(UiTooManyRequests):
-        _stage(staging, b"b" * 41)
+        _stage(staging, b"b")
     staging.release(up.upload_id)
 
     assert not up.path.parent.exists()
     assert staging.used_bytes() == 0
-    _stage(staging, b"b" * 41)
+    _stage(staging, b"b")
 
 
 def test_claim_makes_an_upload_unknown_to_a_second_claim_and_to_discard(tmp_path: Path) -> None:
@@ -284,7 +301,7 @@ def test_no_root_exists_until_the_first_upload(tmp_path: Path) -> None:
 
 
 def test_sweep_uses_the_parent_and_spares_this_process(tmp_path: Path) -> None:
-    dead = tmp_path / f"{ROOT_PREFIX}{2**22 + 12345}-abc"
+    dead = tmp_path / f"{ROOT_PREFIX}{_DEAD_PID}-abc"
     dead.mkdir()
     staging, _ = _staging(tmp_path)
     up = _stage(staging, b"text")
@@ -351,3 +368,165 @@ def test_the_sweep_never_removes_its_own_root(tmp_path: Path) -> None:
 
     assert removed == []
     assert mine.exists()
+
+
+# --- sec-77 (PR #77 security review) regressions ---------------------------------
+
+
+def test_a_tiny_upload_is_charged_one_block_and_a_big_one_whole_blocks(tmp_path: Path) -> None:
+    staging, _ = _staging(tmp_path)
+
+    _stage(staging, b"")
+    _stage(staging, b"x" * (_B + 1))
+
+    assert staging.used_bytes() == _B + 2 * _B
+
+
+def test_the_number_of_staged_uploads_is_capped(tmp_path: Path) -> None:
+    staging, _ = _staging(tmp_path, max_uploads=3)
+    first = _stage(staging, b"1")
+    _stage(staging, b"2")
+    staging.claim(_stage(staging, b"3").upload_id)  # a claimed upload still counts
+
+    with pytest.raises(UiTooManyRequests) as caught:
+        _stage(staging, b"4")
+
+    assert caught.value.code == "too_many_uploads"
+    assert len(list(staging.root.iterdir())) == 3
+    staging.discard(first.upload_id)
+    _stage(staging, b"4")
+
+
+def test_the_default_upload_count_cap_is_sixteen() -> None:
+    assert MAX_STAGED_UPLOADS == 16
+
+
+@pytest.mark.parametrize("digits", ["9999999999", "99999999999999999999", "4194305"])
+def test_a_huge_or_out_of_range_pid_is_left_alone_and_does_not_raise(
+    tmp_path: Path, digits: str
+) -> None:
+    """``mkdir $TMPDIR/brain-ui-ingest-9999999999-x`` used to make ``os.kill`` raise
+    OverflowError and stop ``brain ui`` from starting (sec-77 #1)."""
+    planted = tmp_path / f"{ROOT_PREFIX}{digits}-x"
+    planted.mkdir()
+
+    assert sweep_stale_roots(tmp_path, own_pid=os.getpid()) == []
+    assert planted.exists()
+
+
+@pytest.mark.parametrize("pid", [2**64, -1, 0])
+def test_pid_alive_treats_a_pid_the_os_cannot_look_up_as_alive(pid: int) -> None:
+    assert pid_alive(pid) is True
+
+
+def test_the_sweep_skips_a_root_this_user_does_not_own(tmp_path: Path) -> None:
+    """Simulated with ``own_uid``: chown needs root. The temp directory can be shared."""
+    theirs = tmp_path / f"{ROOT_PREFIX}{_DEAD_PID}-theirs"
+    theirs.mkdir()
+
+    removed = sweep_stale_roots(
+        tmp_path, own_pid=os.getpid(), own_uid=os.getuid() + 1, is_alive=lambda pid: False
+    )
+
+    assert removed == []
+    assert theirs.exists()
+
+
+def test_the_sweep_skips_a_symlinked_or_file_entry_whatever_it_points_at(tmp_path: Path) -> None:
+    precious = tmp_path / "precious"
+    precious.mkdir()
+    (precious / "keep.txt").write_text("x")
+    (tmp_path / f"{ROOT_PREFIX}{_DEAD_PID}-link").symlink_to(precious, target_is_directory=True)
+    (tmp_path / f"{ROOT_PREFIX}{_DEAD_PID}-file").write_text("not a directory")
+
+    removed = sweep_stale_roots(tmp_path, own_pid=os.getpid(), is_alive=lambda pid: False)
+
+    assert removed == []
+    assert (precious / "keep.txt").exists()
+
+
+def test_a_sweep_that_raises_is_logged_by_class_and_skipped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    def exploding(*args: object, **kwargs: object) -> list[Path]:
+        raise PermissionError(13, "synthetic", str(tmp_path / "secret-name"))
+
+    staging, _ = _staging(tmp_path, sweeper=exploding)
+    with caplog.at_level("WARNING", logger="brain.ui.upload_staging"):
+        assert staging.sweep() == []
+
+    assert "PermissionError" in caplog.text and "secret-name" not in caplog.text
+
+
+def test_a_stream_oserror_is_a_fixed_503_and_leaves_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    staging, _ = _staging(tmp_path)
+
+    async def broken() -> AsyncIterator[bytes]:
+        yield b"partial"
+        raise ConnectionResetError(54, "reset", "zorblax-name.txt")
+
+    with caplog.at_level("DEBUG"), pytest.raises(UiUnavailable) as caught:
+        asyncio.run(staging.stage(SafeName("zorblax-name", ".txt"), None, broken()))
+
+    assert caught.value.code == "staging_failed"
+    assert "zorblax" not in caught.value.message and "zorblax" not in caplog.text
+    assert list(staging.root.iterdir()) == []
+    assert staging.used_bytes() == 0
+
+
+def test_a_filesystem_refusal_is_a_fixed_503_with_no_filename_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A read-only root makes ``mkdir`` fail with a real OSError: no patching."""
+    staging, _ = _staging(tmp_path)
+    staging.root.chmod(0o500)
+    try:
+        with caplog.at_level("DEBUG"), pytest.raises(UiUnavailable) as caught:
+            _stage(staging, b"text", name=SafeName("zorblax-quarterly", ".txt"))
+    finally:
+        staging.root.chmod(0o700)
+
+    assert caught.value.code == "staging_failed"
+    assert "OSError" in caplog.text or "PermissionError" in caplog.text
+    assert "zorblax" not in caplog.text
+    assert staging.used_bytes() == 0
+
+
+def test_opening_writing_and_sniffing_run_off_the_event_loop_thread(tmp_path: Path) -> None:
+    """A 25 MiB write or a 5 MiB UTF-8 check on the loop would stall every other
+    request (sec-77 #5). The seams record the thread each call ran on."""
+    threads: dict[str, set[int]] = {"open": set(), "write": set(), "sniff": set()}
+
+    class _Recording:
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+
+        def write(self, data: bytes) -> int:
+            threads["write"].add(threading.get_ident())
+            return int(self.inner.write(data))
+
+        def close(self) -> None:
+            self.inner.close()
+
+    def opener(directory: Path, path: Path) -> Any:
+        threads["open"].add(threading.get_ident())
+        directory.mkdir(mode=0o700)
+        return _Recording(path.open("wb"))
+
+    def sniffer(path: Path, ext: str) -> None:
+        threads["sniff"].add(threading.get_ident())
+
+    staging, _ = _staging(tmp_path, opener=opener, sniffer=sniffer)
+
+    async def run() -> int:
+        loop_thread = threading.get_ident()
+        await staging.stage(_NAME, 9, _chunks([b"abc", b"def", b"ghi"]))
+        return loop_thread
+
+    loop_thread = asyncio.run(run())
+
+    for call, seen in threads.items():
+        assert seen, call
+        assert loop_thread not in seen, f"{call} ran on the event loop thread"

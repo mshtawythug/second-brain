@@ -806,7 +806,8 @@ Why this preserves the CSRF argument:
 | `/api/ingest/paste`, **decoded body** | **2 MiB** of UTF-8 | After `json.loads`, the `body` string's UTF-8 length is checked, giving 413 `body_too_large`. This is the cap the user-facing limit names. |
 | Upload, `.pdf` / `.docx` | 25 MiB | Same: the `Content-Length` precheck, then a counter while streaming to the staging file. The partial file is deleted on abort. |
 | Upload, `.md` / `.markdown` / `.txt` | 5 MiB | Same. |
-| Total staged | 64 MiB | Checked before streaming starts, from `Content-Length`. Re-checked by the counter. |
+| Total staged | 64 MiB | Checked before streaming starts, from `Content-Length`. Re-checked by the counter. Each upload is charged in whole 4 KiB filesystem blocks, at least one (RM-13's security review). |
+| Uploads held at once | 16 | Unsubmitted, claimed by an unsettled job, or streaming. Over it: 429 `too_many_uploads` (RM-13's security review: the byte budget alone admitted thousands of tiny files). |
 
 A missing `Content-Length` (chunked transfer) is allowed. The stream counter alone enforces the cap.
 
@@ -818,7 +819,8 @@ A missing `Content-Length` (chunked transfer) is allowed. The stream counter alo
   sweep safe (Lifetime, below).
 - **Filename.** `X-Brain-Filename` is percent-decoded, reduced to its final component (anything up to
   the last `/` or `\` is dropped), stripped of control characters and leading dots, and capped at 120
-  characters. Its extension must be in the upload allow-list (§3.1: `UPLOAD_EXTENSIONS` ∩
+  characters and 200 UTF-8 bytes, cut on a character boundary (the byte cap added by RM-13's security
+  review: `NAME_MAX` is 255 bytes, so 120 four-byte characters failed `open`). Its extension must be in the upload allow-list (§3.1: `UPLOAD_EXTENSIONS` ∩
   `ingest.dispatch.supported_extensions()`), else 415 `unsupported_file`. An empty or dot-only result is
   400 `bad_filename`. *(Amended by RM-13, which made the allow-list an explicit constant.)* The stored name is `<sanitized-stem><ext>` **inside** the per-upload directory.
   A test asserts `../../x.pdf`, `..\\x.pdf`, `/etc/passwd.txt`, a NUL byte and a 300-character name
@@ -842,7 +844,18 @@ A missing `Content-Length` (chunked transfer) is allowed. The stream counter alo
   
   **Failure direction.** If the OS has reused a dead instance's pid for an unrelated process, the
   stale root survives until that pid dies too. Leftover files are left behind; live uploads are never
-  deleted. A root whose name carries no parseable pid is left alone.
+  deleted. A root whose name carries no parseable pid is left alone. *(Added by RM-13's security
+  review:)* so is one whose pid is out of range (more than seven digits, or above 2²², which once made
+  `os.kill` raise and stopped `brain ui` from starting), one this user does not own (a shared temp
+  directory), and a symlink, judged by `lstat` and never followed. A sweep that fails is logged by
+  class and skipped; it never blocks startup.
+- **Residual risk, accepted (RM-13's security review).** Extraction runs in the server process, on the
+  one job worker. A hostile PDF can exhaust memory or wedge that worker until `brain ui` restarts: the
+  25 MiB cap bounds the input, not the parse. The parser floors (`pypdf>=6.14`,
+  `pdfminer.six>=20251230`) rule out the known advisories. The user is uploading their own file, over
+  loopback only. A resource-limited subprocess (`RLIMIT_AS` plus a wall-clock timeout) is backlog
+  BL-18. An upload body also has no per-chunk idle deadline; the 16-upload cap bounds what a stalled
+  client can hold (backlog BL-19).
 
 ### 7.5 Content handling
 

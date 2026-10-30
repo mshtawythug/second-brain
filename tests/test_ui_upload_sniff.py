@@ -132,3 +132,35 @@ def test_utf8_text_and_an_empty_text_file_pass(tmp_path: Path) -> None:
 
 def test_an_unknown_extension_is_refused(tmp_path: Path) -> None:
     _refused(_write(tmp_path / "x.exe", b"MZ"), ".exe")
+
+
+def test_a_declared_member_count_over_the_bound_is_refused_from_the_end_record(
+    tmp_path: Path,
+) -> None:
+    """The end record claims 60,000 entries and the central directory is garbage: the
+    refusal names the count, which proves it came BEFORE zipfile parsed anything (a
+    ZipFile open would have failed first, as a damaged zip) (sec-77 #5)."""
+    end_record = (
+        b"PK\x05\x06" + (0).to_bytes(2, "little") * 2
+        + (60_000).to_bytes(2, "little") * 2
+        + (1).to_bytes(4, "little") + (4).to_bytes(4, "little") + (0).to_bytes(2, "little")
+    )
+    path = _write(tmp_path / "x.docx", b"PK\x03\x04" + b"\0" * 100 + end_record)
+
+    error = _refused(path, ".docx")
+
+    assert error.message == "the .docx holds too many parts to unpack safely"
+
+
+def test_a_zip_with_no_end_record_is_refused_as_damaged(tmp_path: Path) -> None:
+    error = _refused(_write(tmp_path / "x.docx", b"PK\x03\x04" + b"\0" * 200), ".docx")
+
+    assert error.message == "the file is not a .docx (a damaged zip)"
+
+
+def test_the_zip64_marker_is_refused(tmp_path: Path) -> None:
+    """0xFFFF entries means zip64 or more than 65,534 members: no .docx under the cap."""
+    end_record = b"PK\x05\x06" + b"\0" * 6 + b"\xff\xff" + b"\0" * 10
+    error = _refused(_write(tmp_path / "x.docx", b"PK\x03\x04" + end_record), ".docx")
+
+    assert error.message == "the .docx holds too many parts to unpack safely"

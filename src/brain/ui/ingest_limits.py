@@ -60,11 +60,25 @@ MAX_STAGED_BYTES = 64 * 1024 * 1024
 #: wire like the paste's.
 MAX_FILE_SUBMIT_WIRE_BYTES = 16 * 1024
 
+#: Uploads held at once (unsubmitted, claimed by an unsettled job, or still
+#: streaming). Over it: 429 ``too_many_uploads``. The byte budget alone would let
+#: thousands of tiny files through, each costing a directory, a file and an inode.
+MAX_STAGED_UPLOADS = 16
+
+#: Every staged upload is charged against :data:`MAX_STAGED_BYTES` in whole
+#: filesystem blocks, at least one: a zero-byte file still occupies a block and
+#: an inode on disk.
+STAGING_BLOCK_BYTES = 4096
+
 #: An upload nobody submits is deleted after this long.
 UPLOAD_TTL = timedelta(minutes=15)
 
-#: The sanitized basename (stem plus extension) is at most this long.
+#: The sanitized basename (stem plus extension) is at most this long, in
+#: characters AND in UTF-8 bytes. The byte cap is what the filesystem enforces:
+#: NAME_MAX is 255 BYTES on Linux and macOS, so 120 multibyte characters could
+#: still fail ``open`` with ENAMETOOLONG. 200 leaves room for the extension.
 MAX_FILENAME_CHARS = 120
+MAX_FILENAME_BYTES = 200
 
 #: A ``.docx`` is a zip. Checked from the central directory before extraction:
 #: the members' declared total, the worst member's expansion ratio, and the

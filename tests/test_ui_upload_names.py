@@ -10,6 +10,7 @@ No PII: every name here is synthetic.
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -17,6 +18,7 @@ from brain.ingest.dispatch import ExtractorRegistry, ExtractorSpec, supported_ex
 from brain.ui.errors import UiBadRequest, UiUnsupportedMedia
 from brain.ui.ingest_limits import (
     MAX_BINARY_UPLOAD_BYTES,
+    MAX_FILENAME_BYTES,
     MAX_FILENAME_CHARS,
     MAX_TEXT_UPLOAD_BYTES,
     UPLOAD_EXTENSIONS,
@@ -153,3 +155,16 @@ def test_the_kind_is_the_extractors_registry_name() -> None:
     assert [upload_kind(e) for e in (".md", ".markdown", ".txt", ".pdf", ".docx")] == [
         "markdown", "markdown", "text", "pdf", "docx",
     ]
+
+
+@pytest.mark.parametrize("char", ["é", "日", "😀"])
+def test_a_long_multibyte_name_is_cut_to_the_byte_cap_on_a_character_boundary(char: str) -> None:
+    """120 characters of 4-byte UTF-8 is 480 bytes, past the 255-byte NAME_MAX, and
+    used to fail ``open`` with ENAMETOOLONG: a 500 that logged the path (sec-77 #2)."""
+    name = sanitize_filename(quote(char * 150 + ".txt"))
+
+    encoded = name.basename.encode("utf-8")
+    assert len(encoded) <= MAX_FILENAME_BYTES
+    assert len(encoded) > MAX_FILENAME_BYTES - 4 - len(char.encode("utf-8"))  # cut, not dropped
+    assert name.ext == ".txt" and set(name.stem) == {char}
+    encoded.decode("utf-8")  # strict: no half character
