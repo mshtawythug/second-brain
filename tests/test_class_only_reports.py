@@ -1,10 +1,13 @@
 """RM-29 (H-6): terminal error reports name the failure's class, never its message.
 
-Two reports used to quote an exception's text straight to the terminal:
+These reports used to quote an exception's text straight to the terminal:
 
 - ``brain vault export``: ``summary.errors`` carried ``f"{relative}: {e}"``;
 - ``brain backfill scan-secrets --action redact``: ``_apply_redact`` recorded
   ``str(exc)``.
+- ``brain backfill scan-secrets --action mark-confidential``: three of
+  ``vault/sensitivity_propagate.py``'s ``PropagationFailure`` messages, which that
+  action writes into the same report, interpolated ``{exc}``.
 
 An exception message can carry document-derived text, so each report now goes
 through :func:`brain.errors.describe_failure`. That keeps the content-free
@@ -178,3 +181,59 @@ def test_redact_collision_message_is_the_documented_sentence() -> None:
     assert REDACT_COLLISION_MESSAGE == (
         "redacted body collides with another document's content hash"
     )
+
+
+# --------------------------------------------------------------------------
+# backfill scan-secrets --action mark-confidential (AC2, the propagation path)
+# --------------------------------------------------------------------------
+
+
+def _sentinel_psycopg_error(*_args: Any, **_kwargs: Any) -> Any:
+    raise psycopg.OperationalError(_SENTINEL)
+
+
+@pytest.mark.usefixtures("_scan_secrets")
+def test_mark_confidential_report_never_quotes_the_exception_message(
+    test_db: psycopg.Connection[Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2 through the other writer of the same report: every propagation stage.
+
+    ``_apply_mark_confidential`` records each ``PropagationFailure.message``.
+    One ingested-tier mirror fails to regenerate, one vault-tier file fails its
+    frontmatter rewrite, and both fence refreshes fail. That reaches each of
+    ``propagate_sensitivity_to_vault``'s three ``except`` sites.
+    """
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    ingested = _seed(
+        test_db, title="Synthetic mark ingested", content=f"key {_FAKE_AWS_KEY} one\n"
+    )
+    vault_note = _seed(
+        test_db, title="Synthetic mark vault", content=f"key {_FAKE_AWS_KEY} two\n"
+    )
+    test_db.execute(
+        "UPDATE documents SET vault_path = %s WHERE id = %s",
+        ("_ingested/manual/synthetic-mark-ingested.md", ingested),
+    )
+    test_db.execute(
+        "UPDATE documents SET vault_path = %s, kind = 'vault' WHERE id = %s",
+        ("notes/synthetic-mark-vault.md", vault_note),
+    )
+    target = "brain.vault.sensitivity_propagate"
+    monkeypatch.setattr(f"{target}.regenerate_vault_file", _sentinel_oserror)
+    monkeypatch.setattr(f"{target}.rewrite_sensitivity", _sentinel_oserror)
+    monkeypatch.setattr(f"{target}.refresh_fences_naming", _sentinel_psycopg_error)
+
+    result = CliRunner().invoke(
+        app,
+        ["backfill", "scan-secrets", "--apply", "--action", "mark-confidential", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _SENTINEL not in result.output
+    errors = sorted(e["error"] for e in json.loads(result.output)["errors"])
+    assert len(errors) == 4, errors
+    assert sum("could not write sensitivity into" in e for e in errors) == 1
+    assert sum("vault mirror write failed" in e for e in errors) == 1
+    assert sum("could not refresh derived-link fences" in e for e in errors) == 2
+    assert sum(": OSError[ENOSPC]." in e for e in errors) == 2
+    assert sum(": OperationalError." in e for e in errors) == 2

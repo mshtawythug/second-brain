@@ -686,8 +686,9 @@ non-`report` action **and** pass `--apply`; either alone is a no-op report.
 `--action` is a usage error (**exit 2**).
 
 A document that `redact` could not rewrite is listed under `error(s)` (and in
-`--json`'s `errors`) and keeps its secret. The reason names the failure's class
-only, never the exception's text. The usual case, where the redacted body is
+`--json`'s `errors`) and keeps its secret. A `mark-confidential` change that
+could not reach a vault file is listed the same way. Every reason names the
+failure's class only, never the exception's text. The usual case, where the redacted body is
 identical to another document's, reads "redacted body collides with another
 document's content hash".
 

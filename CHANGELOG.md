@@ -32,6 +32,10 @@ git tag scheme:
   usual case, a redacted body identical to another document's, reads "redacted
   body collides with another document's content hash"; it used to name the
   other document's id.
+- **`brain backfill scan-secrets --action mark-confidential`** and
+  **`brain mark-confidential` / `mark-normal`** report a vault file they could
+  not update by the failure's class (for example `OSError[ENOSPC]`) instead of
+  the exception's message.
 
 ### Added — `brain ui`: Copy path (RM-23)
 
