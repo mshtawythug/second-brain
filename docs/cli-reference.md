@@ -903,6 +903,24 @@ becomes two documents: the upload has no path to dedup on. An uploaded file you
 never submit is deleted once it is 15 minutes old, at the next upload or submit,
 or when the server stops; a submitted one when its job ends.
 
+**Asking from the browser.** The **Agent** tab answers a question from your
+brain, as `brain ask` does. Type a question (at most 2,000 characters), tick
+*Quick answer* to skip the planning loop, and press **Ask**. The answer card shows
+each step as it runs (*Planning the search*, *Retrieving notes (round 1 of 3)*,
+*Checking whether that is enough*, *Writing the answer*), then the answer, the
+notes it cites and what it searched for. A number in brackets, such as `[1]`, is a
+link that opens the cited note in the Notes tab; so is *Open in Notes* beside each
+citation. **Cancel** works until the answer is ready. A question waits while an
+ingest job runs (the card says *Waiting for the ingest job to finish*), and the
+tab takes one question at a time. Answers are plain text: the model's output is
+never rendered as markup, so formatting characters and HTML in it show as typed.
+Where the server does not serve confidential bodies, an answer that draws on a
+confidential note is withheld, and the card says so with no link. The tab
+remembers the questions this browser tab asked, by id only, for as long as the
+server keeps the answer (10 minutes); after a reload a card is labelled by the
+time it was asked. On a `--read-only` or `--host` / `--lan` server the tab is
+disabled and says why: use `brain ask` from a terminal.
+
 The tab sits on these routes. On a
 loopback, writable server, `POST /api/ingest/paste` ingests pasted text as an
 ordinary ingested document from source `manual`, through the same pipeline as
@@ -936,7 +954,7 @@ unknown or expired upload. `DELETE /api/ingest/uploads/{upload_id}` (body `{}`)
 discards an unsubmitted file. An upload's result also carries
 `original_filename`, withheld with the title.
 
-The Agent tab's backend (its front end ships separately) asks a question as a job
+The Agent tab's backend asks a question as a job
 on the same worker, one at a time with ingest. `POST /api/ask` with JSON
 `{question, no_loop?}` (a question of at most 2,000 characters; `no_loop`
 defaults to false) answers 202 with a job of kind `ask`, which runs `brain ask`'s

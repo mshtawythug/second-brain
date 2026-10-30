@@ -32,16 +32,16 @@
  * preload scanner would otherwise fetch in parallel, and delays first paint by
  * a round trip for no benefit.
  *
- * Two same-specificity pairs depend on that order and will break silently if a
- * rule is moved between files. Both are documented where they live:
- *   * `.deferred-tab` must come after `.shell`   (components.css, deferred)
+ * A same-specificity pair depends on that order and will break silently if a
+ * rule is moved between files. It is documented where it lives:
  *   * `components.css` must come after `layout.css` (components.css, responsive)
+ * (A second pair, `.deferred-tab` after `.shell`, went with the last placeholder
+ * tab pane in RM-18b.)
  *
- * THE SECOND RULE USED TO READ "the responsive overrides must come last", and
+ * THAT RULE USED TO READ "the responsive overrides must come last", and
  * that was FALSE — components.css is 4th of 10 sheets and six load after it. It
  * was also inert, which is why it survived: no later sheet declares `.shell`,
- * `.ledger`, `.inspector` or `.deferred-tab` at all (the two later mentions are
- * prose in comments). The rule it was reaching for is the real and narrower
+ * `.ledger` or `.inspector` at all. The rule it was reaching for is the real and narrower
  * one now stated: components.css's `@media` blocks are same-specificity with
  * layout.css's base rules and win only by loading later.
  *

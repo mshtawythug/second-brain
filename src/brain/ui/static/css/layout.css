@@ -24,13 +24,12 @@
    at (0,0,1) still beats UA `[hidden]` at (0,1,0) in Chromium, Firefox and
    WebKit. Reason from origin here; specificity is a red herring across origins
    and gives the right answer only by luck.
-   Two separate things are therefore needed, in this order. (1) An AUTHOR rule
-   that re-hides, because no UA rule can outrank `.shell`. (2) That rule at
-   (0,2,0), because it now competes with author siblings where specificity DOES
-   apply: `.deferred-tab { display: block }` (0,1,0) lives in components.css,
-   which loads after this file, so an equal-specificity rule here would lose on
-   source order. The tab panes are `class="shell deferred-tab" hidden`, so this
-   is what actually hides them. */
+   So an AUTHOR rule has to re-hide, because no UA rule can outrank `.shell`.
+   It is (0,2,0) so that a later same-specificity author `display` on the same
+   element cannot undo it. That sibling used to exist (`.deferred-tab { display:
+   block }` in components.css, on the placeholder tab panes); RM-18b removed the
+   last placeholder, and the Ingest and Agent panes are not `.shell` at all, so
+   today this hides `#tab-notes` alone. */
 .shell[hidden] { display: none; }
 
 .rail, .ledger, .inspector { min-height: 0; overflow-y: auto; }

@@ -92,6 +92,28 @@ def test_csp_is_present_and_default_src_none(tmp_path: Path) -> None:
     assert csp == CSP
 
 
+#: RM-18b, acceptance 5: the policy the Agent tab ships under, as a LITERAL. The
+#: tab renders model text; its hardening rules keep that text out of every HTML
+#: sink, and this policy (no inline script, no ``unsafe-inline``, no nonce) is the
+#: layer that holds if a sink is ever missed. Compared with a copy rather than with
+#: ``security.CSP``, so loosening the constant reddens this test instead of
+#: silently moving both sides of the comparison.
+_RM18B_CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
+
+
+@pytest.mark.parametrize("path", ["/", "/static/js/ask.js", "/api/ask/config"])
+def test_the_agent_tab_ships_under_the_unchanged_csp(tmp_path: Path, path: str) -> None:
+    """The shell, the Agent tab's module and its config route all carry it."""
+    with _client(_context(tmp_path)) as client:
+        response = client.get(path)
+
+    assert response.status_code == 200, path
+    assert response.headers["content-security-policy"] == _RM18B_CSP
+
+
 def test_hardening_headers_on_every_response(tmp_path: Path) -> None:
     with _client(_context(tmp_path)) as client:
         for path in ("/api/health", "/api/does-not-exist"):

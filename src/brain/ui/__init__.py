@@ -1,13 +1,13 @@
 """`brain ui` — the local, loopback-only web app over the brain (F14).
 
-v1 ships the **Notes tab only**. Ingest and Agent are deliberately deferred:
-each is a long-running *job* (chunk+embed, an Ollama plan/reflect loop) and
-exposing one over HTTP forces a background-task subsystem — job store, progress
-channel, cancellation — larger than the entire Notes tab. Those two tabs render
-a one-line redirect to the CLI command that does the job today. This is a
-decision (release plan R-8), not an oversight. A third deferred tab, for the
-Quartz wiki build, was deleted at R2 (spec Q10), and the wiki itself at R3: a
-tab describing a retired subsystem is worse than no tab.
+Three tabs: Notes, Ingest and Agent. v1 shipped the Notes tab only and deferred
+the other two (release plan R-8), because each is a long-running *job*
+(chunk+embed, an Ollama plan/reflect loop) that needs a background-task
+subsystem. That subsystem is :mod:`brain.ui.jobs` (RM-10), and the two tabs ran on
+it from RM-11 (Ingest) and RM-18a/RM-18b (Agent). Both are offered only on a
+loopback, writable server. A third deferred tab, for the Quartz wiki build, was
+deleted at R2 (spec Q10), and the wiki itself at R3: a tab describing a retired
+subsystem is worse than no tab.
 
 Layering, and the review rule that protects it:
 

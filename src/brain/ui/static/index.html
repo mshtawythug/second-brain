@@ -52,6 +52,7 @@
 <link rel="stylesheet" href="/static/css/discovery.css">
 <link rel="stylesheet" href="/static/css/thread.css">
 <link rel="stylesheet" href="/static/css/ingest.css">
+<link rel="stylesheet" href="/static/css/ask.css">
 <script src="/static/theme.js"></script>
 <script type="module" src="/static/js/main.js"></script>
 <!-- A SECOND module entry point, and the reason is ownership rather than
@@ -263,16 +264,52 @@
   </div>
 </section>
 
-<section class="shell deferred-tab" id="tab-agent" hidden>
-  <div class="deferred">
-    <h2>Agent</h2>
-    <p>Deferred to a later release. <code>brain ask</code> is a multi-iteration
-       plan → retrieve → reflect → synthesize loop against a local model; it
-       needs streaming, mid-flight cancellation and conversation state. It also
-       renders model-generated text into the DOM, which deserves its own
-       hardening pass rather than riding along on v1.</p>
-    <p>Use the CLI today:</p>
-    <pre><code>brain ask "your question"</code></pre>
+<!-- THE AGENT TAB (RM-18b; roadmap spec RM-18, A1–A10). js/ask.js wires it and
+     loads /api/ask/config the first time the tab is shown: the fieldset ships
+     DISABLED and only a config that says asking is allowed enables it, so a
+     read-only or LAN-bound server shows its reason instead (A6). Same shape as
+     the Ingest pane, for the same reasons: not `class="shell"` (one scrolling
+     column that owns no `display` rule, so the bare `hidden` attribute hides
+     it), and the turn list is NOT a live region: #agent-announce gets one
+     sentence per state change. Every answer is drawn as TEXT by js/ask_view.js;
+     nothing here or there parses model output as markup. -->
+<section class="agent-pane" id="tab-agent" aria-labelledby="agent-heading" hidden>
+  <div class="agent-layout">
+    <header class="agent-head">
+      <h2 id="agent-heading">Agent</h2>
+      <p class="agent-help">Ask a question and a local model plans searches of your
+         brain, reads what they find, and writes a short answer that cites its
+         notes. It runs on this machine, takes a minute or more, and an ingest
+         waits behind it. Nothing is written to your brain.</p>
+    </header>
+    <p class="agent-unavailable" id="agent-unavailable" role="status" hidden></p>
+    <form class="agent-form" id="agent-form" novalidate>
+      <fieldset class="agent-fieldset" id="agent-fieldset" disabled>
+        <legend>Ask your brain</legend>
+        <div class="agent-field">
+          <label for="agent-question">Question</label>
+          <textarea id="agent-question" rows="3" required
+                    aria-describedby="agent-question-hint"></textarea>
+          <p class="agent-hint" id="agent-question-hint"></p>
+        </div>
+        <div class="agent-check">
+          <input type="checkbox" id="agent-no-loop">
+          <label for="agent-no-loop">Quick answer: one search, no planning loop</label>
+        </div>
+        <p class="agent-error" id="agent-error" role="alert" hidden></p>
+        <div class="agent-actions">
+          <button class="accent-btn" id="agent-submit" type="submit">Ask</button>
+          <p class="agent-busy" id="agent-busy" hidden>One question at a time: this
+             one has to finish, or be cancelled, first.</p>
+        </div>
+      </fieldset>
+    </form>
+    <div class="agent-turns">
+      <h3 id="agent-turns-heading">Answers</h3>
+      <p class="agent-empty" id="agent-empty">Nothing asked from this tab yet.</p>
+      <ol class="turn-list" id="agent-turns" aria-labelledby="agent-turns-heading"></ol>
+    </div>
+    <p class="agent-announce" id="agent-announce" role="status" aria-live="polite"></p>
   </div>
 </section>
 
