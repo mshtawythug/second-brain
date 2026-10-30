@@ -23,24 +23,25 @@ never widens it to their other contributors' items (the #100 review ruling).
 
 **The output cap** is enforced while reading: stdout is read in chunks and
 ``gh`` is killed as soon as :data:`GH_MAX_STDOUT_BYTES` is passed, so an
-oversized answer is refused before it is held. stderr is discarded unread.
+oversized answer is refused before it is held. stderr is discarded unread. The
+process handling lives in :mod:`brain.ingest.capped_process`, shared with
+RM-36's ``osascript`` reader.
 """
 from __future__ import annotations
 
 import base64
 import binascii
-import contextlib
 import json
 import os
 import re
 import shutil
-import signal
 import subprocess
-import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal
+
+from .capped_process import run_capped
 
 SOURCE_KIND = "github"
 
@@ -51,7 +52,6 @@ GhRunner = Callable[[list[str]], str]
 GH_TIMEOUT_SECONDS = 60
 #: The largest answer read; ``gh`` is killed past it (module docstring).
 GH_MAX_STDOUT_BYTES = 32 * 1024 * 1024
-_READ_CHUNK_BYTES = 65536
 #: ``OWNER/REPO`` as the code host spells them; see :func:`is_repo_name`.
 REPO_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}")
 
@@ -146,10 +146,8 @@ def gh_runner(
 ) -> str:
     """The production :data:`GhRunner`. ``which`` and ``popen`` are test seams.
 
-    A timer kills ``gh`` at ``timeout``; the read kills it past ``max_stdout_bytes``.
-    ``gh`` runs in its own process group and the whole group is killed, because a
-    child it started (an extension, a credential helper) would otherwise keep
-    stdout open and the read would wait for it.
+    ``gh`` is killed at ``timeout`` and past ``max_stdout_bytes``, its whole process
+    group with it (:func:`brain.ingest.capped_process.run_capped`).
     """
     if not args:
         raise GithubError("gh runner invoked with no arguments")
@@ -157,54 +155,25 @@ def gh_runner(
     if binary is None:
         raise GithubError(_INSTALL_HINT)
     label = f"`gh {args[1]}`" if len(args) > 1 else "`gh`"
-    timed_out = threading.Event()
-    oversized = False
-    chunks: list[bytes] = []
     try:
-        with popen(
+        run = run_capped(
             [binary, *args[1:]],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            max_stdout_bytes=max_stdout_bytes,
             env={**os.environ, **_QUIET_ENV},
-            start_new_session=True,
-        ) as proc:
-            def _kill() -> None:
-                timed_out.set()
-                _kill_group(proc)
-
-            timer = threading.Timer(timeout, _kill)
-            timer.start()
-            try:
-                size = 0
-                assert proc.stdout is not None  # stdout=PIPE
-                while chunk := proc.stdout.read(_READ_CHUNK_BYTES):
-                    size += len(chunk)
-                    if size > max_stdout_bytes:
-                        oversized = True
-                        _kill_group(proc)
-                        break
-                    chunks.append(chunk)
-                returncode = proc.wait()
-            finally:
-                timer.cancel()
+            popen=popen,
+        )
     except OSError as exc:
         raise GithubError(f"{label} could not run ({type(exc).__name__})") from None
-    if oversized:
+    if run.oversized:
         raise GithubError(
             f"{label} output exceeded {max_stdout_bytes} bytes; narrow --since or --repo"
         )
-    if timed_out.is_set():
+    if run.timed_out:
         raise GithubError(f"{label} timed out after {timeout:g}s")
-    if returncode != 0:
-        raise GithubError(f"{label} failed (exit {returncode})")
-    return b"".join(chunks).decode("utf-8", errors="replace")
-
-
-def _kill_group(proc: subprocess.Popen[bytes]) -> None:
-    """SIGKILL ``proc``'s process group (it leads one: ``start_new_session``)."""
-    with contextlib.suppress(ProcessLookupError):  # already gone
-        os.killpg(proc.pid, signal.SIGKILL)
+    if run.returncode != 0:
+        raise GithubError(f"{label} failed (exit {run.returncode})")
+    return run.stdout.decode("utf-8", errors="replace")
 
 
 def parse_pages(raw: str) -> list[Any]:

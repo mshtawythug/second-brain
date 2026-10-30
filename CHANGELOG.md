@@ -22,6 +22,25 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — `brain ingest-apple-notes`: named Apple Notes folders (RM-36)
+
+- `brain ingest-apple-notes --folder NAME` (repeatable, required; macOS only)
+  stores the notes of the named folders as documents of the new `applenotes`
+  source, read through `osascript -l JavaScript`. The program sent to Notes is
+  fixed and read-only; folder names reach it as JSON data only. Bodies are
+  converted from Notes' HTML to Markdown by a stdlib converter (headings,
+  lists, checklists, links); attachments are skipped and locked notes are never
+  read (they are counted). Notes are stored `confidential` unless
+  `--sensitivity normal`. `--since`, `--max` (default 200, the rest reported),
+  `--dry-run`, `--tag` and `--no-enrich` are offered. Dedup is by the Notes id;
+  a moved note updates only its metadata. Without `--folder` it exits 2; off
+  macOS, 1. `osascript` is stopped after 120 s. `brain doctor` gains an
+  `apple notes` row, and `docs/guides/apple-notes.md` documents macOS's
+  Automation permission prompt.
+- `brain.ingest.capped_process` holds the timeout-and-stdout-cap runner that
+  `gh` (RM-31) used, now shared with the `osascript` reader; `gh`'s behaviour
+  and messages are unchanged.
+
 ### Changed — the `ingest-brain` skill keeps its per-source recipes in `sources/`
 
 - The Gmail, Krisp, Slack, Jira and GitHub recipes moved out of

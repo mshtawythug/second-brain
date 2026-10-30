@@ -15,7 +15,7 @@ description: >
   directory, pull this email, pull last week's Krisp calls, save this Slack
   thread, save this transcript, add this to my brain, capture this in my
   brain, import this into the brain, brain ingest, brain ingest-stdin, brain
-  ingest-gmail, ingest my jira tickets.
+  ingest-gmail, ingest my jira tickets, ingest my apple notes.
 ---
 
 # Ingest Brain
@@ -46,6 +46,7 @@ never run the command from its table row alone.
 | The user's own Jira issues | `brain ingest-stdin --source jira` | Atlassian MCP→stdin, **confidential**. Read [sources/jira.md](sources/jira.md). |
 | Krisp action items as a separate doc | `brain enrich --krisp-action-items` (handoff) + `brain ingest-stdin --content-type krisp_action_items` | See `brain-todo` for the full flow. |
 | The user's own GitHub PRs, issues, READMEs | `brain ingest-github --mine --since YYYY-MM-DD` | **REFUSES without `--repo`/`--mine` and `--since`.** Read [sources/github.md](sources/github.md). |
+| Notes in named Apple Notes folders (macOS) | `brain ingest-apple-notes --folder NAME` | **REFUSES without `--folder`** (repeatable; never all notes). Stored **confidential** unless `--sensitivity normal`. At most `--max` (200) a run; `--dry-run` first. Locked notes and attachments are skipped. The first run triggers macOS's Automation prompt for Notes: the user must allow it (`docs/guides/apple-notes.md` in the brain repo). |
 
 ## Files and directories
 

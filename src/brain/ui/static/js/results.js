@@ -18,6 +18,7 @@ const SOURCE_ICONS = {
   krisp: "🎙️", slack: "💬", gmail: "📧", calendar: "📅", manual: "✍️", vault: "🌱",
   jira: "🎫",
   github: "🔀",
+  applenotes: "🗒️",
 };
 
 /* `vault` is the fallback, matching `sourceIconFor`. It is a real glyph rather
