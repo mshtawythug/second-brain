@@ -9,6 +9,7 @@ which the fake runner returns whatever the window.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -17,9 +18,11 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from brain.cli import app
+from brain.enrichment import SummaryResult
 from brain.errors import DirectoryRefreshError
 from tests import calendar_fixtures as fx
 from tests.conftest import CountingEmbedder
+from tests.secret_fixtures import SYNTHETIC_AWS_KEY
 
 _TODAY = datetime.now(UTC).date()
 _WINDOW = ["--since", str(_TODAY - timedelta(days=60)), "--until", str(_TODAY + timedelta(days=1))]
@@ -430,3 +433,150 @@ def test_a_new_series_without_a_readable_master_falls_back_to_an_instance(
     assert "1 series master(s) could not be read" in result.output
     body = _calendar_docs(test_db)[fx.SERIES_ID]["content"]
     assert "When: recurring series, 09:00–09:30 (UTC-07:00)" in body
+
+
+# --- options and failure paths (aud-96) ------------------------------------------
+
+
+@dataclass
+class _CountingEnricher:
+    """An enricher test double: counts ``summarize`` calls, returns a canned summary."""
+
+    model: str = "fake-model"
+    calls: int = 0
+
+    def count_tokens(self, text: str) -> int:
+        return max(1, len(text) // 4)
+
+    def summarize(self, title: str, content: str) -> SummaryResult:
+        self.calls += 1
+        return SummaryResult(summary="Canned summary.", model=self.model)
+
+
+@pytest.fixture
+def enricher(monkeypatch: pytest.MonkeyPatch) -> _CountingEnricher:
+    fake = _CountingEnricher()
+    monkeypatch.setattr("brain.cli._build_enricher", lambda cfg: fake)
+    monkeypatch.setenv("BRAIN_ENRICH_MIN_TOKENS", "1")  # events are short
+    return fake
+
+
+def _summaries(conn: psycopg.Connection[Any]) -> list[str | None]:
+    rows = conn.execute(
+        "SELECT d.summary FROM documents d JOIN sources s ON s.id = d.source_id "
+        "WHERE s.kind = 'calendar'"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def test_no_summary_is_made_without_enrich(
+    test_db: psycopg.Connection[Any],
+    gws: fx.FakeGws,
+    embedder: CountingEmbedder,
+    enricher: _CountingEnricher,
+) -> None:
+    assert _run().exit_code == 0
+
+    assert enricher.calls == 0
+    assert _summaries(test_db) == [None] * 4
+
+
+def test_enrich_opts_in_to_a_summary_per_document(
+    test_db: psycopg.Connection[Any],
+    gws: fx.FakeGws,
+    embedder: CountingEmbedder,
+    enricher: _CountingEnricher,
+) -> None:
+    result = _run("--enrich")
+
+    assert result.exit_code == 0, result.output
+    assert enricher.calls == 4
+    assert _summaries(test_db) == ["Canned summary."] * 4
+
+
+def test_tag_applies_to_every_document(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
+) -> None:
+    assert _run("--tag", "Meetings").exit_code == 0
+
+    rows = test_db.execute(
+        "SELECT d.tags FROM documents d JOIN sources s ON s.id = d.source_id "
+        "WHERE s.kind = 'calendar'"
+    ).fetchall()
+    assert [r[0] for r in rows] == [["meetings"]] * 4
+
+
+def test_a_window_with_nothing_to_ingest_writes_nothing(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
+) -> None:
+    gws.events = fx.noise()
+
+    result = _run()
+
+    assert result.exit_code == 0, result.output
+    assert "found 5 event(s): 0 document(s), 5 skipped" in result.output
+    assert "ingested" not in result.output
+    assert _calendar_docs(test_db) == {}
+    assert embedder.embed_calls == 0
+
+
+def _event_with_a_secret() -> dict[str, Any]:
+    return {**fx.single(), "description": f"Deploy key {SYNTHETIC_AWS_KEY}"}
+
+
+def test_a_refused_document_is_counted_failed_and_the_run_continues(
+    test_db: psycopg.Connection[Any],
+    gws: fx.FakeGws,
+    embedder: CountingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRAIN_SECRET_GUARD", "reject")
+    gws.events[0] = _event_with_a_secret()
+
+    result = _run()
+
+    assert result.exit_code == 0, result.output
+    assert f"refused {fx.SINGLE_TITLE}" in result.output
+    assert "3 ingested, 0 updated, 0 occurrences refreshed, 0 unchanged, 1 failed" in (
+        result.output
+    )
+    assert set(_calendar_docs(test_db)) == {fx.SERIES_ID, fx.PRIVATE_ID, fx.ALLDAY_ID}
+
+
+def test_allow_secrets_ingests_a_document_the_guard_would_refuse(
+    test_db: psycopg.Connection[Any],
+    gws: fx.FakeGws,
+    embedder: CountingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRAIN_SECRET_GUARD", "reject")
+    gws.events[0] = _event_with_a_secret()
+
+    result = _run("--allow-secrets")
+
+    assert result.exit_code == 0, result.output
+    assert "4 ingested" in result.output
+    assert fx.SINGLE_ID in _calendar_docs(test_db)
+
+
+def test_a_changed_address_alone_refreshes_participants_and_the_directory(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
+) -> None:
+    """Same names, new address: the body is unchanged, so only metadata moves."""
+    assert _run().exit_code == 0
+    before = _calendar_docs(test_db)[fx.SINGLE_ID]
+    moved = ("Avery Sample", "avery.sample@example.com")
+    gws.events[0] = {**fx.single(), "attendees": [fx.owner(), fx.attendee(moved)]}
+
+    result = _run()
+
+    assert result.exit_code == 0, result.output
+    assert f"refreshed {fx.SINGLE_TITLE}" in result.output
+    after = _calendar_docs(test_db)[fx.SINGLE_ID]
+    assert after["content_hash"] == before["content_hash"]
+    assert after["participants"] == [moved[1], fx.OWNER[1]]
+    row = test_db.execute(
+        "SELECT count(*) FROM directory_entries WHERE source = 'calendar' AND email = %s",
+        (moved[1],),
+    ).fetchone()
+    assert row is not None and row[0] == 1

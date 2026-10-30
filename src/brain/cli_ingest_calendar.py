@@ -58,6 +58,7 @@ from .ingest import Embedder, ingest_document, update_document
 from .ingest import calendar as calendar_ingest
 from .ingest.calendar import CalendarDoc, CalendarError
 from .sensitivity import CONFIDENTIAL, DEFAULT_SENSITIVITY
+from .tags import normalize_tags
 from .vault.derived_links import real_gws_runner
 from .vault.derived_links.directory import DirectoryStore
 
@@ -134,7 +135,9 @@ def ingest_calendar(
         _ingest_all(
             batch.documents,
             calendar=calendar,
-            tags=list(tag),
+            # Tags are canonical at every write boundary; ingest_document
+            # normalizes only when it merges into an existing row.
+            tags=normalize_tags(list(tag)),
             enrich=enrich,
             allow_secrets=allow_secrets,
         )
@@ -312,11 +315,10 @@ def _refresh_metadata(
 
 def _record_attendees(conn: psycopg.Connection[Any], cd: CalendarDoc) -> None:
     store = DirectoryStore(conn)
+    # ``calendar._attendees`` keeps only addresses ``is_email_like`` accepts, so
+    # ``upsert_pair``'s empty-address ValueError cannot happen here.
     for name, email in cd.attendees:
-        try:
-            store.upsert_pair(display_name=name, email=email, source="calendar")
-        except ValueError:
-            continue  # a malformed address: skip it, as refresh_calendar does
+        store.upsert_pair(display_name=name, email=email, source="calendar")
 
 
 def register(app: typer.Typer) -> None:

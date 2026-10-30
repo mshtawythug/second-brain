@@ -38,6 +38,8 @@ What a document holds (spec RM-30, protocol points 3 and 6):
   exists, the command then keeps the stored body and refreshes only the
   metadata, so one failed ``events get`` does not rewrite (re-chunk, re-embed)
   the body. :attr:`CalendarBatch.fallbacks` counts them.
+- **Attendees** count only with an address ``is_email_like`` accepts (one
+  ``@``, a dotted domain, no spaces); resource rooms are left out.
 - **Never stored**: attendee addresses in the body, any URL (join links carry
   passcodes in their query strings), ``conferenceData`` and ``hangoutLink``,
   Google's inserted invitation block, and dial-in, PIN and passcode lines.
@@ -62,6 +64,7 @@ from brain.errors import DirectoryRefreshError, describe_failure
 # the two readers of ``gws calendar events list`` from drifting apart, the same
 # trade ``gmail.py`` makes for ``_strip_re_fwd_prefixes``.
 from brain.vault.derived_links.directory import GwsRunner, _parse_gws_pages
+from brain.vault.derived_links.participants import is_email_like
 
 from . import ExtractedDoc
 from .calendar_text import clean_description, clean_line
@@ -270,17 +273,27 @@ def merge_volatile(stored: Mapping[str, Any], incoming: dict[str, Any]) -> dict[
         return incoming
     previous = stored.get("occurrences")
     stored_last = previous.get("last") if isinstance(previous, dict) else None
-    starts = {s for s in [*(stored_last or []), *occurrences["last"]] if isinstance(s, str)}
-    last = sorted(starts, key=_start_sort_key)[-_LAST_OCCURRENCES:]
+    parsed = {
+        start: moment
+        for start in [*(stored_last or []), *occurrences["last"]]
+        if (moment := _parse_stored_start(start)) is not None
+    }
+    last = sorted(parsed, key=parsed.__getitem__)[-_LAST_OCCURRENCES:]
     return {**incoming, "date": last[-1], "occurrences": {**occurrences, "last": last}}
 
 
-def _start_sort_key(start: str) -> datetime:
-    """A stored start time (``_start``'s ISO form) as a UTC datetime, for ordering."""
+def _parse_stored_start(start: object) -> datetime | None:
+    """A start time in ``_start``'s ISO form as a UTC datetime; ``None`` if it is not one.
+
+    A stored value that does not parse (hand-edited metadata) is dropped from the
+    merge rather than ordered arbitrarily.
+    """
+    if not isinstance(start, str):
+        return None
     try:
         return _aware(datetime.fromisoformat(start))
     except ValueError:
-        return datetime.min.replace(tzinfo=UTC)
+        return None
 
 
 def _document(
@@ -303,7 +316,7 @@ def _document(
         lines += ["", description]
     participants = {email for _name, email in attendees}
     organizer = (event.get("organizer") or {}).get("email")
-    if isinstance(organizer, str) and "@" in organizer:
+    if isinstance(organizer, str) and is_email_like(organizer.strip()):
         participants.add(organizer.strip().lower())
     doc = ExtractedDoc(
         title=title,
@@ -340,7 +353,7 @@ def _attendees(event: dict[str, Any]) -> tuple[tuple[str | None, str], ...]:
         if not isinstance(a, dict) or a.get("resource") is True:
             continue
         email = a.get("email")
-        if not isinstance(email, str) or "@" not in email:
+        if not isinstance(email, str) or not is_email_like(email.strip()):
             continue
         out.append((clean_line(a.get("displayName")) or None, email.strip().lower()))
     return tuple(out)

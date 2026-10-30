@@ -350,3 +350,106 @@ def test_a_series_with_its_master_is_not_a_fallback() -> None:
 
     assert batch.fallbacks == 0
     assert not any(doc.body_from_fallback for doc in batch.documents)
+
+
+# --- malformed and partial events (aud-96 branch coverage) --------------------------
+
+
+@pytest.mark.parametrize(
+    "start",
+    [{"dateTime": "not-a-time"}, {"date": "2026-13-45"}, {"date": 20261014}],
+)
+def test_an_event_with_a_malformed_start_is_skipped(start: dict) -> None:
+    broken = fx.event("evtbadstart001", "Broken start", when={"start": start, "end": {}})
+
+    batch = _build([broken])
+
+    assert batch.documents == ()
+    assert batch.skipped == 1
+
+
+@pytest.mark.parametrize("end", [{}, {"dateTime": "not-a-time"}])
+def test_a_missing_or_malformed_end_reads_as_a_zero_length_event(end: dict) -> None:
+    when = {"start": {"dateTime": "2026-10-06T10:00:00Z"}, "end": end}
+    event = fx.event(fx.SINGLE_ID, fx.SINGLE_TITLE, when=when)
+
+    doc = _by_id(_build([event]))[fx.SINGLE_ID]
+
+    assert "When: 2026-10-06 10:00–10:00 (UTC)" in doc.doc.content
+
+
+def test_an_all_day_event_with_a_malformed_end_is_one_day() -> None:
+    event = fx.event(
+        fx.ALLDAY_ID, fx.ALLDAY_TITLE, when={"start": {"date": "2026-10-14"}, "end": {"date": "x"}}
+    )
+
+    doc = _by_id(_build([event]))[fx.ALLDAY_ID]
+
+    assert "When: 2026-10-14 (all day)" in doc.doc.content
+
+
+def test_an_all_day_series_says_all_day() -> None:
+    master = fx.series_master(start={"date": "2026-09-01"}, end={"date": "2026-09-02"})
+    instance = {
+        **fx.series_instance("2026-10-06"),
+        "start": {"date": "2026-10-06"},
+        "end": {"date": "2026-10-07"},
+    }
+
+    doc = _by_id(_build([instance], {fx.SERIES_ID: master}))[fx.SERIES_ID]
+
+    assert "When: recurring, RRULE:FREQ=WEEKLY;BYDAY=TU, (all day)" in doc.doc.content
+    assert doc.doc.metadata["date"] == "2026-10-06T00:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    "attendee",
+    [
+        {"displayName": "No Address"},
+        {"displayName": "Bad Address", "email": "not-an-address"},
+        {"displayName": "No Dot", "email": "someone@localhost"},
+        {"displayName": "Spaced", "email": "some one@example.com"},
+        {"displayName": "Not A String", "email": 42},
+        "not a dict",
+    ],
+)
+def test_an_attendee_without_a_usable_address_is_left_out(attendee: object) -> None:
+    event = fx.event(
+        fx.SINGLE_ID,
+        fx.SINGLE_TITLE,
+        when=fx.timed("2026-10-06T10:00:00-07:00", "2026-10-06T10:30:00-07:00"),
+        attendees=[fx.attendee(fx.AVERY), attendee],  # type: ignore[list-item]
+    )
+
+    doc = _by_id(_build([event]))[fx.SINGLE_ID]
+
+    assert doc.attendees == (("Avery Sample", fx.AVERY[1]),)
+    assert doc.doc.metadata["participants"] == [fx.AVERY[1], fx.OWNER[1]]
+
+
+@pytest.mark.parametrize("organizer", [None, {}, {"email": "no-address"}])
+def test_an_event_without_an_organizer_address_keeps_only_its_attendees(
+    organizer: dict | None,
+) -> None:
+    event = {**fx.single(), "organizer": organizer}
+
+    doc = _by_id(_build([event]))[fx.SINGLE_ID]
+
+    assert doc.doc.metadata["participants"] == [fx.AVERY[1], fx.OWNER[1]]
+
+
+def test_an_event_with_no_attendees_and_no_organizer_has_no_participants() -> None:
+    event = {**fx.private(), "organizer": None}
+
+    doc = _by_id(_build([event]))[fx.PRIVATE_ID]
+
+    assert doc.doc.metadata["participants"] == []
+    assert "Attendees" not in doc.doc.content
+
+
+def test_a_malformed_stored_start_is_dropped_from_the_merge() -> None:
+    stored = _series_meta(["garbage", 20261006, *_SEP], 2)
+
+    merged = cal.merge_volatile(stored, _series_meta(_OCT, 3))
+
+    assert merged["occurrences"]["last"] == [*_SEP, *_OCT]
