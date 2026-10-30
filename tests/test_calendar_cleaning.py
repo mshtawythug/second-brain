@@ -44,6 +44,8 @@ ADVERSARIAL = [
     "+1 555 123 4567,,998877#",
     # caught by the one-tap rule alone (no keyword, under 7 digits)
     "Then press ,,4242#",
+    # caught by the digit-run rule alone (no keyword, no one-tap form)
+    "+1 323 555 0100 (US toll free)",
     "Meeting ID: 123 Passcode: 456",
     # conference hosts the first list missed, and ordinary links
     "https://example.zoomgov.com/j/1612345",
@@ -56,6 +58,8 @@ ADVERSARIAL = [
     # caught by the www. rule alone (no scheme, no path)
     "see www.example.com",
     "mailto:bob@example.com",
+    # caught by the mailto: rule alone (the email rule cannot read %40)
+    "mailto:bob%40example.com?subject=Hi",
     # addresses: full-width, obfuscated, no dot
     "ｂｏｂ＠example.com",
     "bob [at] example [dot] com",
