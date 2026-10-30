@@ -751,6 +751,62 @@ def test_a_same_body_event_is_reported_and_never_patches_the_other_row(
     assert _calendar_docs(test_db) == stored  # the first event's row is untouched
 
 
+DUPLICATE_SERIES_ID = "evtseries002"
+
+
+def _duplicate_series() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """A second series whose master renders the SAME body (same title, rule, time, names,
+    description) but whose volatile metadata differs from the first's: its instances fall
+    on other days (occurrences, date), and one attendee shares a display name but not an
+    address (participants). A wrongful patch would therefore be visible.
+    """
+    other_avery = (fx.AVERY[0], "avery.other@example.com")
+    attendees = [fx.owner(), fx.attendee(other_avery), fx.attendee(fx.BLAKE)]
+    master = fx.series_master(id=DUPLICATE_SERIES_ID, attendees=attendees)
+    instances = [
+        {
+            **fx.series_instance(day),
+            "id": f"{DUPLICATE_SERIES_ID}_{day.replace('-', '')}",
+            "recurringEventId": DUPLICATE_SERIES_ID,
+            "attendees": attendees,
+        }
+        for day in ("2026-09-08", "2026-09-22")
+    ]
+    return master, instances
+
+
+def test_a_same_body_series_never_overwrites_the_other_series_volatile_metadata(
+    test_db: psycopg.Connection[Any], embedder: CountingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BL-34 (aud-106): the second series carries different occurrences, date and
+    participants. On master its refresh landed on the first series' row and replaced all
+    three; now that row keeps its own values on every run.
+    """
+    dup_master, dup_instances = _duplicate_series()
+    fake = fx.FakeGws(
+        [*fx.series_instances(), *dup_instances],
+        masters={fx.SERIES_ID: fx.series_master(), DUPLICATE_SERIES_ID: dup_master},
+    )
+    monkeypatch.setattr("brain.cli_ingest_calendar.calendar_gws_runner", fake)
+
+    first = _run()
+    own = _calendar_docs(test_db)[fx.SERIES_ID]
+    second = _run()
+
+    for result in (first, second):
+        assert result.exit_code == 0, result.output
+        assert f"same body as another event: {DUPLICATE_SERIES_ID}" in result.output
+    docs = _calendar_docs(test_db)
+    assert set(docs) == {fx.SERIES_ID}
+    meta = docs[fx.SERIES_ID]["metadata"]
+    assert meta == own["metadata"]
+    assert meta["date"].startswith("2026-10-27")  # the first series' own last occurrence
+    assert not any(start.startswith("2026-09") for start in meta["occurrences"]["last"])
+    assert "avery.other@example.com" not in meta["participants"]
+    assert fx.AVERY[1] in meta["participants"]
+
+
 def test_a_run_without_rare_outcomes_prints_the_summary_unchanged(
     test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
 ) -> None:

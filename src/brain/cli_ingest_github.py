@@ -318,7 +318,7 @@ def _write(
     gd: GithubDoc,
     run: _Run,
     *,
-    stored: tuple[str, dict[str, Any]] | None = None,
+    stored: tuple[str, dict[str, Any]] | None,
 ) -> str:
     """Ingest one document; ``ingested|updated|refreshed|unchanged|empty|same_body``."""
     result = ingest_document(

@@ -256,7 +256,6 @@ def _ingest_all(
     )
 
 
-
 def _ingest_one(conn: psycopg.Connection[Any], cd: CalendarDoc, run: _Run) -> str:
     """Ingest one document; ``ingested|updated|refreshed|unchanged|empty|same_body``."""
     stored = stored_document(conn, calendar_ingest.SOURCE_KIND, cd.external_id)
