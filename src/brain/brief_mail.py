@@ -4,7 +4,8 @@
 (:mod:`brain.brief_delivery`), and ``brain ingest-gmail`` must not ingest it back. The skip is
 done here, on the fetched message, not in the Gmail query: what Gmail makes of a negated group
 cannot be checked offline, and a misread would silently drop all of the owner's sent mail (plan,
-Deviations 11). A leaf, so ``ingest/gmail.py`` can use it without importing the delivery code.
+Deviations 11). A leaf, so ``ingest/gmail_brief_skip.py`` can use it without importing the delivery
+code.
 """
 
 from __future__ import annotations
