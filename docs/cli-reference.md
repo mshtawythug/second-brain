@@ -665,7 +665,8 @@ brain analyze --all   # ANALYZE every table in the database
 
 `brain doctor` exits non-zero only for required failures: config, database, or
 active embedder. Optional integrations (`gws`, the AGE extension, the
-concept-extractor model, community materialization staleness) are warnings.
+concept-extractor model, community materialization staleness, the local
+reranker) are warnings.
 `brain status --json` and `brain doctor --json` are the scripting-friendly
 paths; `doctor --json` preserves the same non-zero exit on any FAIL check.
 

@@ -22,6 +22,24 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — the local reranker runtime: a guide, a doctor line and an opt-in launchd job (RM-14b)
+
+- **`docs/guides/local-reranker.md`** installs `llama-server` (llama.cpp 0.7.0, from Homebrew)
+  and the `bge-reranker-v2-m3` Q8_0 GGUF (635,676,416 bytes, with its sha256). It measured the
+  server's resident memory at about 804 MiB, and it covers port 8081 already being in use.
+- **`brain-install-launchd --with-reranker`** installs `com.brain.reranker`, a `KeepAlive`
+  LaunchAgent that runs `llama-server --embedding --pooling rank --reranking` on
+  `127.0.0.1:8081`. Its arguments are fixed in the template, so only the model path
+  (`BRAIN_RERANK_GGUF`) varies. The installer refuses the flag when the model file is
+  missing. The agent stays installed: the flagless install `brain-up` runs re-renders it and
+  never removes it, and `brain-uninstall-launchd` removes it.
+- **`brain doctor`** gains a `reranker` line. With `BRAIN_RERANKER=llamacpp` it calls
+  `GET {BRAIN_RERANK_URL}/health` with a 2 s timeout, and it reports `not running` or
+  `not ready` as a WARN, never a FAIL. The `daemons` line checks the reranker agent only when
+  it is installed.
+- Nothing changes until you opt in: `BRAIN_RERANKER` still defaults to `none`, and `brain
+  setup` does not offer the reranker.
+
 ### Fixed — the graph build survives a concurrent delete; a reconcile re-checks the participants (RM-27)
 
 - **`brain graphrag build` no longer stops when a document is deleted while it runs.** A document
