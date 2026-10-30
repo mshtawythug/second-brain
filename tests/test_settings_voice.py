@@ -24,7 +24,6 @@ def test_unset_means_off_with_the_default_cap() -> None:
     settings = load_voice_settings({})
 
     assert settings == VoiceSettings(model=None, max_minutes=DEFAULT_MAX_MINUTES)
-    assert settings.enabled is False
     assert DEFAULT_MAX_MINUTES == 60
 
 
@@ -36,7 +35,6 @@ def test_an_absolute_model_path_is_kept() -> None:
     settings = load_voice_settings({"BRAIN_WHISPER_MODEL": "/opt/models/ggml-base.en.bin"})
 
     assert settings.model == Path("/opt/models/ggml-base.en.bin")
-    assert settings.enabled is True
 
 
 def test_a_tilde_model_path_is_expanded() -> None:

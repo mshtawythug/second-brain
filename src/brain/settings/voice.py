@@ -32,10 +32,6 @@ class VoiceSettings:
     max_minutes: int
 
     @property
-    def enabled(self) -> bool:
-        return self.model is not None
-
-    @property
     def max_seconds(self) -> float:
         return self.max_minutes * 60.0
 
