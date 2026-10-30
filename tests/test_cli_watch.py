@@ -51,7 +51,15 @@ def test_add_seeds_and_an_immediate_check_reports_nothing(
     assert "Added watch 'zephyr' (lexical); 1 existing match" in added.stdout
     assert checked.exit_code == 0, checked.output
     assert json.loads(checked.stdout) == [
-        {"watch": "zephyr", "mode": "lexical", "skipped": None, "peek": False, "new": []}
+        {
+            "watch": "zephyr",
+            "mode": "lexical",
+            "skipped": None,
+            "peek": False,
+            "unrecorded": 0,
+            "capped": False,
+            "new": [],
+        }
     ]
 
 
@@ -210,3 +218,41 @@ def test_a_bad_config_is_a_clean_exit_1(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert result.exit_code == 1
     assert "Configuration error" in result.output
+
+
+def test_a_bad_min_cosine_refuses_a_semantic_add_cleanly_and_spares_lexical(
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: WordEmbedder())
+    _run("add", "orbit-old", "orbital", "--semantic")
+    monkeypatch.setenv("BRAIN_WATCH_MIN_COSINE", "2")
+
+    semantic = _run("add", "orbit", "orbital", "--semantic")
+    lexical = _run("add", "zephyr", "zephyr")
+    checked = _run("check", "orbit-old")
+
+    assert semantic.exit_code == 1
+    assert "BRAIN_WATCH_MIN_COSINE is invalid" in semantic.output
+    assert "2" not in semantic.output  # never the value
+    assert "Traceback" not in semantic.output
+    assert lexical.exit_code == 0
+    assert checked.exit_code == 0
+    assert "orbit-old (semantic): skipped, BRAIN_WATCH_MIN_COSINE is invalid" in checked.stdout
+
+
+def test_check_prints_the_limit_line(
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from brain import saved_search_check
+
+    monkeypatch.setattr(saved_search_check, "CHECK_LIMIT", 2)
+    _run("add", "zephyr", "zephyr")
+    words = WordEmbedder()
+    for i in range(3):
+        ingest(test_db, words, title=f"Zephyr {i}", content=f"zephyr bulk {i}")
+
+    text = _run("check", "--peek")
+    as_json = json.loads(_run("check", "--json").stdout)[0]
+
+    assert "1 more matched than a check can record" in text.stdout
+    assert (as_json["unrecorded"], as_json["capped"], len(as_json["new"])) == (1, False, 2)

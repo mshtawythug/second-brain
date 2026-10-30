@@ -23,7 +23,7 @@ from brain.config import Config
 from brain.db import connect
 from brain.errors import OllamaUnavailable
 from brain.saved_search import MODE_LEXICAL, MODE_SEMANTIC, WatchFilters, WatchNote
-from brain.saved_search_check import SKIP_EMBEDDER, Matcher, add_watch
+from brain.saved_search_check import SKIP_EMBEDDER, SKIP_MIN_COSINE, Matcher, add_watch
 from tests.saved_search_fakes import DownEmbedder, WordEmbedder, ingest
 
 TEST_DATABASE_URL = os.environ.get(
@@ -297,3 +297,73 @@ def test_a_brief_without_migration_029_still_builds(
 
     assert [doc.title for doc in data.captures] == ["Still here"]
     assert data.watch_hits == [] and written is not None
+
+
+# --- review round (rev-78): the knob never breaks the brief; the fetch limit is reported ---
+
+
+def test_a_bad_min_cosine_leaves_a_lexical_brief_working(
+    test_db: psycopg.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BRAIN_WATCH_MIN_COSINE", "2")
+    _watch(test_db, "zephyr", "zephyr")
+    ingest(test_db, WordEmbedder(), title="Zephyr launch", content="zephyr launch")
+
+    data, written = _build(tmp_path, wiki=True)
+
+    assert [h.title for h in data.watch_hits] == ["Zephyr launch"]
+    assert data.watch_notes == []
+    assert written is not None and "- [zephyr] Zephyr launch" in written.read_text()
+
+
+def test_a_bad_min_cosine_skips_a_semantic_watch_with_a_note(
+    test_db: psycopg.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _watch(test_db, "orbit", "orbital", mode=MODE_SEMANTIC, matcher=_word_matcher())
+    monkeypatch.setenv("BRAIN_WATCH_MIN_COSINE", "2")
+
+    data, written = _build(tmp_path, wiki=True, embedder=WordEmbedder())
+
+    assert data.watch_notes == [WatchNote(watch="orbit", skipped=SKIP_MIN_COSINE)]
+    assert written is not None
+    assert f"- [orbit] {SKIP_MIN_COSINE}" in _page_watch_lines(written.read_text())
+
+
+@pytest.mark.fresh_schema
+def test_a_bad_min_cosine_without_migration_029_still_builds(
+    test_db: psycopg.Connection,
+    seed_doc: Callable[..., str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRAIN_WATCH_MIN_COSINE", "2")
+    test_db.execute("DROP TABLE saved_search_hits")
+    test_db.execute("DROP TABLE saved_searches")
+    seed_doc(title="Still here", content="still here body")
+
+    data, written = _build(tmp_path, wiki=True)
+
+    assert [doc.title for doc in data.captures] == ["Still here"] and written is not None
+
+
+def test_a_check_over_the_limit_is_noted_with_its_count_only_in_the_terminal(
+    test_db: psycopg.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from brain import saved_search_check
+
+    monkeypatch.setattr(saved_search_check, "CHECK_LIMIT", 3)
+    _watch(test_db, "zephyr", "zephyr")
+    words = WordEmbedder()
+    for i in range(5):
+        ingest(test_db, words, title=f"Zephyr {i}", content=f"zephyr bulk {i}")
+
+    data, written = _build(tmp_path, wiki=True)
+
+    terminal = "2 more matched than a check can record (`brain search zephyr` lists them)"
+    page = "more matched than a check can record (`brain search zephyr` lists them)"
+    assert data.watch_notes == [WatchNote(watch="zephyr", limit=terminal)]
+    assert data.to_dict()["watch_notes"][0]["limit"] == terminal
+    assert written is not None
+    lines = _page_watch_lines(written.read_text())
+    assert f"- [zephyr] {page}" in lines
+    assert not any("2 more" in line for line in lines)

@@ -437,7 +437,8 @@ def test_build_matcher_reads_the_knob_and_builds_the_embedder_at_most_once() -> 
         env={"BRAIN_WATCH_MIN_COSINE": "0.7"},
     )
 
-    assert (matcher.min_cosine, matcher.vector_sim_floor) == (0.7, 0.3)
+    assert callable(matcher.min_cosine)  # read lazily, so building a matcher never raises
+    assert (matcher.min_cosine(), matcher.vector_sim_floor) == (0.7, 0.3)
     assert built == []
     assert matcher.embedder() is words and matcher.embedder() is words
     assert len(built) == 1
@@ -522,3 +523,104 @@ def test_seeded_matches_are_not_hits_in_the_terminal_set(
 
     assert [h.document_id for h in hits] == [new]
     assert test_db.execute("SELECT count(*) FROM saved_search_hits").fetchone()[0] == 2
+
+
+# --- review round (rev-78) ---------------------------------------------------
+
+
+def test_a_real_hit_marked_in_its_checks_transaction_is_still_a_hit(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """The seed marker is the ``seeded`` column, not ``notified_at = first_seen_at``: a hit a
+    caller records and marks in one transaction (RM-16's risk) is still reported."""
+    from brain.saved_search import hits_since, mark_notified, unnotified_view
+
+    _add(test_db, "zephyr", "zephyr")
+    new = ingest(test_db, WordEmbedder(), title="Zephyr", content="zephyr same tx")
+
+    with test_db.transaction():
+        check_watch(test_db, "zephyr", _lexical_matcher())
+        mark_notified(test_db, unnotified_view(test_db).pending)
+    row = test_db.execute(
+        "SELECT notified_at = first_seen_at, seeded FROM saved_search_hits WHERE document_id = %s",
+        (new,),
+    ).fetchone()
+
+    assert row == (True, False)
+    assert [h.document_id for h in hits_since(test_db, hours=24)] == [new]
+
+
+def test_a_bad_min_cosine_skips_semantic_watches_only(test_db: psycopg.Connection[Any]) -> None:
+    from brain.config import Config
+    from brain.saved_search_check import SKIP_MIN_COSINE, build_matcher
+
+    words = WordEmbedder()
+    _add(test_db, "orbit", "orbital", mode=MODE_SEMANTIC, matcher=_matcher(words))
+    _add(test_db, "zephyr", "zephyr")
+    ingest(test_db, words, title="Zephyr", content="zephyr")
+    matcher = build_matcher(
+        Config(database_url=TEST_DATABASE_URL),
+        embedder=lambda: words,
+        env={"BRAIN_WATCH_MIN_COSINE": "2"},
+    )
+
+    results = {r.watch: r for r in check_enabled(test_db, matcher)}
+
+    assert results["orbit"].skipped == SKIP_MIN_COSINE
+    assert results["zephyr"].skipped is None and len(results["zephyr"].matches) == 1
+
+
+def test_a_lexical_check_over_the_limit_counts_what_it_could_not_record(
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from brain import saved_search_check
+    from brain.saved_search_check import limit_note
+
+    monkeypatch.setattr(saved_search_check, "CHECK_LIMIT", 3)
+    _add(test_db, "zephyr", "zephyr")
+    words = WordEmbedder()
+    for i in range(5):
+        ingest(test_db, words, title=f"Zephyr {i}", content=f"zephyr bulk {i}")
+
+    result = check_watch(test_db, "zephyr", _lexical_matcher())
+
+    assert (len(result.matches), result.unrecorded, result.capped) == (3, 2, False)
+    assert limit_note(result, with_count=True) == (
+        "2 more matched than a check can record (`brain search zephyr` lists them)"
+    )
+    assert limit_note(result, with_count=False) == (
+        "more matched than a check can record (`brain search zephyr` lists them)"
+    )
+
+
+def test_a_semantic_check_that_fills_the_limit_says_more_may_exist(
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from brain import saved_search_check
+    from brain.saved_search_check import limit_note
+
+    words = WordEmbedder()
+    _add(test_db, "orbit", "orbital mechanics", mode=MODE_SEMANTIC, matcher=_matcher(words))
+    monkeypatch.setattr(saved_search_check, "CHECK_LIMIT", 2)
+    for i in range(3):
+        ingest(test_db, words, title=f"Orbital {i}", content=f"orbital mechanics {i}")
+
+    result = check_watch(test_db, "orbit", _matcher(words))
+
+    assert result.capped is True and result.unrecorded == 0
+    assert limit_note(result, with_count=True) == "2 checked, more may exist"
+
+
+def test_a_check_within_the_limit_has_no_limit_note(test_db: psycopg.Connection[Any]) -> None:
+    from brain.saved_search_check import limit_note
+
+    _add(test_db, "zephyr", "zephyr")
+    ingest(test_db, WordEmbedder(), title="Zephyr", content="zephyr")
+
+    result = check_watch(test_db, "zephyr", _lexical_matcher())
+
+    assert (result.unrecorded, result.capped, limit_note(result, with_count=True)) == (
+        0,
+        False,
+        None,
+    )

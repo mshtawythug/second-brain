@@ -41,11 +41,7 @@ def _hit(
     hours_ago: int = 0,
     notified: bool = False,
 ) -> None:
-    """A hit a check found ``hours_ago`` (plus a minute), marked notified now if ``notified``.
-
-    Seen strictly before it was notified, as every real hit is: a row seen and notified in the
-    same instant is a seed (``saved_search.NOT_SEED_SQL``).
-    """
+    """A hit a check found ``hours_ago`` (plus a minute), marked notified now if ``notified``."""
     conn.execute(
         "INSERT INTO saved_search_hits (saved_search_id, document_id, first_seen_at, "
         "notified_at) VALUES (%s, %s, NOW() - make_interval(hours => %s, mins => 1), "
@@ -276,8 +272,8 @@ def test_seeds_are_not_in_the_terminal_set(test_db: psycopg.Connection[Any]) -> 
     watch = create_watch(test_db, name="w", query="q", filters=WatchFilters(), mode=MODE_LEXICAL)
     seed, hit = _docs(test_db, "Seed", "Hit")
     test_db.execute(
-        "INSERT INTO saved_search_hits (saved_search_id, document_id, notified_at) "
-        "VALUES (%s, %s, NOW())",
+        "INSERT INTO saved_search_hits (saved_search_id, document_id, notified_at, seeded) "
+        "VALUES (%s, %s, NOW(), TRUE)",
         (watch.id, seed),
     )
     _hit(test_db, watch.id, hit, notified=True)

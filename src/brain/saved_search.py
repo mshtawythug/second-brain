@@ -40,10 +40,8 @@ MAX_NAME_LENGTH = 80
 _COLUMNS = "id::text, name, query, filters, mode, enabled, created_at, last_checked_at"
 
 #: Excludes the SEED rows of ``saved_search_hits`` (alias ``h``): the matches ``add`` records as
-#: already seen. A seed is the only row inserted seen AND notified in one transaction, so its
-#: ``notified_at`` equals its ``first_seen_at`` (both that transaction's ``NOW()``). A hit a check
-#: finds is inserted unnotified and marked by a later transaction, so the two always differ.
-NOT_SEED_SQL = "h.notified_at IS DISTINCT FROM h.first_seen_at"
+#: already seen (``seeded``, migration 029). They are not hits.
+NOT_SEED_SQL = "NOT h.seeded"
 
 
 class SavedSearchError(BrainError):
@@ -109,11 +107,13 @@ class WatchHit:
 
 @dataclass(frozen=True)
 class WatchNote:
-    """A per-watch line in the brief: ``more`` hits beyond the cap, or why a check was skipped."""
+    """A per-watch line in the brief: ``more`` hits beyond the cap, why a check was skipped, or
+    ``limit``, the line for a check that matched more than it could record."""
 
     watch: str
     more: int = 0
     skipped: str | None = None
+    limit: str | None = None
 
 
 @dataclass(frozen=True)

@@ -95,7 +95,7 @@ def test_a_hit_is_unnotified_until_marked_and_keyed_once(
     )
 
     row = test_db.execute(
-        "SELECT notified_at, first_seen_at IS NOT NULL FROM saved_search_hits"
+        "SELECT notified_at, first_seen_at IS NOT NULL, seeded FROM saved_search_hits"
     ).fetchone()
     with pytest.raises(psycopg.errors.UniqueViolation):
         test_db.execute(
@@ -103,7 +103,7 @@ def test_a_hit_is_unnotified_until_marked_and_keyed_once(
             (watch, doc),
         )
 
-    assert row == (None, True)
+    assert row == (None, True, False)
 
 
 def test_the_unnotified_index_is_partial(test_db: psycopg.Connection[Any]) -> None:

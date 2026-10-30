@@ -8,6 +8,9 @@
 --
 -- `notified_at` is NULL until a published brief (`brain brief --wiki`) has
 -- listed the hit; the partial index serves the "unnotified hits" read.
+-- `seeded` is TRUE for the matches `brain watch add` records as already seen
+-- (inserted notified); they are not hits, and the terminal brief and
+-- `brain watch hits` leave them out.
 -- `last_checked_at` is the start time of the last recording check, and only
 -- ever moves forward (the check writes GREATEST(last_checked_at, start)).
 --
@@ -37,6 +40,7 @@ CREATE TABLE IF NOT EXISTS saved_search_hits (
   document_id      UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   first_seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   notified_at      TIMESTAMPTZ,
+  seeded           BOOLEAN NOT NULL DEFAULT FALSE,
   PRIMARY KEY (saved_search_id, document_id)
 );
 

@@ -97,6 +97,8 @@ def _result_json(result: CheckResult) -> dict[str, Any]:
         "watch": result.watch,
         "mode": result.mode,
         "skipped": result.skipped,
+        "unrecorded": result.unrecorded,
+        "capped": result.capped,
         "new": [
             {"id": m.document_id, "title": m.title, "source": m.source_kind}
             for m in result.matches
@@ -168,8 +170,10 @@ def brain_watch_check(
 
     A preview only: nothing is marked and the watch's window does not move, so the owner's
     morning brief still reports the same documents. Returns ``{results: [{watch, mode, skipped,
-    new: [{id, title, source}]}]}``. ``skipped`` is a reason (``skipped, embedder unavailable``
-    for a semantic watch while the embedder is down) and ``new`` is then empty.
+    unrecorded, capped, new: [{id, title, source}]}]}``. ``skipped`` is a reason (``skipped,
+    embedder unavailable`` for a semantic watch while the embedder is down) and ``new`` is then
+    empty. A check looks at 50 documents at most: ``unrecorded`` counts further lexical matches
+    (under the same lens), and ``capped`` says a semantic check reached 50.
 
     F6: confidential documents are excluded unless ``include_confidential=true``. An unknown
     ``name`` is ``INVALID_PARAMS``.

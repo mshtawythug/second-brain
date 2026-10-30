@@ -46,7 +46,7 @@ from .saved_search import (
     unnotified_view,
     watch_tables_present,
 )
-from .saved_search_check import CheckResult, build_matcher, check_enabled
+from .saved_search_check import CheckResult, build_matcher, check_enabled, limit_note
 
 #: Opens one database connection from a URL: :func:`brain.db.connect` in production.
 Connect = Callable[[str], AbstractContextManager[psycopg.Connection[Any]]]
@@ -78,9 +78,14 @@ def build_brief(
         # its row lock is released before the brief's reads (RM-15 plan, D5).
         conn.autocommit = True
         watches_on = watch_tables_present(conn)
-        matcher = build_matcher(cfg, embedder=None if embedder is None else lambda: embedder)
-        checks = check_enabled(conn, matcher) if watches_on else []
-        skipped = _skipped_notes(checks)
+        checks = (
+            check_enabled(
+                conn,
+                build_matcher(cfg, embedder=None if embedder is None else lambda: embedder),
+            )
+            if watches_on
+            else []
+        )
         data = brief_mod.assemble_brief(
             conn,
             cfg,
@@ -103,7 +108,7 @@ def build_brief(
         )
         if published is not None and watches_on:
             view = unnotified_view(conn)
-    data = replace(data, watch_notes=skipped)
+    data = replace(data, watch_notes=_check_notes(checks, published=False))
     # Compared while BOTH still carry ``suggestions=[]``, so this is a straight
     # question about the assembled rows. It decides only whether the published
     # page needs its OWN LLM round-trip: ``suggest_next_steps`` feeds action-item
@@ -130,7 +135,9 @@ def build_brief(
             )
     if published is not None and view is not None:
         published = replace(
-            published, watch_hits=view.hits, watch_notes=[*view.notes, *skipped]
+            published,
+            watch_hits=view.hits,
+            watch_notes=[*view.notes, *_check_notes(checks, published=True)],
         )
     written_path = (
         brief_mod.write_brief_to_vault(cfg.vault_path, on_date, published)
@@ -144,13 +151,17 @@ def build_brief(
     return data, written_path
 
 
-def _skipped_notes(checks: list[CheckResult]) -> list[WatchNote]:
-    """One note per watch whose check was skipped (a semantic watch with no embedder)."""
-    return [
-        WatchNote(watch=check.watch, skipped=check.skipped)
-        for check in checks
-        if check.skipped is not None
-    ]
+def _check_notes(checks: list[CheckResult], *, published: bool) -> list[WatchNote]:
+    """One note per watch whose check was skipped or hit the fetch limit.
+
+    The page gets the limit line without its count: the count is taken over both tiers.
+    """
+    notes = []
+    for check in checks:
+        limit = limit_note(check, with_count=not published)
+        if check.skipped is not None or limit is not None:
+            notes.append(WatchNote(watch=check.watch, skipped=check.skipped, limit=limit))
+    return notes
 
 
 def _without_watches(brief: BriefData) -> BriefData:

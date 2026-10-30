@@ -124,7 +124,12 @@ class BriefData:
                 for hit in self.watch_hits
             ],
             "watch_notes": [
-                {"watch": note.watch, "more": note.more, "skipped": note.skipped}
+                {
+                    "watch": note.watch,
+                    "more": note.more,
+                    "skipped": note.skipped,
+                    "limit": note.limit,
+                }
                 for note in self.watch_notes
             ],
         }
@@ -370,4 +375,6 @@ def watch_section_lines(brief: BriefData) -> list[str]:
             )
         if note.skipped:
             lines.append(f"[{note.watch}] {note.skipped}")
+        if note.limit:
+            lines.append(f"[{note.watch}] {note.limit}")
     return lines

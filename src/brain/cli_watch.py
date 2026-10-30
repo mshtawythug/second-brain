@@ -47,6 +47,7 @@ from .saved_search_check import (
     build_matcher,
     check_enabled,
     check_watch,
+    limit_note,
     peek_enabled,
     peek_watch,
 )
@@ -190,6 +191,8 @@ def _check_json(result: CheckResult, *, peek: bool) -> dict[str, Any]:
         "mode": result.mode,
         "skipped": result.skipped,
         "peek": peek,
+        "unrecorded": result.unrecorded,
+        "capped": result.capped,
         "new": [
             {"id": m.document_id, "title": m.title, "source": m.source_kind}
             for m in result.matches
@@ -235,6 +238,8 @@ def check(
         typer.echo(f"{result.watch} ({result.mode}): {len(result.matches)} new")
         for match in result.matches:
             typer.echo(f"  • [{match.source_kind or 'manual'}] {match.title}")
+        if (limit := limit_note(result, with_count=True)) is not None:
+            typer.echo(f"  {limit}")
 
 
 def _hit_json(hit: WatchHit) -> dict[str, Any]:

@@ -28,6 +28,7 @@ reranker cannot change.
 from __future__ import annotations
 
 import os
+import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -50,7 +51,7 @@ from .saved_search import (
     list_watches,
     lock_watch,
 )
-from .search import CANDIDATE_LIMIT, SearchResult, hybrid_search
+from .search import CANDIDATE_LIMIT, SearchDiagnostics, SearchResult, hybrid_search
 from .search_fallback import SearchFn
 from .search_pipeline import run_search
 from .source_kinds import validate_source_kind
@@ -64,6 +65,8 @@ CHECK_LIMIT = CANDIDATE_LIMIT
 #: Why a check was skipped, as the brief prints it after the watch name.
 SKIP_EMBEDDER = "skipped, embedder unavailable"
 SKIP_PERSON = "skipped, its person filter matches no one"
+#: The knob is read only for a semantic watch, so a bad value costs that watch, never the brief.
+SKIP_MIN_COSINE = "skipped, BRAIN_WATCH_MIN_COSINE is invalid"
 
 
 @dataclass(frozen=True)
@@ -71,12 +74,14 @@ class Matcher:
     """What a check needs besides the connection.
 
     ``embedder`` is called only for a semantic watch, so a lexical check never builds one.
-    ``search_fn`` is ``hybrid_search``; a test wraps it.
+    ``min_cosine`` is a number, or a callable read only when a semantic watch is checked (so a
+    bad ``BRAIN_WATCH_MIN_COSINE`` skips semantic watches and nothing else). ``search_fn`` is
+    ``hybrid_search``; a test wraps it.
     """
 
     embedder: Callable[[], Embedder]
     vector_sim_floor: float
-    min_cosine: float
+    min_cosine: float | Callable[[], float]
     search_fn: SearchFn = hybrid_search
 
 
@@ -91,13 +96,30 @@ class WatchMatch:
 
 @dataclass(frozen=True)
 class CheckResult:
-    """One watch's check. ``started_at`` is ``None`` for a peek, which records nothing."""
+    """One watch's check. ``started_at`` is ``None`` for a peek, which records nothing.
+
+    A check fetches at most :data:`CHECK_LIMIT` documents, so a bigger change in one window
+    (a bulk import) cannot all be recorded. ``unrecorded`` is how many more documents matched
+    a LEXICAL watch than the check fetched (an exact count); ``capped`` says a SEMANTIC check
+    filled the limit, so more may exist (the vector leg has no total). Either way the rest are
+    never recorded: the window moves on, and :func:`limit_note` tells the owner.
+    """
 
     watch: str
     mode: str
     matches: list[WatchMatch]
     skipped: str | None = None
     started_at: datetime | None = None
+    query: str = ""
+    unrecorded: int = 0
+    capped: bool = False
+
+
+@dataclass(frozen=True)
+class _Found:
+    results: list[SearchResult]
+    unrecorded: int = 0
+    capped: bool = False
 
 
 def build_matcher(
@@ -109,8 +131,9 @@ def build_matcher(
     """The matcher every surface uses: the config's floor, the watch knob, a lazy embedder.
 
     ``embedder`` defaults to :func:`brain.embeddings.make_embedder` of ``cfg``; whichever it is,
-    it is called at most once, and only if a semantic watch is checked. ``env`` defaults to
-    ``os.environ`` (after ``Config.load()``, spec §2.3).
+    it is called at most once, and only if a semantic watch is checked. The knob is read from
+    ``env`` (default ``os.environ``, after ``Config.load()``, spec §2.3) only then too, so
+    building a matcher never raises.
     """
     from .settings.watch import load_watch_settings
 
@@ -126,11 +149,31 @@ def build_matcher(
                 built.append(make_embedder(cfg))
         return built[0]
 
+    def _min_cosine() -> float:
+        return load_watch_settings(os.environ if env is None else env).min_cosine
+
     return Matcher(
         embedder=_embedder,
         vector_sim_floor=cfg.vector_sim_floor,
-        min_cosine=load_watch_settings(os.environ if env is None else env).min_cosine,
+        min_cosine=_min_cosine,
     )
+
+
+def limit_note(result: CheckResult, *, with_count: bool) -> str | None:
+    """The brief's and ``brain watch check``'s line for a check that hit :data:`CHECK_LIMIT`.
+
+    ``with_count=False`` is for the published page: the count is taken over both tiers, so it
+    would say that withheld documents exist (the membership oracle F6 avoids).
+    """
+    if result.unrecorded:
+        more = f"{result.unrecorded} more" if with_count else "more"
+        return (
+            f"{more} matched than a check can record "
+            f"(`brain search {shlex.quote(result.query)}` lists them)"
+        )
+    if result.capped:
+        return f"{CHECK_LIMIT} checked, more may exist"
+    return None
 
 
 class _Skip(Exception):
@@ -147,6 +190,15 @@ def _null_embedder() -> Embedder:
     return NullEmbedder()
 
 
+def _cosine_floor(matcher: Matcher) -> float:
+    if not callable(matcher.min_cosine):
+        return matcher.min_cosine
+    try:
+        return matcher.min_cosine()
+    except ConfigError as exc:
+        raise _Skip(SKIP_MIN_COSINE) from exc
+
+
 def _search(
     conn: psycopg.Connection[Any],
     watch: SavedSearch,
@@ -154,7 +206,7 @@ def _search(
     *,
     updated_after: datetime | None,
     sensitivity: str | None = None,
-) -> list[SearchResult]:
+) -> _Found:
     """The watch's matches, best first; raises :class:`_Skip` when it cannot be checked."""
     filters = watch.filters
     person = None
@@ -165,6 +217,7 @@ def _search(
             raise _Skip(SKIP_PERSON) from exc
     semantic = watch.mode == MODE_SEMANTIC
     if semantic:
+        floor = _cosine_floor(matcher)
         try:
             embedder = matcher.embedder()
         # Building the embedder can refuse its configuration (``ConfigError``) or its backend
@@ -176,6 +229,8 @@ def _search(
             raise _Skip(SKIP_EMBEDDER)
     else:
         embedder = _null_embedder()
+    # The lexical total is exact and uncapped; the vector leg has none (``SearchDiagnostics``).
+    diagnostics = SearchDiagnostics()
     outcome = run_search(
         matcher.search_fn,
         conn,
@@ -185,6 +240,8 @@ def _search(
         stages=(),
         fts_only=not semantic,
         explain=semantic,
+        diagnostics=diagnostics,
+        total_count=not semantic,
         vector_sim_floor=matcher.vector_sim_floor,
         source_kind=filters.source,
         tag=filters.tag,
@@ -196,16 +253,18 @@ def _search(
         sensitivity=sensitivity,
     )
     if not semantic:
-        return outcome.results
+        total = diagnostics.total_documents or 0
+        return _Found(outcome.results, unrecorded=max(0, total - len(outcome.results)))
     if outcome.fallback is not None:
         raise _Skip(SKIP_EMBEDDER)
-    return [
+    kept = [
         result
         for result in outcome.results
         if result.explain is not None
         and result.explain.vector_cosine is not None
-        and result.explain.vector_cosine >= matcher.min_cosine
+        and result.explain.vector_cosine >= floor
     ]
+    return _Found(kept, capped=len(outcome.results) >= CHECK_LIMIT)
 
 
 def _matches(results: list[SearchResult], keep: set[str] | None = None) -> list[WatchMatch]:
@@ -221,24 +280,23 @@ def _record(
     watch_id: str,
     document_ids: list[str],
     *,
-    notified: bool,
+    seed: bool,
 ) -> set[str]:
     """Insert the hits that are new; return their document ids.
 
-    ``notified=True`` writes a SEED: ``notified_at`` and ``first_seen_at`` are both this
-    transaction's ``NOW()``, which is how :data:`brain.saved_search.NOT_SEED_SQL` tells a seed
-    from a hit. Keep the two equal here.
+    ``seed=True`` writes SEEDS (``add``'s current matches): notified, and ``seeded``, so the
+    terminal reads leave them out (:data:`brain.saved_search.NOT_SEED_SQL`).
     """
     if not document_ids:
         return set()
     rows = conn.execute(
         """
-        INSERT INTO saved_search_hits (saved_search_id, document_id, notified_at)
-        SELECT %s, doc, CASE WHEN %s THEN NOW() END FROM unnest(%s::uuid[]) AS doc
+        INSERT INTO saved_search_hits (saved_search_id, document_id, notified_at, seeded)
+        SELECT %s, doc, CASE WHEN %s THEN NOW() END, %s FROM unnest(%s::uuid[]) AS doc
         ON CONFLICT (saved_search_id, document_id) DO NOTHING
         RETURNING document_id::text
         """,
-        (watch_id, notified, document_ids),
+        (watch_id, seed, seed, document_ids),
     ).fetchall()
     return {row[0] for row in rows}
 
@@ -293,8 +351,8 @@ def add_watch(
             raise SavedSearchError(
                 f"cannot seed watch {watch.name!r} ({exc.reason}); nothing was saved"
             ) from exc
-        ids = list(dict.fromkeys(r.document_id for r in [*current, *window]))
-        seeded = _record(conn, watch.id, ids, notified=True)
+        ids = list(dict.fromkeys(r.document_id for r in [*current.results, *window.results]))
+        seeded = _record(conn, watch.id, ids, seed=True)
     return watch, len(seeded)
 
 
@@ -309,7 +367,7 @@ def check_watch(conn: psycopg.Connection[Any], name: str, matcher: Matcher) -> C
     with conn.transaction():
         watch, started_at = lock_watch(conn, name)
         try:
-            results = _search(
+            found = _search(
                 conn, watch, matcher, updated_after=watch.last_checked_at - WINDOW_OVERLAP
             )
         except _Skip as exc:
@@ -319,8 +377,9 @@ def check_watch(conn: psycopg.Connection[Any], name: str, matcher: Matcher) -> C
                 matches=[],
                 skipped=exc.reason,
                 started_at=started_at,
+                query=watch.query,
             )
-        new = _record(conn, watch.id, [r.document_id for r in results], notified=False)
+        new = _record(conn, watch.id, [r.document_id for r in found.results], seed=False)
         conn.execute(
             "UPDATE saved_searches SET last_checked_at = GREATEST(last_checked_at, %s) "
             "WHERE id = %s",
@@ -329,8 +388,11 @@ def check_watch(conn: psycopg.Connection[Any], name: str, matcher: Matcher) -> C
     return CheckResult(
         watch=watch.name,
         mode=watch.mode,
-        matches=_matches(results, new),
+        matches=_matches(found.results, new),
         started_at=started_at,
+        query=watch.query,
+        unrecorded=found.unrecorded,
+        capped=found.capped,
     )
 
 
@@ -347,7 +409,7 @@ def peek_watch(
     """
     watch = get_watch(conn, name)
     try:
-        results = _search(
+        found = _search(
             conn,
             watch,
             matcher,
@@ -355,8 +417,10 @@ def peek_watch(
             sensitivity=sensitivity,
         )
     except _Skip as exc:
-        return CheckResult(watch=watch.name, mode=watch.mode, matches=[], skipped=exc.reason)
-    ids = [r.document_id for r in results]
+        return CheckResult(
+            watch=watch.name, mode=watch.mode, matches=[], skipped=exc.reason, query=watch.query
+        )
+    ids = [r.document_id for r in found.results]
     known = {
         row[0]
         for row in conn.execute(
@@ -368,7 +432,10 @@ def peek_watch(
     return CheckResult(
         watch=watch.name,
         mode=watch.mode,
-        matches=_matches(results, set(ids) - known),
+        matches=_matches(found.results, set(ids) - known),
+        query=watch.query,
+        unrecorded=found.unrecorded,
+        capped=found.capped,
     )
 
 
@@ -396,6 +463,7 @@ def peek_enabled(
 __all__ = [
     "CHECK_LIMIT",
     "SKIP_EMBEDDER",
+    "SKIP_MIN_COSINE",
     "SKIP_PERSON",
     "WINDOW_OVERLAP",
     "CheckResult",
@@ -406,6 +474,7 @@ __all__ = [
     "build_matcher",
     "check_enabled",
     "check_watch",
+    "limit_note",
     "peek_enabled",
     "peek_watch",
 ]

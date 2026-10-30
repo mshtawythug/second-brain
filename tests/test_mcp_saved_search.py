@@ -149,6 +149,8 @@ def test_check_peeks_and_never_records_even_with_the_embedder_down(
                 "watch": "zephyr",
                 "mode": "lexical",
                 "skipped": None,
+                "unrecorded": 0,
+                "capped": False,
                 "new": [{"id": doc, "title": "Zephyr launch", "source": "manual"}],
             }
         ]
@@ -266,3 +268,21 @@ def test_a_database_failure_is_internal_error_naming_only_its_class(
     assert _code(excinfo) == INTERNAL_ERROR
     assert "OperationalError" in str(excinfo.value)
     assert secret_detail not in str(excinfo.value)
+
+
+def test_a_bad_min_cosine_is_a_clean_error_for_semantic_and_spares_lexical(
+    mcp_state: mcp_server._State, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools.brain_watch_add("orbit-old", "orbital", semantic=True)
+    monkeypatch.setenv("BRAIN_WATCH_MIN_COSINE", "2")
+
+    with pytest.raises(MCPError) as excinfo:
+        tools.brain_watch_add("orbit", "orbital", semantic=True)
+    lexical = tools.brain_watch_add("zephyr", "zephyr")
+    checked = tools.brain_watch_check("orbit-old")
+
+    assert _code(excinfo) == INVALID_PARAMS
+    assert "BRAIN_WATCH_MIN_COSINE is invalid" in str(excinfo.value)
+    assert "2" not in str(excinfo.value)
+    assert lexical["watch"]["name"] == "zephyr"
+    assert checked["results"][0]["skipped"] == "skipped, BRAIN_WATCH_MIN_COSINE is invalid"
