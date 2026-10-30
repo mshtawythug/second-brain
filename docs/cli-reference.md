@@ -516,6 +516,54 @@ brain rm <id-prefix>
 brain rm <id-prefix> --yes
 ```
 
+## brain tags
+
+Tag maintenance across the whole corpus: list tags, rename one, merge several,
+and find the pairs that are probably one tag.
+
+```bash
+brain tags list [--json]                             # every tag and its count
+brain tags rename old-tag new-tag                    # dry run: prints what would change
+brain tags rename old-tag new-tag --apply            # write it
+brain tags merge widgets widget-ui --into widget     # dry run
+brain tags merge widgets widget-ui --into widget --apply
+brain tags suggest-merges [--limit 50] [--json]      # ranked, with evidence
+```
+
+- **Dry run by default.** Without `--apply`, `rename` and `merge` print the
+  mapping (`mapping: old → new`), each document they would retag, and each saved
+  search whose filter they would rewrite, and write nothing. A merge into an
+  existing tag cannot be undone without a mapping back, so read the plan first.
+- **`--apply` writes every place a tag lives**: the `documents.tags` row, its
+  chunks' `tags_text` (what tag text search reads), the frontmatter of the file
+  at the document's `vault_path` (vault notes and `_ingested/` mirrors alike),
+  and the `tag` / `without_tag` filters of saved searches (`brain watch`), so a
+  watch keeps matching. A file missing on disk is warned about on stderr; the
+  row is still updated.
+- It runs per document, each one committed on its own, the same loop as
+  `brain backfill normalize-tags`. A run cut short leaves some documents done;
+  running it again finishes the rest, and a run with nothing left to do is a
+  no-op. Only documents carrying a mapped tag are touched. `updated_at` is not
+  bumped: tag maintenance is not new knowledge.
+- **A file that cannot be rewritten** (unreadable, broken frontmatter, or a
+  `vault_path` outside the vault) does not stop the run: it is reported on
+  stderr by error class, with the tags it should have, the summary counts it
+  (`N file(s) failed`), and the command exits 1 once everything else is done.
+  Its database row is already updated, so **a re-run will not retry that
+  file**: fix the file by hand. `brain backfill normalize-tags` behaves the
+  same way.
+- **`merge`** keeps one copy of the merged tag per document, in first-seen
+  order. `--into` may be one of the sources (`merge a b --into a`).
+- **`suggest-merges`** reports pairs whose spelling is close (`difflib` ratio
+  ≥ 0.85), singular/plural pairs (`widget` / `widgets`, `policy` / `policies`),
+  and pairs that sit on the same documents (Jaccard ≥ 0.8 over at least 2
+  shared documents). Each line names the tag to keep (the more used one), the
+  reasons, the counts, the ratio and the overlap, and the command to run. It
+  writes nothing.
+- The MCP twins, `brain_tags_list` and `brain_tags_suggest_merges`, are
+  read-only and leave confidential documents out by default. There is no MCP
+  rename or merge: a corpus-wide rewrite is done here.
+
 ## Gmail ingest
 
 `brain ingest-gmail` uses the `gws` CLI and requires at least one scope flag so
