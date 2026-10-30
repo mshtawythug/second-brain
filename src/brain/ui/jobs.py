@@ -409,9 +409,9 @@ class JobRegistry:
         self._run_settled()
 
     def _fail(self, job: _Job, error: JobError) -> None:
-        # Outside the `except` block on purpose: the log-privacy guard's taint scan
-        # (tests/log_privacy_rules.py) flags an attribute write through `job` there,
-        # and treats `job`, so the class-only failure line above, as exception-derived.
+        # Outside the `except` block on purpose: there, storing the mapped error is a
+        # store of a value computed from `exc`, which the log-privacy guard flags
+        # (tests/log_privacy_rules.py, T2); here it is one allowlisted store.
         with self._lock:
             job.error = error
             self._finish_locked(job, "failed")

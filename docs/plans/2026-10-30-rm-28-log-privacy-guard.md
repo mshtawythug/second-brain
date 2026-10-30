@@ -10,10 +10,11 @@
 
 ## What ships
 
-The G1 guard (`tests/test_log_privacy.py`) gains three AST rules. Its scanner moves to a new
-helper module, `tests/log_privacy_rules.py`, because the self-tests for three rules would take
-the test file past the 800-line ceiling (it was 541). The allowlists move with it: they are the
-scanner's data, and each entry keeps its reason.
+The G1 guard gains three AST rules and moves to `tests/test_log_privacy_rules.py` (below). Its
+scanner moves to a new helper module, `tests/log_privacy_rules.py`, because the self-tests for
+three rules would take `tests/test_log_privacy.py` past the 800-line ceiling (it was 541). The
+allowlists moved with the scanner, and in the review round to their own module,
+`tests/log_privacy_allowlists.py`; each entry keeps its reason.
 
 G1 and its self-tests (G2-G3, T1-T3) move to `tests/test_log_privacy_rules.py`, marked `nodb`.
 They are pure AST work, but in a module that also holds database tests, running them alone still
@@ -85,5 +86,46 @@ The proofs, with their test counts, go in the PR body.
 
 ## Verification
 
-`ruff check && mypy src/`; `python scripts/check_ceiling_table.py`; the self-tests and G1 in
-`tests/test_log_privacy.py` (no local full suite; CI is the evidence).
+`ruff check && mypy src/`; `python scripts/check_ceiling_table.py`; G1 and its self-tests in
+`tests/test_log_privacy_rules.py` (no database), and the leak reproductions in
+`tests/test_log_privacy.py` against a sibling test database (no local full suite; CI is the
+evidence).
+
+## Review round (PR #94)
+
+The security review, the code review and the completion audit found gaps in the new rules. None
+was a live leak in `src/`. Each fix has a positive self-test, a negative where a false positive
+is plausible, and a mutation proof (PR body).
+
+- **S1:** a parameter whose DEFAULT is tainted stays tainted (`lambda e=e: …`).
+- **S2:** taint flows through every binding form: `for`/`async for`, comprehension targets,
+  `with … as`, `match` captures (`MatchAs`, `MatchStar`, a mapping's `**rest`, class-pattern
+  keywords), and `except*` with `for sub in eg.exceptions`.
+- **S3:** `traceback.format_exc`/`format_exception`/`format_exception_only`/`format_tb`,
+  `sys.exc_info`, `sys.exception` and an argument-less `.exception()` are tainted sources;
+  `traceback.print_exc` and kin are `traceback` hits.
+- **S4:** `setattr`/`object.__setattr__`, a subscript on an attribute (`self.errors[k] = …`), and
+  an attribute container's `append`/`extend`/`add`/`insert`/`update` are stores (the Y4 shape).
+- **S6:** the `warn` and `fatal` levels; a `getLogger(...)` receiver; an exception parameter is
+  one whose annotation has an identifier ENDING with `Error`/`Exception`, a builtin exception, one
+  of `EXCEPTION_CLASS_NAMES` (the 46 `src/brain` exception classes whose names do not end that
+  way; a self-test re-derives the set), or `psycopg.errors.…`. "Ends with", not "contains":
+  `ErrorMapper` is a callable alias, and the substring rule flagged `ui/jobs.py`'s `submit`.
+- **S7:** the store allowlist is keyed on the whole statement, and G1 fails when any entry of any
+  allowlist matches no site.
+- **S8:** the module scope no longer descends into top-level `def` bodies.
+- **R1:** a content-free call exempts only its first positional argument. `len` joins the set (a
+  count is content-free).
+- **R2:** a nested `def`'s decorators and annotations are scanned with the enclosing taint.
+- **A5:** only NAME targets are tainted. A store's base (`self`, `job`) and key stay clean; T2
+  reports the store itself.
+
+**Hits in `src/` after the round: six, none a leak.** Two are fixed at the rule level (`len`, the
+"ends with" rule). Four are allowlisted with written reasons: `chunk_split.on_truncated` extends
+the tally with the salvaged entities (the extraction's output, not exception text);
+`frontmatter._shifted_past_the_fence` re-stores the exception's own mark on itself; and
+`sync_vault`/`sync_one_file` append `str(e)` of a `_SyncError`, whose message is authored at its
+raise sites from fixed text, `describe_failure`, a constraint name or a count (Y5 and Y6 pin two).
+
+**Still not covered** is listed in `tests/log_privacy_rules.py`'s module docstring. The two big
+classes, raise-message interpolation and stderr echo, are backlog **BL-28**.
