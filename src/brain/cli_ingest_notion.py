@@ -22,7 +22,9 @@ concept-extracted at minutes per page: 200 pages is about 30 hours of graph
 lane in the worst case.
 
 **Output (ruling R7).** Pages are named by id, never by title, since a title is
-someone else's text; failures are printed by class (``describe_failure``).
+someone else's text: the secret guard's notices are re-rendered with the page id
+as their label, and a refused page prints its id and finding count. Failures
+are printed by class (``describe_failure``).
 """
 from __future__ import annotations
 
@@ -52,6 +54,7 @@ from .errors import BrainError, SecretGuardError, describe_failure
 from .ingest import Embedder, ingest_document
 from .ingest import notion_archive as na
 from .ingest import notion_export as ne
+from .ingest.guard import format_findings, scan_secrets
 from .sensitivity import DEFAULT_SENSITIVITY
 from .tags import normalize_tags
 
@@ -71,7 +74,8 @@ _SKIP_LINES = (
     (ne.SKIP_DUPLICATE_ID, "page(s) whose id occurs more than once skipped"),
     (ne.SKIP_DATABASE_ROW, "database row page(s) skipped (pass --with-databases)"),
     (ne.SKIP_ARCHIVE, "nested archive(s) skipped (unzip it and pass the inner archive)"),
-    (na.SKIP_LINK, "link(s) or special file(s) skipped"),
+    (na.SKIP_LINK, "link(s), hard link(s) or special file(s) skipped"),
+    (na.SKIP_UNREADABLE, "file(s) that vanished while being listed skipped"),
     (na.SKIP_TOO_LARGE, "file(s) over the size cap skipped"),
 )
 
@@ -225,11 +229,12 @@ def _guarded(conn: psycopg.Connection[Any], page: ne.NotionPage, run: _Run) -> s
     """Ingest one page; a failure is counted and printed, never fatal."""
     try:
         outcome = _write(conn, page, run)
-    except SecretGuardError as exc:
+    except SecretGuardError:
         # Per page: one false positive must not abort the run. The guard's own
-        # message masks the finding.
-        typer.secho(f"  refused {page.page_id}", fg="red", err=True)
-        typer.secho(str(exc), fg="red", err=True)
+        # message quotes the title, which is the export's text, so it is not
+        # printed: the page id and the count say which page and how much.
+        findings = len(scan_secrets(page.doc.content))
+        typer.secho(f"  refused {page.page_id}: {findings} finding(s)", fg="red", err=True)
         return "failed"
     except (psycopg.Error, ValueError, BrainError) as exc:
         typer.secho(f"  failed {page.page_id}: {describe_failure(exc)}", fg="red", err=True)
@@ -256,7 +261,11 @@ def _write(conn: psycopg.Connection[Any], page: ne.NotionPage, run: _Run) -> str
         allow_secrets=run.allow_secrets,
         sensitivity=run.level,
     )
-    _emit_secret_notice(result.secret_notice)
+    # The pipeline's notice is labelled with the title; re-render it with the page
+    # id. A Notion page carries no ``allow_secrets`` frontmatter, so the display
+    # mode is the one ``ingest_document`` chose: ``allow`` under --allow-secrets.
+    mode = "allow" if run.allow_secrets else run.cfg.secret_guard
+    _emit_secret_notice(format_findings(result.secret_findings, title=page.page_id, mode=mode))
     _emit_egress_notice(result.egress_notice)
     if result.created:
         return "ingested"

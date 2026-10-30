@@ -7,9 +7,12 @@ checked for the crafted name too. All content is synthetic.
 from __future__ import annotations
 
 import os
+import struct
 import warnings
 import zipfile
+from collections.abc import Callable, Iterator
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import pytest
 
@@ -168,7 +171,7 @@ def test_folder_file_swapped_for_a_link_after_listing_is_refused(tmp_path: Path)
         assert "outside secret" not in str(info.value)
         (root / f"B {fx.BOOK_ONE_ID}.md").unlink()
         (root / f"B {fx.BOOK_ONE_ID}.md").symlink_to(inside_target / "t.md")
-        with pytest.raises(NotionExportError, match="could not be opened"):
+        with pytest.raises(NotionExportError, match="could not be read as the file"):
             export.read_text(files[f"B {fx.BOOK_ONE_ID}.md"])
 
 
@@ -198,6 +201,133 @@ def test_a_path_that_is_not_a_folder_or_zip_is_refused(tmp_path: Path, name: str
         path.write_text("not an export")
 
     _refused(path, "neither a folder nor a .zip")
+
+
+def _listed_then(root: Path, swap: Callable[[Path], None]) -> NotionExportError:
+    """List ``root``, apply ``swap`` to ``PAGE``'s path, and return the read's refusal."""
+    with open_export(root) as export:
+        page = next(f for f in export.files if f.path.name == PAGE)
+        swap(root.joinpath(*page.path.parts))
+        with pytest.raises(NotionExportError) as info:
+            export.read_text(page)
+    return info.value
+
+
+def test_folder_skips_a_file_with_more_than_one_hard_link(tmp_path: Path) -> None:
+    outside = fx.write_tree(tmp_path / "outside", {"secret.md": "# outside secret\n"})
+    root = fx.write_tree(tmp_path / "export", {fx.HANDBOOK_PATH: fx.HANDBOOK_MD})
+    os.link(outside / "secret.md", root / PAGE)
+
+    with open_export(root) as export:
+        assert _paths(export.files) == {fx.HANDBOOK_PATH}
+        assert export.skipped == {na.SKIP_LINK: 1}
+
+
+def test_folder_entry_that_vanishes_while_listed_is_skipped_unnamed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = fx.write_tree(tmp_path / "export", {fx.HANDBOOK_PATH: fx.HANDBOOK_MD})
+    real_walk = os.walk
+
+    def walk_with_a_ghost(top: Any, **kwargs: Any) -> Iterator[tuple[str, list[str], list[str]]]:
+        for dirpath, dirnames, filenames in real_walk(top, **kwargs):
+            yield dirpath, dirnames, [*filenames, f"Ghost {fx.LEDGER_ID}.md"]
+
+    monkeypatch.setattr(na.os, "walk", walk_with_a_ghost)
+
+    with open_export(root) as export:
+        assert _paths(export.files) == {fx.HANDBOOK_PATH}
+        assert export.skipped == {na.SKIP_UNREADABLE: 1}
+
+
+def _replace_with_fifo(path: Path) -> None:
+    path.unlink()
+    os.mkfifo(path)
+
+
+def _replace_with_dir(path: Path) -> None:
+    path.unlink()
+    path.mkdir()
+
+
+def _replace_with_new_file(path: Path) -> None:
+    path.unlink()
+    path.write_text("# a different file\n")
+
+
+@pytest.mark.parametrize(
+    "swap", [_replace_with_fifo, _replace_with_dir, _replace_with_new_file],
+    ids=["fifo", "directory", "new-inode"],
+)
+def test_folder_file_replaced_after_listing_is_refused(
+    tmp_path: Path, swap: Callable[[Path], None]
+) -> None:
+    root = fx.write_tree(tmp_path / "export", {PAGE: PAGE_TEXT})
+
+    refusal = _listed_then(root, swap)
+
+    assert "could not be read as the file that was listed" in str(refusal)
+
+
+def test_folder_file_replaced_by_a_hard_link_after_listing_is_refused(tmp_path: Path) -> None:
+    outside = fx.write_tree(tmp_path / "outside", {"secret.md": "# outside secret\n"})
+    root = fx.write_tree(tmp_path / "export", {PAGE: PAGE_TEXT})
+
+    def hard_link(path: Path) -> None:
+        path.unlink()
+        os.link(outside / "secret.md", path)
+
+    refusal = _listed_then(root, hard_link)
+
+    assert "could not be read as the file" in str(refusal)
+    assert "secret" not in str(refusal)
+
+
+def test_folder_parent_swapped_for_an_inside_link_after_listing_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = fx.write_tree(
+        tmp_path / "export", {f"Sub/{PAGE}": PAGE_TEXT, f"Other/{PAGE}": "# other page\n"}
+    )
+
+    def swap_parent(path: Path) -> None:
+        path.unlink()
+        path.parent.rmdir()
+        path.parent.symlink_to(root / "Other", target_is_directory=True)
+
+    with open_export(root) as export:
+        page = next(f for f in export.files if str(f.path) == f"Sub/{PAGE}")
+        swap_parent(root / "Sub" / PAGE)
+        with pytest.raises(NotionExportError, match="could not be read as the file"):
+            export.read_text(page)
+
+
+def test_folder_read_error_is_refused_unnamed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = fx.write_tree(tmp_path / "export", {PAGE: PAGE_TEXT})
+    real_fdopen = os.fdopen
+
+    class FailingRead:
+        def __init__(self, fd: int, mode: str, **kwargs: Any) -> None:
+            self._fh = real_fdopen(fd, mode, **kwargs)
+
+        def __enter__(self) -> FailingRead:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self._fh.close()
+
+        def read(self, _n: int) -> bytes:
+            raise OSError(5, f"I/O error on {PAGE}")
+
+    monkeypatch.setattr(na.os, "fdopen", FailingRead)
+
+    with open_export(root) as export, pytest.raises(NotionExportError) as info:
+        export.read_text(export.files[0])
+
+    assert "could not be read as the file" in str(info.value)
+    assert PAGE not in str(info.value)
 
 
 # --- zips -----------------------------------------------------------------------------
@@ -350,3 +480,113 @@ def test_a_file_named_zip_that_is_not_one_is_refused(tmp_path: Path, content: by
     path.write_bytes(content)
 
     _refused(path, "not a readable zip")
+
+
+# --- the central directory is sized before zipfile parses it (L3) ----------------------
+
+
+def _no_zipfile(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("zipfile parsed an archive the end record should have refused")
+
+    monkeypatch.setattr(na.zipfile, "ZipFile", refuse)
+
+
+def _many(path: Path, count: int) -> Path:
+    return _zip_with(path, *[(f"f{i}.png", b"x") for i in range(count)])
+
+
+def _eocd_offset(data: bytes) -> int:
+    return data.rfind(b"PK\x05\x06")
+
+
+def test_an_end_record_over_the_entry_cap_is_refused_before_parsing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _many(tmp_path / "e.zip", 4)
+    _no_zipfile(monkeypatch)
+
+    _refused(archive, "more files than the cap", ExportLimits(max_files=3))
+
+
+def test_a_central_directory_too_large_for_its_entries_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _many(tmp_path / "e.zip", 2)
+    data = bytearray(archive.read_bytes())
+    at = _eocd_offset(data)
+    data[at + 12 : at + 16] = (10 * na._CD_BYTES_PER_ENTRY + 1).to_bytes(4, "little")
+    archive.write_bytes(bytes(data))
+    _no_zipfile(monkeypatch)
+
+    _refused(archive, "more files than the cap", ExportLimits(max_files=10))
+
+
+def test_an_end_record_that_understates_its_entries_is_still_capped(tmp_path: Path) -> None:
+    archive = _many(tmp_path / "e.zip", 4)
+    data = bytearray(archive.read_bytes())
+    at = _eocd_offset(data)
+    data[at + 8 : at + 12] = struct.pack("<2H", 1, 1)  # entries on this disk, total entries
+    archive.write_bytes(bytes(data))
+
+    _refused(archive, "more files than the cap", ExportLimits(max_files=3))
+
+
+def _zip64(path: Path, count: int, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A ZIP64 archive: ``zipfile`` writes the ZIP64 end records past its count limit."""
+    with monkeypatch.context() as patch:
+        patch.setattr(zipfile, "ZIP_FILECOUNT_LIMIT", 2)
+        archive = _many(path, count)
+    # zipfile clamps the classic record only past 0xFFFF entries; mark it as a real
+    # >65,535-entry archive's would be, so the count must come from the ZIP64 record.
+    data = bytearray(archive.read_bytes())
+    at = _eocd_offset(data)
+    assert data.rfind(b"PK\x06\x07") == at - 20  # the locator precedes the classic record
+    data[at + 8 : at + 12] = b"\xff\xff\xff\xff"
+    archive.write_bytes(bytes(data))
+    return archive
+
+
+def test_a_zip64_archive_is_sized_from_its_zip64_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _zip64(tmp_path / "e.zip", 4, monkeypatch)
+
+    with open_export(archive, limits=ExportLimits(max_files=4)) as export:
+        assert len(export.files) == 4
+    _no_zipfile(monkeypatch)
+    _refused(archive, "more files than the cap", ExportLimits(max_files=3))
+
+
+@pytest.mark.parametrize("signature", [b"PK\x06\x07", b"PK\x06\x06"], ids=["locator", "record"])
+def test_a_zip64_archive_with_a_damaged_end_record_is_refused_as_corrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signature: bytes
+) -> None:
+    archive = _zip64(tmp_path / "e.zip", 4, monkeypatch)
+    data = bytearray(archive.read_bytes())
+    at = data.rfind(signature)
+    data[at + 3] ^= 0xFF
+    archive.write_bytes(bytes(data))
+    _no_zipfile(monkeypatch)
+
+    _refused(archive, "not a readable zip")
+
+
+def test_a_zip64_marker_with_no_room_for_its_record_is_refused_as_corrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "e.zip"
+    path.write_bytes(struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 0, 0, 0))
+    _no_zipfile(monkeypatch)
+
+    _refused(path, "not a readable zip")
+
+
+def test_a_sane_end_record_over_a_broken_directory_is_refused_as_corrupt(tmp_path: Path) -> None:
+    archive = _many(tmp_path / "e.zip", 2)
+    data = bytearray(archive.read_bytes())
+    at = data.find(b"PK\x01\x02")
+    data[at + 3] ^= 0xFF  # the first central-directory entry's signature
+    archive.write_bytes(bytes(data))
+
+    _refused(archive, "not a readable zip")

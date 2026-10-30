@@ -18,7 +18,8 @@ no page id, so rows are ingested from their row pages, and only with
 ``--with-databases`` (AC3). The CSVs themselves are never stored.
 
 **Pages (rulings R2, R3).** The title is the page's ``# `` first line, else the
-file name without its id (AC1), else :data:`UNTITLED`. The body is the text as
+file name without its id (AC1), else :data:`UNTITLED`; control and format
+characters are removed and it is cut at :data:`MAX_TITLE_CHARS`. The body is the text as
 exported, NULs removed. A database row's ``Last edited time`` property, when it
 parses, becomes ``metadata.last_edited`` and ``metadata.date`` (``sent_at``).
 """
@@ -34,10 +35,14 @@ from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
 from . import ExtractedDoc
+from .github_docs import one_line
 
 SOURCE_KIND = "notion"
 CONTENT_TYPE = "notion_page"
 UNTITLED = "Untitled"
+#: A title is someone else's text and is stored as ``documents.title``; an
+#: 8 MiB heading must not become one.
+MAX_TITLE_CHARS = 300
 
 PAGE_SUFFIX = ".md"
 TABLE_SUFFIX = ".csv"
@@ -234,10 +239,20 @@ def last_edited(text: str) -> tuple[bool, datetime | None]:
     return False, None
 
 
+def _clean_title(raw: str) -> str:
+    """``raw`` on one line, control and format characters removed, cut to the cap.
+
+    An ESC or OSC sequence in a title could drive the terminal of anything that
+    prints it (the secret guard's notice did); ``""`` when nothing is left.
+    """
+    return one_line(raw)[:MAX_TITLE_CHARS].strip()
+
+
 def build_page(ref: PageRef, text: str) -> NotionPage:
     """The document for one page's text (rulings R2, R3)."""
     body = text.replace("\x00", "").strip()
-    title = _first_line_title(body.splitlines()) or ref.name_title or UNTITLED
+    heading = _first_line_title(body.splitlines()) or ""
+    title = _clean_title(heading) or _clean_title(ref.name_title) or UNTITLED
     has_edited, edited = last_edited(body)
     metadata: dict[str, str] = {"notion_page_id": ref.page_id}
     if ref.parent_id is not None:

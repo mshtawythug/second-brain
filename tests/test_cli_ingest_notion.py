@@ -199,7 +199,7 @@ def test_link_and_oversize_skips_are_reported(
     result = _run(root)
 
     assert result.exit_code == 0, result.output
-    assert "1 link(s) or special file(s) skipped" in result.output
+    assert "1 link(s), hard link(s) or special file(s) skipped" in result.output
     assert "1 file(s) over the size cap skipped" in result.output
     assert "1 nested archive(s) skipped (unzip it and pass the inner archive)" in result.output
     assert fx.LEDGER_ID not in _docs(test_db)
@@ -323,6 +323,54 @@ def test_sensitivity_and_tags_apply_to_every_page(
 # --- per-page failures --------------------------------------------------------------------
 
 
+HOSTILE_TITLE = "\x1b]8;;https://example.invalid\x07Pay me\x1b]8;;\x07 \x1b[2J\x1b[31mRed"
+
+
+def _hostile_export(tmp_path: Path) -> Path:
+    body = f"# {HOSTILE_TITLE}\n\nThe key is {SYNTHETIC_AWS_KEY}.\n"
+    return fx.write_tree(tmp_path / "e", {f"Hostile {fx.LEDGER_ID}.md": body})
+
+
+def _assert_no_title_or_escape(output: str) -> None:
+    assert "\x1b" not in output and "\x07" not in output
+    assert "Pay me" not in output and "Hostile" not in output
+    assert SYNTHETIC_AWS_KEY not in output
+
+
+def test_a_rejected_page_prints_its_id_and_count_never_its_title(
+    tmp_path: Path, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRAIN_SECRET_GUARD", "reject")
+
+    result = _run(_hostile_export(tmp_path))
+
+    assert f"refused {fx.LEDGER_ID}: 1 finding(s)" in result.output
+    _assert_no_title_or_escape(result.output)
+    assert _docs(test_db) == {}
+
+
+@pytest.mark.parametrize(
+    ("mode", "args", "marker"),
+    [("warn", (), "stored UNCHANGED"), ("redact", (), "REDACTED"),
+     ("reject", ("--allow-secrets",), "guard bypassed")],
+)
+def test_guard_notices_are_labelled_with_the_page_id(
+    tmp_path: Path, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch, mode: str, args: tuple[str, ...], marker: str,
+) -> None:
+    monkeypatch.setenv("BRAIN_SECRET_GUARD", mode)
+
+    result = _run(_hostile_export(tmp_path), *args)
+
+    assert result.exit_code == 0, result.output
+    assert f'1 finding(s) in "{fx.LEDGER_ID}"' in result.output
+    assert marker in result.output
+    _assert_no_title_or_escape(result.output)
+    stored = _docs(test_db)[fx.LEDGER_ID]["title"]
+    assert "\x1b" not in stored and stored.endswith("Red")
+
+
 def test_the_secret_guard_refuses_one_page_and_the_run_goes_on(
     tmp_path: Path, embedder: CountingEmbedder, test_db: psycopg.Connection,
     monkeypatch: pytest.MonkeyPatch,
@@ -332,7 +380,7 @@ def test_the_secret_guard_refuses_one_page_and_the_run_goes_on(
 
     result = _run(_tree(tmp_path, **{fx.ONBOARDING_PATH: leaky}))
 
-    assert f"refused {fx.ONBOARDING_ID}" in result.output
+    assert f"refused {fx.ONBOARDING_ID}: 1 finding(s)" in result.output
     assert SYNTHETIC_AWS_KEY not in result.output
     assert set(_docs(test_db)) == {fx.HANDBOOK_ID}
     assert "1 ingested, 0 updated, 0 unchanged, 1 failed" in result.output

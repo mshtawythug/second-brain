@@ -98,7 +98,15 @@ case ("its own command"), so the export reader is its own module behind its own 
   what is stored (content hash, by page id) and the remainder that would still be written is
   printed with "run again to continue".
 - **R7 — output** names pages by id, never by title (a title is someone else's text). Failures
-  are printed by class (`describe_failure`).
+  are printed by class (`describe_failure`). The secret guard's notices are re-rendered with the
+  page id as their label, a refused page prints `refused <id>: N finding(s)`, and the stored
+  title has control and format characters removed and is cut at 300 characters (sec-104 M1).
+- **R8 — the sec-104 hardening round.** A folder read records each file's `(st_dev, st_ino)` at
+  listing, skips files with more than one hard link, opens with `O_NOFOLLOW | O_NONBLOCK`, and
+  requires a regular file with the recorded identity (L1); an entry that vanishes while listed is
+  skipped and counted, never echoed (L2); a zip's end record (and its ZIP64 form) is read from the
+  file's tail and an archive declaring more than `MAX_EXPORT_FILES` entries, or a larger central
+  directory than that many can need, is refused before `zipfile` parses it (L3).
 
 ## Tasks (TDD, each red first)
 
@@ -119,6 +127,15 @@ case ("its own command"), so the export reader is its own module behind its own 
   count and size guards, the folder `followlinks`, regular-file, resolve and `O_NOFOLLOW` guards,
   the read caps, the corrupt-member mapping, and the plan's id, duplicate-id, resource-fork and
   database-row rules.
+- After the sec-104 round (R8), 40 mutations: 37 killed (the round adds `O_NONBLOCK`, the
+  identity check, the hard-link skip, the vanished-entry skip, the read-error mapping, the
+  end-record entry and size caps and the call that runs them, the ZIP64 parse and signature
+  checks, the missing end record, the title strip and cap, and the guard output by id) and 3
+  **equivalent** mutants, recorded rather than claimed: removing `O_NOFOLLOW` or the read-time
+  `S_ISREG` is still refused by the inode-identity check (a link, FIFO or folder swapped in is
+  another inode), and removing the ZIP64 record's room check is still refused as corrupt
+  because a negative seek raises `OSError`, which maps to the same sentence. Both read-time
+  checks stay as defence in depth.
 - `tests/test_skills_token_routing.py::test_skills_sync_is_not_drifted` fails locally until
   `bin/brain-skills-sync` runs after merge, because SKILL.md gained the Notion row (CI skips it).
 

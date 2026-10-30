@@ -9,20 +9,28 @@ without ever trusting a name, a link or a size:
 - **Bounded.** At most :data:`MAX_EXPORT_FILES` entries, at most
   :data:`MAX_FILE_BYTES` per page or table (a larger one is skipped and
   counted), and at most :data:`MAX_READ_BYTES` read in one run. The declared
-  sizes are summed before anything is read, and ``zipfile`` never returns more
-  than a member's declared size (it stops there and checks the CRC), so a
-  header that understates a member is refused as corrupt, not believed.
+  sizes are summed before anything is read, and a read never returns more than
+  a member's declared size: ``zipfile`` stops there. A header that understates
+  a member is refused as corrupt when the CRC of the shortened content does not
+  match, which is the case for any real content.
 - **No traversal, no links.** A zip is refused whole when a member name is
   absolute or drive-absolute, or has an empty, ``.`` or ``..`` component
   (``/`` or ``\\`` separated); when a member is a symbolic link, encrypted, or shares its
   name with another; or when ``zipfile`` reports corruption. A folder is walked
-  without following links: symlinked files and folders, and anything that is
-  not a regular file, are skipped and counted. A read re-checks that the path
-  still resolves inside the root and opens it with ``O_NOFOLLOW``, so a swap
-  between listing and reading is refused rather than followed.
-
-The zip's central directory is parsed by ``zipfile`` when it is opened, before
-the entry count can be checked; its size is bounded by the archive on disk.
+  without following links: symlinked files and folders, anything that is not a
+  regular file, files with more than one hard link, and entries that vanish
+  while being listed are skipped and counted. Each listed file's
+  ``(st_dev, st_ino)`` is recorded. A read re-checks that the path still
+  resolves inside the root, opens it with ``O_NOFOLLOW | O_NONBLOCK`` (a FIFO
+  swapped in cannot block the run), and requires the open file to be a regular
+  file with the recorded identity, so a file, a parent folder or a hard link
+  swapped in between listing and reading is refused rather than read.
+- **The central directory is sized before it is parsed.** ``zipfile`` parses
+  the whole central directory when it opens an archive, so the end record (and
+  its ZIP64 form) is read from the file's tail first, and an archive declaring
+  more than :data:`MAX_EXPORT_FILES` entries, or a central directory larger
+  than that many entries can honestly need, is refused before ``zipfile``
+  sees it.
 
 Every :class:`NotionExportError` message is a fixed sentence: no member name,
 path or ``zipfile`` text is echoed, since all of them come from the export.
@@ -32,6 +40,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import struct
 import zipfile
 import zlib
 from collections.abc import Iterator
@@ -52,11 +61,25 @@ READ_SUFFIXES = frozenset({PAGE_SUFFIX, TABLE_SUFFIX})
 
 SKIP_LINK = "link"
 SKIP_TOO_LARGE = "too_large"
+SKIP_UNREADABLE = "unreadable"
 
 _ZIP_SUFFIX = ".zip"
 _SYMLINK_MODE = stat.S_IFLNK
 _ENCRYPTED_FLAG = 0x1
 _DRIVE_RE = re.compile(r"^[A-Za-z]:[/\\]")
+_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+
+#: The end-of-central-directory record, the ZIP64 locator and the ZIP64 record.
+_EOCD = struct.Struct("<4s4H2LH")
+_EOCD_SIG = b"PK\x05\x06"
+_ZIP64_LOCATOR = struct.Struct("<4sLQL")
+_ZIP64_LOCATOR_SIG = b"PK\x06\x07"
+_ZIP64_EOCD = struct.Struct("<4sQ2H2L4Q")
+_ZIP64_EOCD_SIG = b"PK\x06\x06"
+_MAX_ZIP_COMMENT = 0xFFFF
+#: A central-directory entry is 46 fixed bytes plus its name, extra field and
+#: comment; about 1 KiB of those per entry is more than an honest export needs.
+_CD_BYTES_PER_ENTRY = 46 + 1024
 
 _NOT_AN_EXPORT = "the export path is neither a folder nor a .zip archive"
 _TOO_MANY = "the export holds more files than the cap; export a smaller part"
@@ -67,7 +90,7 @@ _DUPLICATE_MEMBER = "the archive has two members with the same name"
 _ENCRYPTED = "the archive has an encrypted member"
 _CORRUPT = "the archive is not a readable zip, or a member is corrupt"
 _ESCAPED = "an export file now resolves outside the export folder"
-_UNREADABLE = "an export file could not be opened (it was removed or replaced by a link)"
+_UNREADABLE = "an export file could not be read as the file that was listed (it was replaced)"
 _GREW = "an export file grew past the size cap after it was listed"
 
 
@@ -142,6 +165,7 @@ class FolderExport:
     def __init__(self, root: Path, limits: ExportLimits) -> None:
         self._root = root.resolve()
         self._budget = _Budget(limits)
+        self._identity: dict[PurePosixPath, tuple[int, int]] = {}
         listed: list[ExportFile] = []
         for dirpath, dirnames, filenames in os.walk(self._root, followlinks=False):
             here = Path(dirpath)
@@ -149,11 +173,16 @@ class FolderExport:
                 if (here / name).is_symlink():  # followlinks=False: walk never enters it
                     self._budget.skip(SKIP_LINK)
             for name in filenames:
-                info = (here / name).lstat()
-                if not stat.S_ISREG(info.st_mode):
-                    self._budget.skip(SKIP_LINK)
+                try:
+                    info = os.lstat(here / name)
+                except OSError:  # vanished since the walk listed it; its path is not echoed
+                    self._budget.skip(SKIP_UNREADABLE)
+                    continue
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
+                    self._budget.skip(SKIP_LINK)  # a hard link may be a file outside the root
                     continue
                 rel = PurePosixPath((here / name).relative_to(self._root).as_posix())
+                self._identity[rel] = (info.st_dev, info.st_ino)
                 listed.append(ExportFile(rel, info.st_size))
                 if len(listed) > limits.max_files:
                     raise NotionExportError(_TOO_MANY)
@@ -166,11 +195,24 @@ class FolderExport:
         if not full.resolve().is_relative_to(self._root):
             raise NotionExportError(_ESCAPED)
         try:
-            fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW)
+            fd = os.open(full, _OPEN_FLAGS)
         except OSError as exc:
             raise NotionExportError(_UNREADABLE) from exc
-        with os.fdopen(fd, "rb") as fh:
-            data = fh.read(self._budget.limits.max_file_bytes + 1)
+        try:
+            info = os.fstat(fd)
+            # The identity alone refuses every swap (a link, FIFO or folder is another
+            # inode); ``O_NOFOLLOW`` and ``S_ISREG`` are kept as defence in depth.
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or (info.st_dev, info.st_ino) != self._identity[file.path]
+            ):
+                raise NotionExportError(_UNREADABLE)
+            with os.fdopen(fd, "rb", closefd=False) as fh:
+                data = fh.read(self._budget.limits.max_file_bytes + 1)
+        except OSError as exc:
+            raise NotionExportError(_UNREADABLE) from exc
+        finally:
+            os.close(fd)
         return self._budget.charge(data)
 
 
@@ -219,11 +261,53 @@ class ZipExport:
         _require_readable(file)
         try:
             with self._zip.open(self._members[file.path]) as fh:
-                # ``zipfile`` stops at the declared size and then checks the CRC.
+                # ``zipfile`` never returns more than the declared size; a header that
+                # understates it fails the CRC check on the shortened content.
                 data = fh.read(self._budget.limits.max_file_bytes + 1)
         except (zipfile.BadZipFile, zlib.error, EOFError, OSError, NotImplementedError) as exc:
             raise NotionExportError(_CORRUPT) from exc
         return self._budget.charge(data)
+
+
+def _central_directory(path: Path) -> tuple[int, int]:
+    """``(entries, central-directory bytes)`` from the end records in the file's tail.
+
+    Read the way ``zipfile`` reads them: the last end-of-central-directory
+    signature in the final 64 KiB, and for ZIP64 the record just before its
+    locator. A missing or truncated record is :data:`_CORRUPT`.
+    """
+    with path.open("rb") as fh:
+        size = fh.seek(0, os.SEEK_END)
+        tail_start = max(0, size - _EOCD.size - _MAX_ZIP_COMMENT)
+        fh.seek(tail_start)
+        tail = fh.read()
+        at = tail.rfind(_EOCD_SIG)
+        if at < 0 or len(tail) - at < _EOCD.size:
+            raise NotionExportError(_CORRUPT)
+        _sig, _disk, _cd_disk, _here, entries, cd_size, cd_offset, _note = _EOCD.unpack_from(
+            tail, at
+        )
+        if entries != 0xFFFF and 0xFFFFFFFF not in (cd_size, cd_offset):
+            return entries, cd_size
+        locator_at = tail_start + at - _ZIP64_LOCATOR.size
+        record_at = locator_at - _ZIP64_EOCD.size
+        if record_at < 0:
+            raise NotionExportError(_CORRUPT)
+        fh.seek(record_at)
+        record = fh.read(_ZIP64_EOCD.size + _ZIP64_LOCATOR.size)
+    if (
+        record[: len(_ZIP64_EOCD_SIG)] != _ZIP64_EOCD_SIG
+        or record[_ZIP64_EOCD.size :][: len(_ZIP64_LOCATOR_SIG)] != _ZIP64_LOCATOR_SIG
+    ):
+        raise NotionExportError(_CORRUPT)
+    fields = _ZIP64_EOCD.unpack_from(record)
+    return fields[7], fields[8]  # total entries, central-directory size
+
+
+def _check_central_directory(path: Path, limits: ExportLimits) -> None:
+    entries, cd_size = _central_directory(path)
+    if entries > limits.max_files or cd_size > limits.max_files * _CD_BYTES_PER_ENTRY:
+        raise NotionExportError(_TOO_MANY)
 
 
 @contextmanager
@@ -236,6 +320,7 @@ def open_export(path: Path, *, limits: ExportLimits | None = None) -> Iterator[E
     if path.suffix.lower() != _ZIP_SUFFIX or not path.is_file():
         raise NotionExportError(_NOT_AN_EXPORT)
     try:
+        _check_central_directory(path, caps)
         archive = zipfile.ZipFile(path)
     except (zipfile.BadZipFile, OSError, EOFError, ValueError) as exc:
         raise NotionExportError(_CORRUPT) from exc

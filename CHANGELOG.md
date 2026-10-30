@@ -41,8 +41,13 @@ git tag scheme:
 - The export is read as untrusted input: a zip is read member by member in memory and never
   extracted; a member name that is absolute or leaves the archive, a symbolic-link, encrypted or
   duplicate member, more than 100,000 entries, or more than 512 MiB of pages and tables refuses
-  the whole archive; a page over 8 MiB is skipped. A folder is walked without following links.
-  Output names pages by id, never by title.
+  the whole archive; a page over 8 MiB is skipped. The entry count and central-directory size
+  are read from the archive's end record (ZIP64 included) before the directory is parsed. A
+  folder is walked without following links; hard-linked files are skipped, and a file replaced
+  between listing and reading (by a link, a FIFO, a folder or another file) is refused.
+- Titles have control and format characters removed and are cut at 300 characters. Output names
+  pages by id, never by title, including the secret guard's notices (`refused <id>: N
+  finding(s)`).
 
 ### Added — image-only PDFs are OCR'd (RM-32)
 

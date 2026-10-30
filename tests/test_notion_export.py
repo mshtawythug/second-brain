@@ -216,6 +216,32 @@ def test_build_page_falls_back_when_the_heading_is_missing_or_empty(text: str) -
     assert ne.build_page(ref, text).doc.title == ne.UNTITLED
 
 
+def test_build_page_strips_control_sequences_from_the_title() -> None:
+    ref = _ref(_plan({f"Evil \x1b[31mname {fx.LEDGER_ID}.md": "x"}), fx.LEDGER_ID)
+    heading = "# \x1b]8;;https://example.invalid\x07Click\x1b]8;;\x07 \x1b[2Jme\u202e\n\nbody"
+
+    page = ne.build_page(ref, heading)
+
+    assert page.doc.title == "]8;;https://example.invalidClick]8;; [2Jme"
+    assert not any(ch in page.doc.title for ch in "\x1b\x07\u202e")
+    assert ne.build_page(ref, "no heading").doc.title == "Evil [31mname"
+
+
+def test_a_heading_of_only_control_characters_falls_back_to_the_name() -> None:
+    ref = _ref(_plan({f"Plain {fx.LEDGER_ID}.md": "x"}), fx.LEDGER_ID)
+
+    assert ne.build_page(ref, "# \x1b\x07\x9b\n\nbody").doc.title == "Plain"
+
+
+def test_the_title_is_capped() -> None:
+    ref = _ref(_plan({f"Long {fx.LEDGER_ID}.md": "x"}), fx.LEDGER_ID)
+
+    page = ne.build_page(ref, "# " + "a" * 8_000 + "\n\nbody")
+
+    assert page.doc.title == "a" * ne.MAX_TITLE_CHARS
+    assert page.doc.content.startswith("# " + "a" * 8_000)  # the body keeps the heading
+
+
 def test_build_page_removes_nul_characters() -> None:
     ref = _ref(_plan({f"Nul {fx.LEDGER_ID}.md": "x"}), fx.LEDGER_ID)
 

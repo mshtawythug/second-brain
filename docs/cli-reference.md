@@ -788,9 +788,14 @@ brain ingest-notion ~/Downloads/Export-abc123.zip --max 50 --tag notion
   page (`--allow-secrets` skips it for one run).
 - **Untrusted input.** A zip is read member by member in memory and never extracted. It is refused
   whole (exit 1) when a member name is absolute or leaves the archive, a member is a symbolic
-  link, encrypted or duplicated, it holds more than 100,000 entries, or its pages and tables add up
-  to more than 512 MiB. A folder is walked without following links. Output names pages by id,
-  never by title.
+  link, encrypted or duplicated, it holds more than 100,000 entries (read from its end record
+  before the central directory is parsed), or its pages and tables add up to more than 512 MiB.
+  A folder is walked without following links; files with more than one hard link are skipped,
+  and a file replaced between listing and reading is refused.
+- **Terminal safety.** Titles are stored on one line with control and format characters removed,
+  at most 300 characters. Output names pages by id, never by title; a page the secret guard
+  refuses prints `refused <page id>: N finding(s)`, and its warn and redact notices are labelled
+  with the page id.
 
 ## Status and health
 
