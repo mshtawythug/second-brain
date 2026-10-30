@@ -141,3 +141,17 @@ def test_runtime_doctor_composes_the_row(
     checks = runtime_doctor_checks(launchd_dir=agents, platform="linux", processes=[])
 
     assert "drop folders" in [c.check for c in checks]
+
+
+def test_a_missing_folder_warns_by_index_not_path(home: Path, agents: Path, tmp_path: Path) -> None:
+    gone = tmp_path / "unplugged-volume"
+    (home / "drop-folders.toml").write_text(
+        _folder(tmp_path, "a") + f'[[folder]]\npath = "{gone}"\n'
+    )
+
+    check = _check(home, agents)
+
+    assert check.status == "warn"
+    assert "folder[1]" in check.detail
+    assert "the other folders still run" in check.detail
+    assert "unplugged-volume" not in check.detail

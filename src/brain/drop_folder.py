@@ -25,8 +25,8 @@ documents. The title is the original stem. Three rules keep the owner's files sa
    taken) and then an unlink. On a volume without hard links it is an ``O_EXCL`` copy
    instead. A move back uses the same primitive.
 2. **A destination that already exists is the same file dropped twice** only when its
-   full SHA-256 matches; then the drop copy is deleted and nothing is ingested (the
-   earlier import already holds that ``source_path``). A different file at that name
+   full SHA-256 matches; then it is ingested again (``unchanged`` when its document
+   exists, reported ``duplicate``) and the drop copy is deleted. A different file at that name
    (``sha8`` is 32 bits), or anything but a regular file there, is a failure that
    touches neither.
 3. **Only a move this run made is ever moved back**, and only after a *transient*
@@ -55,9 +55,9 @@ capped at :data:`MAX_TITLE_CHARS`, else the ``imported/`` stem.
 either are left exactly where they are, counted as ``deferred``. The ingest step gets
 what is left of the deadline as its timeout.
 
-**Known residual.** A crash between the move and the ingest leaves a file in
-``imported/`` with no document, and a later identical drop is then a no-op;
-``brain ingest <that path>`` recovers it.
+**A crash between the move and the ingest** leaves a file in ``imported/`` with no
+document. The same file dropped again ingests it (a duplicate is re-ingested, which is a
+no-op when its document exists), and ``brain ingest <that path>`` recovers it too.
 """
 from __future__ import annotations
 
@@ -370,8 +370,7 @@ class _Mover:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(to_name, dir_fd=to_dir)
             raise MoveRaceError("the file changed during the move")
-        if _same_file(name, from_dir, identity):
-            os.unlink(name, dir_fd=from_dir)
+        _unlink_if_same(name, from_dir, identity)
         return expected
 
     def _copy_exclusive(self, fd: int, to_name: str, to_dir: int, digest: str) -> tuple[int, int]:
@@ -389,7 +388,9 @@ class _Mover:
                     view = view[self.write(out, bytes(view)) :]
             if copied.hexdigest() != digest:
                 raise MoveRaceError("the file changed during the copy")
-            os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns))
+            # Some volumes refuse to set times; the bytes are what count (rev-105 F4).
+            with contextlib.suppress(OSError):
+                os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns))
             identity = _identity(os.fstat(out))
         except BaseException:
             os.close(out)
@@ -418,21 +419,17 @@ def _one(
         digest = _sha256_fd(fd)
         identity = _identity(st)
         dst_name = _imported_name(name, digest)
+        step = _Step(conn, ingest, timeout, name, dst_name, mover.dirs)
         try:
             moved = mover.move(name, dst_name, fd=fd, identity=identity, digest=digest)
         except FileExistsError:
-            return _duplicate(name, dst_name, identity, digest, mover.dirs)
+            return _duplicate(step, identity, digest)
         except FileNotFoundError:
             return FileOutcome(name, "vanished")
         except (OSError, MoveRaceError) as exc:
             return FileOutcome(name, "failed", describe_failure(exc))
-        dst = mover.dirs.imported_path / dst_name
         try:
-            # The ingest reads by path. If ``imported/`` was swapped since it was opened,
-            # that path names some other file: refuse, and move ours back by fd.
-            if _path_identity(dst) != moved:
-                raise MoveRaceError("imported/ changed during the run")
-            status = ingest(conn, dst, title=_title(name, dst_name), timeout=timeout)
+            status = step.ingest_moved(moved)
         except RejectedFileError as exc:
             return FileOutcome(name, "rejected", _cause(exc))
         except Exception as exc:  # noqa: BLE001 - any other failure moves the file back
@@ -447,13 +444,44 @@ def _cause(exc: RejectedFileError) -> str:
     return describe_failure(exc.__cause__) if exc.__cause__ is not None else describe_failure(exc)
 
 
-def _duplicate(
-    name: str, dst_name: str, identity: tuple[int, int], digest: str, dirs: _Dirs
-) -> FileOutcome:
-    """``dst_name`` existed before this move: delete the drop copy only if the bytes match."""
+@dataclass(frozen=True)
+class _Step:
+    """One file's ingest call: what :func:`_one` and :func:`_duplicate` share."""
+
+    conn: psycopg.Connection[Any]
+    ingest: IngestFn
+    timeout: float
+    name: str
+    dst_name: str
+    dirs: _Dirs
+
+    def ingest_moved(self, identity: tuple[int, int]) -> str:
+        """Ingest ``imported/<dst_name>``, which must still be the file with ``identity``.
+
+        The ingest reads by path. If ``imported/`` was swapped since it was opened, that
+        path names some other file: :class:`MoveRaceError`, and ours stays put by fd.
+        """
+        dst = self.dirs.imported_path / self.dst_name
+        if _path_identity(dst) != identity:
+            raise MoveRaceError("imported/ changed during the run")
+        title = _title(self.name, self.dst_name)
+        return self.ingest(self.conn, dst, title=title, timeout=self.timeout)
+
+
+def _duplicate(step: _Step, identity: tuple[int, int], digest: str) -> FileOutcome:
+    """``imported/<dst_name>`` existed before this move: the same file, dropped again?
+
+    Only when its full SHA-256 matches. Then it is ingested again (rev-105 F2, a deviation
+    from the spec's "ingests nothing"): ingest is idempotent by ``source_path``, so this is
+    ``unchanged`` (reported ``duplicate``) when its document exists, and it ingests a file
+    a crash left in ``imported/`` without one. The drop copy is deleted after a success or
+    a rejection (the import holds those bytes), and kept for the next run after a
+    transient failure. The existing file is never moved or deleted.
+    """
+    name, dst_name, dirs = step.name, step.dst_name, step.dirs
     different = FileOutcome(name, "failed", f"a different file holds {dst_name}")
     try:
-        fd, _ = _open_regular(dst_name, dirs.imported)
+        fd, dst_st = _open_regular(dst_name, dirs.imported)
     except FileNotFoundError:
         return FileOutcome(name, "vanished")
     except MoveRaceError:
@@ -467,10 +495,21 @@ def _duplicate(
             return different
     finally:
         os.close(fd)
-    if not _same_file(name, dirs.folder, identity):
-        return FileOutcome(name, "vanished")
-    os.unlink(name, dir_fd=dirs.folder)
-    return FileOutcome(name, "duplicate")
+    try:
+        status = step.ingest_moved(_identity(dst_st))
+    except RejectedFileError as exc:
+        _unlink_if_same(name, dirs.folder, identity)
+        return FileOutcome(name, "rejected", _cause(exc))
+    except Exception as exc:  # noqa: BLE001 - transient: keep the drop copy for the next run
+        return FileOutcome(name, "failed", describe_failure(exc))
+    _unlink_if_same(name, dirs.folder, identity)
+    return FileOutcome(name, "duplicate" if status == "unchanged" else status)
+
+
+def _unlink_if_same(name: str, dir_fd: int, identity: tuple[int, int]) -> None:
+    """Delete ``name`` only while it is still the file with ``identity``."""
+    if _same_file(name, dir_fd, identity):
+        os.unlink(name, dir_fd=dir_fd)
 
 
 def _move_back(dst_name: str, name: str, mover: _Mover, detail: str, digest: str) -> str:

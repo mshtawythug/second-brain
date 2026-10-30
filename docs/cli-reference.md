@@ -772,9 +772,13 @@ brain ingest-folder --configured --since 2d          # what the LaunchAgent runs
 - **Move first, then ingest.** Each new file is moved to the folder's
   `imported/` as `<stem>-<sha8><ext>` (`sha8`: the first 8 hex digits of its
   SHA-256) and ingested from there, titled by its original stem. Two different
-  files with one name stay two documents. The same file dropped twice is a
-  no-op: the drop copy is deleted (only after its full SHA-256 matches the
-  earlier import) and nothing is ingested.
+  files with one name stay two documents. The same file dropped twice: the drop
+  copy is deleted (only after its full SHA-256 matches the earlier import) and
+  that import is ingested again, which adds nothing when its document exists
+  (reported `duplicate`) and recovers a file a crash left in `imported/`.
+- **A missing folder** (an unplugged volume, a folder deleted) is skipped with a
+  warning naming its `drop-folders.toml` entry by index; the other folders still
+  run, and it alone does not make the run exit 1. `brain doctor` warns too.
 - **Your files are safe.** A move never overwrites (a hard link, or an exclusive
   copy on a volume without hard links), and files are moved by identity: the
   folders are held open, and a file swapped for a symlink or a pipe mid-run is

@@ -296,8 +296,12 @@ def test_two_different_files_with_one_name_in_two_runs_are_two_imports(tmp_path:
 
 
 def test_the_same_file_dropped_twice_is_a_no_op_the_second_time(tmp_path: Path) -> None:
-    """AC4: the drop copy goes, the earlier import is untouched, nothing is ingested."""
-    ingest = _Ingest()
+    """AC4: the drop copy goes, the earlier import is untouched, no document is added.
+
+    rev-105 F2: the earlier import is ingested again, which is ``unchanged`` when its
+    document exists (reported ``duplicate``).
+    """
+    ingest = _Ingest(answers=["ingested", "unchanged"])
     _drop(tmp_path, "shot.png", b"same")
     _run(_folder(tmp_path), ingest)
     final = tmp_path / IMPORTED_DIR / f"shot-{_sha8(b'same')}.png"
@@ -306,7 +310,7 @@ def test_the_same_file_dropped_twice_is_a_no_op_the_second_time(tmp_path: Path) 
 
     report = _run(_folder(tmp_path), ingest)
 
-    assert len(ingest.calls) == 1
+    assert [(c[0], c[1]) for c in ingest.calls] == [(final, "shot"), (final, "shot")]
     assert [(o.name, o.status) for o in report.outcomes] == [("shot.png", "duplicate")]
     assert _tree(tmp_path) == {f"{IMPORTED_DIR}/{final.name}": b"same"}
     after = os.stat(final)
@@ -398,12 +402,15 @@ def test_a_failure_on_an_existing_destination_never_moves_or_deletes_it(tmp_path
     final = tmp_path / IMPORTED_DIR / f"shot-{_sha8(body)}.png"
     _drop(tmp_path, "shot.png", body)
     failing = _Ingest(answers=[RuntimeError("would fail")])
+    before = os.stat(final)
 
-    _run(_folder(tmp_path), failing)
+    report = _run(_folder(tmp_path), failing)
 
-    assert failing.calls == []
-    assert final.read_bytes() == body
-    assert not (tmp_path / "shot.png").exists()
+    assert [c[0] for c in failing.calls] == [final]
+    assert report.outcomes[0].status == "failed"
+    after = os.stat(final)
+    assert (after.st_ino, final.read_bytes()) == (before.st_ino, body)
+    assert (tmp_path / "shot.png").read_bytes() == body  # kept for the next run
 
 
 def test_an_empty_document_stays_in_imported(tmp_path: Path) -> None:
@@ -517,12 +524,12 @@ def test_the_copy_fallback_never_overwrites_a_destination(tmp_path: Path) -> Non
     final = tmp_path / IMPORTED_DIR / f"shot-{_sha8(body)}.png"
     final.write_bytes(body)
     _drop(tmp_path, "shot.png", body)
-    ingest = _Ingest()
+    ingest = _Ingest(answers=["unchanged"])
 
     report = _run(_folder(tmp_path), ingest, link=_no_hard_links(errno.EXDEV))
 
     assert report.outcomes[0].status == "duplicate"
-    assert ingest.calls == []
+    assert [c[0] for c in ingest.calls] == [final]
     assert _tree(tmp_path) == {f"{IMPORTED_DIR}/{final.name}": body}
 
 
@@ -843,10 +850,10 @@ def test_a_source_replaced_before_a_duplicate_is_deleted_is_kept(tmp_path: Path)
         (tmp_path / src).write_bytes(b"a newer drop")
         raise FileExistsError(errno.EEXIST, "taken")
 
-    report = _run(_folder(tmp_path), _Ingest(), link=taken_then_replace)
+    report = _run(_folder(tmp_path), _Ingest(answers=["unchanged"]), link=taken_then_replace)
 
-    assert report.outcomes[0].status == "vanished"
-    assert (tmp_path / "shot.png").read_bytes() == b"a newer drop"
+    assert report.outcomes[0].status == "duplicate"
+    assert (tmp_path / "shot.png").read_bytes() == b"a newer drop"  # not ours: kept
 
 
 def test_imported_swapped_for_a_symlink_mid_run_receives_nothing(tmp_path: Path) -> None:
@@ -972,3 +979,57 @@ def test_a_directory_at_the_imported_name_is_a_different_file(tmp_path: Path) ->
 
     assert report.outcomes[0].detail == f"a different file holds shot-{_sha8(body)}.png"
     assert (tmp_path / "shot.png").read_bytes() == body
+
+
+
+# ---------------------------------------------------------------------------
+# rev-105 F2 (a duplicate is re-ingested) and F4 (utime may fail)
+# ---------------------------------------------------------------------------
+
+
+def test_a_crash_after_the_move_is_recovered_by_dropping_the_file_again(tmp_path: Path) -> None:
+    """The residual F2 closes: no document, the file in imported/, then the same drop."""
+    body = b"crashed mid-ingest"
+    _drop(tmp_path, "shot.png", body)
+    final = tmp_path / IMPORTED_DIR / f"shot-{_sha8(body)}.png"
+
+    with pytest.raises(KeyboardInterrupt):  # the process dies: no handler runs
+        _run(_folder(tmp_path), _Ingest(answers=[KeyboardInterrupt()]))
+    assert _tree(tmp_path) == {f"{IMPORTED_DIR}/{final.name}": body}
+
+    _drop(tmp_path, "shot.png", body)
+    ingest = _Ingest(answers=["ingested"])
+    report = _run(_folder(tmp_path), ingest)
+
+    assert [(o.name, o.status) for o in report.outcomes] == [("shot.png", "ingested")]
+    assert [(c[0], c[1]) for c in ingest.calls] == [(final, "shot")]
+    assert _tree(tmp_path) == {f"{IMPORTED_DIR}/{final.name}": body}
+
+
+def test_a_rejected_duplicate_still_removes_the_drop_copy(tmp_path: Path) -> None:
+    body = b"still unreadable"
+    (tmp_path / IMPORTED_DIR).mkdir()
+    final = tmp_path / IMPORTED_DIR / f"shot-{_sha8(body)}.png"
+    final.write_bytes(body)
+    _drop(tmp_path, "shot.png", body)
+
+    report = _run(_folder(tmp_path), _Ingest(answers=[drop_folder.RejectedFileError("no")]))
+
+    assert report.outcomes[0].status == "rejected"
+    assert _tree(tmp_path) == {f"{IMPORTED_DIR}/{final.name}": body}
+
+
+def test_a_copy_whose_times_cannot_be_set_is_still_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = b"times refused"
+    _drop(tmp_path, "shot.png", body)
+
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        raise PermissionError(errno.EPERM, "volume refuses times")
+
+    monkeypatch.setattr("brain.drop_folder.os.utime", refuse)
+    report = _run(_folder(tmp_path), _Ingest(), link=_no_hard_links(errno.EXDEV))
+
+    assert report.outcomes[0].status == "ingested"
+    assert _tree(tmp_path) == {f"{IMPORTED_DIR}/shot-{_sha8(body)}.png": body}

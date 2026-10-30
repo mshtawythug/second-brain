@@ -29,9 +29,13 @@ git tag scheme:
   `$BRAIN_HOME/drop-folders.toml` with `auto = true`). Each new file is moved to
   the folder's `imported/` as `<stem>-<sha8><ext>`, then ingested from there and
   titled by its original name, so two different files that arrive with one name
-  stay two documents. The same file dropped twice is a no-op that deletes the
-  drop copy, only after its full SHA-256 matches the earlier import. A move never
-  overwrites a file, and a failed ingest returns the file to the folder. Symlinks,
+  stay two documents. The same file dropped twice deletes the drop copy, only
+  after its full SHA-256 matches the earlier import, and re-ingests that import:
+  nothing is added when its document exists, and a file a crash left in
+  `imported/` without one is ingested. A move never overwrites a file, and a
+  transient failed ingest returns the file to the folder. A configured folder
+  that is missing (an unplugged volume) is skipped with a warning naming its
+  entry; the other folders still run. Symlinks,
   sub-folders, hidden files (iCloud stubs and in-progress screenshots), iCloud
   files evicted from the disk, and files modified in the last 5 seconds are left
   alone. A run stops after 200 files a folder or 8 minutes, and the rest wait for

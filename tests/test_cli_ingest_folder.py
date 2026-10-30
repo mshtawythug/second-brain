@@ -184,7 +184,7 @@ def test_configured_with_no_file_does_nothing(home: Path) -> None:
     result = _run("--configured", "--since", "2d")
 
     assert result.exit_code == 0
-    assert "no drop folders configured" in result.output
+    assert "no drop folders to run" in result.output
 
 
 def test_a_config_error_exits_1_naming_the_key(home: Path, drop: Path) -> None:
@@ -308,7 +308,7 @@ def test_the_same_file_dropped_twice_adds_nothing(
     assert len(_docs(test_db)) == 1
     assert not (drop / "shot.png").exists()
     assert "duplicate shot.png" in result.output
-    assert engine.calls == 1
+    assert engine.calls == 2  # re-ingested (rev-105 F2): unchanged, no document added
 
 
 # --- AC5: a failed ingest returns the file -----------------------------------------------
@@ -645,3 +645,80 @@ def test_ocr_unavailable_inside_the_step_is_transient_not_rejected(drop: Path) -
         step(None, _png(drop, "shot.png"), title="shot", timeout=5.0)  # type: ignore[arg-type]
 
     assert not isinstance(err.value, RejectedFileError)
+
+
+def test_a_missing_configured_folder_is_skipped_and_the_others_run(
+    home: Path, tmp_path: Path, drop: Path, engine: _Engine, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """rev-105 F6: one unplugged folder warns by index; the rest run; exit 0."""
+    gone = tmp_path / "unplugged-volume"
+    _configure(home, _table(gone), _table(drop))
+    _png(drop, "shot.png")
+
+    result = _run("--configured", "--since", "2d")
+
+    assert result.exit_code == 0, result.output
+    assert "skipped folder[0] in drop-folders.toml: it does not exist" in result.output
+    assert "unplugged-volume" not in result.output
+    assert [d["title"] for d in _docs(test_db)] == ["shot"]
+
+
+def test_only_missing_folders_is_not_a_failure(home: Path, tmp_path: Path) -> None:
+    _configure(home, _table(tmp_path / "gone"))
+
+    result = _run("--configured", "--since", "2d")
+
+    assert result.exit_code == 0
+    assert "skipped folder[0]" in result.output
+    assert "no drop folders to run" in result.output
+
+
+def test_an_oversized_image_is_rejected_from_its_header(
+    home: Path, drop: Path, engine: _Engine, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """rev-105 F5: ImageTooLargeError is a rejection, not a move back."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(
+            ">I", zlib.crc32(kind + data) & 0xFFFFFFFF
+        )
+
+    big = drop / "huge.png"
+    big.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 9_000, 9_000, 8, 0, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"\x00" * 8))
+        + chunk(b"IEND", b"")
+    )
+    sha8 = _sha8(big)
+    _settled(big)
+    _configure(home, _table(drop))
+
+    result = _run("--configured", "--since", "2d")
+
+    assert result.exit_code == 1
+    assert "rejected  huge.png (ImageTooLargeError" in result.output
+    assert (drop / IMPORTED_DIR / f"huge-{sha8}.png").is_file()
+    assert not big.exists()
+    assert engine.calls == 0
+
+
+def test_dry_run_on_an_unreadable_folder_reports_by_class(
+    home: Path, drop: Path, engine: _Engine,
+) -> None:
+    """sec-105 L3: an OSError from the scan is a red line by class, never a traceback."""
+    _configure(home, _table(drop))
+    drop.chmod(0)
+    try:
+        result = _run("--configured", "--since", "2d", "--dry-run")
+    finally:
+        drop.chmod(0o755)
+
+    assert result.exit_code == 1
+    assert "PermissionError[EACCES]" in result.output
+    assert "Traceback" not in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)

@@ -510,7 +510,7 @@ No environment variable: the folders `brain ingest-folder --configured` reads ar
 
 | Key | Default | Purpose |
 |---|---|---|
-| `path` | (required) | The folder. Absolute or starting with `~`; it must exist, and is stored resolved. |
+| `path` | (required) | The folder. Absolute or starting with `~`; stored resolved. A folder that does not exist (an unplugged volume) is skipped with a warning naming its entry; the others still run. |
 | `kind` | `screenshot` | The source kind its documents get; any kind `brain ingest-stdin --source` accepts. |
 | `extensions` | `[".png", ".jpg", ".jpeg"]` | Which files are taken; each must be one an extractor reads. |
 | `sensitivity` | `confidential` | `normal` or `confidential`. A screenshot can show anything, so the default is confidential. |

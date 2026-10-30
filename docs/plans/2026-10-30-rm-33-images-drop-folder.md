@@ -108,9 +108,9 @@ No file in the CLAUDE.md ceiling table is touched. No migration (the kind is a T
 14. **`brain ingest x.png`** works through dispatch (kind `manual`, the CLI's own sensitivity
     default). `cli_ingest.py` is over the ceiling and is not touched.
 
-**Known residual (recorded, not fixed):** a crash between the move and the ingest leaves a file
-in `imported/` with no document, and a later identical drop is the spec's no-op, so it is never
-ingested; `brain ingest <imported path>` recovers it. An image whose OCR times out is moved back
+**Known residual (superseded by review round 2, rev-105 F2):** a crash between the move and
+the ingest leaves a file in `imported/` with no document. Dropping the same file again now
+ingests it (see below); `brain ingest <imported path>` recovers it too. An image whose OCR times out is moved back
 and retried every run inside `--since`.
 
 ## Tasks (TDD, RED first, each guard mutation-proven in a `git archive` copy)
@@ -188,3 +188,31 @@ and retried every run inside `--since`.
   It is never retried; `brain ingest <imported path>` (with `--allow-secrets` for the
   guard) recovers it. Any other failure (the database, the embedder) and
   `OcrUnavailableError` still move the file back.
+
+## Review round 2 (#105, rev-105 at `f51488d`, and sec-105 L3)
+
+- **F1** is the L1 work above. The copy fallback reads from the very fd that was hashed and
+  re-hashes the bytes it copies against the digest. So `fstat(fd_in)` is the hashed identity
+  by construction, and a separate comparison would be dead code. The test drives the swap
+  through the `link` seam.
+- **F2, a deviation from the spec's "ingests nothing" (ruled by team-lead).** On a
+  byte-identical duplicate the runner still calls the ingest step on the existing
+  `imported/` file, with the folder's kind, sensitivity and the original-stem title.
+  Ingest is idempotent by `source_path`, so it reports `unchanged` (shown as `duplicate`)
+  when the document exists, and ingests a file a crash left without one. AC4's "no
+  document is added" still holds. The drop copy is deleted after a success or a
+  rejection, and kept for the next run after a transient failure. The existing file is
+  never moved or deleted. Tested, crash-then-redrop included.
+- **F3:** the CHANGELOG, backlog row 5.1, the skill recipe and cli-reference say that
+  screenshots are confidential on every path.
+- **F4:** `os.utime` on the copy is best-effort (`contextlib.suppress(OSError)`); tested.
+- **F5:** `UnreadableImageError`, `ImageTooLargeError`, an OCR timeout and
+  `SecretGuardError` (under `reject`) are each `rejected` and never moved back; each tested
+  end to end.
+- **F6, ruled by team-lead.** A configured folder whose path does not exist or is not a
+  directory is not a `ConfigError` any more. `load_drop_folders` returns a
+  `DropFolderConfig(folders, missing)`; `brain ingest-folder --configured` warns by index
+  and runs the rest, with no exit 1 for it alone; `brain doctor` warns by index, never
+  by path. Every other bad value is still a `ConfigError`.
+- **sec-105 L3:** `--dry-run` reports an `OSError` from the scan by class and exits 1,
+  never with a traceback carrying the path.

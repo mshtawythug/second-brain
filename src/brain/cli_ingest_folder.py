@@ -70,6 +70,7 @@ from .ingest.outcome import IngestOutcome, classify
 from .ingest.text_safety import one_line
 from .sensitivity import VALID_SENSITIVITY_LEVELS
 from .settings.drop_folders import (
+    CONFIG_NAME,
     DEFAULT_EXTENSIONS,
     DEFAULT_KIND,
     DEFAULT_SENSITIVITY,
@@ -138,13 +139,13 @@ def ingest_folder(
     if sensitivity is not None:
         folders = [replace(f, sensitivity=sensitivity) for f in folders]
     if not folders:
-        typer.echo(f"no drop folders configured (see {GUIDE})")
+        typer.echo(f"no drop folders to run (see {GUIDE})")
         return
     cfg = Config.load()  # publishes the .env chain, so the OCR knobs below read it
     ocr = ocr_resolver(os.environ)
     usable, failed = _check_ocr(folders, ocr)
     if dry_run:
-        _dry_run(usable, cutoff)
+        failed = _dry_run(usable, cutoff) or failed
     elif usable:
         run_failed = _ingest_all(
             cfg, usable, cutoff, ocr=ocr, enrich=enrich, allow_secrets=allow_secrets
@@ -173,12 +174,22 @@ def _scope_or_exit(
 
 def _folders_or_exit(directory: Path | None) -> list[DropFolder]:
     try:
-        configured = load_drop_folders(_brain_home_root())
+        config = load_drop_folders(_brain_home_root())
     except ConfigError as exc:
         # The settings leaf names the entry and key, never a value.
         typer.secho(str(exc), fg="red", err=True)
         raise typer.Exit(code=1) from exc
+    configured = config.folders
     if directory is None:
+        # A missing folder (an unplugged volume) is skipped, never fatal to the others
+        # (rev-105 F6). Named by index: the path is in the file, and may be a volume name.
+        for index in config.missing:
+            typer.secho(
+                f"skipped folder[{index}] in {CONFIG_NAME}: it does not exist or is not a "
+                "directory; the other folders still run",
+                fg="yellow",
+                err=True,
+            )
         return [f for f in configured if f.auto]
     path = directory.resolve()
     match = next((f for f in configured if f.path == path), None)
@@ -207,13 +218,24 @@ def _check_ocr(folders: list[DropFolder], ocr: OcrSetup) -> tuple[list[DropFolde
     return usable, len(usable) < len(folders)
 
 
-def _dry_run(folders: list[DropFolder], cutoff: datetime) -> None:
+def _dry_run(folders: list[DropFolder], cutoff: datetime) -> bool:
+    """List what a run would take; ``True`` when a folder could not be read."""
     until = datetime.now(UTC) - timedelta(seconds=SETTLE_S)
+    failed = False
     for folder in folders:
-        found = scan(folder, since=cutoff, until=until)
+        try:
+            found = scan(folder, since=cutoff, until=until)
+        except OSError as exc:
+            # TCC's EPERM on ~/Desktop, a folder removed since: by class, never a traceback
+            # that would print the path and the message (sec-105 L3).
+            where = one_line(str(folder.path))
+            typer.secho(f"skipped {where}: {describe_failure(exc)}", fg="red", err=True)
+            failed = True
+            continue
         typer.echo(f"{one_line(str(folder.path))}: {len(found)} file(s)")
         for path in found:
             typer.echo(f"  would ingest  {one_line(path.name)}")
+    return failed
 
 
 @dataclass(frozen=True)

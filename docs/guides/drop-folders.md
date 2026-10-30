@@ -61,8 +61,11 @@ This installs the `com.brain.dropfolders` LaunchAgent, which runs
   digits of its SHA-256. The document keeps the original name as its title, and its stored
   path is the `imported/` one, so do not move files out of `imported/`.
 - The same file saved twice: the second copy is deleted, only after its full SHA-256 matches
-  the first, and nothing new is ingested. Two different files with one name become two
-  documents.
+  the first, and the first is ingested again, which adds nothing when its document exists
+  (and recovers it if a crash left it without one). Two different files with one name
+  become two documents.
+- A configured folder that is missing (an unplugged drive) is skipped with a warning naming
+  its entry (`folder[0]`); the others still run, and `brain doctor` warns until it is back.
 - A failure that may pass next time (the database was down) moves the file back, to be tried
   again next run. A failure that would repeat (an unreadable or oversized image, an OCR
   timeout, the secret guard) leaves it in `imported/`, reported `rejected`, and it is not

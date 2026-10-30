@@ -48,18 +48,18 @@ def test_config_path_is_under_brain_home(home: Path) -> None:
 
 
 def test_a_missing_file_means_no_folders(home: Path) -> None:
-    assert load_drop_folders(home) == ()
+    assert load_drop_folders(home).folders == ()
 
 
 def test_an_empty_file_means_no_folders(home: Path) -> None:
     _write(home, "")
-    assert load_drop_folders(home) == ()
+    assert load_drop_folders(home).folders == ()
 
 
 def test_one_folder_with_defaults(home: Path, drop: Path) -> None:
     _write(home, f'[[folder]]\npath = "{drop}"\n')
 
-    assert load_drop_folders(home) == (
+    assert load_drop_folders(home).folders == (
         DropFolder(
             path=drop.resolve(),
             mode="ingest",
@@ -83,7 +83,7 @@ def test_every_key_set(home: Path, tmp_path: Path) -> None:
         'extensions = [".pdf", ".md"]\nsensitivity = "normal"\nauto = false\n',
     )
 
-    (folder,) = load_drop_folders(home)
+    (folder,) = load_drop_folders(home).folders
 
     assert folder == DropFolder(
         path=inbox.resolve(),
@@ -101,7 +101,7 @@ def test_two_folders_keep_their_order(home: Path, tmp_path: Path) -> None:
     b.mkdir()
     _write(home, f'[[folder]]\npath = "{b}"\n[[folder]]\npath = "{a}"\n')
 
-    assert [f.path for f in load_drop_folders(home)] == [b.resolve(), a.resolve()]
+    assert [f.path for f in load_drop_folders(home).folders] == [b.resolve(), a.resolve()]
 
 
 def test_a_tilde_path_is_expanded(
@@ -111,7 +111,7 @@ def test_a_tilde_path_is_expanded(
     (tmp_path / "Shots").mkdir()
     _write(home, '[[folder]]\npath = "~/Shots"\n')
 
-    assert load_drop_folders(home)[0].path == (tmp_path / "Shots").resolve()
+    assert load_drop_folders(home).folders[0].path == (tmp_path / "Shots").resolve()
 
 
 def test_a_symlinked_folder_path_is_stored_resolved(home: Path, tmp_path: Path) -> None:
@@ -120,13 +120,13 @@ def test_a_symlinked_folder_path_is_stored_resolved(home: Path, tmp_path: Path) 
     (tmp_path / "alias").symlink_to(real)
     _write(home, f'[[folder]]\npath = "{tmp_path / "alias"}"\n')
 
-    assert load_drop_folders(home)[0].path == real.resolve()
+    assert load_drop_folders(home).folders[0].path == real.resolve()
 
 
 def test_extensions_are_lowercased(home: Path, drop: Path) -> None:
     _write(home, f'[[folder]]\npath = "{drop}"\nextensions = [".PNG"]\n')
 
-    assert load_drop_folders(home)[0].extensions == frozenset({".png"})
+    assert load_drop_folders(home).folders[0].extensions == frozenset({".png"})
 
 
 @pytest.mark.parametrize(
@@ -175,7 +175,6 @@ def test_capture_mode_says_when_it_arrives(home: Path, drop: Path) -> None:
         "",  # missing
         "path = 3",
         'path = "relative/dir"',
-        f'path = "/{SECRET_LOOKING}/nowhere"',
     ],
 )
 def test_a_bad_path_names_the_key(home: Path, path_line: str) -> None:
@@ -199,13 +198,36 @@ def test_a_relative_path_is_refused_even_when_it_exists_under_the_cwd(
         load_drop_folders(home)
 
 
-def test_a_file_path_is_not_a_folder(home: Path, tmp_path: Path) -> None:
+def test_a_missing_folder_is_skipped_by_index_not_refused(home: Path, tmp_path: Path) -> None:
+    """rev-105 F6: an unplugged folder must not stop the others."""
     plain = tmp_path / "plain.txt"
     plain.write_text("x", encoding="utf-8")
-    _write(home, f'[[folder]]\npath = "{plain}"\n')
+    here = tmp_path / "here"
+    here.mkdir()
+    _write(
+        home,
+        f'[[folder]]\npath = "/{SECRET_LOOKING}/nowhere"\n'
+        f'[[folder]]\npath = "{here}"\n'
+        f'[[folder]]\npath = "{plain}"\n',
+    )
 
-    with pytest.raises(ConfigError, match=r"folder\[0\]\.path"):
+    config = load_drop_folders(home)
+
+    assert [f.path for f in config.folders] == [here.resolve()]
+    assert config.missing == (0, 2)
+
+
+def test_a_missing_folder_still_has_its_other_keys_checked(home: Path) -> None:
+    _write(home, '[[folder]]\npath = "/nowhere-synthetic"\nkind = "nope"\n')
+
+    with pytest.raises(ConfigError, match=r"folder\[0\]\.kind"):
         load_drop_folders(home)
+
+
+def test_two_missing_entries_for_one_path_are_not_a_duplicate(home: Path) -> None:
+    _write(home, '[[folder]]\npath = "/nowhere-synthetic"\n' * 2)
+
+    assert load_drop_folders(home).missing == (0, 1)
 
 
 def test_two_entries_for_one_folder_are_refused(home: Path, tmp_path: Path, drop: Path) -> None:

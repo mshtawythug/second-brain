@@ -5,7 +5,8 @@ Part of the [`ingest-brain`](../SKILL.md) skill. Its safety rules apply to this 
 `brain ingest-folder` takes the files saved into a drop folder (a screenshot folder, for
 one), **moves** each into the folder's `imported/` sub-folder, and ingests it from there.
 Images (`.png`, `.jpg`, `.jpeg`) are OCR'd by the local `tesseract` into `screenshot`
-documents, stored **confidential** by default. It **refuses without `--dir PATH` or
+documents, stored **confidential** by default, on every path: `brain ingest x.png` and
+`brain ingest-dir --ext png` too, unless `--sensitivity normal` is passed. It **refuses without `--dir PATH` or
 `--configured`, and `--since Nd`** (1d to 365d).
 
 The command moves the user's files, so:
@@ -24,7 +25,8 @@ brain ingest-folder --configured --since 2d
 ```
 
 Per-file verbs: `ingested`, `updated`, `unchanged`, `empty` (no text was read: the file stays
-in `imported/`), `duplicate` (the same file was imported before: the drop copy is deleted),
+in `imported/`), `duplicate` (the same file was imported before: the drop copy is deleted and the import
+re-checked, adding nothing),
 `vanished`, `rejected` (a failure every run would repeat, such as an unreadable image, an
 OCR timeout or the secret guard: the file stays in `imported/` and is not retried), `failed`
 (a transient failure: the file is moved back; the reason is a class name). Exit 1 means a

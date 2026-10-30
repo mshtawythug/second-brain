@@ -46,9 +46,22 @@ def drop_folders_doctor_check(
     """
     home = brain_home if brain_home is not None else _brain_home_root()
     try:
-        folders = load_drop_folders(home)
+        config = load_drop_folders(home)
     except ConfigError as exc:
         return [_check(_NAME, "warn", str(exc), remedy=f"fix it; see {_GUIDE}")]
+    if config.missing:
+        # By index, never by path (rev-105 F6): the other folders still run.
+        entries = ", ".join(f"folder[{i}]" for i in config.missing)
+        return [
+            _check(
+                _NAME,
+                "warn",
+                f"{entries} in {CONFIG_NAME} does not exist or is not a directory "
+                "and is skipped; the other folders still run",
+                remedy=f"reconnect it or remove the entry; see {_GUIDE}",
+            )
+        ]
+    folders = config.folders
     if not folders:
         return [_check(_NAME, "ok", f"none configured ($BRAIN_HOME/{CONFIG_NAME})")]
     images = [f for f in folders if f.extensions & DEFAULT_EXTENSIONS]
