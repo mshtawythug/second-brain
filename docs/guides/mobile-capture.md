@@ -93,7 +93,9 @@ mode = "capture"
 A capture folder takes `.md` and `.txt` files and makes **normal** notes unless a share asks
 for confidential. To make every share from this folder confidential, add
 `sensitivity = "confidential"`. A share can raise a folder's level, never lower it. A
-capture folder has no `kind`, and naming one is an error. All the keys are listed in
+capture folder has no `kind`, and naming one is an error. It must not be your vault, be
+inside it (such as the vault's own `capture/`), or contain it: brain refuses such a folder,
+because it would take your existing notes as new shares. All the keys are listed in
 [configuration](../configuration.md#drop-folderstoml--drop-folders-rm-33).
 
 Check it, then import once by hand:
@@ -122,6 +124,8 @@ allow it under System Settings › Privacy & Security (Files and Folders, or Ful
   `---` block. `sensitivity` is the only key the block may carry. The block must close within
   40 lines and 4 KiB. A block that does not close, or a `sensitivity` value brain does not
   know, makes the note **confidential**: when brain cannot tell what you meant, it plays safe.
+  If all of a share's text sits inside the block, the whole text is kept as the note, so
+  nothing you wrote is dropped.
 - **The same file is one note.** A share is identified by its file name plus its contents, so
   a file seen twice is imported once. Two shares with the same content are both kept as long
   as their names differ, which the date in the Shortcut's file name ensures.
@@ -132,7 +136,7 @@ allow it under System Settings › Privacy & Security (Files and Folders, or Ful
   | Status | Meaning |
   |---|---|
   | `ingested` | A new inbox note was made; the file is gone. |
-  | `duplicate` | This file was imported before; nothing new was made, and the file is gone. |
+  | `duplicate` | This file (same name and contents) was imported before, so nothing new was made, and the file is gone. Whichever way brain found that out, it is reported as `duplicate`. |
   | `empty` | Nothing to capture (only blank lines); the file is gone. |
   | `written` | The note was written to the vault, but indexing it failed (the database or the embedder was down). The next `brain vault sync` (or the vault watcher) indexes it. The file is gone, because the note holds its content. |
   | `rejected` | The file is over 1 MiB or not UTF-8 text. It stays in `imported/` and is not retried. |
@@ -150,5 +154,7 @@ A file is deleted only once its note exists.
   has not downloaded yet are not listed. Open the folder in Finder to start the download.
 - **`… is configured as an ingest folder`.** The folder's entry in `drop-folders.toml` has no
   `mode = "capture"`.
+- **`a capture folder must not be the vault …`.** Point the Shortcut and the folder entry
+  at a folder outside your vault, such as the iCloud Drive folder above.
 - **A `rejected` share.** It is in `<folder>/imported/`. Read it there, and capture what you
   need with `brain capture --text …`. Then delete the file, because it is still in iCloud.

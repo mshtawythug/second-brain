@@ -26,7 +26,8 @@ documents. The title is the original stem. Three rules keep the owner's files sa
    instead. A move back uses the same primitive.
 2. **A destination that already exists is the same file dropped twice** only when its
    full SHA-256 matches; then it is ingested again (``unchanged`` when its document
-   exists, reported ``duplicate``) and the drop copy is deleted. A different file at that name
+   exists, reported ``duplicate``, as ``unchanged`` is on every path) and the drop copy
+   is deleted. A different file at that name
    (``sha8`` is 32 bits), or anything but a regular file there, is a failure that
    touches neither.
 3. **Only a move this run made is ever moved back**, and only after a *transient*
@@ -472,9 +473,14 @@ def _one(
         except Exception as exc:  # noqa: BLE001 - any other failure moves the file back
             detail = describe_failure(exc)
             return FileOutcome(name, "failed", _move_back(dst_name, name, mover, detail, digest))
-        return FileOutcome(name, status, step.consume(moved))
+        return FileOutcome(name, _reported(status), step.consume(moved))
     finally:
         os.close(fd)
+
+
+def _reported(status: str) -> str:
+    """An ingest step's ``unchanged`` is reported ``duplicate``, on every path (rev-111)."""
+    return "duplicate" if status == "unchanged" else status
 
 
 def _cause(exc: RejectedFileError) -> str:
@@ -554,7 +560,7 @@ def _duplicate(step: _Step, identity: tuple[int, int], digest: str) -> FileOutco
         return FileOutcome(name, "rejected", _cause(exc) + _drop_copy_kept(step, identity))
     except Exception as exc:  # noqa: BLE001 - transient: keep the drop copy for the next run
         return FileOutcome(name, "failed", describe_failure(exc))
-    status = "duplicate" if status == "unchanged" else status
+    status = _reported(status)
     kept = (_drop_copy_kept(step, identity).removeprefix("; "), step.consume(_identity(dst_st)))
     return FileOutcome(name, status, "; ".join(k for k in kept if k))
 

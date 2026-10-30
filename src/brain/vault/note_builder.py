@@ -119,24 +119,36 @@ def _build_note_text(
     return dump_frontmatter(fields, note_body), document_id
 
 
-def _unique_target(base_dir: Path, slug: str) -> Path:
-    """Return a non-existing ``<base_dir>/<slug>.md`` path, suffixing on collision.
+def _write_unique(base_dir: Path, slug: str, text: str) -> Path:
+    """Create ``<base_dir>/<slug>.md`` exclusively, suffixing on collision; return it.
 
     ``brain note new`` guards against collisions before delegating here, but the
     elicitation ``_codify`` path calls :func:`create_vault_note` directly. Without
     this guard a draft whose title slugifies to an existing note's slug would
     silently overwrite that note (data loss). On collision we append ``-2``,
-    ``-3``, … until a free path is found so the existing note is never clobbered.
+    ``-3``, … until a free name is found so the existing note is never clobbered.
+
+    The create is ``O_EXCL`` (mode ``"x"``), not a check followed by a write
+    (rev-111): two concurrent writers (the drop-folder LaunchAgent and a manual
+    ``brain capture import``) can no longer pick the same name and overwrite each
+    other, and a name taken by a dangling symlink is never written through. A
+    write that fails after the create removes the partial file.
     """
-    target = base_dir / f"{slug}.md"
-    if not target.exists():
-        return target
-    suffix = 2
+    suffix = 1
     while True:
-        candidate = base_dir / f"{slug}-{suffix}.md"
-        if not candidate.exists():
-            return candidate
-        suffix += 1
+        target = base_dir / (f"{slug}.md" if suffix == 1 else f"{slug}-{suffix}.md")
+        try:
+            handle = target.open("x", encoding="utf-8")
+        except FileExistsError:
+            suffix += 1
+            continue
+        try:
+            with handle:
+                handle.write(text)
+        except BaseException:
+            target.unlink(missing_ok=True)
+            raise
+        return target
 
 
 def create_vault_note(
@@ -264,9 +276,7 @@ def write_vault_note(
             [(base_dir, f"folder {folder!r} escapes the vault root")]
         )
     base_dir.mkdir(parents=True, exist_ok=True)
-    target = _unique_target(base_dir, slugify(title))
-    target.write_text(file_text, encoding="utf-8")
-    return target, document_id
+    return _write_unique(base_dir, slugify(title), file_text), document_id
 
 
 def index_vault_note(

@@ -328,8 +328,8 @@ def _paths_taken_by_others(
     That was the whole of issue #23.
 
     The database is the right authority precisely because it is the thing that
-    rejects. Note that ``note_builder._unique_target`` checks the FILESYSTEM
-    (``target.exists()``) — a different oracle, and not the one that fails here:
+    rejects. Note that ``note_builder._write_unique`` checks the FILESYSTEM
+    (an ``O_EXCL`` create) — a different oracle, and not the one that fails here:
     a row can own a ``vault_path`` whose file is missing (exactly the orphan
     state this bug produced), and a file can exist with no row.
 

@@ -513,16 +513,20 @@ def capture_import_cmd(
         raise typer.Exit(code=2)
     cutoff = cli_ingest_folder.since_or_exit(since, _IMPORT_REFUSAL, now=datetime.now(UTC))
     folder = _capture_folder_or_exit(directory)
+    cfg = Config.load()
+    if capture_import.overlaps_vault(folder.path, cfg.vault_path):  # rev-111 M1
+        typer.secho(capture_import.VAULT_OVERLAP, fg="red", err=True)
+        raise typer.Exit(code=2)
     if dry_run:
         # 1 when the folder could not be read (``_dry_run`` printed why).
         raise typer.Exit(code=int(cli_ingest_folder._dry_run([folder], cutoff, verb="import")))
-    cfg = Config.load()
     from brain import cli as _cli
 
     ctx = capture_import.CaptureContext(
         cfg=cfg,
         embedder=_cli._build_embedder(cfg),  # type: ignore[attr-defined]
         sensitivity=folder.sensitivity,
+        folder=folder.path,
     )
     with connect(cfg.database_url) as conn:
         conn.autocommit = True

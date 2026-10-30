@@ -614,17 +614,34 @@ def _capture(path: Path) -> DropFolder:
     return _folder(path, mode="capture", kind=None, extensions=TEXT, sensitivity="normal")
 
 
-@pytest.mark.parametrize("status", ["ingested", "unchanged", "empty", "written"])
-def test_a_capture_success_deletes_the_imported_copy(tmp_path: Path, status: str) -> None:
+@pytest.mark.parametrize(
+    ("status", "reported"),
+    [("ingested", "ingested"), ("unchanged", "duplicate"), ("empty", "empty"),
+     ("written", "written")],
+)
+def test_a_capture_success_deletes_the_imported_copy(
+    tmp_path: Path, status: str, reported: str
+) -> None:
     _drop(tmp_path, "share.md", b"a shared link")
     ingest = _Ingest(answers=[status])
 
     report = _run(_capture(tmp_path), ingest)
 
-    assert [(o.name, o.status, o.detail) for o in report.outcomes] == [("share.md", status, "")]
+    assert [(o.name, o.status, o.detail) for o in report.outcomes] == [
+        ("share.md", reported, "")
+    ]
     assert ingest.seen_bytes == [b"a shared link"]
     assert ingest.calls[0][0].name == f"share-{_sha8(b'a shared link')}.md"
     assert _tree(tmp_path) == {}
+
+
+def test_unchanged_is_reported_duplicate_on_a_fresh_move_too(tmp_path: Path) -> None:
+    """rev-111 3a: one word for "already there", whichever path found it."""
+    _drop(tmp_path, "shot.png", b"known bytes")
+
+    report = _run(_folder(tmp_path), _Ingest(answers=["unchanged"]))
+
+    assert [o.status for o in report.outcomes] == ["duplicate"]
 
 
 def test_an_ingest_folder_keeps_the_imported_copy(tmp_path: Path) -> None:

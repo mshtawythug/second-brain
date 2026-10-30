@@ -374,7 +374,10 @@ def _ingest_step(ctx: _Context, folder: DropFolder) -> IngestFn:
     if folder.mode == "capture":  # RM-39: the one path `brain capture import` uses too
         return capture_import.importer(
             capture_import.CaptureContext(
-                cfg=ctx.cfg, embedder=ctx.embedder, sensitivity=folder.sensitivity
+                cfg=ctx.cfg,
+                embedder=ctx.embedder,
+                sensitivity=folder.sensitivity,
+                folder=folder.path,
             )
         )
 

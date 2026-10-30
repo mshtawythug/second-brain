@@ -15,13 +15,21 @@ deletes the ``imported/`` copy after any success (RM-39.D2).
   is :class:`~brain.drop_folder.RejectedFileError`, and the file stays in ``imported/``.
 - No YAML parser ever sees it. :func:`parse_share` reads an optional leading ``---``
   block line by line and honours exactly one key, ``sensitivity``. Every other key
-  (``allow_secrets``, ``id``, ``tags``…) is dropped and never reaches the note.
+  (``allow_secrets``, ``id``, ``tags``…) is dropped and never reaches the note. A share
+  whose only text is inside the block keeps the whole text as its body, so it is never
+  reported empty and deleted.
 - Sensitivity fails closed and only escalates. An invalid level, or a block with no
   closing ``---`` within :data:`MAX_FRONTMATTER_LINES` lines and
   :data:`MAX_FRONTMATTER_BYTES` bytes, means ``confidential``. A file's ``normal`` never
   lowers a confidential folder.
 - The secret guard does not run, the same as ``brain capture``: a share is text the
   owner chose to send.
+
+**A capture folder must not overlap the vault** (rev-111 M1): one that is the vault,
+lies inside it (``<vault>/capture``), or holds it would take the vault's own notes as
+shares, re-create each and delete the original, every run. :func:`importer` refuses it
+with :class:`~brain.drop_folder.DropFolderError`, by RM-37's rule
+(:func:`brain.ingest.import_sync.is_within`, applied both ways).
 
 **The note** is written the way ``brain capture`` writes one: a vault-tier note under
 ``capture/``, tagged ``inbox``, titled by
@@ -50,8 +58,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .capture import make_capture_title
-from .drop_folder import IngestFn, MoveRaceError, RejectedFileError
+from .drop_folder import DropFolderError, IngestFn, MoveRaceError, RejectedFileError
 from .errors import describe_failure
+from .ingest.import_sync import is_within
 from .sensitivity import CONFIDENTIAL, VALID_SENSITIVITY_LEVELS
 from .vault.note_builder import index_vault_note, require_autocommit, write_vault_note
 
@@ -74,6 +83,10 @@ KEY_FIELD = "capture_import"
 _FENCE = "---"
 _SENSITIVITY_LINE = re.compile(r"\s*sensitivity\s*:(.*)")
 _QUOTES = "\"'"
+VAULT_OVERLAP = (
+    "a capture folder must not be the vault, be inside it, or contain it: "
+    "it would take the vault's own notes as shares"
+)
 
 
 @dataclass(frozen=True)
@@ -86,11 +99,17 @@ class Share:
 
 @dataclass(frozen=True)
 class CaptureContext:
-    """What :func:`import_file` needs besides the file: config, embedder, folder level."""
+    """What :func:`import_file` needs besides the file: config, embedder, the folder."""
 
     cfg: Config
     embedder: Embedder
-    sensitivity: str
+    sensitivity: str  # the folder's level
+    folder: Path
+
+
+def overlaps_vault(folder: Path, vault: Path) -> bool:
+    """Whether ``folder`` is the vault, lies inside it, or contains it (module docstring)."""
+    return is_within(folder, vault) or is_within(vault, folder)
 
 
 def escalate(folder_level: str, share_level: str | None) -> str:
@@ -115,10 +134,16 @@ def parse_share(text: str) -> Share:
             if len("\n".join(block).encode("utf-8")) > MAX_FRONTMATTER_BYTES:
                 break
             body = "\n".join(lines[len(block) + 2 :]).strip()
+            if not body and any(_is_content(line) for line in block):
+                body = text.strip()  # text only inside the block: never lose it
             return Share(body=body, sensitivity=_level(block))
         block.append(line)
     # No closing fence in bounds: the intent is unknown, so fail closed.
     return Share(body=text.strip(), sensitivity=CONFIDENTIAL)
+
+
+def _is_content(line: str) -> bool:
+    return bool(line.strip()) and _SENSITIVITY_LINE.fullmatch(line) is None
 
 
 def _level(block: list[str]) -> str | None:
@@ -135,7 +160,12 @@ def _level(block: list[str]) -> str | None:
 
 
 def importer(ctx: CaptureContext) -> IngestFn:
-    """The drop-folder runner's ingest step for a capture folder: :func:`import_file`."""
+    """The drop-folder runner's ingest step for a capture folder: :func:`import_file`.
+
+    Raises :class:`~brain.drop_folder.DropFolderError` when the folder overlaps the vault.
+    """
+    if overlaps_vault(ctx.folder, ctx.cfg.vault_path):
+        raise DropFolderError(VAULT_OVERLAP)
 
     def ingest(conn: psycopg.Connection[Any], path: Path, *, title: str, timeout: float) -> str:
         return import_file(conn, path, title=title, timeout=timeout, ctx=ctx)

@@ -28,7 +28,7 @@ from brain.capture_import import (
     share_key,
 )
 from brain.config import Config
-from brain.drop_folder import MoveRaceError, RejectedFileError
+from brain.drop_folder import DropFolderError, MoveRaceError, RejectedFileError
 from brain.errors import VaultNoteSyncError
 from brain.vault.frontmatter import parse_frontmatter
 
@@ -111,6 +111,19 @@ def test_a_block_over_the_byte_limit_is_unclosed() -> None:
     assert parse_share(text).sensitivity == "confidential"
 
 
+def test_text_only_inside_a_closed_block_is_the_body_never_lost() -> None:
+    """rev-111 3b: a share whose only text sits inside a closed ``---`` block is not
+    empty (and deleted): the whole text is the body. Its ``sensitivity`` still counts."""
+    text = "---\nsensitivity: confidential\nmy only thought\n---\n\n"
+
+    assert parse_share(text) == Share(body=text.strip(), sensitivity="confidential")
+
+
+@pytest.mark.parametrize("text", ["---\nsensitivity: confidential\n---\n", "---\n\n  \n---\n"])
+def test_a_block_with_nothing_but_sensitivity_or_blanks_is_still_empty(text: str) -> None:
+    assert parse_share(text).body == ""
+
+
 def test_crlf_and_a_bom_are_read_like_plain_newlines() -> None:
     text = "﻿---\r\nsensitivity: confidential\r\n---\r\nline one\r\nline two\r\n"
 
@@ -156,8 +169,10 @@ def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-def _ctx(embedder: Any, sensitivity: str = "normal") -> CaptureContext:
-    return CaptureContext(cfg=Config.load(), embedder=embedder, sensitivity=sensitivity)
+def _ctx(embedder: Any, sensitivity: str = "normal", folder: Path | None = None) -> CaptureContext:
+    cfg = Config.load()
+    where = folder if folder is not None else cfg.vault_path.parent / "share-folder"
+    return CaptureContext(cfg=cfg, embedder=embedder, sensitivity=sensitivity, folder=where)
 
 
 def _share(tmp_path: Path, text: str | bytes, name: str = "share-1a2b3c4d.md") -> Path:
@@ -239,7 +254,7 @@ def test_the_same_share_imported_twice_is_one_note(
     first = _import(test_db, path, ctx)
     second = _import(test_db, path, ctx)
 
-    assert (first, second) == ("ingested", "unchanged")
+    assert (first, second) == ("ingested", "unchanged")  # the runner reports it ``duplicate``
     assert len(_notes(test_db)) == 1
     assert len(_note_files(vault)) == 1
 
@@ -381,6 +396,46 @@ def test_an_index_failure_after_the_write_is_written_not_retried(
     assert URL in note_file.read_text(encoding="utf-8")
     assert "ConnectionError" in caplog.text
     assert "widget" not in caplog.text  # class only, never content
+
+
+def test_a_share_hidden_in_its_frontmatter_becomes_a_note(
+    test_db: psycopg.Connection[Any], tmp_path: Path, vault: Path, fake_embedder: Any
+) -> None:
+    path = _share(tmp_path, f"---\n{URL}\n---\n")
+
+    assert _import(test_db, path, _ctx(fake_embedder)) == "ingested"
+    assert URL in _notes(test_db)[0]["content"]
+
+
+@pytest.mark.parametrize("where", ["vault", "inside", "contains"])
+def test_a_capture_folder_overlapping_the_vault_is_refused(
+    tmp_path: Path, vault: Path, fake_embedder: Any, where: str
+) -> None:
+    """rev-111 M1: a capture folder that is the vault, lies inside it, or holds it would
+    consume the vault's own notes (re-created, the originals deleted), every 10 minutes."""
+    folder = {"vault": vault, "inside": vault / CAPTURE_FOLDER, "contains": vault.parent}[where]
+
+    with pytest.raises(DropFolderError, match="vault"):
+        importer(_ctx(fake_embedder, folder=folder))
+
+
+def test_a_differently_spelled_path_to_the_vault_is_refused(
+    tmp_path: Path, vault: Path, fake_embedder: Any
+) -> None:
+    alias = tmp_path / "vault-alias"
+    alias.symlink_to(vault)
+
+    with pytest.raises(DropFolderError):
+        importer(_ctx(fake_embedder, folder=alias / CAPTURE_FOLDER))
+
+
+def test_a_sibling_whose_name_starts_like_the_vault_is_allowed(
+    tmp_path: Path, vault: Path, fake_embedder: Any
+) -> None:
+    sibling = tmp_path / "vault-shares"
+    sibling.mkdir()
+
+    importer(_ctx(fake_embedder, folder=sibling))
 
 
 def test_the_importer_calls_import_file(

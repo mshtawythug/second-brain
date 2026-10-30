@@ -296,6 +296,47 @@ def test_a_symlinked_imported_refuses_the_folder(
     assert list(elsewhere.iterdir()) == []
 
 
+# --- rev-111 M1: a capture folder must not overlap the vault -------------------------
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_capture_import_refuses_the_vaults_own_capture_folder(
+    test_db: psycopg.Connection[Any], home: Path, vault: Path, embedder: Any, dry_run: bool
+) -> None:
+    note = vault / "capture" / "existing-note.md"
+    note.write_text("---\ntitle: Existing\n---\nan inbox note\n", encoding="utf-8")
+    then = time.time() - 600
+    os.utime(note, (then, then))
+
+    result = _import(
+        "--dir", str(vault / "capture"), "--since", "7d", *(["--dry-run"] if dry_run else [])
+    )
+
+    assert result.exit_code == 2
+    assert "vault" in result.output
+    assert note.read_text(encoding="utf-8").endswith("an inbox note\n")
+    assert not (vault / "capture" / IMPORTED_DIR).exists()
+
+
+def test_ingest_folder_skips_a_configured_capture_folder_inside_the_vault(
+    test_db: psycopg.Connection[Any], home: Path, vault: Path, embedder: Any, no_ocr: None
+) -> None:
+    note = vault / "capture" / "existing-note.md"
+    note.write_text("---\ntitle: Existing\n---\nan inbox note\n", encoding="utf-8")
+    then = time.time() - 600
+    os.utime(note, (then, then))
+    _configure(home, f'[[folder]]\npath = "{vault / "capture"}"\nmode = "capture"\n')
+
+    result = CliRunner().invoke(
+        app, ["ingest-folder", "--no-enrich", "--configured", "--since", "7d"]
+    )
+
+    assert result.exit_code == 1
+    assert "skipped" in result.output and "vault" in result.output
+    assert note.exists()
+    assert not (vault / "capture" / IMPORTED_DIR).exists()
+
+
 # --- dry run ------------------------------------------------------------------------
 
 

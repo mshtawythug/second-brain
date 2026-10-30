@@ -67,12 +67,18 @@ git tag scheme:
   same file (name and bytes) is one note: its key is kept as `capture_import` in the note's
   frontmatter.
 - A capture folder takes `.md`/`.txt` and defaults to `normal` sensitivity; naming a `kind`
-  for it is an error. Evicted iCloud files and `.icloud` placeholders wait until they download.
+  for it is an error. A capture folder that is the vault, lies inside it or contains it is
+  refused (RM-37's `import_sync.is_within` rule, applied both ways), because it would take
+  the vault's own notes as shares. A share whose only text is inside its `---` block keeps the
+  whole text. An ingest step's `unchanged` is now reported `duplicate` on every drop-folder
+  path. Evicted iCloud files and `.icloud` placeholders wait until they download.
   The guide states that shares pass through Apple's iCloud and recommends Advanced Data
   Protection.
 - `brain.vault.note_builder.create_vault_note` is now `write_vault_note` followed by
   `index_vault_note`, with no change in behaviour. Both take an `extra_frontmatter` mapping,
-  which can never set a brain-managed field.
+  which can never set a brain-managed field. The note file is now created exclusively
+  (`O_EXCL`, retrying `-2`, `-3`… on a taken name), so two concurrent writers can no longer
+  overwrite each other, and a failed write leaves no partial file.
 
 ### Added — voice memos, transcribed on this machine (RM-38)
 

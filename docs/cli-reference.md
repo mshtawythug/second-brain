@@ -1032,10 +1032,11 @@ into `imported/` (RM-33's runner), made a capture-inbox note (`capture/`, tagged
 `sensitivity:` line is read from the file. It can raise the note to `confidential`,
 never lower the folder's level, and a block that does not close (or an unknown level) means
 `confidential`. The same file (name and bytes) is one note. Per-file statuses:
-`ingested`, `duplicate`, `empty`, `written` (the note is in the vault but not yet indexed:
+`ingested`, `duplicate` (an ingest step's `unchanged`, on every path), `empty`, `written` (the note is in the vault but not yet indexed:
 the next vault sync does it), `rejected` (over 1 MiB or not UTF-8: kept in `imported/`),
 and `failed` (moved back, retried next run). The command refuses without `--dir PATH` and `--since Nd`
-(exit 2), and refuses a folder configured with `mode = "ingest"` (exit 2). It exits 1 when a file
+(exit 2), and refuses a folder configured with `mode = "ingest"` (exit 2), and a folder that is the
+vault, lies inside it or contains it (exit 2; `ingest-folder` skips such a folder, exit 1). It exits 1 when a file
 failed or was rejected. `brain ingest-folder --configured` runs capture folders through
 the same code.
 

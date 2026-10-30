@@ -540,3 +540,31 @@ def test_the_default_embedder_comes_from_config() -> None:
     embedder = _build_embedder(Config.load())
 
     assert embedder.dim > 0
+
+
+def test_a_name_taken_by_a_dangling_symlink_is_never_written_through(tmp_path: Path) -> None:
+    """rev-111 2: the note file is created exclusively (O_EXCL), so a name that is taken,
+    even by a dangling symlink, moves the note to ``-2`` instead of writing through it."""
+    # Arrange
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    outside = tmp_path / "outside.md"
+    (vault / "taken.md").symlink_to(outside)
+
+    # Act
+    target, _ = write_vault_note(vault_path=vault, title="Taken", body="b")
+
+    # Assert
+    assert target.name == "taken-2.md"
+    assert not outside.exists()
+
+
+def test_a_note_that_fails_to_write_leaves_no_partial_file(tmp_path: Path) -> None:
+    # Arrange: a lone surrogate cannot be encoded, so the write fails after the create.
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    # Act / Assert
+    with pytest.raises(UnicodeEncodeError):
+        write_vault_note(vault_path=vault, title="Unwritable", body="bad \ud800 text")
+    assert not (vault / "unwritable.md").exists()

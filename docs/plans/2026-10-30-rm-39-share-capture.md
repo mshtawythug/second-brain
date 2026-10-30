@@ -21,7 +21,8 @@ brain ingest-folder --configured ────────┘        └─ drop_
 
 There is **one code path**. Both CLIs build their `IngestFn` with
 `capture_import.importer(...)`, which calls `import_file` by module-global lookup.
-`tests/test_capture_import_one_path.py` puts a spy on `capture_import.import_file`
+`tests/test_cli_capture_import.py::test_both_commands_make_the_same_notes_through_import_file`
+puts a spy on `capture_import.import_file`
 (pytest `monkeypatch`, a test double) and asserts that both commands reach it.
 
 ## Files
@@ -132,9 +133,26 @@ The source is deleted only after the vault file exists.
     dot-file);
   - `--dry-run`;
   - every printed name goes through `one_line`.
-- `test_capture_import_one_path.py`: AC6. The same files through
+- `test_cli_capture_import.py` (AC6, `test_both_commands_make_the_same_notes_through_import_file`): the same files through
   `ingest-folder --configured` and `capture import` give the same notes, and the spy sees
   both calls.
 - 100% line + branch on `capture_import.py` and the touched hunks.
 - Mutation-prove each guard (size cap, allowlist, escalate-only, delete-only-on-success,
   identity check on delete, written-not-moved-back) in `git archive` copies, batches ≤5.
+
+## Review round 1 (rev-111)
+
+- **M1:** `capture_import.importer` refuses a capture folder that is the vault, lies
+  inside it or contains it (`DropFolderError`, so `ingest-folder` skips it with exit 1).
+  `brain capture import` refuses it with exit 2 before anything moves, `--dry-run`
+  included. The rule is RM-37's: `ingest.import_sync.is_within`, extracted from
+  `resolve_sync_root` and applied both ways.
+- **2:** `note_builder._write_unique` replaces `_unique_target` plus `write_text`: an
+  exclusive (`"x"`) create that retries `-N` on `FileExistsError` and unlinks a partial
+  file when the write fails.
+- **3a:** `drop_folder._reported` maps `unchanged` to `duplicate` on both `_one` and
+  `_duplicate`.
+- **3b:** a share whose only text is inside a closed `---` block keeps the whole text as
+  its body.
+- **4:** the AC6 test's real location is named above.
+

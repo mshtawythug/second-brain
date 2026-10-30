@@ -33,7 +33,7 @@ brain ingest-folder --dir ~/Pictures/Screenshots --since 7d
 brain ingest-folder --configured --since 2d
 ```
 
-Per-file verbs: `ingested`, `updated`, `unchanged`, `empty` (no text was read: the file stays
+Per-file verbs: `ingested`, `updated`, `empty` (no text was read: the file stays
 in `imported/`), `duplicate` (the same file was imported before: the drop copy is deleted and the import
 re-checked, adding nothing),
 `vanished`, `rejected` (a failure every run would repeat, such as an unreadable image, an
