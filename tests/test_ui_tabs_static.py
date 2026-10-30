@@ -85,11 +85,27 @@ def test_the_ingest_pane_is_a_real_tab_not_a_deferred_one() -> None:
         assert f'for="{control}"' in ingest, f"{control} has no <label for>"
 
 
-def test_the_agent_pane_is_still_deferred() -> None:
+def test_the_agent_pane_is_a_real_tab_not_a_deferred_one() -> None:
+    """RM-18b: ``#tab-agent`` stops being the "Deferred" placeholder, as Ingest did."""
     agent = _section(_INDEX, "agent")
+    opening = agent.split(">", 1)[0]
 
-    assert 'class="shell deferred-tab"' in agent.split(">", 1)[0]
-    assert "Deferred to a later release" in agent
+    assert "deferred-tab" not in opening
+    assert 'class="agent-pane"' in opening
+    assert "Deferred to a later release" not in agent
+    assert '<form class="agent-form" id="agent-form"' in agent
+    for control in ("agent-question", "agent-no-loop"):
+        assert f'id="{control}"' in agent
+        assert f'for="{control}"' in agent, f"{control} has no <label for>"
+    # Ships disabled: only a config that says asking is allowed enables it.
+    assert re.search(r'<fieldset[^>]*\bid="agent-fieldset"[^>]*\bdisabled', agent)
+    assert re.search(r'id="agent-announce"[^>]*role="status"[^>]*aria-live="polite"', agent)
+
+
+def test_no_pane_is_deferred_any_more() -> None:
+    """After RM-11 and RM-18b every tab is real (spec §5 U3), so the class is dead."""
+    assert "deferred-tab" not in _INDEX
+    assert "Deferred to a later release" not in _INDEX
 
 
 def test_file_mode_has_a_real_button_for_the_drop_zone() -> None:

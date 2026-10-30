@@ -166,7 +166,7 @@ INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
 CSS_ORDER = (
     "tokens.css", "base.css", "layout.css", "components.css",
     "palette.css", "marginalia.css", "graph.css", "related.css", "reading.css", "explorer.css",
-    "discovery.css", "thread.css", "ingest.css",
+    "discovery.css", "thread.css", "ingest.css", "ask.css",
 )
 CSS = {name: (STATIC / "css" / name).read_text(encoding="utf-8") for name in CSS_ORDER}
 ALL_CSS = "\n".join(CSS[name] for name in CSS_ORDER)
@@ -212,7 +212,8 @@ JS_ORDER = (
     "inspector.js", "tree.js", "results.js", "keys.js",
     "palette.js", "note_fetch.js", "marginalia.js", "graph.js", "related.js",
     "discovery.js", "thread.js", "watcher_status.js", "watcher.js",
-    "jobs.js", "ingest_view.js", "upload.js", "ingest_file.js", "ingest.js", "main.js",
+    "jobs.js", "ingest_view.js", "upload.js", "ingest_file.js", "ingest.js",
+    "ask_view.js", "ask.js", "main.js",
 )
 JS = {name: (STATIC / "js" / name).read_text(encoding="utf-8") for name in JS_ORDER}
 JS_ALL = "\n".join(JS[name] for name in JS_ORDER)
@@ -312,6 +313,63 @@ def check_single_innerhtml(js: str) -> None:
         f"server-rendered body), found {js.count('.innerHTML')}"
     )
     assert "body.innerHTML = note.html;" in js, "the one innerHTML is not the body"
+
+
+#: RM-18b, hardening rule 1: the HTML-parsing entry points the Agent tab's two
+#: modules may not contain, as (what the message names, the pattern). The first
+#: seven are the ticket's list; the last three are the other ways a string becomes
+#: markup in a browser, and forbidding them costs nothing. Matched ANYWHERE in the
+#: file, comments included, which is the ticket's wording ("contains"): a comment
+#: that needs the word can say "an HTML sink" instead. ``eval`` is matched as a
+#: whole word, or "retrieval" would trip it.
+ASK_FORBIDDEN_SINKS: tuple[tuple[str, str], ...] = (
+    ("innerHTML", r"innerHTML"),
+    ("outerHTML", r"outerHTML"),
+    ("insertAdjacentHTML", r"insertAdjacentHTML"),
+    ("document.write", r"document\s*\.\s*write"),
+    ("eval", r"\beval\b"),
+    ("new Function", r"\bnew\s+Function\b"),
+    ('setAttribute("on...")', r"""(?i)setAttribute\(\s*["'`]on"""),
+    ("createContextualFragment", r"createContextualFragment"),
+    ("DOMParser", r"DOMParser"),
+    ("srcdoc", r"srcdoc"),
+)
+
+
+def check_ask_has_no_html_sinks(js: str) -> None:
+    """RM-18b: the Agent tab's modules put model text in the page as TEXT only.
+
+    The answer and the sub-queries are written by a local model that read the
+    user's documents, so they are attacker-reachable (a pasted note can carry an
+    instruction). ``check_single_innerhtml`` proves the one front-end-wide sink is
+    still the server-rendered note body; this is the stricter, per-file rule the
+    ticket adds, and it is handed ``ask.js`` and ``ask_view.js`` separately (one
+    GUARDS row each), because the view is where the text is inserted and a guard
+    over only the tab's wiring would be green and blind. It is also the test the
+    ticket's risk names: a later client-side markdown renderer fails here first.
+    """
+    found = [name for name, pattern in ASK_FORBIDDEN_SINKS if re.search(pattern, js)]
+    assert not found, (
+        f"an Agent-tab module contains {found}: model text must reach the page only "
+        "through textContent / createTextNode (RM-18b hardening rule 1). If answers "
+        "need markup, render them server-side through render.py's hardened path "
+        "(RM-18b.D1), never in the browser."
+    )
+
+
+def check_the_ask_tab_is_wired_into_boot(js: str) -> None:
+    """RM-18b: the Agent tab is MOUNTED, not merely shipped (the ingest guard's twin).
+
+    NO ORDERING PIN: ``wireAsk()`` owns ``#tab-agent`` and subscribes to nothing.
+    """
+    assert 'import { wireAsk } from "/static/js/ask.js";' in js, (
+        "js/main.js does not import the ask module, so ask.js never evaluates and "
+        "the Agent tab is a form nothing submits."
+    )
+    assert "wireAsk();" in _boot_body(js), (
+        "boot() does not call wireAsk(), so the Agent tab never loads its config "
+        "and its form is never wired."
+    )
 
 
 def _boot_body(js: str) -> str:
@@ -967,10 +1025,10 @@ def check_every_stylesheet_is_linked_in_order(html: str) -> None:
     test, and is simply missing a tier of the design. That is not hypothetical
     — it is what the layout.css experiment above demonstrated.
 
-    Asserts presence AND ORDER, because order is the cascade. `.deferred-tab`
-    vs `.shell`, and every responsive override, are same-specificity pairs
-    settled only by which file loaded first; a correct set of links in the
-    wrong sequence is a real defect that nothing else here would notice.
+    Asserts presence AND ORDER, because order is the cascade. Every responsive
+    override is a same-specificity pair settled only by which file loaded
+    first; a correct set of links in the wrong sequence is a real defect that
+    nothing else here would notice.
 
     Also refuses `@import`, which would reintroduce the serialised round trip
     the four-link form exists to avoid, and would move the real load order out
@@ -981,9 +1039,8 @@ def check_every_stylesheet_is_linked_in_order(html: str) -> None:
         f"index.html links {links}, expected exactly {list(CSS_ORDER)} in that "
         "order. A missing sheet renders a page that still passes the browser "
         "harness (verified: dropping layout.css left it at 15 passed), and a "
-        "reordered one silently flips every same-specificity pair — the "
-        ".deferred-tab/.shell display conflict and all of the responsive "
-        "overrides."
+        "reordered one silently flips every same-specificity pair — all of "
+        "the responsive overrides."
     )
     # COMMENTS STRIPPED FIRST, and this is a correctness fix, not tidying. The
     # `@import` check shipped BLIND: index.html's own header comment explains
@@ -1680,22 +1737,22 @@ CROSS_SHEET_OVERLAPS: dict[str, tuple[str, str]] = {
     # two, which is the edit the recorded value catches.
     ".rail {background}": ("components.css", "var(--paper)"),
     ".rail {border-right}": ("components.css", "var(--hair)"),
-    # The second shape: DIFFERENT selectors, equal specificity, one element.
-    # `class="shell deferred-tab"` gets `display: block` because components.css
-    # is linked after layout.css, and components.css says so in prose two lines
-    # above the rule. This is that sentence, executable.
-    ".deferred-tab vs .shell {display}": ("components.css", "block"),
+    # The second shape (DIFFERENT selectors, equal specificity, one element) has
+    # no live instance since RM-18b removed the last `class="shell deferred-tab"`
+    # pane and its CSS. The scan for it stays, and stays proven: the
+    # `cross-sheet-second-shape-*` GUARDS row puts `.shell` on the Agent pane and
+    # requires the `.agent-pane` vs `.shell` fight to be reported.
 }
 
 
 def _element_key_sets(html: str) -> list[frozenset[str]]:
     """Every element in the static shell, as the simple selectors that match it.
 
-    ``<section class="shell deferred-tab" id="tab-ingest">`` becomes
-    ``{section, .shell, .deferred-tab, #tab-ingest}``, which is what lets the
-    scan below notice that ``.shell`` and ``.deferred-tab`` — two DIFFERENT
+    ``<section class="agent-pane shell" id="tab-agent">`` would become
+    ``{section, .agent-pane, .shell, #tab-agent}``, which is what lets the
+    scan below notice that ``.shell`` and ``.agent-pane`` — two DIFFERENT
     selectors, in two sheets, at the same specificity — are fighting over one
-    element's ``display``.
+    element's ``height`` (the second-shape GUARDS row makes exactly that edit).
 
     ONLY THE STATIC SHELL, and that is a real limit rather than an oversight.
     Elements built in ``js/`` (``.disc-panel``, ``.palette-box``, the note body)
@@ -1723,8 +1780,8 @@ def _cross_sheet_overlaps(parts: dict[str, str]) -> dict[str, _Decl]:
     TWO SHAPES, one roster. The first is the same selector declared in two
     sheets. The second is two different selectors of equal specificity that both
     match one element of the static shell — the shape ``.shell { display: grid }``
-    and ``.deferred-tab { display: block }`` have, which ``components.css``
-    documents in prose and nothing asserted.
+    and ``.deferred-tab { display: block }`` had until RM-18b removed the last
+    placeholder pane, and the shape the second-shape GUARDS row re-creates.
     """
     declarations = _stylesheet_declarations(parts)
     out: dict[str, _Decl] = {}
@@ -1763,12 +1820,13 @@ def _cross_sheet_overlaps(parts: dict[str, str]) -> dict[str, _Decl]:
 def check_cross_sheet_overlaps_are_rostered(bundle: str) -> None:
     """No selector may be redeclared in a second sheet without a recorded winner.
 
-    Written after running it. Six overlaps exist, every one of them layout.css
-    against components.css. Four decide something, because the two declarations
+    Written after running it. Six overlaps existed, every one of them layout.css
+    against components.css. Four decided something, because the two declarations
     differ: ``.shell {grid-template-columns}`` (three declarations — the base
     grid plus the 1100px and 780px overrides), ``.inspector {padding}``,
     ``.ledger {border-right}``, and ``.shell`` vs ``.deferred-tab`` over
-    ``display``. Two decide nothing: ``.rail`` restates ``background`` and
+    ``display`` (gone since RM-18b removed the last placeholder pane, which
+    leaves five). Two decide nothing: ``.rail`` restates ``background`` and
     ``border-right`` at the same values, so reordering the sheets would change
     no pixel.
 
@@ -1866,6 +1924,52 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
     # The import survives; only the boot() call assertion can fire.
     ("ingest-wired-in-boot", check_the_ingest_tab_is_wired_into_boot, "js/main.js",
      "\n  wireIngest();\n", "\n", 1),
+    # RM-18b, hardening rule 1. One row per forbidden sink, each putting the
+    # model's answer through it at the one place ask_view.js inserts it. The
+    # guard has a single assertion, so any row fires it; the rows exist to prove
+    # each PATTERN matches the sink it names (a typo in one regex would leave
+    # that sink allowed while every other row stayed red).
+    ("ask-view-sink-innerhtml", check_ask_has_no_html_sinks, "js/ask_view.js",
+     "answer.append(...answerNodes(result.answer, result.citations));",
+     "answer.innerHTML = result.answer;", 1),
+    ("ask-view-sink-outerhtml", check_ask_has_no_html_sinks, "js/ask_view.js",
+     "answer.append(...answerNodes(result.answer, result.citations));",
+     "answer.outerHTML = result.answer;", 1),
+    ("ask-view-sink-insertadjacenthtml", check_ask_has_no_html_sinks, "js/ask_view.js",
+     "answer.append(...answerNodes(result.answer, result.citations));",
+     'answer.insertAdjacentHTML("beforeend", result.answer);', 1),
+    ("ask-view-sink-document-write", check_ask_has_no_html_sinks, "js/ask_view.js",
+     "answer.append(...answerNodes(result.answer, result.citations));",
+     "document.write(result.answer);", 1),
+    ("ask-view-sink-eval", check_ask_has_no_html_sinks, "js/ask_view.js",
+     "answer.append(...answerNodes(result.answer, result.citations));",
+     "eval(result.answer);", 1),
+    ("ask-view-sink-new-function", check_ask_has_no_html_sinks, "js/ask_view.js",
+     "answer.append(...answerNodes(result.answer, result.citations));",
+     "new Function(result.answer)();", 1),
+    ("ask-view-sink-setattribute-on", check_ask_has_no_html_sinks, "js/ask_view.js",
+     "answer.append(...answerNodes(result.answer, result.citations));",
+     'answer.setAttribute("onclick", result.answer);', 1),
+    ("ask-view-sink-contextual-fragment", check_ask_has_no_html_sinks, "js/ask_view.js",
+     "answer.append(...answerNodes(result.answer, result.citations));",
+     "answer.append(document.createRange().createContextualFragment(result.answer));", 1),
+    ("ask-view-sink-domparser", check_ask_has_no_html_sinks, "js/ask_view.js",
+     "answer.append(...answerNodes(result.answer, result.citations));",
+     'answer.append(new DOMParser().parseFromString(result.answer, "text/html").body);', 1),
+    ("ask-view-sink-srcdoc", check_ask_has_no_html_sinks, "js/ask_view.js",
+     "answer.append(...answerNodes(result.answer, result.citations));",
+     "answer.srcdoc = result.answer;", 1),
+    # The tab's own module is guarded too, not only the view: a sink in the
+    # announcer would put server text through the parser just the same.
+    ("ask-js-sink-innerhtml", check_ask_has_no_html_sinks, "js/ask.js",
+     "requestAnimationFrame(() => { region.textContent = text; });",
+     "requestAnimationFrame(() => { region.innerHTML = text; });", 1),
+    # RM-18b. The import goes; the call survives, so only the first assertion fires.
+    ("ask-module-imported", check_the_ask_tab_is_wired_into_boot, "js/main.js",
+     'import { wireAsk } from "/static/js/ask.js";\n', "", 1),
+    # The import survives; only the boot() call assertion can fire.
+    ("ask-wired-in-boot", check_the_ask_tab_is_wired_into_boot, "js/main.js",
+     "\n  wireAsk();\n", "\n", 1),
     ("thread-wired-in-boot", check_the_thread_is_wired_after_the_inspector,
      "js/main.js", " wireThread();", "", 1),
     # RELOCATES rather than deletes, so the count stays 1 and only the position
@@ -2180,7 +2284,7 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
     # guard is green while looking at an empty list. Renaming the property at
     # all eleven sites is the shape that produces that.
     ("hidden-toggle-scan-finds-nothing", check_hidden_toggles_survive_the_cascade,
-     "static/*", ".hidden =", ".hiddenFlag =", 19),
+     "static/*", ".hidden =", ".hiddenFlag =", 25),
     # The DISCOVERY clause. `toast()`'s element stops being resolvable, the site
     # count is unchanged so the first assertion stays green, and only
     # "cannot tell what this hides" can fire. A guard that skipped the site
@@ -2225,11 +2329,21 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
      "static/*",
      ".rail-head { flex-wrap: wrap; row-gap: var(--s-2); }",
      ".rail-head { flex-wrap: wrap; row-gap: var(--s-2); padding: 0; }", 1),
+    # The SECOND shape, re-created: two different selectors of equal specificity
+    # in two sheets, on one element. RM-18b removed its last live instance
+    # (`.shell` vs `.deferred-tab`), so without this row the half of the scan
+    # that reads index.html's elements would be green and never proven able to
+    # see anything. `.shell` (layout.css) and `.agent-pane` (ask.css) both set
+    # `height`, so the fight must be reported as new and unrostered.
+    ("cross-sheet-second-shape-different-selectors-one-element",
+     check_cross_sheet_overlaps_are_rostered, "static/*",
+     '<section class="agent-pane" id="tab-agent"',
+     '<section class="agent-pane shell" id="tab-agent"', 1),
     # The WINNER, not the set. Swapping two <link> tags leaves every overlap key
     # unchanged — a fight is the same fight whoever wins it — so the first
     # assertion stays green and only the recorded-winner one can fire. This is
     # the mutation `check_layout_precedes_components` makes for one pair,
-    # generalised to all six.
+    # generalised to every rostered pair.
     ("cross-sheet-winner-flipped-by-link-order",
      check_cross_sheet_overlaps_are_rostered, "static/*",
      '<link rel="stylesheet" href="/static/css/layout.css">\n'

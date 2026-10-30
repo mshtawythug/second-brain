@@ -116,6 +116,10 @@ evicting the tab in the background — leaves every request refused (403) until 
   time, and a leaked token should not let any device on the network do that. On a `--lan` or
   `--host` bind the tab is disabled and says why. To capture from a phone, use `+ New` (a note,
   without `--read-only`), or run `brain ingest` on the machine itself.
+- **The Agent tab does not work over the LAN either.** Asking runs a local model for a minute or
+  more on the same single job runner as ingest, so it is offered only when `brain ui` is bound to
+  this machine. On a `--lan` or `--host` bind the tab is disabled and says why; run `brain ask` on
+  the machine itself.
 - **Confidential documents are withheld off loopback.** On a LAN bind, the bodies of documents
   marked `sensitivity: confidential` are not served unless you pass `--include-confidential`.
   The startup panel states which mode you got. On a loopback address, or on `localhost` when it
