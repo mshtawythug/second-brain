@@ -129,3 +129,42 @@ UUID check dropped; the citation-range check dropped; each must turn a named tes
 
 - A later edit adds a client-side markdown renderer: the sink guard fails first (ticket risk).
 - The browser suite polls at 1 s; scripts are short and every wait is on the DOM.
+
+## Deviations from the ticket text
+
+1. **A5's turn log is not built here** (D3). `sessionStorage` holds ask ids only; the capped log of
+   questions and answers is RM-18c's, its only consumer. A stored answer would outlive A10's
+   10-minute retention.
+2. **The sink guard covers `ask_view.js` as well as `ask.js`**, and forbids three more HTML entry
+   points (`createContextualFragment`, `DOMParser`, `srcdoc`). The ticket names `ask.js` only; the
+   view is where text is inserted, so a guard over `ask.js` alone would be blind.
+3. **`jobs.js` is touched** (an optional `scope`, D2), although the ticket's scope list says "reuse".
+   Reused as it was, a reloaded ask appeared as an ingest row; ingest's keys are unchanged.
+4. **The dead `.deferred-tab` / `.deferred` CSS is deleted** (`components.css`), with the prose that
+   described it (`layout.css`, `tokens.css`) and the `.deferred-tab vs .shell` row of
+   `CROSS_SHEET_OVERLAPS`. The scan's "different selectors, one element" half lost its only live
+   instance, so a new GUARDS row (`cross-sheet-second-shape-different-selectors-one-element`)
+   re-creates one by putting `.shell` on the Agent pane, keeping that half proven.
+5. **Docs beyond the ticket's list:** `README.md` (the `brain ui` paragraph) and
+   `src/brain/ui/__init__.py`'s docstring, which still said Ingest and Agent were deferred.
+6. **The route test is a new file**, `tests/test_ui_ask_wire_contract.py`, rather than rows in
+   `tests/test_ui_ask_routes.py`: its job is to tie the hermetic stub to the wire, so it imports the
+   stub's key sets.
+7. **The list of turns is a `<div>` with a heading**, not a nested `<section>`:
+   `tests/test_ui_tabs_static.py` slices a pane up to its first `</section>`.
+
+## Evidence
+
+- RED before code: `tests/test_ui_tabs_static.py` (2 failed: the pane was the placeholder),
+  `tests/test_ui_security.py::test_the_agent_tab_ships_under_the_unchanged_csp` (`ask.js` 404).
+- RED baseline for the browser suite: `master` `2f83ea3` plus the new test files, in a `git archive`
+  copy: 12 failed (the pane did not exist).
+- Mutation proofs, each in its own `git archive` copy (import realpath checked, anchor applied exactly
+  once, copy deleted): answer through an HTML sink; UUID check dropped; range check dropped (any
+  marker links to a citation); ask scope dropped; ingest-ahead check disabled; Cancel never offered;
+  withheld flag ignored; CSP loosened; a stub key dropped; UUID pattern unanchored. Each turns its
+  named test red. Two survived the first pass (withheld flag; unanchored pattern), and the tests were
+  strengthened until both died (`80c9c01`).
+- End-to-end: the real app under uvicorn with its worker thread, on the 5434 rm18b database, a fake
+  `ChatJson` (no Ollama) and a real Chromium: four steps shown in order, the hostile answer shown as
+  text with no `img` and no dialog, `[1]` opened the note in the Notes tab.
