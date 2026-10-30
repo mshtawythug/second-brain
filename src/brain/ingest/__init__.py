@@ -51,7 +51,7 @@ from brain.vault.derived_links.participants import (
 )
 from brain.vault.export import regenerate_vault_file
 
-from .chunker import Chunk, chunk_text
+from .chunk_dispatch import Chunk, chunk_for
 from .dispatch import extract_path, supported_extensions  # noqa: F401  (re-export, RM-07)
 from .guard import GuardOutcome, SecretFinding, apply_guard, format_findings
 from .sub_tokens import extract_sub_tokens
@@ -1189,7 +1189,7 @@ def _ingest_within_transaction(
 
     # Chunk (cheap, pure Python) then embed — BOTH outside the transaction so
     # the Ollama HTTP round-trip holds no DB lock.
-    chunks = chunk_text(doc.content, count_tokens=embedder.count_tokens)
+    chunks = chunk_for(doc.content_type, doc.content, doc.metadata, embedder.count_tokens)
     if action.kind in ("insert", "replace") and not chunks:
         # Matches the legacy INSERT-path "no chunks → no document" behavior.
         # (The update path still proceeds on empty chunks — it rebuilds zero
@@ -2169,7 +2169,7 @@ def update_document(
                 "DELETE FROM chunks WHERE document_id=%s", (document_id,)
             )
             assert new_content is not None  # gated by the empty-check above
-            chunks = chunk_text(new_content, count_tokens=embedder.count_tokens)
+            chunks = chunk_for(cur_type, new_content, effective_meta, embedder.count_tokens)
             if chunks:
                 # F6 hosted-egress veto — call site 2 of 2. The level comes from
                 # the row itself (``cur_sensitivity``), not from a parameter:
