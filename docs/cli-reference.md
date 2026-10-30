@@ -76,6 +76,8 @@ brain ingest ./notes.md --force       # re-ingest even if the content already ex
 brain ingest-dir ~/Documents/career
 brain ingest-dir ~/Documents/career --tag career --ext pdf,md,docx
 brain ingest-dir ~/Documents/career --dry-run
+brain ingest-dir ~/Documents/career --sync          # also list documents whose files are gone
+brain ingest-dir ~/Documents/career --sync --apply  # ...and delete them
 
 # Piped content: used for Krisp / Slack / arbitrary text from agents.
 echo "<transcript>" | brain ingest-stdin \
@@ -91,6 +93,29 @@ echo "<transcript>" | brain ingest-stdin \
 All ingest paths write rows + chunks to Postgres and, when `BRAIN_VAULT_PATH`
 exists, mirror ingested documents into `_ingested/<source>/` so the vault holds the
 whole corpus as Markdown. Re-running unchanged content is a no-op unless you pass `--force`.
+
+**Re-syncing an imported directory (`--sync`).** Re-running `ingest-dir` picks up new and
+changed files, but a file you deleted from the tree leaves its document behind. `--sync` adds a
+prune pass after the walk: it finds the `manual` documents imported from files under `<dir>`
+(compared by path components, so `notes` never matches `notes-old`) whose files are gone, and
+lists them, `would delete: <id8>  <path>`, with a `N of M documents under <dir> would be removed`
+summary. Nothing is deleted without `--apply`, which re-checks each file just before deleting
+its document (row, chunks, graph entry and vault mirror, the same path as `brain rm`). The scope
+is this run's extensions (`--ext`). A file that exists but cannot be checked (an unreadable
+folder, an I/O error) is kept and counted, never deleted. Vault notes and stdin documents are
+never candidates, and documents under a brain vault nested inside `<dir>` are skipped.
+
+`--sync` refuses, exit 1, before anything is written:
+
+- when `<dir>` does not exist or is not a directory;
+- when `<dir>` is the brain vault or inside it (the vault watcher owns that tree);
+- when the walk finds no files while documents were imported from `<dir>` (an unmounted drive);
+- with `--apply`, when more than half of the documents under `<dir>` and more than 5 would go
+  (a partly unmounted tree or a moved folder).
+
+`--allow-empty` overrides the last two. `--apply` or `--allow-empty` without `--sync`, and
+`--apply` with `--dry-run`, are usage errors (exit 2). A delete that fails is reported by error
+class and the run exits 1.
 
 **Scanned PDFs.** A PDF with no real text layer (a scan, a photographed receipt)
 is read with the local `tesseract` binary when it is installed (`brew install
