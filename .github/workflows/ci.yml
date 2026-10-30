@@ -366,6 +366,7 @@ jobs:
           tests/test_ui_browser.py
           tests/test_ui_browser_agent.py
           tests/test_ui_browser_api.py
+          tests/test_ui_browser_copy_path.py
           tests/test_ui_browser_discovery.py
           tests/test_ui_browser_graph.py
           tests/test_ui_browser_graph_labels.py

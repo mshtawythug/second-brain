@@ -952,6 +952,19 @@ non-loopback bind.) On a **non-loopback** bind they are withheld unless you pass
 a network bind: a token is required, and bodies are withheld unless you pass
 `--include-confidential`. The startup banner states which of the three you got.
 
+**Copy path.** The note pane's **Copy path** button puts the note's path on the
+clipboard, so you can open the file in any editor. On a loopback server it copies
+the absolute path of the note's file; elsewhere it copies the path inside the vault
+(`vault_path`). The status beside the button says **Copied**, or why the copy
+failed (for example, a denied clipboard permission). The button needs the
+browser's clipboard API, which a page offers only in a secure context: an
+`http://127.0.0.1` page is one, and a `--lan` `http://` page is not, so the
+button is absent over `--lan`. `GET /api/notes/{id}` carries the absolute path as
+`abs_path` only on a loopback bind (a loopback address, or `localhost` resolving
+only to loopback), and never for a note whose body is withheld or whose vault
+file is missing. There is no `obsidian://` link, and the server never starts an
+editor.
+
 **When the embedder is unreachable, the Notes tab searches text-only.** If the
 query embedding cannot be computed, `GET /api/search` still answers 200 with
 full-text matches, and a notice above the results says so: the failure by class
