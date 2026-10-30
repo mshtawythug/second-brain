@@ -514,7 +514,7 @@ No environment variable: the folders `brain ingest-folder --configured` reads ar
 | `kind` | `screenshot` | The source kind its documents get; any kind `brain ingest-stdin --source` accepts. `voice` for voice memos (RM-38). |
 | `extensions` | `[".png", ".jpg", ".jpeg"]`; `[".m4a", ".mp3", ".wav"]` when `kind = "voice"` | Which files are taken; each must be one an extractor reads. |
 | `sensitivity` | `confidential` | `normal` or `confidential`. A screenshot or a memo can hold anything, so the default is confidential. |
-| `auto` | `true` | `false`: only `brain ingest-folder --dir PATH` uses the folder, never `--configured`. |
+| `auto` | `true` | `false`: only `brain ingest-folder --dir PATH` uses the folder, never `--configured`. The first `kind = "manual"`, `auto = false` entry is also the Ingest tab's inbox (RM-40). |
 | `mode` | `ingest` | The only mode; `capture` arrives with RM-39 and is refused until then. |
 
 An unknown key, a bad value, or two entries for one folder is a `ConfigError`

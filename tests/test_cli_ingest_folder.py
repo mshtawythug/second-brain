@@ -449,6 +449,30 @@ def test_configured_skips_a_folder_with_auto_off(
     assert not (manual / IMPORTED_DIR).exists()
 
 
+def test_configured_leaves_the_ui_inbox_untouched(
+    home: Path, tmp_path: Path, drop: Path, engine: _Engine, embedder: CountingEmbedder,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """RM-40 AC3: the LaunchAgent's run never ingests what waits in the inbox."""
+    from brain.ui.inbox import find_inbox
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _configure(home, _table(drop),
+               _table(inbox, 'kind = "manual"\nauto = false\nextensions = [".md", ".txt"]'))
+    _png(drop, "auto.png")
+    waiting = _note(inbox, "waiting.md")
+    found = find_inbox(home)
+    assert found is not None and found.path == inbox.resolve()
+
+    result = _run("--configured", "--since", "2d")
+
+    assert result.exit_code == 0, result.output
+    assert [d["title"] for d in _docs(test_db)] == ["auto"]
+    assert waiting.exists()
+    assert sorted(p.name for p in inbox.iterdir()) == ["waiting.md"]
+
+
 # --- OCR unavailable, unsafe folder, dry run ---------------------------------------------
 
 

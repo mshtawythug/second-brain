@@ -252,6 +252,55 @@ def run(
     return DropReport(folder.path, tuple(outcomes), deferred=0)
 
 
+# --- One named file (RM-40) ---------------------------------------------------------
+
+
+def run_one(
+    conn: psycopg.Connection[Any],
+    folder: DropFolder,
+    name: str,
+    *,
+    ingest: IngestFn,
+    timeout: float = RUN_DEADLINE_S,
+    lstat: Lstat = os.lstat,
+    link: Link | None = None,
+    write: Write = os.write,
+    unlink: Unlink | None = None,
+) -> FileOutcome:
+    """Move the one file ``name`` into ``imported/`` and ingest it there (RM-40's inbox).
+
+    The same move-first step as :func:`run`, for a file the owner picked by name, so
+    there is no ``since`` and no settle window. ``name`` must be a bare file name this
+    folder takes (not empty, no leading ``.``, no ``/`` or NUL, one of its extensions),
+    else ``ValueError`` before anything is opened. A dataless file is refused unread. The
+    open is ``O_NOFOLLOW`` relative to the folder's fd and must be a regular file, so a
+    name swapped for a symlink, a FIFO or a directory since the caller checked it moves
+    nothing. Raises :class:`DropFolderError` as :func:`run` does; any other ``OSError``
+    is the file's ``failed`` outcome, by class.
+    """
+    if folder.mode != "ingest":
+        raise DropFolderError(f"mode {folder.mode!r} is not available until RM-39")
+    if folder.kind is None:
+        raise DropFolderError("an ingest folder needs a source kind")
+    if not _is_bare_name(name) or Path(name).suffix.lower() not in folder.extensions:
+        raise ValueError("not a file name this folder takes")
+    with _open_dirs(folder.path) as dirs:
+        mover = _Mover(dirs, link=link or _hard_link, write=write, unlink=unlink or _unlink)
+        try:
+            if getattr(lstat(folder.path / name), "st_flags", 0) & SF_DATALESS:
+                return FileOutcome(name, "failed", "not on disk (dataless)")
+            return _one(conn, name, ingest=ingest, timeout=timeout, mover=mover)
+        except FileNotFoundError:
+            return FileOutcome(name, "vanished")
+        except OSError as exc:
+            return FileOutcome(name, "failed", describe_failure(exc))
+
+
+def _is_bare_name(name: str) -> bool:
+    """A name directly in the folder: no path separator, no NUL, not hidden, ``.`` or ``..``."""
+    return bool(name) and not name.startswith(".") and "/" not in name and "\0" not in name
+
+
 @dataclass(frozen=True)
 class _Dirs:
     """The folder and its ``imported/``, held open so a later swap of either path is moot."""

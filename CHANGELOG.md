@@ -22,6 +22,27 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — the Ingest tab's inbox folder (RM-40)
+
+- `brain ui`'s Ingest tab gains **From the inbox**: pick, by name, a file already sitting in
+  the inbox folder and ingest it. The inbox is the first `drop-folders.toml` entry with
+  `kind = "manual"` and `auto = false`, so the `--configured` LaunchAgent never ingests it
+  first; it takes the uploadable types (`.md`, `.markdown`, `.txt`, `.pdf`, `.docx`) its entry
+  lists. The file is moved into the inbox's `imported/` folder first (RM-33's move-first step,
+  through the new `brain.drop_folder.run_one`), ingested from there under source `manual`
+  with the folder's sensitivity (confidential unless set), and so appears in the tree.
+- `GET /api/ingest/inbox` lists names and sizes only (never a path), and only on a loopback,
+  writable server; `POST /api/ingest/inbox {name, ...}` queues a job of kind `ingest.inbox`.
+- A new traversal surface, guarded three times: the name must be one plain file name
+  (no `/`, `..`, NUL, control character or leading dot) and is checked with `vault/paths.py`'s
+  resolve-then-compare rule and `lstat` at submit; the job checks it again before anything
+  moves; and the move opens it `O_NOFOLLOW` against the folder's descriptor. A symlink, a
+  folder, a pipe, an iCloud-only file or a file over the upload caps is refused, and a file
+  swapped after it was listed or submitted is never read.
+- Every failure (database, embedder, secret guard, unreadable file, cancel) puts the file
+  back in the inbox; a file with no text stays in `imported/`. Job errors name the cause by
+  class or fixed code only. Guide: `docs/guides/drop-folders.md#the-ingest-tabs-inbox-rm-40`.
+
 ### Added — voice memos, transcribed on this machine (RM-38)
 
 - A drop folder with `kind = "voice"` takes `.m4a`, `.mp3` and `.wav` memos (shared or

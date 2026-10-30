@@ -1417,6 +1417,24 @@ unknown or expired upload. `DELETE /api/ingest/uploads/{upload_id}` (body `{}`)
 discards an unsubmitted file. An upload's result also carries
 `original_filename`, withheld with the title.
 
+The inbox (RM-40) is the first `drop-folders.toml` entry with `kind = "manual"` and
+`auto = false`, which the `--configured` LaunchAgent never ingests
+([guide](guides/drop-folders.md#the-ingest-tabs-inbox-rm-40)). `GET /api/ingest/inbox`
+answers 200 `{available, reason, extensions, files: [{name, size}], truncated,
+default_sensitivity}`: names only, never a path, newest first, at most 200, and an empty
+list unless ingest is available (`reason` is also `inbox_unconfigured`,
+`inbox_misconfigured` or `inbox_unreadable`). `POST /api/ingest/inbox` with JSON
+`{name, tags?, sensitivity?, enrich?, title?}` queues a job of kind `ingest.inbox` (202);
+`sensitivity` defaults to the folder's (confidential unless set). Refusals: 400
+`invalid_name` (a `/`, `..`, NUL, control character or leading dot), `outside_inbox`,
+`not_a_regular_file` (a symlink, folder or pipe) or `unknown_field`; 404
+`inbox_file_unknown` or `inbox_unconfigured`; 409 `inbox_misconfigured` or
+`file_not_on_disk`; 413 `inbox_file_too_large`; 415 `unsupported_file`. The job checks the
+name again, moves the file into the inbox's `imported/` folder and ingests it from there
+(source `manual`, deduplicated by that path); every failure puts it back, by error code
+(`inbox_file_changed`, `inbox_file_gone`, `inbox_move_failed`, `inbox_unusable`, or the
+ingest codes above).
+
 The Agent tab's backend asks a question as a job
 on the same worker, one at a time with ingest. `POST /api/ask` with JSON
 `{question, no_loop?, history?}` (a question of at most 2,000 characters; `no_loop`

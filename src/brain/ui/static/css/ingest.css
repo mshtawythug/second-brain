@@ -201,6 +201,24 @@
 }
 .ingest-pane input[type="radio"],
 .ingest-pane input[type="checkbox"] { accent-color: var(--accent); }
+/* Inbox mode (RM-40): one radio per file, stacked, long names wrapping. */
+.ingest-pane .ingest-inbox { flex-direction: column; align-items: stretch; }
+.ingest-pane .ingest-inbox-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  max-height: 18rem;
+  overflow-y: auto;
+}
+.ingest-pane .ingest-inbox-file label { overflow-wrap: anywhere; }
+.ingest-pane .ingest-inbox .ghost-btn { align-self: flex-start; font-size: var(--t-meta); }
+.ingest-pane .ingest-inbox .ghost-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .ingest-pane .ingest-error {
   margin: 0;
   padding: var(--s-2) var(--s-3);

@@ -22,7 +22,7 @@
 import { el } from "/static/js/dom.js";
 import { isTerminal } from "/static/js/jobs.js";
 
-const KIND_LABELS = { "ingest.paste": "Paste", "ingest.file": "File" };
+const KIND_LABELS = { "ingest.paste": "Paste", "ingest.file": "File", "ingest.inbox": "Inbox" };
 
 const OUTCOMES = {
   ingested: "Added",

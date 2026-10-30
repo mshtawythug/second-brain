@@ -22,6 +22,11 @@ The command moves the user's files, so:
 - Never edit `drop-folders.toml` or install the LaunchAgent unless the user asks; the guide
   `docs/guides/drop-folders.md` has both steps.
 
+**The inbox (RM-40).** The first entry with `kind = "manual"` and `auto = false` is the
+`brain ui` Ingest tab's inbox: the user picks a file there by name (**From the inbox**), and
+`--configured` never touches it. Do not run `--dir` on the inbox to "help": the files there
+are waiting for the user's own pick.
+
 ```bash
 brain ingest-folder --dir ~/Pictures/Screenshots --since 7d --dry-run
 brain ingest-folder --dir ~/Pictures/Screenshots --since 7d

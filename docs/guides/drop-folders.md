@@ -77,6 +77,41 @@ To read a file again (a `rejected` one included), delete its document if it has 
 (`brain rm`), then `brain ingest <folder>/imported/<file>`; an image is stored
 confidential unless you pass `--sensitivity normal`.
 
+## The Ingest tab's inbox (RM-40)
+
+A drop folder can also be an **inbox** you pick files from in `brain ui`'s Ingest tab,
+instead of one the LaunchAgent empties. The inbox is the **first** entry with
+`kind = "manual"` and `auto = false` (and the default `mode = "ingest"`); no other key marks
+it. List its extensions, because a `manual` folder otherwise gets the image defaults, and the
+inbox takes only the types the tab can upload (`.md`, `.markdown`, `.txt`, `.pdf`, `.docx`):
+
+```toml
+[[folder]]
+path = "~/Documents/Brain inbox"
+kind = "manual"
+auto = false
+extensions = [".md", ".txt", ".pdf", ".docx"]
+# sensitivity = "normal"    # the default is confidential, as for every drop folder
+```
+
+`auto = false` keeps `brain ingest-folder --configured` (and so the LaunchAgent) off it: a
+file waits there until you pick it. In the Ingest tab choose **From the inbox**, pick a file
+and press **Ingest**. The file is moved into the inbox's `imported/` folder first and
+ingested from there, exactly as above, so it ends up in `imported/` and in the tree. The
+folder's `sensitivity` is preselected; you can change it, and add tags or a title.
+
+- The tab lists names and sizes only, newest first (200 at most), and only on a loopback,
+  writable `brain ui`. It leaves out symlinks, sub-folders, hidden files, iCloud files that
+  are not downloaded, files of other types, and files modified in the last 5 seconds.
+- The browser sends a **name**, never a path. A name with `/`, a `..`, a symlink (inside or
+  out of the inbox), a folder or a pipe is refused, and so is a file over the upload caps
+  (25 MiB for `.pdf` / `.docx`, 5 MiB for text). The name is checked again when the job
+  starts, and the file is opened without following a link, so a file swapped after you
+  picked it is refused rather than read.
+- Any failure (the database or the embedding model was down, the secret guard refused it,
+  the file could not be read, or you cancelled) puts the file back in the inbox to try
+  again or delete. A file with no text stays in `imported/` and adds no document.
+
 ## Voice memos (RM-38)
 
 A drop folder can also take voice memos (`.m4a`, `.mp3`, `.wav`). Each memo is transcribed

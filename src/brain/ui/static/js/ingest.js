@@ -12,9 +12,9 @@
  * subscribes to nothing.
  *
  * The job row is drawn by ingest_view.js; polling and storage are jobs.js; file
- * mode's staging and drop zone are ingest_file.js. Tags, sensitivity and the
- * summary switch are shared by both modes. Every server string reaches the page
- * as text.
+ * mode's staging and drop zone are ingest_file.js; inbox mode's list is
+ * ingest_inbox.js (RM-40). Tags, sensitivity and the summary switch are shared by
+ * every mode. Every server string reaches the page as text.
  */
 
 import { $, el, toast } from "/static/js/dom.js";
@@ -30,6 +30,9 @@ import {
 import {
   acceptsFiles, describeFileLimits, fileProblem, submitStagedFile, wireFileMode,
 } from "/static/js/ingest_file.js";
+import {
+  inboxProblem, showInbox, submitInboxFile, wireInboxMode,
+} from "/static/js/ingest_inbox.js";
 
 const UNAVAILABLE = {
   read_only: "This server is read-only.",
@@ -100,14 +103,17 @@ function fillControls(cfg) {
 }
 
 function mode() {
-  return $("ingest-mode-file").checked ? "file" : "paste";
+  if ($("ingest-mode-file").checked) return "file";
+  return $("ingest-mode-inbox").checked ? "inbox" : "paste";
 }
 
 function onModeChange() {
-  const file = mode() === "file";
-  $("ingest-paste-fields").hidden = file;
-  $("ingest-file-fields").hidden = !file;
+  const current = mode();
+  $("ingest-paste-fields").hidden = current !== "paste";
+  $("ingest-file-fields").hidden = current !== "file";
+  $("ingest-inbox-fields").hidden = current !== "inbox";
   showError("");
+  if (current === "inbox") showInbox();
 }
 
 async function loadConfig() {
@@ -289,13 +295,22 @@ async function submitFile() {
   return submitStagedFile(readCommon());
 }
 
+async function submitInbox() {
+  const message = inboxProblem();
+  showError(message);
+  if (message) return null;
+  return submitInboxFile(readCommon());
+}
+
+const SUBMIT = { paste: submitPaste, file: submitFile, inbox: submitInbox };
+
 async function onSubmit(event) {
   event.preventDefault();
   if (!config || !config.enabled) return;
   const submit = $("ingest-submit");
   submit.disabled = true;
   try {
-    const snapshot = await (mode() === "file" ? submitFile() : submitPaste());
+    const snapshot = await SUBMIT[mode()]();
     if (!snapshot) return;
     track(newRecord(snapshot), { immediate: false });
     announce(announcement(jobs.get(snapshot.id).record));
@@ -351,4 +366,5 @@ export function wireIngest() {
   $("ingest-jobs").addEventListener("click", onJobsClick);
   $("ingest-mode").addEventListener("change", onModeChange);
   wireFileMode({ config: () => config, showError, announce });
+  wireInboxMode({ showError, announce });
 }

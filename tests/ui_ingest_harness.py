@@ -1,8 +1,9 @@
 """The shared harness for the Ingest tab's browser suites (RM-11, Ingest spec §9.4).
 
 Used by ``tests/test_ui_browser_ingest.py`` (the flows),
-``tests/test_ui_browser_ingest_lifecycle.py`` (races, resumption, announcements)
-and ``tests/test_ui_browser_ingest_upload.py`` (RM-13's file mode), split so none
+``tests/test_ui_browser_ingest_lifecycle.py`` (races, resumption, announcements),
+``tests/test_ui_browser_ingest_upload.py`` (RM-13's file mode) and
+``tests/test_ui_browser_ingest_inbox.py`` (RM-40's inbox mode), split so none
 crosses the 800-line test-file precedent. Same shape as
 ``tests/ui_graph_harness.py``: the fixtures are registered under their public
 names and imported by each module. Not a test module, and it carries no marker.
@@ -76,6 +77,13 @@ ENABLED_CONFIG: dict[str, Any] = {
 }
 
 DOC_ID = "0" * 31 + "7"
+
+#: ``GET /api/ingest/inbox`` on an enabled server with two synthetic files (RM-40).
+INBOX_LISTING: dict[str, Any] = {
+    "available": True, "reason": None, "extensions": [".md", ".pdf", ".txt"],
+    "files": [{"name": "zibbit plan.md", "size": 2048}, {"name": "flonk.txt", "size": 7}],
+    "truncated": False, "default_sensitivity": "confidential",
+}
 STAMP = "2026-03-01T10:00:00+00:00"
 
 
@@ -153,6 +161,11 @@ SCRIPTS: dict[str, list[Frame]] = {
     "file": [Frame("running", [("extracting", None, None, None)]),
              Frame("succeeded", [("finishing", None, None, None)],
                    _result(original_filename="quarkle-notes.md"), cancellable=False)],
+    # RM-40: an inbox file, moved and extracted, then done.
+    "inbox": [Frame("running", [("extracting", None, None, None)]),
+              Frame("succeeded", [("finishing", None, None, None)],
+                    _result(original_filename="zibbit plan.md", title="zibbit plan",
+                            sensitivity="confidential"), cancellable=False)],
     "fails": [Frame("failed", [], None, {
         "code": "embedder_busy",
         "message": "The embedding model did not answer. Nothing was written; retry.",
@@ -190,6 +203,11 @@ class FakeJobs:
         self.file_error: tuple[int, str, str] | None = None
         self.hold_uploads: list[Any] = []
         self.holding = False
+        # RM-40: what the inbox lists, what reached its submit, and an error to answer.
+        self.inbox: dict[str, Any] = dict(INBOX_LISTING)
+        self.inbox_lists = 0
+        self.inbox_posts: list[dict[str, Any]] = []
+        self.inbox_error: tuple[int, str, str] | None = None
 
     def snapshot(self, job: FakeJob, after: int = 0) -> dict[str, Any]:
         frame = job.frame
@@ -236,6 +254,9 @@ class FakeJobs:
             return True
         if path.startswith("/api/ingest/uploads") or path == "/api/ingest/file":
             return self._upload_routes(route, path)
+        if path == "/api/ingest/inbox":
+            self._inbox_route(route)
+            return True
         match = re.fullmatch(r"/api/jobs/([0-9a-f]+)(/cancel)?", path)
         if not match:
             return False
@@ -295,6 +316,24 @@ class FakeJobs:
             _json(route, 202, self.snapshot(job))
             return True
         return False
+
+    def _inbox_route(self, route: Any) -> None:
+        request = route.request
+        if request.method == "GET":
+            self.inbox_lists += 1
+            _json(route, 200, self.inbox)
+            return
+        self.inbox_posts.append(json.loads(request.post_data or "{}"))
+        if self.inbox_error is not None:
+            status, code, message = self.inbox_error
+            _json(route, status, {"error": {"code": code, "message": message}})
+            return
+        job = FakeJob(id=f"{len(self.jobs) + 1:032x}", script=SCRIPTS["inbox"],
+                      kind="ingest.inbox")
+        job.events.append({"seq": 1, "at": STAMP, "phase": "queued",
+                           "done": None, "total": None, "code": None})
+        self.jobs[job.id] = job
+        _json(route, 202, self.snapshot(job))
 
     def answer_upload(self, route: Any) -> None:
         """Answer one upload request now (also used to release a held one)."""
