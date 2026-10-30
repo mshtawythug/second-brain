@@ -45,11 +45,13 @@ CAST = frozenset(
 # adds no search behaviour, while the calendar path itself (the ``gws`` read, one
 # document per series, ``metadata.occurrences``) cannot run from a manifest seed;
 # ``tests/test_cli_ingest_calendar.py`` covers it. Keeping it out also keeps the
-# 22-doc count that the demo tests, docs and recorded demo tape pin. The exemption
-# is checked against the canonical set below, so it cannot outlive the kind, and
-# any kind added later still fails this guard until it is either seeded or
-# exempted here.
-DEMO_EXEMPT_KINDS = frozenset({"calendar"})
+# 22-doc count that the demo tests, docs and recorded demo tape pin.
+# ``jira`` (RM-34): a Jira issue is ingested ``confidential`` by default, and the
+# demo manifest has no sensitivity field, so a demo Jira document would showcase
+# the wrong tier. The exemption is checked against the canonical set below, so it
+# cannot outlive the kind, and any kind added later still fails this guard until
+# it is either seeded or exempted here.
+DEMO_EXEMPT_KINDS = frozenset({"calendar", "jira"})
 EXPECTED_SOURCES = VALID_SOURCE_KINDS - DEMO_EXEMPT_KINDS
 
 # Real-provider email domains that must NEVER appear (generic provider domains,

@@ -187,8 +187,8 @@ A ticket is done when **all** of the following hold. A reviewer checks each item
    `mock.patch` and `mocker.patch` are allowed.
 6. **Class-only failure text.** Every log line and every user-visible error for a caught exception
    uses `brain.errors.describe_failure` (the class name), never the exception message.
-   `tests/test_log_privacy.py` (G1) must stay green without a new allowlist entry, unless the ticket
-   argues for one.
+   The G1 guard (`tests/test_log_privacy_rules.py` since RM-28; rules in `tests/log_privacy_rules.py`)
+   must stay green without a new allowlist entry, unless the ticket argues for one.
 7. **Parameterized SQL, explicit timeouts.** Every new HTTP call (httpx), subprocess (`gws`, `gh`,
    `git`, `tesseract`, `whisper-cli`, `afconvert`, `osascript`, `llama-server` probes) and DB connection has an explicit
    timeout. Every external binary is found with `shutil.which` and is a soft dependency: absent, the
@@ -3627,7 +3627,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-12 | MCP `brain_related` + `brain_explain` | S | 3 | RM-06, RM-09 | DONE (#75) |
 | RM-13 | Ingest tab phase 3: file upload | M | 3 | RM-11, RM-07 | DONE (#77) |
 | RM-14a | Reranker stage, backends, eval wiring (off) | M | 4 | RM-08, RM-09 | DONE (#76) |
-| RM-14b | Local reranker runtime | S | 4 | RM-14a | TODO |
+| RM-14b | Local reranker runtime | S | 4 | RM-14a | DONE (#98) |
 | RM-14c | Reranker measurement and adoption | S | 4 | RM-14b | TODO |
 | RM-15 | Saved searches and watch lists (with the `brief --wiki` extraction) | M | 4 | RM-06, RM-09 | DONE (#78) |
 | RM-16 | Brief delivery (email to self / Slack webhook) | S | 4 | RM-08, RM-15 | DONE (#82) |
@@ -3643,15 +3643,15 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-23 | Copy-path affordance | XS | 5 | — | DONE (#89) |
 | RM-24 | `--entity` search filter (NEEDS USER CONFIRMATION) | S | 5 | RM-09 | DONE (#91) |
 | RM-25 | H-1 move identity | S | 6 | RM-19 | DONE (#90) |
-| RM-26 | H-2 + H-4 owed watcher work | S | 6 | — | TODO |
+| RM-26 | H-2 + H-4 owed watcher work | S | 6 | — | DONE (#95) |
 | RM-27 | H-3 graph-lock residuals | S | 6 | — | DONE (#93) |
-| RM-28 | H-5 log-privacy guard | S | 6 | — | TODO |
+| RM-28 | H-5 log-privacy guard | S | 6 | — | DONE (#94) |
 | RM-29 | H-6 class-only error reports | XS | 6 | — | DONE (#92) |
 | RM-30 | Calendar events | M | 7 | RM-06, RM-07 | DONE (#96) |
 | RM-31 | Code-host activity | M | 7 | RM-06, RM-07 | TODO |
 | RM-32 | OCR and image-only PDFs | M | 7 | RM-07, RM-08 | TODO |
 | RM-33 | Images and the drop-folder runner | M | 7 | RM-06, RM-32 | TODO |
-| RM-34 | Jira issues | S | 7 | RM-07 | TODO |
+| RM-34 | Jira issues | S | 7 | RM-07 | DONE (#97) |
 | RM-35 | Notion export | M | 7 | RM-06, RM-07 | TODO |
 | RM-36 | Apple Notes | M | 7 | RM-06, RM-07 | TODO |
 | RM-37 | External vault sync with deletions | M | 7 | RM-07 | TODO |

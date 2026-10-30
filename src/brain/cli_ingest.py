@@ -60,7 +60,7 @@ from .queries import (
     iter_chunks_missing_embedding,
 )
 from .sensitivity import DEFAULT_SENSITIVITY, normalize_level
-from .source_kinds import InvalidSourceKind, validate_source_kind
+from .source_kinds import InvalidSourceKind, source_kinds_hint, validate_source_kind
 from .vault.derived_links import real_gws_runner
 
 if TYPE_CHECKING:
@@ -381,7 +381,7 @@ def ingest_dir(
 
 def ingest_stdin(
     source: str = typer.Option(
-        ..., "--source", help="Source kind: gmail|krisp|manual|slack."
+        ..., "--source", help=f"Source kind: {source_kinds_hint()}."
     ),
     external_id: str = typer.Option(
         ..., "--external-id", help="Stable id from the upstream system."

@@ -35,11 +35,11 @@ git tag scheme:
   removes every link and address (obfuscated forms included) and drops any line with a dial-in
   number, PIN, passcode or meeting ID. A title keeps the words before the secret, so it stays
   findable by name. A date is told apart from a phone number by being a whole, valid date
-  ("2026.10.06" stays; "01.70.37.22.46" is a phone number and goes). The rules prefer privacy to recall, so an ordinary line that looks like a dial-in is
-  dropped too. Declined, untitled, cancelled, working-location and
-  out-of-office entries are skipped, and private events (or Google's legacy `confidential`
-  visibility) are stored as `confidential`. The `gws` read gets a 120-second timeout and a 16 MiB
-  output cap, and errors are printed by class only.
+  ("2026.10.06" stays; "01.70.37.22.46" is a phone number and goes). The rules prefer privacy to
+  recall, so an ordinary line that looks like a dial-in is dropped too. Declined, untitled,
+  cancelled, working-location and out-of-office entries are skipped, and private events (or
+  Google's legacy `confidential` visibility) are stored as `confidential`. The `gws` read gets a
+  120-second timeout and a 16 MiB output cap, and errors are printed by class only.
 - A series' occurrence dates live in its metadata, so a re-run that only finds new occurrences
   updates the metadata without re-chunking or re-embedding. Each run is merged into what is
   stored (the latest ten start times known, and the latest date), so backfilling an earlier window
@@ -56,6 +56,76 @@ git tag scheme:
   empty extraction and a policy watermark, so the next `brain graphrag build --backfill` counts it
   as skipped, and its people aspect still runs. Adding a type and bumping
   `CONCEPT_SKIP_POLICY_VERSION` strips that type's earlier concept mentions on the next backfill.
+
+### Added — Jira issues as a source, through an agent recipe (RM-34)
+
+- **A new source kind, `jira`.** `brain ingest-stdin --source jira` is accepted, and the facet
+  panel, the source filter and `[[jira:<host>/<KEY>]]` links pick it up. In `brain ui` a Jira row
+  gets its own glyph. `_ingested/jira/` has no month headers in the tree, which is intended.
+- **The recipe lives in the `ingest-brain` skill, not in code.** The Atlassian MCP connector
+  fetches the issues, and the skill pipes each one into `brain ingest-stdin --source jira
+  --content-type jira_issue --sensitivity confidential`. There is no Jira API client. The scope is
+  in the recipe: by default the JQL is
+  `(assignee = currentUser() OR reporter = currentUser()) AND updated >= -30d`, with the
+  parentheses. The agent refuses a JQL with no time bound, and project-wide pulls are not part of
+  the recipe. Issues ingest as `confidential`, because work-tracker content is the employer's.
+  Status and assignee go in metadata, never in the body. Other people's comments go in only on
+  request.
+- **`brain ingest-stdin --help` lists the accepted kinds from the one definition.** It had listed
+  four kinds as a literal, so it would have called `jira` invalid.
+
+### Fixed — the vault watcher no longer loses a delete across a shutdown or a lost connection (RM-26)
+
+- A file deleted (or renamed away) just as the watcher shut down, or while it
+  could not reach the database, kept its row until `brain vault sync --prune`:
+  the startup sync never prunes. The watcher now writes each such delete to
+  `$BRAIN_HOME/state/watcher-owed.jsonl` and applies it at its next start,
+  after the startup sync. A path whose file is back on disk is never deleted.
+- A delete whose database write landed just before the connection dropped no
+  longer leaves the document's graph vertex behind (it used to need
+  `brain graphrag remove`). Graph removes the watcher could not apply at
+  shutdown are written to the same journal and applied at the next start.
+- The journal is mode 0600 and holds vault-relative paths and document ids,
+  never content. A line it cannot read is skipped with a warning; the rest is
+  applied. Only `brain vault sync --watch` keeps it.
+
+### Added — the local reranker runtime: a guide, a doctor line and an opt-in launchd job (RM-14b)
+
+- **`docs/guides/local-reranker.md`** installs `llama-server` (llama.cpp 0.7.0, from Homebrew)
+  and the `bge-reranker-v2-m3` Q8_0 GGUF (635,676,416 bytes, with its sha256). It measured the
+  server's resident memory at about 804 MiB, and it covers port 8081 already being in use.
+- **`brain-install-launchd --with-reranker`** installs `com.brain.reranker`, a `KeepAlive`
+  LaunchAgent that runs `llama-server --embedding --pooling rank --reranking` on
+  `127.0.0.1`. Its arguments are fixed in the template; only the model path
+  (`BRAIN_RERANK_GGUF`) and the port vary. The port is `BRAIN_RERANK_URL`'s, so the job listens
+  where searches look: 8081 by default. The host is always `127.0.0.1`. The flag fails before
+  touching anything when the model path is relative or names no file, or when
+  `BRAIN_RERANK_URL` is not `http://127.0.0.1:PORT` / `http://localhost:PORT` with PORT in
+  1024–65535. On `brain-up`'s flagless run, a value that has since gone bad leaves the installed
+  job as it was. That run prints one WARNING naming the variable and installs the other jobs. The agent stays installed: the flagless install `brain-up` runs re-renders it and
+  never removes it, and `brain-uninstall-launchd` removes it.
+- **`brain doctor`** gains a `reranker` line. With `BRAIN_RERANKER=llamacpp` it calls
+  `GET {BRAIN_RERANK_URL}/health` with a 2 s timeout, and it reports `not running` or
+  `not ready` as a WARN, never a FAIL. The `daemons` line checks the reranker agent only when
+  it is installed.
+- Nothing changes until you opt in: `BRAIN_RERANKER` still defaults to `none`, and `brain
+  setup` does not offer the reranker.
+
+### Changed — the log-privacy guard covers its three recorded blind spots (RM-28)
+
+- The test guard that keeps exception text out of `src/brain`'s log lines now
+  also catches a value derived from an exception and logged after its `except`
+  block, an exception stored on an attribute or appended to an attribute's
+  container, and a nested `def` or `lambda` (its defaults included) that logs
+  the handler's exception. It follows every binding form (`for`, `with … as`,
+  comprehensions, `match` captures, `except*`), sees `traceback.format_exc()`
+  and `sys.exc_info()`, and fails when an allowlist entry goes stale. Its rules
+  moved to `tests/log_privacy_rules.py`, its allowlists to
+  `tests/log_privacy_allowlists.py`. It found no new leak in `src/brain`; no
+  runtime behaviour changes.
+- What it still cannot see is listed in its module docstring; backlog BL-28
+  tracks the two big classes, exception text interpolated into a new
+  exception's message and exception text echoed to stderr.
 
 ### Fixed — the graph build survives a concurrent delete; a reconcile re-checks the participants (RM-27)
 

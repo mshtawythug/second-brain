@@ -406,9 +406,10 @@ These knobs live in the feature settings leaf `brain/settings/rerank.py`.
 | `BRAIN_RERANKER` | `none` | `none`, `llamacpp` (a local `llama-server` from llama.cpp, serving `bge-reranker-v2-m3`), or `voyage` (hosted). |
 | `BRAIN_RERANK_DEPTH` | `20` | How many top results are rescored, 2 to 50. The rest keep their order after them. |
 | `BRAIN_RERANK_TIMEOUT_S` | `5.0` | Per-call timeout, 0.1 to 120 seconds. On a timeout the results stay in hybrid order. |
-| `BRAIN_RERANK_URL` | `http://127.0.0.1:8081` | Where `llama-server` listens. **Loopback only** (`127.0.0.1`, `::1`, `localhost`): the passages are your documents' text, so any other host is a `ConfigError`. |
+| `BRAIN_RERANK_URL` | `http://127.0.0.1:8081` | Where `llama-server` listens. **Loopback only** (`127.0.0.1`, `::1`, `localhost`): the passages are your documents' text, so any other host is a `ConfigError`. The opt-in `com.brain.reranker` job binds `127.0.0.1` at this URL's port; for it the URL must be `http://127.0.0.1:PORT` or `http://localhost:PORT`, PORT in 1024–65535 (read by `brain-install-launchd`). |
 | `BRAIN_RERANK_MODEL` | `bge-reranker-v2-m3` (llamacpp), `rerank-3` (voyage) | The model name sent with each request. |
 | `BRAIN_RERANK_MAX_CHARS` | `1500` | Each passage is the title, a newline and the snippet, cut to this many characters (100 to 20,000). |
+| `BRAIN_RERANK_GGUF` | `$BRAIN_HOME/models/bge-reranker-v2-m3-Q8_0.gguf` | The model file the opt-in `com.brain.reranker` LaunchAgent serves; an absolute path (or `~/…`). Read by `brain-install-launchd` (from the shell, else `$BRAIN_HOME/.env`), not by searches; re-run it after a change. |
 
 `voyage` uses `VOYAGE_API_KEY`, the same key the Voyage embedder reads, and is a
 `ConfigError` without it. It never receives a **confidential** document: those
@@ -416,8 +417,12 @@ rows are not sent and keep their places in the list. The local backend sees them
 because nothing leaves the machine.
 
 `llama-server` must be started with `--embedding --pooling rank --reranking`
-(the request is `POST {BRAIN_RERANK_URL}/v1/rerank`). Installing and running it
-is a separate step (roadmap ticket RM-14b).
+(the request is `POST {BRAIN_RERANK_URL}/v1/rerank`). Installing it, the tested
+version and model, its measured memory, and the opt-in launchd job
+(`brain-install-launchd --with-reranker`) are in
+[docs/guides/local-reranker.md](guides/local-reranker.md). `brain doctor`'s
+`reranker` line probes `{BRAIN_RERANK_URL}/health` while the backend is
+`llamacpp`.
 
 A bad value in any of these is a `ConfigError` the first time a search runs,
 even while `BRAIN_RERANKER=none`, as with every other knob. `brain eval` records

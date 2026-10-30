@@ -16,6 +16,7 @@ import { pagerModel } from "/static/js/pager.js";
    not sufficient: a source-specific chip style would need the same entry. */
 const SOURCE_ICONS = {
   krisp: "🎙️", slack: "💬", gmail: "📧", calendar: "📅", manual: "✍️", vault: "🌱",
+  jira: "🎫",
 };
 
 /* `vault` is the fallback, matching `sourceIconFor`. It is a real glyph rather
