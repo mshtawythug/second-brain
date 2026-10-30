@@ -144,6 +144,13 @@ check dropped; the graph-off check dropped; MCP mapping to `INTERNAL_ERROR`.
   malformed YAML, missing key) plus one CLI and one MCP test for the malformed file. Each carries
   a sentinel name the message must not contain. RED on a `git archive` copy of `6e2c014`: 6 failed,
   each with the escaped loader error. GREEN: the five RM-24 test files pass 55.
+- Round 5 (aud-91): every class in `_ALIAS_LOAD_FAILURES` is now tested. `TypeError` (a rule that
+  is a bare string) and `AttributeError` (a top-level YAML list) are two more `BAD_ALIAS_FILES`
+  entries, each carrying the sentinel. `ValueError` is covered by
+  `test_a_non_utf8_alias_file_is_a_filter_error` (`UnicodeDecodeError`), and `OSError` by
+  `test_an_alias_path_that_is_a_directory_is_a_filter_error` (`IsADirectoryError`). Mutation
+  proofs ran in `git archive` copies with `PYTHONPATH` pinned to the copy. Dropping each of the
+  four classes from the tuple fails its test: 4 of 4 killed.
 
 ## Found, not fixed
 

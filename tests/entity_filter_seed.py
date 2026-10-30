@@ -35,6 +35,10 @@ BAD_ALIAS_FILES = {
     ),
     "malformed-yaml": f"rules:\n  - from: {{type: project, key: {BAD_ALIAS_SENTINEL}\n",
     "missing-key": f"rules:\n  - from: {{type: project, key: {BAD_ALIAS_SENTINEL}}}\n",
+    # A rule that is a bare string: indexing it raises TypeError.
+    "rule-not-a-mapping": f"rules: [{BAD_ALIAS_SENTINEL}]\n",
+    # A top-level list has no ``.get``: AttributeError.
+    "top-level-list": f"- {BAD_ALIAS_SENTINEL}\n",
 }
 
 

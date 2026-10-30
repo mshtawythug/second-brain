@@ -121,8 +121,7 @@ Query-shape tips:
   `brain search "scaling teams" --tag interview --limit 8 --json`
 - "Action items from Q1 meetings" → use `brain-todo` instead.
 - "Write in my voice about engineering culture" →
-  `brain search "engineering culture" --kind note --limit 5 --json`
-  (vault notes carry tone better than transcripts).
+  `brain search "engineering culture" --kind note --limit 5 --json` (vault notes carry tone better than transcripts).
 
 **People shortcut.** Before searching, if the user names a person you don't
 know yet, run `brain people "<name>"` first to confirm the canonical display

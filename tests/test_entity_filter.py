@@ -304,6 +304,18 @@ def test_the_alias_file_is_read(test_db: psycopg.Connection[Any], tmp_path: Path
     assert search_kwargs(test_db, cfg, "Harbor", None)["entity_ids"] == [target]
 
 
+def _alias_file_error(conn: psycopg.Connection[Any], aliases: Path) -> str:
+    """The message of the ``EntityFilterError`` an ``--entity`` search raises for ``aliases``."""
+    seed_entity(conn, name="Quillmoor", canonical_key="quillmoor")
+    cfg = _cfg(graph_enabled=True, graph_aliases_path=aliases)
+
+    with pytest.raises(EntityFilterError) as exc_info:
+        search_kwargs(conn, cfg, "Quillmoor", None)
+
+    assert str(exc_info.value).startswith(ALIAS_FILE_MESSAGE)
+    return str(exc_info.value)
+
+
 @pytest.mark.parametrize("body", BAD_ALIAS_FILES.values(), ids=BAD_ALIAS_FILES.keys())
 def test_a_bad_alias_file_is_a_filter_error_that_quotes_nothing(
     test_db: psycopg.Connection[Any], tmp_path: Path, body: str
@@ -311,13 +323,27 @@ def test_a_bad_alias_file_is_a_filter_error_that_quotes_nothing(
     # chk-91: search never read this file before RM-24, and the loader's errors
     # escaped as a traceback. A YAML error quotes the bad line, and an invalid
     # type is printed unredacted, so the message names the failure's class only.
-    seed_entity(test_db, name="Quillmoor", canonical_key="quillmoor")
     aliases = tmp_path / "graph_aliases.yml"
     aliases.write_text(body, encoding="utf-8")
-    cfg = _cfg(graph_enabled=True, graph_aliases_path=aliases)
 
-    with pytest.raises(EntityFilterError) as exc_info:
-        search_kwargs(test_db, cfg, "Quillmoor", None)
+    assert BAD_ALIAS_SENTINEL not in _alias_file_error(test_db, aliases)
 
-    assert str(exc_info.value).startswith(ALIAS_FILE_MESSAGE)
-    assert BAD_ALIAS_SENTINEL not in str(exc_info.value)
+
+def test_a_non_utf8_alias_file_is_a_filter_error(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    # aud-91: pins ValueError in the caught set (UnicodeDecodeError is a ValueError).
+    aliases = tmp_path / "graph_aliases.yml"
+    aliases.write_bytes(b"\xff\xfe\xfa rules: []\n")
+
+    assert "UnicodeDecodeError" in _alias_file_error(test_db, aliases)
+
+
+def test_an_alias_path_that_is_a_directory_is_a_filter_error(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    # aud-91: pins OSError in the caught set (reading a directory is IsADirectoryError).
+    aliases = tmp_path / "graph_aliases.yml"
+    aliases.mkdir()
+
+    assert "IsADirectoryError" in _alias_file_error(test_db, aliases)
