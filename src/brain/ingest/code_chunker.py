@@ -46,6 +46,11 @@ _MAX_PATH_TOKENS = CODE_CHUNK_BUDGET_TOKENS // 4
 _MAX_SYMBOL_CHARS = 80
 _ELLIPSIS = "…"
 
+# The character splitter's first probe: about four characters per token, so the
+# answer is usually within one doubling of it. Galloping from here keeps every
+# probe within twice the chunk it finds, rather than spanning the whole line.
+_GALLOP_START_CHARS = 4 * CODE_CHUNK_BUDGET_TOKENS
+
 TokenCounter = Callable[[str], int]
 
 
@@ -153,7 +158,10 @@ _ALIASES: dict[str, str] = {
 }
 
 _PYTHON_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-_PYTHON_ATTACHED = ("#",)
+# "@" too: a decorator whose expression starts on a later line (``@(`` /
+# ``dec`` / ``)``) reports that later line, so ``ast`` alone would leave the
+# ``@(`` line in the chunk above.
+_PYTHON_ATTACHED = ("#", "@")
 # What a failed ``ast.parse`` raises on 3.11+: syntax errors (NUL bytes too),
 # ValueError on older interpreters for NUL, and the two nesting-depth failures.
 _PARSE_FAILURES = (SyntaxError, ValueError, RecursionError, MemoryError)
@@ -323,6 +331,8 @@ def _header_path(path: str | None, count_tokens: TokenCounter) -> str:
         shown = _ELLIPSIS + shown[-(_MAX_PATH_CHARS - 1) :]
     while count_tokens(shown) > _MAX_PATH_TOKENS:
         rest = shown.removeprefix(_ELLIPSIS)
+        if not rest:  # only a counter that prices "…" alone over the cap gets here
+            break
         shown = _ELLIPSIS + rest[max(1, len(rest) // 4) :]
     return shown
 
@@ -411,13 +421,38 @@ class _Writer:
         head = self._head(number, number, symbol)
         line = self._lines[number - 1]
         i = 0
+        hint = _GALLOP_START_CHARS
         while i < len(line):
-            low, high = 1, len(line) - i
-            while low < high:
-                mid = (low + high + 1) // 2
-                if self._count(head + line[i : i + mid]) <= CODE_CHUNK_BUDGET_TOKENS:
-                    low = mid
-                else:
-                    high = mid - 1
-            self.chunks.append(head + line[i : i + low])
-            i += low
+            take = self._longest_fit(head, line, i, hint)
+            self.chunks.append(head + line[i : i + take])
+            i += take
+            hint = take  # the next piece of the same line is usually the same size
+
+    def _longest_fit(self, head: str, line: str, i: int, hint: int) -> int:
+        """The longest ``line[i:i + n]`` that fits after ``head``; at least 1.
+
+        Gallops up from ``hint`` and binary-searches the last bracket, so no
+        probe is longer than twice the answer (or the hint): a line of length L
+        costs O(L log L) characters counted, not O(L^2) as a search bounded by
+        the whole remaining line did. Slices only what it counts.
+        """
+        remaining = len(line) - i
+
+        def fits(size: int) -> bool:
+            return self._count(head + line[i : i + size]) <= CODE_CHUNK_BUDGET_TOKENS
+
+        low = 1  # taken even if it does not fit, so the caller always advances
+        probe = min(remaining, hint)
+        while fits(probe):
+            low = probe
+            if probe == remaining:
+                return probe
+            probe = min(remaining, probe * 2)
+        high = probe - 1  # ``probe`` does not fit
+        while low < high:
+            mid = (low + high + 1) // 2
+            if fits(mid):
+                low = mid
+            else:
+                high = mid - 1
+        return low

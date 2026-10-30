@@ -169,6 +169,14 @@ def test_python_statement_directly_after_a_definition_is_kept() -> None:
     assert_every_line_once(chunks, source)
 
 
+def test_python_multiline_decorator_opening_line_stays_with_the_definition() -> None:
+    # ``ast`` reports the decorator at ``dec`` (line 3), not at ``@(`` (line 2).
+    source = "x = 1\n@(\n    dec\n)\ndef f():\n    pass\n"
+    chunks = chunk_code(source, count_tokens=char_count, path="d.py")
+    assert spans(chunks) == [(1, 1, MODULE_SYMBOL), (2, 6, "f")]
+    assert_every_line_once(chunks, source)
+
+
 def test_python_class_that_fits_is_one_chunk() -> None:
     source = "class Tiny:\n    def a(self):\n        return 1\n"
     chunks = chunk_code(source, count_tokens=char_count, path="t.py")
@@ -553,6 +561,12 @@ def test_path_of_expensive_characters_is_shortened_to_its_token_cap() -> None:
     assert cl100k_count(shown) <= CODE_CHUNK_BUDGET_TOKENS // 4
 
 
+def test_path_shortening_stops_at_the_ellipsis_for_an_absurd_counter() -> None:
+    # A counter that prices even "…" over the path cap must not loop forever.
+    chunks = chunk_code("x\n", count_tokens=lambda text: 1000 * len(text), path="abc.py")
+    assert [c.content for c in chunks] == ["…:1-1 <module>\nx"]
+
+
 def test_long_symbol_is_capped() -> None:
     name = "f" + "x" * 300
     chunks = chunk_code(f"def {name}():\n    pass\n", count_tokens=char_count, path="a.py")
@@ -591,3 +605,28 @@ def test_every_chunk_is_within_budget_on_cl100k(source: str) -> None:
         assert_every_line_once(chunks, source)
     assert max(cl100k_count(c.content) for c in chunks) <= CODE_CHUNK_BUDGET_TOKENS
     assert_indexes(chunks)
+
+
+# --- the character splitter's cost --------------------------------------------
+
+
+def test_character_split_cost_is_near_linear_in_the_line() -> None:
+    """A 1 MB line is counted a bounded number of times over, not quadratically.
+
+    The counter (one token per 8 characters) lets the first probe fit, so the
+    galloping search doubles before it bisects. A search bounded by the whole
+    remaining line counts about a hundred times the line here.
+    """
+    line = "    s = '" + "q" * 1_000_000 + "'"
+    source = f"def f():\n{line}\n"
+    counted = [0]
+
+    def counting(text: str) -> int:
+        counted[0] += len(text)
+        return len(text) // 8
+
+    chunks = chunk_code(source, count_tokens=counting, path="f.py")
+    pieces = [c for c, sp in zip(chunks, spans(chunks), strict=True) if sp[:2] == (2, 2)]
+    assert "".join(c.content.split("\n", 1)[1] for c in pieces) == line
+    assert all(len(c.content) // 8 <= CODE_CHUNK_BUDGET_TOKENS for c in chunks)
+    assert counted[0] <= 40 * len(source)

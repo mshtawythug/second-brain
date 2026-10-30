@@ -24,8 +24,19 @@ it), so this ticket changes no stored chunk. No migration, no knob, no CLI or MC
 | `CHANGELOG.md`, spec Appendix B row → DONE, backlog row 7.3 → SHIPPED, CLAUDE.md ceiling row | Docs. |
 | memory `extractors.md`, `types.md` | "verify merged". |
 
-`vault/sync.py` (vault notes, authored markdown) and `graph_rag/extract.py` (concept extraction
-windows) keep calling `chunk_text` directly; neither ever sees `code`.
+`vault/sync.py` and `graph_rag/extract.py` keep calling `chunk_text` directly.
+
+- `graph_rag/extract.py` uses it only for concept-extraction windows, and its chunks are never
+  stored.
+- **`vault/sync.py` does see `code`.** *(Corrected in review round 1, F1. This sentence said
+  "neither ever sees `code`", which was false.)* Sync re-syncs `_ingested/` mirrors, which carry
+  `content_type` in their frontmatter. On a body change it runs `_update_document` →
+  `_embed_and_insert_chunks` → `chunk_text`, so once RM-43 produces `code`, an edited code mirror
+  is re-chunked as prose.
+- RM-42 leaves `sync.py` alone, on the coordinator's ruling: the file is over the ceiling and
+  nothing produces `code` yet.
+- `tests/test_vault_sync_code_mirror.py` pins today's behaviour, so the change is visible.
+- See "Carry-forward to RM-43" below and backlog BL-35.
 
 ## Signature — where the path comes from (decision D-A)
 
@@ -91,11 +102,15 @@ changes a document to or from `code` today.
   decorator lines directly above it goes with it. The symbol is the regex's name group. Lines
   before the first declaration form `<module>`. A language with no row, or no hint at all, is one
   `<module>` segment.
-- **Packing an oversize segment:** split it into blank-line blocks, packed greedily to the budget.
-  A block still over budget is packed line by line, and a single line over budget is split by
-  characters. Each piece gets its own `path:start-end symbol` header. Packing estimates with the
-  per-line counts, then checks every emitted chunk with exact `count_tokens`. A piece that fails
-  the check is halved by lines until it passes, so the budget is a guarantee, not an estimate.
+- **Packing an oversize segment:** split the segment into blank-line blocks and pack them greedily.
+  Each pack step renders the candidate chunk, header included, and counts it with the exact
+  `count_tokens`. A unit joins the current chunk only if the result fits, so every emitted chunk is
+  within the budget by construction, with no estimate and no backstop. A block too big alone is
+  packed line by line. A line too big alone is split by characters: a galloping search finds the
+  longest prefix that fits, starting from the previous piece's length, and at least one character
+  is always taken. Each piece gets its own `path:start-end symbol` header. *(Rewritten in review
+  round 1, F4. The bullet described estimating from per-line counts and then halving, which the
+  code never did.)*
 - Separate definitions are **not** merged into one chunk, so a hit is one definition.
 
 ## Acceptance tests
@@ -134,6 +149,18 @@ packer runs in `git archive` copies with `PYTHONPATH` pinned, in batches of 5 or
   line. Its length is capped at 200 characters and its cost at a quarter of the budget, shortening
   from the left with `…`. The symbol is capped at 80 characters.
 
+## Carry-forward to RM-43
+
+- **`vault/sync.py` must use the chunker choice.** RM-43 must route `vault/sync.py`
+  `_embed_and_insert_chunks` through `chunk_dispatch.chunk_for(content_type, content, metadata,
+  ...)`, or exclude code documents from mirror re-chunking. Record it as a ceiling hop: `sync.py`
+  is over 800. Then flip the last assertion of `tests/test_vault_sync_code_mirror.py`. This is
+  backlog BL-35.
+- **Set the metadata hints.** Set `metadata["path"]` (repo-relative) and, where the extension is
+  ambiguous, `metadata["language"]`. `chunk_for` reads only those two keys.
+- **Residual from D-A:** an `update_document` that changes `content_type` and content in one call
+  chunks by the old type.
+
 ## Verification record
 
 - Coverage of `code_chunker.py` and `chunk_dispatch.py` is 100% line and branch, from the two pure
@@ -148,3 +175,20 @@ packer runs in `git archive` copies with `PYTHONPATH` pinned, in batches of 5 or
     attached prefix.
   - M3 needed a statement directly after a `def`, and a "no line lost or repeated" property on the
     fixtures.
+- **Review round 1 (rev-109):**
+  - **F2:** the character splitter gallops from the previous piece's length instead of
+    binary-searching the whole remaining line. It also slices only what it counts. A 1 MB single
+    line on cl100k now takes 0.5–2.2 s, depending on how well the tokenizer compresses it (the
+    reviewer measured 12 s). A counter-based test bounds the characters counted at 40× the
+    source.
+  - **F3:** `"@"` was added to the attached prefixes, so the `@(` line of a multi-line decorator
+    stays with its definition.
+  - **F5:** `_header_path` stops at a bare `…`.
+  - **Mutants:**
+    - G1 (search bounded by the whole line), G2 (no doubling), G5 (slicing from the line start) and
+      F3 are killed. F5 is killed by timeout.
+    - G3 (the bracket keeps the failing probe) is **equivalent**: the binary search accepts only
+      sizes that pass `fits`, so the extra probe never changes the answer.
+    - G4 (the hint is not carried) **survives as a performance-only heuristic**: it changes how much
+      is counted, never the chunks. The cost bound targets the quadratic regression, which G1 and
+      G2 represent.
