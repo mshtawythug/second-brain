@@ -13,7 +13,8 @@ rule against the inbox root and ``lstat``s the name, so a symlink (in or out of 
 inbox), a directory, a FIFO or an iCloud-evicted file is refused. The job re-runs both
 on the worker thread, and :func:`brain.drop_folder.run_one` opens with ``O_NOFOLLOW``
 relative to the folder's fd, so a file swapped after the listing or after the submit
-moves nothing (RM-40 AC2).
+moves nothing (RM-40 AC2). ``lstat`` comes before the resolve, so a symlink loop is a
+4xx and never a ``RuntimeError`` (#110 rev F1).
 
 Reads only: nothing here moves or writes a file. The move is the job's
 (``ingest_service.inbox_runner``), in the one module permitted to mutate.
@@ -115,21 +116,33 @@ def resolve_inbox_file(
 ) -> int:
     """The size of ``<inbox>/<name>``, once it is shown to be a regular file in it.
 
-    ``name`` has passed :func:`check_name`. Resolve-then-compare (``vault/paths.py``):
-    both sides resolved, the candidate's parent must be the root itself; then ``lstat``,
-    which never follows a symlink.
+    ``name`` has passed :func:`check_name`. ``lstat`` first, which never follows a
+    symlink, so a link (a loop among them: ``Path.resolve`` raises ``RuntimeError`` on
+    one on 3.11) is refused before anything is resolved (#110 rev F1). Then
+    resolve-then-compare (``vault/paths.py``): both sides resolved, the candidate's
+    parent must be the root itself, which catches a link swapped in between the two.
+    Any other ``OSError`` (an inbox this process may not search: TCC's ``EPERM``) is
+    409 ``inbox_unreadable``, never a 500.
     """
-    root = folder.path.resolve()
+    try:
+        root = folder.path.resolve(strict=True)
+    except (RuntimeError, OSError):  # removed, or swapped for a link loop, since loaded
+        raise _unreadable() from None
     candidate = root / name
-    if candidate.resolve().parent != root:
-        raise UiBadRequest("the name points outside the inbox", code="outside_inbox")
     try:
         st = lstat(candidate)
     except FileNotFoundError:
         raise UiNotFound("no such file in the inbox", code="inbox_file_unknown") from None
+    except OSError:
+        raise _unreadable() from None
     if not stat.S_ISREG(st.st_mode):
-        raise UiBadRequest("not a regular file (a link, folder or pipe)",
-                           code="not_a_regular_file")
+        raise _not_regular()
+    try:
+        parent = candidate.resolve().parent
+    except (RuntimeError, OSError):  # swapped for a link loop after the lstat
+        raise _not_regular() from None
+    if parent != root:
+        raise UiBadRequest("the name points outside the inbox", code="outside_inbox")
     if getattr(st, "st_flags", 0) & SF_DATALESS:
         raise UiConflict("the file is in iCloud, not on this disk; download it first",
                          code="file_not_on_disk")
@@ -137,6 +150,14 @@ def resolve_inbox_file(
     if st.st_size > cap:
         raise UiPayloadTooLarge(f"the file is over {cap} bytes", code="inbox_file_too_large")
     return int(st.st_size)
+
+
+def _not_regular() -> UiBadRequest:
+    return UiBadRequest("not a regular file (a link, folder or pipe)", code="not_a_regular_file")
+
+
+def _unreadable() -> UiConflict:
+    return UiConflict("the inbox folder could not be read", code="inbox_unreadable")
 
 
 def list_inbox(folder: DropFolder, *, now: float, lstat: Lstat = os.lstat) -> InboxListing:

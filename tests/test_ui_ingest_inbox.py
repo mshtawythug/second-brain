@@ -320,8 +320,62 @@ def test_a_symlink_out_of_the_inbox_is_refused(
 
     response = _post(client, {"name": "link.md"})
 
-    assert (response.status_code, response.json()["error"]["code"]) == (400, "outside_inbox")
+    assert (response.status_code, response.json()["error"]["code"]) == (
+        400, "not_a_regular_file")
     assert outside.read_bytes() == BODY and registry.list_recent() == ()
+
+
+@pytest.mark.parametrize("cycle", ["self", "pair"])
+def test_a_symlink_loop_is_a_4xx_not_a_500(
+    client: TestClient, registry: JobRegistry, inbox: Path, cycle: str
+) -> None:
+    """#110 rev F1: the POST takes names the listing never showed; a loop is one."""
+    if cycle == "self":
+        (inbox / "loop.md").symlink_to(inbox / "loop.md")
+    else:
+        (inbox / "loop.md").symlink_to(inbox / "b.md")
+        (inbox / "b.md").symlink_to(inbox / "loop.md")
+
+    response = _post(client, {"name": "loop.md"})
+
+    assert (response.status_code, response.json()["error"]["code"]) == (
+        400, "not_a_regular_file")
+    assert registry.list_recent() == ()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any directory")
+def test_an_inbox_that_cannot_be_searched_refuses_the_submit_with_409(
+    client: TestClient, registry: JobRegistry, inbox: Path
+) -> None:
+    _drop(inbox, "x.md")
+    inbox.chmod(0o600)
+    try:
+        response = _post(client, {"name": "x.md"})
+    finally:
+        inbox.chmod(0o700)
+
+    assert (response.status_code, response.json()["error"]["code"]) == (
+        409, "inbox_unreadable")
+    assert registry.list_recent() == ()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any directory")
+def test_an_inbox_that_stops_being_searchable_after_the_submit_is_its_own_job_error(
+    client: TestClient, registry: JobRegistry, inbox: Path, test_db: psycopg.Connection[Any]
+) -> None:
+    _drop(inbox, "x.md")
+    response = _post(client, {"name": "x.md", "enrich": False})
+    assert response.status_code == 202
+    inbox.chmod(0o600)
+    try:
+        assert registry.run_next()
+    finally:
+        inbox.chmod(0o700)
+    snap = registry.get(response.json()["id"])
+
+    assert snap.error is not None and snap.error.code == "inbox_unreadable"
+    assert "may already have been saved" not in snap.error.message
+    assert _tree(inbox) == {"x.md": BODY} and _documents(test_db) == []
 
 
 def test_a_symlink_inside_the_inbox_is_refused(
@@ -388,7 +442,7 @@ def test_a_file_swapped_for_a_symlink_after_the_listing_is_refused(
     assert outside.read_bytes() == b"not the inbox's" and registry.list_recent() == ()
 
 
-@pytest.mark.parametrize("swap", ["symlink", "fifo", "directory", "gone"])
+@pytest.mark.parametrize("swap", ["symlink", "loop", "fifo", "directory", "gone"])
 def test_a_file_swapped_after_the_submit_is_refused_by_the_job(
     client: TestClient, registry: JobRegistry, inbox: Path, tmp_path: Path,
     test_db: psycopg.Connection[Any], swap: str,
@@ -400,6 +454,8 @@ def test_a_file_swapped_after_the_submit_is_refused_by_the_job(
     (inbox / "late.md").unlink()
     if swap == "symlink":
         (inbox / "late.md").symlink_to(outside)
+    elif swap == "loop":  # #110 rev F1: once a RuntimeError, i.e. internal_error
+        (inbox / "late.md").symlink_to(inbox / "late.md")
     elif swap == "fifo":
         os.mkfifo(inbox / "late.md")
     elif swap == "directory":
@@ -411,6 +467,7 @@ def test_a_file_swapped_after_the_submit_is_refused_by_the_job(
     assert snap.state == "failed" and snap.error is not None
     assert snap.error.code == "inbox_file_changed"
     assert "late" not in snap.error.message
+    assert "may already have been saved" not in snap.error.message
     assert outside.read_bytes() == b"not the inbox's"
     assert not (inbox / IMPORTED_DIR).exists()
     assert _documents(test_db) == []

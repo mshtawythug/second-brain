@@ -349,6 +349,10 @@ def inbox_runner(
         try:
             resolve_inbox_file(folder, spec.name)
         except UiError as exc:
+            if exc.code == "inbox_unreadable":
+                raise InboxRefused(
+                    "inbox_unreadable", "The inbox folder could not be read. Nothing was moved."
+                ) from None
             raise InboxRefused(
                 "inbox_file_changed",
                 f"The file changed since it was listed ({exc.code}). Nothing was moved.",

@@ -154,7 +154,7 @@ def test_a_missing_file_is_unknown(tmp_path: Path) -> None:
     assert exc.value.code == "inbox_file_unknown"
 
 
-def test_a_symlink_out_of_the_inbox_is_refused_by_resolve_then_compare(tmp_path: Path) -> None:
+def test_a_symlink_out_of_the_inbox_is_refused_by_lstat(tmp_path: Path) -> None:
     root = tmp_path / "inbox"
     root.mkdir()
     outside = _write(tmp_path / "secret.md")
@@ -162,7 +162,73 @@ def test_a_symlink_out_of_the_inbox_is_refused_by_resolve_then_compare(tmp_path:
 
     with pytest.raises(UiBadRequest) as exc:
         resolve_inbox_file(_folder(root), "link.md")
+    assert exc.value.code == "not_a_regular_file"
+
+
+def test_a_link_swapped_in_after_the_lstat_is_caught_by_resolve_then_compare(
+    tmp_path: Path,
+) -> None:
+    """The lstat saw a regular file; by the resolve the name is a link out of the inbox."""
+    root = tmp_path / "inbox"
+    root.mkdir()
+    real = _write(tmp_path / "regular.md")
+    (root / "link.md").symlink_to(tmp_path / "secret.md")
+
+    def lstat(path: Path) -> Any:
+        return os.lstat(real)  # what the name was a moment ago
+
+    with pytest.raises(UiBadRequest) as exc:
+        resolve_inbox_file(_folder(root), "link.md", lstat=lstat)
     assert exc.value.code == "outside_inbox"
+
+
+@pytest.mark.parametrize("cycle", ["self", "pair"])
+def test_a_symlink_loop_is_not_a_regular_file(tmp_path: Path, cycle: str) -> None:
+    """#110 rev F1: ``Path.resolve`` raises ``RuntimeError`` on a loop on 3.11."""
+    if cycle == "self":
+        (tmp_path / "loop.md").symlink_to(tmp_path / "loop.md")
+    else:
+        (tmp_path / "loop.md").symlink_to(tmp_path / "b.md")
+        (tmp_path / "b.md").symlink_to(tmp_path / "loop.md")
+
+    with pytest.raises(UiBadRequest) as exc:
+        resolve_inbox_file(_folder(tmp_path), "loop.md")
+    assert exc.value.code == "not_a_regular_file"
+
+
+def test_a_loop_swapped_in_after_the_lstat_is_not_a_regular_file(tmp_path: Path) -> None:
+    """The resolve's ``RuntimeError`` is a 4xx too, never an unhandled 500."""
+    real = _write(tmp_path / "real.txt")
+    (tmp_path / "loop.md").symlink_to(tmp_path / "loop.md")
+
+    def lstat(path: Path) -> Any:
+        return os.lstat(real)
+
+    with pytest.raises(UiBadRequest) as exc:
+        resolve_inbox_file(_folder(tmp_path), "loop.md", lstat=lstat)
+    assert exc.value.code == "not_a_regular_file"
+
+
+def test_an_lstat_it_may_not_make_is_inbox_unreadable(tmp_path: Path) -> None:
+    def lstat(path: Path) -> Any:
+        raise PermissionError(1, "Operation not permitted", str(path))
+
+    with pytest.raises(UiConflict) as exc:
+        resolve_inbox_file(_folder(tmp_path), "x.md", lstat=lstat)
+    assert exc.value.code == "inbox_unreadable"
+
+
+@pytest.mark.parametrize("gone", ["removed", "loop"])
+def test_an_inbox_root_that_no_longer_resolves_is_unreadable(tmp_path: Path, gone: str) -> None:
+    root = tmp_path / "inbox"  # built directly: _folder() would resolve the path
+    folder = DropFolder(path=root, mode="ingest", kind="manual", extensions=DOCS,
+                        sensitivity="confidential", auto=False)
+    if gone == "loop":
+        root.symlink_to(root)
+
+    with pytest.raises(UiConflict) as exc:
+        resolve_inbox_file(folder, "x.md")
+    assert exc.value.code == "inbox_unreadable"
 
 
 def test_a_symlink_to_a_file_inside_the_inbox_is_refused_by_lstat(tmp_path: Path) -> None:
