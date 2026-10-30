@@ -205,6 +205,61 @@ def test_build_weekly_report_key_people_dedup_top5(
     assert report.key_people[:3] == ["person-a", "person-b", "person-c"]
 
 
+def _calendar_doc(
+    conn: psycopg.Connection, *, title: str, participants: list[str], ingested_at: datetime
+) -> str:
+    """Insert a ``calendar_event`` doc whose attendees live in ``metadata.participants``."""
+    src = conn.execute(
+        "INSERT INTO sources (kind, external_id) VALUES ('calendar', %s) RETURNING id",
+        (str(uuid.uuid4()),),
+    ).fetchone()[0]
+    doc_id = conn.execute(
+        "INSERT INTO documents "
+        "(source_id, title, content, content_hash, content_type, metadata, ingested_at) "
+        "VALUES (%s, %s, %s, %s, 'calendar_event', %s, %s) RETURNING id::text",
+        (
+            src,
+            title,
+            title,
+            str(uuid.uuid4()),
+            json.dumps({"participants": participants}),
+            ingested_at,
+        ),
+    ).fetchone()[0]
+    return str(doc_id)
+
+
+def test_build_weekly_report_key_people_count_calendar_attendees(
+    test_db: psycopg.Connection,
+) -> None:
+    """RM-30 (aud-96): a meeting's attendees are key-people signal, by ruling.
+
+    ``_key_people`` reads ``people._doc_participant_keys``, whose ``calendar``
+    branch yields the attendees' addresses, as Gmail's branch already does.
+    """
+    meeting = _calendar_doc(
+        test_db,
+        title="Vendor intro",
+        participants=["avery@example.com", "owner@example.com"],
+        ingested_at=IN_WINDOW,
+    )
+    call = _krisp_doc(
+        test_db,
+        title="Sync",
+        content="c",
+        participant_keys=["person-a"],
+        ingested_at=IN_WINDOW,
+    )
+    for doc in (meeting, call):
+        _add_interaction(test_db, doc, IN_WINDOW)
+
+    report = build_weekly_report(
+        test_db, _cfg(), week=WEEK, generated_on=GENERATED_ON, no_graph=True
+    )
+
+    assert set(report.key_people) == {"avery@example.com", "owner@example.com", "person-a"}
+
+
 # ---------------------------------------------------------------------------
 # graph leg
 # ---------------------------------------------------------------------------

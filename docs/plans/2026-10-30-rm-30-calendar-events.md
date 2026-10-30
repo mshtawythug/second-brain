@@ -96,7 +96,11 @@ explained below.
    graph's people aspect resolves a calendar event's attendees (rev-96 R2; it was first recorded
    as backlog BL-29 and then done here). The attendees are recorded in the directory before the
    write, and a metadata-only refresh passes `graph_syncer`, so a participants-only change (an
-   address-only attendee) re-indexes the people too (rev-96 R5). `people.py` is over the ceiling: the growth is recorded
+   address-only attendee) re-indexes the people too (rev-96 R5). `review.weekly._key_people`
+   tallies through the same function, so the weekly review's "key people" (written to
+   `<vault>/reviews/<week>.md`) now count calendar attendees' addresses, as they already count
+   Gmail's. Kept by ruling (aud-96): meetings are key-people signal, and confidential documents are
+   gated upstream. `tests/test_review_weekly.py` pins it. `people.py` is over the ceiling: the growth is recorded
    inline at the branch, in its module docstring and in its CLAUDE.md row.
 7. **Scope** (exact message from the ticket). `--since` and `--until` are `YYYY-MM-DD`, `--since`
    is inclusive and `--until` exclusive, the same as `ingest-gmail`'s `before:`. The window must

@@ -45,7 +45,10 @@ git tag scheme:
   never moves a series backwards, and an occurrence that is no longer in the calendar stops
   dating the series. A series whose own record cannot be read keeps its stored text.
 - The graph's people aspect now resolves a calendar event's attendees
-  (`people._doc_participant_keys` reads its participants).
+  (`people._doc_participant_keys` reads its participants). Because `brain review weekly` tallies
+  its "key people" through the same function, a week's meetings now count their attendees'
+  addresses there too, as its Gmail threads already did. That is intended: a meeting is key-people
+  signal. Confidential documents stay out, as before.
 - `brain ui` shows a calendar glyph for the new kind, and groups `_ingested/calendar` by month.
 - **Concept-skip policy.** `graph_rag/extract_policy.py` names the content types whose concept
   aspect is never extracted (`calendar_event` for now). Such a document is reconciled with an
