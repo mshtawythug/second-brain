@@ -33,7 +33,11 @@ branch base) -> 853 (``3b16527``) -> 867 (``0473b5f``) -> 870 (``d99ca34``) ->
 to :mod:`brain.search_vector_leg` with the exact-scan fix -- a ranking change,
 eval-measured and re-baselined) -> 819 (``f7882ea``) -> 823 (``128f78f``:
 ``SearchDiagnostics.vector_ms``, the leg's own time, which the revisit trigger
-needs; still net below 826) -> the commit that added this hop (descriptive).
+needs; still net below 826) -> 823 (``c343f5c``, which added that hop; no net
+change) -> 823 (``737247c``, a docstring reworded) -> the RM-24 commit
+(descriptive): ``hybrid_search`` gains ``entity_ids`` / ``entity_tenant``, the
+``--entity`` filter, and forwards them to :func:`build_predicate` and nothing
+else (reasoned inline at the parameters).
 Two earlier changes, both reasoned inline at the
 point of growth: :attr:`SearchResult.recency_ts`, whose read was hoisted OUT of
 the recency-boost branch so a hit's displayed date and its ranking date cannot
@@ -398,6 +402,9 @@ def hybrid_search(
     updated_before: datetime | None = None,
     # — F6 sensitivity lens (opt-in; None = both tiers, the pre-026 behaviour) —
     sensitivity: str | None = None,
+    # Ceiling growth (RM-24, --entity): forwarded to build_predicate only.
+    entity_ids: list[str] | None = None,
+    entity_tenant: str | None = None,
 ) -> list[SearchResult]:
     """Combine FTS and vector ranks via Reciprocal Rank Fusion.
 
@@ -522,6 +529,8 @@ def hybrid_search(
         updated_after=updated_after,
         updated_before=updated_before,
         sensitivity=sensitivity,
+        entity_ids=entity_ids,
+        entity_tenant=entity_tenant,
     )
     where_params = list(predicate.where_params)
     prepare_flag = predicate.prepare_flag

@@ -1,0 +1,108 @@
+# RM-24 — `--entity` search filter
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use team-driven-development to implement this plan task-by-task.
+
+**Ticket:** RM-24 in `docs/specs/2026-10-23-roadmap-completion-design.md` (Wave 5; roadmap 3.3;
+backlog rank 17). The ticket is the spec; this plan is the task list.
+
+**U4.** The spec marks RM-24 NEEDS USER CONFIRMATION (§5 U4). It is **built on the coordinator's
+ruling adopting §5 U4's recommendation; no user answer yet.** The ticket text is not edited.
+
+## Goal
+
+`brain search "q" --entity "<name>"` (and MCP `brain_search(entity=...)`) returns only documents
+that mention that entity in the graph. Every leg, the total count and the facets see the filter.
+
+## How the filter reaches the surfaces
+
+The filter is two predicate keyword arguments, `entity_ids` and `entity_tenant`, built by
+`brain.entity_filter.search_kwargs` and splatted into two places on each named surface:
+
+1. `run_search(hybrid_search, …, **entity_kw)`. `run_search` passes unknown keyword arguments to
+   `hybrid_search` unchanged (RM-09), and `hybrid_search` forwards them to its one
+   `build_predicate` call. The FTS leg, the vector leg and the total count all read that one
+   predicate.
+2. The facet predicate. `hybrid_search` does not return its predicate, so `brain search --facets`
+   and MCP `brain_search(facets=true)` each rebuild it from the same keyword arguments. Both
+   rebuild sites get `**entity_kw` too.
+
+Surfaces: `brain search` (CLI) and MCP `brain_search`, which the ticket names. **Not** `brain
+explain`, `brain ui`'s `/api/search`, `brain recall`, `brain ask`, saved searches or MCP
+`brain_related`. They pass no entity arguments, so `build_predicate`'s default (`None`) leaves
+their SQL byte-identical.
+
+## Files
+
+| File | Change |
+|---|---|
+| `src/brain/entity_filter.py` (new leaf) | `resolve_entity_ids`, `graph_tables_present`, `search_kwargs`, `GRAPH_REQUIRED_MESSAGE`. Graph modules are imported inside functions, so a search without `--entity` does not import `brain.graph_rag`. |
+| `src/brain/errors.py` | `EntityFilterError(BrainError)`, with `EntityNotFound`, `EntityAmbiguous` and `EntityGraphUnavailable` beside `PersonNotFound` / `PersonAmbiguous`. |
+| `src/brain/search_predicate.py` | `entity_ids`, `entity_tenant`; the ticket's `d.id IN (SELECT gem.document_id …)` clause. `entity_ids` without `entity_tenant` raises `ValueError` (a caller bug). |
+| `src/brain/search.py` (over the ceiling) | `hybrid_search` gains the two keyword arguments and forwards them. Recorded inline and in the module docstring. |
+| `src/brain/cli_search.py` (budget ≤ 15) | `--entity`, `--entity-type`; one resolution call mapped to `typer.BadParameter` (exit 2); `**entity_kw` at the two sites. |
+| `src/brain/mcp_server.py` (over the ceiling) | `brain_search` gains `entity` and `entity_type`; the error maps to `INVALID_PARAMS`; `**entity_kw` at the two sites. Recorded inline and in the module docstring. |
+| `CLAUDE.md` | The `search.py` and `mcp_server.py` rows each gain a SHA-bound hop, in a later commit that does not touch either file (the `bc3b868` precedent). Neither row has a descriptive last hop to promote: `search.py` ends at `737247c`, `mcp_server.py` at `39fef78`, and no commit touched either file after them. |
+| Docs | `CHANGELOG.md`, `docs/cli-reference.md`, `docs/configuration.md`, the skill that documents search filters, the backlog row, Appendix B. |
+
+## Resolver
+
+`resolve_entity_ids(conn, *, tenant_id, name, entity_type, rules=()) -> list[str]`:
+
+1. Keys: `name` lowercased with its whitespace collapsed (the ticket's `lower(name)`, and the
+   alias rules' key form), and the strip-all concept key (`graph_rag.extract._canonical_key`).
+2. Alias redirects (`graph_rag.aliases` rules, loaded from `BRAIN_GRAPH_ALIASES_PATH`): a rule whose
+   source `(type, key)` matches the name, or matches an entity the name resolved to, is replaced by
+   its target entity. A merged source is left with no mentions and is later deleted, so without
+   this step a merged name resolves to nothing or to an empty entity.
+3. `canonical_key` match, tenant-scoped, narrowed by `entity_type` when given.
+4. Only when 2 and 3 found nothing: a case-insensitive `name` match.
+5. No entity → `EntityNotFound`, whose message points at `brain graphrag entities`. Entities of
+   more than one type and no `entity_type` → `EntityAmbiguous`, which lists the types.
+
+`search_kwargs(conn, cfg, name, entity_type)` returns `{}` when `name` is `None`. Otherwise it checks
+`cfg.graph_enabled` and that `graph_entities` and `graph_entity_mentions` exist (`to_regclass`). It
+raises `EntityGraphUnavailable` with the ticket's message if either check fails. Then it resolves the
+tenant (`graph_rag.tenancy.resolve_tenant`), loads the alias rules, and resolves. `entity_type`
+without `name` is an `EntityFilterError`, and so is an unknown type.
+
+## Tests (RED first)
+
+- `tests/test_entity_filter.py` (DB on 5434): key match; strip-all key match; name fallback; alias
+  redirect (source present with no mentions, and source deleted); tenant scoping; not found;
+  ambiguous; `entity_type` narrows away the ambiguity; graph off; tables absent; `entity_type`
+  without `name`; unknown type.
+- `tests/test_search_predicate_entity.py`: the clause and its params; no filter leaves `where_sql`
+  as `"TRUE"`; ids without a tenant raise `ValueError`.
+- `tests/test_search_entity_filter.py` (DB): `hybrid_search` returns only the entity's documents
+  on both legs (AC 1), and `total_documents` and `compute_facets` agree with the filtered set (AC 3).
+- `tests/test_cli_search_entity.py`: AC 1, AC 3 through `--meta --facets`, AC 2 (exit 2 for not
+  found and ambiguous), AC 4 (graph off → exit 2 with the message).
+- `tests/test_mcp_search_entity.py`: the same four ACs through `brain_search`, mapped to
+  `INVALID_PARAMS`.
+
+Mutation proofs, in `git archive` copies only: the filter dropped from the FTS leg, from the vector
+leg, and from the total or the facets; the tenant dropped; the alias step dropped; the ambiguity
+check dropped; the graph-off check dropped; MCP mapping to `INTERNAL_ERROR`.
+
+## Risks
+
+- An alias the resolver misses gives an empty result; `EntityNotFound`'s message names `brain
+  graphrag entities`.
+- Budgets: `search.py` about +6, `cli_search.py` ≤ 15, `mcp_server.py` "one parameter". Measured at
+  the end and stated in the PR.
+
+## Deviations
+
+1. **MCP takes `entity_type` as well as `entity`.** The ticket names only `entity`. Without
+   `entity_type`, an MCP caller has no way to settle an `EntityAmbiguous` answer, which tells it to
+   pick a type. One optional parameter beside the first keeps to the "one parameter" spirit.
+2. **The resolver also tries the strip-all concept key.** The ticket says `canonical_key =
+   lower(name)`. Concept entities have been keyed by strip-all since concepts-v6 (`Acme Platform`
+   → `acmeplatform`), so `lower(name)` alone misses every multi-word concept. It still reaches
+   step 4's name match, but only when nothing else matched.
+3. **The facet predicate gets the filter at its rebuild sites, not through a shared object.** The
+   ticket says the facets see the filter "because they share the predicate". In fact the CLI and
+   MCP each rebuild the facet predicate from the same keyword arguments, so both rebuild sites take
+   `**entity_kw`. AC 3 is tested on both surfaces.
+4. **`brain explain` does not get `--entity`.** The ticket names `brain search` only, and the
+   `cli_search.py` budget (≤ 15) has no room for a second command.

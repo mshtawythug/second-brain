@@ -1,0 +1,209 @@
+"""The ``--entity`` resolver and its graph checks (RM-24), against the test DB on 5434.
+
+All entities are synthetic. Each test seeds the rows it reads; nothing depends on a graph build.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import psycopg
+import pytest
+
+from brain.config import Config
+from brain.entity_filter import (
+    GRAPH_REQUIRED_MESSAGE,
+    graph_tables_present,
+    resolve_entity_ids,
+    search_kwargs,
+)
+from brain.errors import (
+    EntityAmbiguous,
+    EntityFilterError,
+    EntityGraphUnavailable,
+    EntityNotFound,
+)
+from brain.graph_rag.aliases import AliasRule
+from tests.entity_filter_seed import OTHER_TENANT, TENANT, seed_entity
+
+_ALIASES_YAML = """\
+rules:
+  - from: {type: project, key: harbor}
+    to:   {type: project, key: harborlight}
+"""
+
+
+def _resolve(conn: psycopg.Connection[Any], name: str, **kwargs: Any) -> list[str]:
+    return resolve_entity_ids(
+        conn,
+        tenant_id=kwargs.pop("tenant_id", TENANT),
+        name=name,
+        entity_type=kwargs.pop("entity_type", None),
+        **kwargs,
+    )
+
+
+def test_canonical_key_match_is_case_insensitive(test_db: psycopg.Connection[Any]) -> None:
+    entity = seed_entity(test_db, name="Quillmoor", canonical_key="quillmoor")
+
+    assert _resolve(test_db, "QUILLMOOR") == [entity]
+
+
+def test_strip_all_concept_key_matches_a_spaced_name(test_db: psycopg.Connection[Any]) -> None:
+    # concepts-v6 keys strip every separator; `lower(name)` alone would miss this row.
+    entity = seed_entity(test_db, name="Harbor Light", canonical_key="harborlight")
+
+    assert _resolve(test_db, "harbor-light") == [entity]
+
+
+def test_name_match_is_the_fallback(test_db: psycopg.Connection[Any]) -> None:
+    entity = seed_entity(
+        test_db, name="Pat Morgan", canonical_key="pat@example.com", entity_type="person"
+    )
+
+    assert _resolve(test_db, "pat morgan") == [entity]
+
+
+def test_name_match_does_not_run_when_a_key_matched(test_db: psycopg.Connection[Any]) -> None:
+    by_key = seed_entity(test_db, name="Ferncastle", canonical_key="ferncastle")
+    seed_entity(test_db, name="ferncastle", canonical_key="ferncastle-old", entity_type="topic")
+
+    assert _resolve(test_db, "Ferncastle") == [by_key]
+
+
+def test_alias_redirects_a_merged_source_that_still_exists(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    seed_entity(test_db, name="Harbor", canonical_key="harbor")
+    target = seed_entity(test_db, name="Harbor Light", canonical_key="harborlight")
+    rules = [AliasRule("project", "harbor", "project", "harborlight")]
+
+    assert _resolve(test_db, "Harbor", rules=rules) == [target]
+
+
+def test_alias_redirects_a_merged_source_already_deleted(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    target = seed_entity(test_db, name="Harbor Light", canonical_key="harborlight")
+    rules = [AliasRule("project", "harbor", "project", "harborlight")]
+
+    assert _resolve(test_db, "harbor", rules=rules) == [target]
+
+
+def test_resolution_is_tenant_scoped(test_db: psycopg.Connection[Any]) -> None:
+    mine = seed_entity(test_db, name="Quillmoor", canonical_key="quillmoor")
+    seed_entity(
+        test_db, name="Quillmoor", canonical_key="quillmoor", tenant_id=OTHER_TENANT
+    )
+
+    assert _resolve(test_db, "Quillmoor") == [mine]
+
+
+def test_not_found_points_at_the_entity_listing(test_db: psycopg.Connection[Any]) -> None:
+    seed_entity(test_db, name="Quillmoor", canonical_key="quillmoor", tenant_id=OTHER_TENANT)
+
+    with pytest.raises(EntityNotFound) as exc_info:
+        _resolve(test_db, "Quillmoor")
+
+    assert "brain graphrag entities" in str(exc_info.value)
+
+
+def test_several_types_without_a_type_is_ambiguous(test_db: psycopg.Connection[Any]) -> None:
+    seed_entity(test_db, name="Ember", canonical_key="ember", entity_type="tool")
+    seed_entity(test_db, name="Ember", canonical_key="ember", entity_type="topic")
+
+    with pytest.raises(EntityAmbiguous) as exc_info:
+        _resolve(test_db, "Ember")
+
+    assert "tool" in str(exc_info.value)
+    assert "topic" in str(exc_info.value)
+    assert "--entity-type" in str(exc_info.value)
+
+
+def test_a_type_settles_the_ambiguity(test_db: psycopg.Connection[Any]) -> None:
+    tool = seed_entity(test_db, name="Ember", canonical_key="ember", entity_type="tool")
+    seed_entity(test_db, name="Ember", canonical_key="ember", entity_type="topic")
+
+    assert _resolve(test_db, "Ember", entity_type="tool") == [tool]
+
+
+def test_an_unknown_type_is_refused(test_db: psycopg.Connection[Any]) -> None:
+    with pytest.raises(EntityFilterError) as exc_info:
+        _resolve(test_db, "Ember", entity_type="planet")
+
+    assert "--entity-type" in str(exc_info.value)
+
+
+def test_a_blank_name_is_not_found(test_db: psycopg.Connection[Any]) -> None:
+    with pytest.raises(EntityNotFound):
+        _resolve(test_db, "   ")
+
+
+# ---------------------------------------------------------------------------
+# search_kwargs: the graph checks, the tenant, and the alias file
+# ---------------------------------------------------------------------------
+
+
+def _cfg(**kwargs: Any) -> Config:
+    return Config(database_url="postgresql://unused", **kwargs)
+
+
+def test_no_entity_means_no_filter(test_db: psycopg.Connection[Any]) -> None:
+    assert search_kwargs(test_db, _cfg(graph_enabled=False), None, None) == {}
+
+
+def test_a_type_without_an_entity_is_refused(test_db: psycopg.Connection[Any]) -> None:
+    with pytest.raises(EntityFilterError) as exc_info:
+        search_kwargs(test_db, _cfg(graph_enabled=True), None, "tool")
+
+    assert "--entity-type" in str(exc_info.value)
+
+
+def test_graph_off_raises_the_graph_message(test_db: psycopg.Connection[Any]) -> None:
+    seed_entity(test_db, name="Quillmoor", canonical_key="quillmoor")
+
+    with pytest.raises(EntityGraphUnavailable) as exc_info:
+        search_kwargs(test_db, _cfg(graph_enabled=False), "Quillmoor", None)
+
+    assert str(exc_info.value) == GRAPH_REQUIRED_MESSAGE
+
+
+def test_absent_graph_tables_raise_the_graph_message(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    # A transaction rolled back at the end, so the shared schema is untouched.
+    with pytest.raises(EntityGraphUnavailable), test_db.transaction(force_rollback=True):
+        test_db.execute("DROP TABLE graph_entity_mentions CASCADE")
+        assert graph_tables_present(test_db) is False
+        search_kwargs(test_db, _cfg(graph_enabled=True), "Quillmoor", None)
+
+    assert graph_tables_present(test_db) is True
+
+
+def test_graph_on_returns_the_predicate_kwargs(test_db: psycopg.Connection[Any]) -> None:
+    entity = seed_entity(test_db, name="Quillmoor", canonical_key="quillmoor")
+
+    got = search_kwargs(test_db, _cfg(graph_enabled=True), "Quillmoor", None)
+
+    assert got == {"entity_ids": [entity], "entity_tenant": TENANT}
+
+
+def test_the_configured_tenant_is_used(test_db: psycopg.Connection[Any]) -> None:
+    theirs = seed_entity(
+        test_db, name="Quillmoor", canonical_key="quillmoor", tenant_id=OTHER_TENANT
+    )
+    cfg = _cfg(graph_enabled=True, graph_tenant_id=OTHER_TENANT)
+
+    assert search_kwargs(test_db, cfg, "Quillmoor", None) == {
+        "entity_ids": [theirs],
+        "entity_tenant": OTHER_TENANT,
+    }
+
+
+def test_the_alias_file_is_read(test_db: psycopg.Connection[Any], tmp_path: Path) -> None:
+    target = seed_entity(test_db, name="Harbor Light", canonical_key="harborlight")
+    aliases = tmp_path / "graph_aliases.yml"
+    aliases.write_text(_ALIASES_YAML, encoding="utf-8")
+    cfg = _cfg(graph_enabled=True, graph_aliases_path=aliases)
+
+    assert search_kwargs(test_db, cfg, "Harbor", None)["entity_ids"] == [target]

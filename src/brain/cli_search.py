@@ -31,7 +31,8 @@ from .agent import resolve_agent_id
 from .config import Config
 from .db import connect
 from .durations import since_window
-from .errors import BrainError, PersonAmbiguous, PersonNotFound
+from .entity_filter import search_kwargs as entity_search_kwargs
+from .errors import BrainError, EntityFilterError, PersonAmbiguous, PersonNotFound
 from .facets import SearchFacets, compute_facets
 from .format import console, emit_json, explain_table, search_table
 from .format_search import (
@@ -338,6 +339,10 @@ def search(
             "local CLI is inside the trust boundary."
         ),
     ),
+    entity: str | None = typer.Option(
+        None, "--entity", help="Only docs that mention this graph entity (needs the graph)."),
+    entity_type: str | None = typer.Option(
+        None, "--entity-type", help="Settle an ambiguous --entity: org/person/project/tool/topic."),
     agent: str | None = typer.Option(
         None,
         "--agent",
@@ -387,6 +392,10 @@ def search(
         # under autocommit).
         conn.autocommit = True
         person_match = _resolve_search_person(conn, person)
+        try:  # RM-24: entity_ids/entity_tenant for the search AND the facet predicate.
+            entity_kw = entity_search_kwargs(conn, cfg, entity, entity_type)
+        except EntityFilterError as e:
+            raise typer.BadParameter(str(e)) from e
         # The diagnostics holder captures the FTS-leg hit count from work the
         # search already does (no extra query) — the lexical-miss signal that
         # `brain gaps` keys off (the vector leg always returns filler).
@@ -423,6 +432,7 @@ def search(
             draft=draft,
             without_tag=without_tag,
             sensitivity=sensitivity,
+            **entity_kw,
         )
         results = outcome.results
         _warn_if_fell_back(outcome)
@@ -449,6 +459,7 @@ def search(
                     draft=draft,
                     without_tag=without_tag,
                     sensitivity=sensitivity,
+                    **entity_kw,
                 ),
                 tsquery=build_tsquery(conn, query),
             )

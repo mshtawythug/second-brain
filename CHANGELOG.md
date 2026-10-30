@@ -22,6 +22,18 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — `--entity` search filter (RM-24)
+
+- **`brain search --entity "<name>" [--entity-type TYPE]`** returns only documents
+  that mention that graph entity (`graph_entity_mentions`, tenant-scoped). The name
+  resolves by canonical key, then curated alias rules, then display name. Every
+  leg, the total and `--facets` see the filter.
+- **MCP `brain_search`** takes `entity` and `entity_type`.
+- Not found, ambiguous, or the graph off or absent: exit 2 / `INVALID_PARAMS`.
+  The not-found message points at `brain graphrag entities`.
+- Built on the coordinator's ruling adopting the roadmap spec's §5 U4
+  recommendation; no user answer yet.
+
 ### Added — tag rename, merge and suggested merges (RM-21)
 
 - **`brain tags`**: `list [--json]`, `rename OLD NEW`, `merge A B --into C` and
