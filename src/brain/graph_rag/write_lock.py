@@ -26,8 +26,9 @@ before they hold anything.
 
 The lock does not by itself make a reconcile's PLAN current: a reconcile reads
 the document before it takes the lock. ``ReconcilePlan.is_current``
-(:mod:`brain.graph_rag.reconcile_plan`) re-checks the plan under the lock, so
-a reconcile of a body that was edited or deleted meanwhile writes nothing.
+(:mod:`brain.graph_rag.reconcile_plan`) re-checks the plan under the lock: a
+reconcile whose document was deleted, or whose body or participants were edited
+meanwhile (the plan's ``inputs_fingerprint``, RM-27), writes nothing.
 
 **Properties.**
 

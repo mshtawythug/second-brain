@@ -6,7 +6,8 @@ so that module stays under the 800-line ceiling. ``reconcile_document`` now
 runs in three steps:
 
 1. **Plan** (:func:`plan_reconcile`, inside a short read transaction): fetch
-   the doc's ``content_hash`` / ``content_type``, resolve its persons, compare
+   the doc's inputs (:class:`~brain.graph_rag.relational.DocInputs`) and
+   fingerprint them, resolve its persons, compare
    both aspects' ``graph_index_state`` watermarks, and, only when the concept
    aspect is stale, read the body pinned to that hash. The transaction commits
    before step 2, so every ``AccessShareLock`` it took on ``documents`` / ``graph_*`` is released.
@@ -16,15 +17,29 @@ runs in three steps:
    is 3s).
 3. **Write** (a new transaction): take the graph write lock
    (:mod:`brain.graph_rag.write_lock`), then :meth:`ReconcilePlan.is_current`
-   re-reads the ``content_hash``. If the document was edited, or deleted, after
+   re-reads the inputs and compares fingerprints. If the document was edited, or deleted, after
    step 1, the plan is stale and the reconcile writes nothing: the newer edit's
    own reconcile (it runs after every write), or the next build, indexes the
    current body. Without that check, a slow extraction of the OLD body could
    commit over a newer edit's graph (``tests/test_graphrag_deadlock.py``).
 
-Only a ``content_hash`` change invalidates a plan. A metadata-only edit that
-changes the resolved persons without touching the body is not detected here;
-the plan records that residual (``docs/plans/2026-10-22-graph-entities-deadlock.md``).
+**Every input the plan read is re-checked (RM-27, residual 3).** Until RM-27
+only a ``content_hash`` change invalidated a plan, so an edit that changed a
+document's participants without touching its body could be overtaken: an older
+reconcile's persons, read before the lock, committed after the newer edit's.
+:attr:`ReconcilePlan.inputs_fingerprint` (:func:`compute_inputs_fingerprint`)
+now covers ``content_hash``, ``content_type``, the source kind and the raw
+participant keys, and the write compares it. The fingerprint is the plan's
+FIRST read, before the person resolver: the plan transaction is READ COMMITTED,
+so an edit can commit between two of its statements. Read first, the
+fingerprint holds the older row and the write drops the plan. Read after the
+resolver, it would hold the newer row, match at write time, and let the older
+persons commit. The corpus-wide ``directory_entries`` is not a document input
+and is not covered; a directory change is picked up by the next build through
+the people watermark, as before.
+
+A document that no longer exists raises :class:`DocumentNotFound`, which the
+corpus build counts as ``skipped_deleted`` (RM-27, residual 2).
 
 When the caller is already inside a transaction, both blocks nest as
 SAVEPOINTs and the caller's transaction keeps its locks across step 2. That is
@@ -43,13 +58,30 @@ from ..errors import GraphReconcileError
 from .concepts import CONCEPTS_ASPECT, concept_inputs_hash
 from .extract import EntityExtractor
 from .person_resolver import ResolvedPerson
-from .relational import fetch_doc_content_at, fetch_doc_meta, index_state, key_share_doc_meta
+from .relational import DocInputs, fetch_doc_content_at, fetch_doc_inputs, index_state
 from .weighting import suppress_ver
 
 if TYPE_CHECKING:
     from .reconcile import PersonResolver, ReconcileConfig
 
-__all__ = ["PEOPLE_ASPECT", "PEOPLE_ASPECT_VERSION", "ReconcilePlan", "plan_reconcile"]
+__all__ = [
+    "PEOPLE_ASPECT",
+    "PEOPLE_ASPECT_VERSION",
+    "DocumentNotFound",
+    "ReconcilePlan",
+    "compute_inputs_fingerprint",
+    "plan_reconcile",
+]
+
+
+class DocumentNotFound(GraphReconcileError):
+    """The document to reconcile does not exist (deleted, or never existed).
+
+    A :class:`~brain.errors.GraphReconcileError`, so every existing handler
+    still catches it. :func:`brain.graph_rag.build.build_graph` catches exactly
+    this one and counts the document as ``skipped_deleted``: a document deleted
+    between the build's id enumeration and its read phase needs no graph.
+    """
 
 # The migration-012 ``graph_index_state.aspect`` value the person aspect owns.
 # People and concepts (G2) re-index independently under their own watermark rows.
@@ -78,6 +110,9 @@ class ReconcilePlan:
     document_id: str
     content_hash: str
     content_type: str
+    #: :func:`compute_inputs_fingerprint` over the inputs read at plan time;
+    #: :meth:`is_current` re-checks it under the graph write lock.
+    inputs_fingerprint: str
     sver: str
     persons: list[ResolvedPerson]
     person_inputs_hash: str
@@ -99,22 +134,28 @@ class ReconcilePlan:
         return self.content is None or (not self.person_stale and not self.concept_stale)
 
     def is_current(self, conn: psycopg.Connection[Any]) -> bool:
-        """True iff the document still exists with the ``content_hash`` the plan read.
+        """True iff the document still exists with the inputs the plan read.
 
-        ``content`` was read only if the document still had that hash, so a
-        match means the body the plan extracted is still the document's body
-        (or a byte-identical revert of it). Call it AFTER taking the graph write
+        Compares :attr:`inputs_fingerprint` with one recomputed from a fresh
+        read: ``content_hash``, ``content_type``, the source kind and the raw
+        participant keys. ``content`` was read only if the document still had
+        that hash, so a match means the body the plan extracted is still the
+        document's body (or a byte-identical revert of it), and the persons it
+        resolved came from the participants the document still has. A change to
+        metadata the plan never read (a label, a summary) is not a reason to
+        drop the plan, and does not. Call it AFTER taking the graph write
         lock: from then on no other graph writer can index this document, so a
         plan that is current here stays current until this transaction commits.
 
         It is also the write transaction's first touch of the document, and it
-        takes ``FOR KEY SHARE`` on its row (``relational.key_share_doc_meta``)
-        before any graph row is written. A concurrent ``DELETE`` of the document
+        takes ``FOR KEY SHARE`` on its row
+        (``relational.fetch_doc_inputs(..., key_share=True)``) before any graph
+        row is written. A concurrent ``DELETE`` of the document
         therefore waits for this transaction instead of deadlocking with its
         cascade.
         """
-        meta = key_share_doc_meta(conn, self.document_id)
-        return meta is not None and meta[0] == self.content_hash
+        inputs = fetch_doc_inputs(conn, self.document_id, key_share=True)
+        return inputs is not None and compute_inputs_fingerprint(inputs) == self.inputs_fingerprint
 
 
 def plan_reconcile(
@@ -130,12 +171,14 @@ def plan_reconcile(
 
     ``extractor`` is ``None`` when the concept aspect is inactive. ``force``
     marks every active aspect stale (spec §7 authoritative rebuild). Raises
-    :class:`~brain.errors.GraphReconcileError` when the document does not exist.
+    :class:`DocumentNotFound` when the document does not exist.
     """
-    doc_meta = fetch_doc_meta(conn, document_id)
-    if doc_meta is None:
-        raise GraphReconcileError(f"cannot reconcile document {document_id!r}: not found")
-    content_hash, content_type = doc_meta
+    # FIRST read, before the resolver (module docstring): the fingerprint must
+    # describe a row no newer than the one the persons are resolved from.
+    inputs = fetch_doc_inputs(conn, document_id)
+    if inputs is None:
+        raise DocumentNotFound(f"cannot reconcile document {document_id!r}: not found")
+    content_hash, content_type = inputs.content_hash, inputs.content_type
     tenant_id = cfg.tenant_id
     sver = suppress_ver(cfg.generic_df_ratio)
 
@@ -172,6 +215,7 @@ def plan_reconcile(
         document_id=document_id,
         content_hash=content_hash,
         content_type=content_type,
+        inputs_fingerprint=compute_inputs_fingerprint(inputs),
         sver=sver,
         persons=persons,
         person_inputs_hash=person_inputs_hash,
@@ -206,6 +250,36 @@ def _inputs_hash(
         ),
         "window": window,
         "max_entities": max_entities,
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def compute_inputs_fingerprint(inputs: DocInputs) -> str:
+    """SHA-256 over every document input a reconcile plan reads (RM-27).
+
+    Covers ``content_hash``, ``content_type``, ``source_kind`` and the sorted
+    raw participant keys (:func:`brain.people._doc_participant_keys`, the same
+    extraction :func:`~brain.graph_rag.person_resolver.default_person_resolver`
+    resolves from: Gmail ``from`` / ``to``, Krisp ``_participant_keys``). The
+    rest of ``metadata`` is left out on purpose: the plan never reads it, so a
+    change there cannot make a plan stale. Sorting makes participant order
+    irrelevant. A document with no source row has no participants.
+    """
+    # Late import keeps :mod:`brain.graph_rag` import-cheap, mirroring
+    # person_resolver's late import from the same module.
+    from ..people import _doc_participant_keys
+
+    keys = (
+        _doc_participant_keys(source_kind=inputs.source_kind, metadata=inputs.metadata)
+        if inputs.source_kind is not None
+        else set()
+    )
+    payload = {
+        "content_hash": inputs.content_hash,
+        "content_type": inputs.content_type,
+        "source_kind": inputs.source_kind,
+        "participant_keys": sorted(keys),
     }
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
