@@ -102,11 +102,15 @@ def parse_history(raw: Any) -> tuple[AskTurn, ...]:
     """A follow-up's earlier turns, oldest first, shape-checked (RM-18c).
 
     A list of ``{question, answer}`` objects, each a non-empty UTF-8 string within
-    its character cap. The count and token caps are ``ask``'s (oldest dropped).
+    its character cap. Every turn is checked; only the newest
+    :data:`~brain.ask_history.MAX_HISTORY_TURNS` are kept (oldest dropped first, as
+    ``ask``'s own cap would), so an :class:`AskSpec` never holds more. The token cap
+    is ``ask``'s.
     """
     if not isinstance(raw, list):
         raise UiBadRequest("history must be a list of turns", code="invalid_history")
-    return tuple(_parse_turn(item) for item in raw)
+    turns = [_parse_turn(item) for item in raw]
+    return tuple(turns[-MAX_HISTORY_TURNS:])
 
 
 def _parse_turn(item: Any) -> AskTurn:

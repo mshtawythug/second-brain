@@ -3668,7 +3668,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-48 | Split `cli.py` / `mcp_server.py` (NEEDS USER CONFIRMATION) | XL | 9 | RM-06 | TODO |
 | RM-49 | Hermetic CI eval gate (NEEDS USER CONFIRMATION) | M | 9 | — | TODO |
 | RM-50 | Self-hosted fonts | S | 9 | RM-05 | TODO |
-| RM-51 | Retire the tab strip (NEEDS USER CONFIRMATION; closure note if answered as recommended) | XS | 9 | RM-18b | CLOSED AS MOOT (#85; §5 U3: after RM-11 and RM-18b (#83) all three tabs are real) |
+| RM-51 | Retire the tab strip (NEEDS USER CONFIRMATION; closure note if answered as recommended) | XS | 9 | RM-18b | CLOSED AS MOOT (#85; coordinator's ruling adopting §5 U3's recommendation, no user answer yet: after RM-11 and RM-18b (#83) all three tabs are real) |
 | RM-52 | `brain search --pick` | XS | 9 | RM-09 | TODO |
 | RM-53 | `brain examples` | XS | 9 | RM-06 | TODO |
 | RM-54 | Opt-in `--rewrite` | S | 9 | RM-09 | TODO |

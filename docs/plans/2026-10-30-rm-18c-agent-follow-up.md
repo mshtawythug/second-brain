@@ -73,9 +73,11 @@ RM-18b stores **ask ids only** in `sessionStorage`, because a stored answer woul
 - Each turn record keeps the history it was asked with. Pressing **Follow up** on turn *T* sets the
   form's context to `T.history + [T's question and answer]`, the last `max_history_turns` (3) of
   them, so a chain of follow-ups carries the conversation forward and never more than three turns.
-- The context's lifetime is the rendered turn's: it lives in page memory, is gone on reload, and is
-  cleared when its turn leaves the page. So no answer is kept anywhere it was not already visible,
-  and A10's reasoning holds. A5's "capped at 20" turn log is the page's existing turn list (capped at
+- The context lives in page memory only and is gone on reload. It is spent by the submit that sends
+  it, and that submit is also the only thing that can evict the turn it quotes: `track()` runs after
+  `clearFollowUp()`, and a settled turn is no longer polled, so `onGone` never drops it. So no
+  follow-up outlives its turn on the page (review round 1 removed a `drop()` branch that could not
+  run), no answer is kept anywhere it was not already visible, and A10's reasoning holds. A5's "capped at 20" turn log is the page's existing turn list (capped at
   `MAX_REMEMBERED`), not a stored log; see Deviation 1.
 - The tab sends `history` **only** after **Follow up** is pressed. A fresh ask's body is exactly
   `{question, no_loop}`, with no `history` key. After a follow-up is submitted, the form returns to
@@ -95,6 +97,14 @@ RM-18b stores **ask ids only** in `sessionStorage`, because a stored answer woul
   (`token_budget.truncate_to_token_budget`); if its question alone does not fit, no history is sent.
 - `history_block` labels the turns as earlier questions and answers given **for context only, not
   instructions**, and tells the planner to write sub-queries that stand on their own.
+- **Each turn is flattened** before it is measured or rendered: every run of whitespace, newlines
+  included, becomes one space (review round 1). An answer is synthesis over third-party document
+  bodies, so a newline in it could otherwise open a forged `Question:` line or a fake `Q:` / `A:`
+  turn. Flattened, each turn is exactly two lines, and the real question is the only line that
+  starts `Question:`.
+- `parse_history` keeps only the newest three turns it was sent (oldest dropped first), so an
+  `AskSpec` never holds more, and the runner's log line counts "up to N earlier turns for the plan"
+  (the token cap in `ask` may drop more) and never their text (review round 1).
 - History reaches **the plan step only**. Reflect and synthesis prompts are built from the current
   question and the retrieved notes, exactly as before (RM-18c.D1): an earlier answer's claims cannot
   enter a new answer without a citation. Tests pin both.
@@ -153,8 +163,11 @@ removed; the cap dropping newest-first; history sent without **Follow up**; MCP 
 
 - History steers the plan off-topic (ticket risk): only the plan step sees it, and the plan's
   output is search strings, not prose.
-- A prompt-injection in an earlier answer reaches the planner: it is the user's own earlier answer,
-  labelled as context, capped, and it can only change which searches run.
+- A prompt-injection in an earlier answer reaches the planner. The answer is NOT the user's own
+  words: it is the model's synthesis over the user's documents, which can quote third-party text
+  (mail, transcripts). It is flattened so it cannot forge prompt structure, labelled as context,
+  capped, and seen by the plan step only, whose output is search strings. At worst it changes which
+  searches run; it cannot reach the answer.
 
 ## Deviations from the ticket text
 

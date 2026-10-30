@@ -355,12 +355,17 @@ _QUICK_ANSWER = "Plonk ships quarkle [1]."
 
 
 def _ask_next(ask_harness: AskHarness, scenario: str, **kwargs: Any) -> Any:
-    """Ask, then wait for THIS turn: until it is prepended, turn 0 is the last one."""
-    shown = ask_harness.page.locator("#agent-turns > li").count()
+    """Ask, then wait for THIS turn: until it is prepended, turn 0 is the last one.
+
+    Keyed on the newest row's job id, not the row count: at 20 turns a new ask
+    evicts the oldest, so the count does not move.
+    """
+    page = ask_harness.page
+    newest = "() => document.querySelector('#agent-turns > li')?.dataset.jobId || ''"
+    before = page.evaluate(newest)
     ask_harness.ask(scenario, **kwargs)
-    ask_harness.page.wait_for_function(
-        f"() => document.querySelectorAll('#agent-turns > li').length > {shown}",
-        timeout=SETTLE_MS)
+    page.wait_for_function(f"(before) => ({newest})() !== before", arg=before,
+                           timeout=SETTLE_MS)
     return ask_harness.settled()
 
 
@@ -390,6 +395,12 @@ def test_follow_up_sends_the_previous_turns_and_then_stops(ask_harness: AskHarne
     # A follow-up always plans (plan doc D3): Quick answer is off while it is set.
     assert page.locator("#agent-no-loop").is_disabled()
     assert not page.locator("#agent-no-loop").is_checked()
+    # A11y (rev-85 item 4): the button names the question it follows up, by a job
+    # id (never model text).
+    button = ask_harness.turn(0).locator("button.turn-follow-up")
+    question_id = ask_harness.turn(0).locator(".turn-question").get_attribute("id")
+    assert question_id == f"turn-{1:032x}-question"   # the harness's first job id
+    assert button.get_attribute("aria-describedby") == question_id
     follow = _ask_next(ask_harness, "quick", words="turn two")
     assert page.locator("#agent-follow-up").is_hidden()   # back to a fresh ask
     assert page.locator("#agent-no-loop").is_enabled()
@@ -466,3 +477,46 @@ def test_a_resumed_turn_offers_no_follow_up(ask_harness: AskHarness) -> None:
     assert turn.locator(".turn-answer").inner_text() == _QUICK_ANSWER
     assert turn.locator("button.turn-follow-up").count() == 0
     assert page.locator("#agent-follow-up").is_hidden()
+
+
+def test_the_follow_up_hint_and_chain_use_the_servers_turn_cap(ask_harness: AskHarness) -> None:
+    # rev-85 item 5: the number comes from /api/ask/config, never from index.html.
+    page = ask_harness.page
+    ask_harness.fake.config = {**ask_harness.fake.config, "max_history_turns": 2}
+    ask_harness.open_tab()
+    _ask_next(ask_harness, "quick", words="turn one")
+    for n in ("two", "three"):
+        _follow_up(ask_harness)
+        assert "the last 2 questions and answers" in page.locator("#agent-follow-up").inner_text()
+        _ask_next(ask_harness, "quick", words=f"turn {n}")
+    _follow_up(ask_harness)
+    _ask_next(ask_harness, "quick", words="turn four")
+
+    assert [len(body.get("history", [])) for body in ask_harness.fake.asks] == [0, 1, 2, 2]
+    assert [t["question"] for t in ask_harness.fake.asks[-1]["history"]] == [
+        "scenario:quick turn two", "scenario:quick turn three"]
+
+
+def test_a_follow_up_is_spent_by_the_submit_that_evicts_its_turn(ask_harness: AskHarness) -> None:
+    """rev-85 item 6. The oldest of 20 turns is followed up; sending that follow-up
+    adds a 21st turn, which evicts the one it quoted. The context is already spent:
+    the notice is gone and the next ask is fresh."""
+    page = ask_harness.page
+    ask_harness.open_tab()
+    _ask_next(ask_harness, "quick", words="turn oldest")
+    for n in range(2, 21):
+        _ask_next(ask_harness, "quick", words=f"filler {n}")
+    assert page.locator("#agent-turns > li").count() == 20
+    _follow_up(ask_harness, 19)
+    assert "turn oldest" in page.locator("#agent-follow-up").inner_text()
+
+    _ask_next(ask_harness, "quick", words="after eviction")
+
+    questions = page.locator("#agent-turns .turn-question").all_inner_texts()
+    assert len(questions) == 20 and "scenario:quick turn oldest" not in questions
+    assert ask_harness.fake.asks[-1]["history"] == [
+        {"question": "scenario:quick turn oldest", "answer": _QUICK_ANSWER}]
+    assert page.locator("#agent-follow-up").is_hidden()
+    assert page.locator("#agent-no-loop").is_enabled()
+    _ask_next(ask_harness, "quick", words="fresh again")
+    assert "history" not in ask_harness.fake.asks[-1]

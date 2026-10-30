@@ -281,7 +281,7 @@ def ask_runner(
             embedder.release()
         elapsed_ms = int((ask_runtime.clock() - started) * 1000)
         logger.info(
-            "ui ask job %s: %d citations, %d earlier turns sent, in %d ms",
+            "ui ask job %s: %d citations, up to %d earlier turns for the plan, in %d ms",
             handle.job_id, len(result.citations), len(spec.history), elapsed_ms,
         )
         return _payload(ctx, result, levels, elapsed_ms)

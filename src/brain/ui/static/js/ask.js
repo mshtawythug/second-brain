@@ -23,7 +23,10 @@
  * re-fetched, so a reload ends the conversation and no answer outlives its page
  * (A10, RM-18b's D3). A fresh ask sends no `history` at all, and a follow-up always
  * plans, so Quick answer is off while one is set up. The server re-checks the shape
- * and applies the cap itself.
+ * and applies the cap itself. The context is spent by the submit that sends it,
+ * which is also the only thing that can evict the turn it quotes (track() runs
+ * after clearFollowUp(); a settled turn is no longer polled, so onGone never
+ * drops it), so no follow-up outlives its turn on the page.
  *
  * WAITING FOR AN INGEST (A1, plan doc D4). One worker runs ingest and ask jobs,
  * from a FIFO queue. A snapshot carries no queue position, so while an ask is
@@ -96,6 +99,7 @@ async function loadConfig() {
   $("agent-question-hint").textContent =
     `Up to ${config.max_question_chars} characters. Answers are plain text; `
     + "a number in brackets opens the note it cites.";
+  $("agent-follow-up-hint").textContent = followUpHint(config.max_history_turns);
   if (!config.enabled) {
     notice.textContent = UNAVAILABLE[config.reason] || "The agent is not available on this server.";
     notice.hidden = false;
@@ -103,6 +107,13 @@ async function loadConfig() {
   }
   notice.hidden = true;
   $("agent-fieldset").disabled = false;
+}
+
+/* The server's turn cap, never restated here (RM-18c). */
+function followUpHint(max) {
+  const seen = max === 1 ? "the last question and answer" : `the last ${max} questions and answers`;
+  return `The search plan sees ${seen}; the answer cites only what it finds now. `
+    + "A follow-up always plans, so Quick answer is off.";
 }
 
 function fromSnapshot(snapshot) {
@@ -233,8 +244,6 @@ function drop(id) {
   entry.stop();
   entry.row.remove();
   turns.delete(id);
-  /* The context lives only as long as the turn it quotes is on the page. */
-  if (followUp && followUp.id === id) clearFollowUp();
 }
 
 /* The turns a follow-up of `record` sends: its own, then itself, newest last. */

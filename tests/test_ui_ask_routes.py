@@ -244,6 +244,34 @@ def test_the_server_caps_a_follow_ups_history_oldest_first(
     assert not any("quillbeam question" in prompt for prompt in chat.others)
 
 
+def test_parse_keeps_only_the_newest_turns() -> None:
+    # Review rev-85 item 3: an AskSpec never holds more than the cap's turn count,
+    # whatever arrived; the oldest go first, as ask's own cap would drop them.
+    from brain.ui.routes_ask import parse_ask
+
+    turns = _turns(5, 10)
+
+    spec = parse_ask({"question": "q", "history": turns})
+
+    assert [t.question for t in spec.history] == [t["question"] for t in turns[-3:]]
+    assert len(spec.history) == MAX_HISTORY_TURNS
+
+
+def test_the_log_counts_the_turns_kept_never_their_text(
+    test_db: psycopg.Connection[Any], tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    ctx = _ctx(test_db, tmp_path, chat=_PlanRecorder())
+    caplog.set_level("INFO", logger="brain.ui.ask_service")
+
+    assert _ask(_client(ctx), {"question": "q", "history": _turns(5, 10)}).status_code == 202
+    assert ctx.jobs is not None and ctx.jobs.run_next()
+
+    (line,) = [r.getMessage() for r in caplog.records if r.name == "brain.ui.ask_service"]
+    # At most three reach the plan's token cap, which may drop more: "up to".
+    assert "up to 3 earlier turns for the plan" in line
+    assert "quillbeam" not in line
+
+
 def test_a_fresh_ask_has_no_history_in_its_plan(
     test_db: psycopg.Connection[Any], tmp_path: Path
 ) -> None:

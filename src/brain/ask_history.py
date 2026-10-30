@@ -11,7 +11,12 @@ History is UNTRUSTED prompt input. It comes from the browser, so :func:`cap_hist
 re-applies the cap whoever the caller is (``brain.ask.ask`` calls it before the
 plan step): the newest :data:`MAX_HISTORY_TURNS` turns, then newest-first while
 the total stays within :data:`MAX_HISTORY_TOKENS`, so the OLDEST go first.
-:func:`history_block` labels the turns as context, not instructions. Its worst case
+:func:`history_block` labels the turns as context, not instructions, and each turn
+is FLATTENED first (:func:`_flatten`): an answer is synthesis over third-party
+document bodies, not the user's words, so a newline in it could otherwise open a
+forged ``Question:`` line or a fake ``Q:`` / ``A:`` turn. Flattened, every turn is
+exactly two lines and the real question is the only line that starts
+``Question:``. Its worst case
 (the cap plus the plan prompt plus ``_PLAN_NUM_PREDICT``) is well inside the
 default ``num_ctx`` (``brain.ollama_budget``), and ``ask``'s calls are bounded by the
 server's over-window refusal in any case.
@@ -50,8 +55,14 @@ class AskTurn:
     answer: str
 
 
+def _flatten(turn: AskTurn) -> AskTurn:
+    """``turn`` with every run of whitespace, newlines included, collapsed to one space."""
+    return AskTurn(" ".join(turn.question.split()), " ".join(turn.answer.split()))
+
+
 def _render(turn: AskTurn) -> str:
-    return f"Q: {turn.question}\nA: {turn.answer}"
+    flat = _flatten(turn)
+    return f"Q: {flat.question}\nA: {flat.answer}"
 
 
 def _cost(text: str, cost: TokenCost) -> int:
@@ -75,7 +86,8 @@ def cap_history(
     question and is sent with its answer cut to fit; when even its question does not
     fit, no history is sent.
     """
-    recent = list(history)[-max_turns:] if max_turns > 0 else []
+    # Flattened before measuring, so the cap counts the text the prompt carries.
+    recent = [_flatten(turn) for turn in history[-max_turns:]] if max_turns > 0 else []
     kept: list[AskTurn] = []
     used = 0
     for turn in reversed(recent):

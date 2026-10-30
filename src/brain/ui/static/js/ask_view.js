@@ -165,7 +165,9 @@ export function createTurn(record) {
   row.dataset.jobId = record.id;
   row.tabIndex = -1;          // focus lands here when its Cancel button goes away
   const head = el("div", "turn-head");
-  head.append(el("p", "turn-question"), el("span", "turn-state"));
+  const question = el("p", "turn-question");
+  question.id = `turn-${record.id}-question`;   // a job id, never model text
+  head.append(question, el("span", "turn-state"));
   const phase = el("p", "turn-phase");
   phase.id = `turn-${record.id}-phase`;
   row.append(head, el("p", "turn-context"), el("ol", "turn-steps"), phase,
@@ -254,6 +256,7 @@ function detailNodes(record) {
     const button = el("button", "ghost-btn turn-follow-up", "Follow up");
     button.type = "button";
     button.dataset.action = "follow-up";
+    button.setAttribute("aria-describedby", `turn-${record.id}-question`);
     nodes.push(button);
   }
   if (record.unreachable && !isSettled(record)) {
