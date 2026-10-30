@@ -255,7 +255,7 @@ eval only now that the eval has just been re-judged.
 | 11 | **3.4: near-duplicate detection** | M | SHIPPED (#86, RM-19): `brain dedup`, MCP `brain_dedup_list`, the brief's count and the Ingest tab's `possible_duplicates`; flags, never refuses. ~~It grows in value as more uploads arrive through the Ingest tab (cross-surface duplicates, spec §5.2 and §11 R4).~~ |
 | 12 | **3.6: document-level embeddings** | M | It needs a migration and an eval run. Re-evaluate after the reranker, which may take most of the gain. |
 | 13 | **7.4: tag merge / rename** | S | Housekeeping. Normalization already prevents new drift. |
-| 14 | **1.3 phase 2: interactions-aware ranking** | M | Only worth doing once `brain usage` shows enough opens to learn from. Gate it on the data. |
+| 14 | **1.3 phase 2: interactions-aware ranking** | M | Only worth doing once `brain usage` shows enough opens to learn from. Gate it on the data. The readout that decides the gate is **SHIPPED (#PR, RM-22a)**: `brain usage --engagement`. The ranking stage itself (RM-22b) waits until that gate is met. |
 | 15 | **BL-4: copy-path / external-editor affordance** | XS | Small. Its default was already decided. |
 | 16 | **H-1 to H-6, BL-12: watcher / graph / log residues, and the stale ingest docstring** | XS–S each | Each has a known repair, and none loses data. Take them when their module is next opened (Scout rule). |
 | 17 | **3.3 leg: `--entity` search filter** | S | Mostly covered by `brain graphrag` today. Ask whether it is wanted before building it. |
