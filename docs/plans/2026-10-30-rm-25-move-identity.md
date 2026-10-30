@@ -26,7 +26,7 @@ The rename kept B's row, so `c.md` got B's id and every backlink pointing at B.
 | File | Change |
 |---|---|
 | `src/brain/vault/move_identity.py` | `is_another_document` sends an id-less dst to the new `_differs_by_content`; the constants `MIN_IDENTITY_SHINGLES` and `MIN_IDENTITY_JACCARD`, each with its rationale. A 46-line leaf before, 97 after; far under the ceiling. |
-| `tests/test_vault_watch_move_identity.py` | Eleven tests (below); `_linked_pair` gains an optional `b_body`. |
+| `tests/test_vault_watch_move_identity.py` | Thirteen tests (below; two added in review round 1); `_linked_pair` gains an optional `b_body`. |
 | `src/brain/vault/watch.py` | **Not touched.** `_handle_move` already passes `conn`, `src_rel` and `dst_abs`, and the row's stored content is one `SELECT` on `conn`. |
 | `CLAUDE.md` | The `vault/watch.py` ceiling row's id-less clause reworded (prose only; no hop, count or trail changes). Deviation 5. |
 
@@ -94,6 +94,19 @@ DB. AC1 also drives the debouncer, with hand-fired timers as in
 | cut `<` → `<=` | AC3 exactly-0.2 |
 | comparison applied to id-bearing files (content decides every dst) | PR #52 (a), both id-bearing guards |
 | content checked before the id (content OR id) | the same-id rewrite guard |
+| the no-row guard on the id-less path removed (round 1) | the never-synced id-less rename |
+| the fence strip removed, `shingles(body)` (round 1) | the derived-fence test |
+
+## Review round 1 (rev-90 at `5341774`)
+
+Two test gaps, tests only; `move_identity.py` is unchanged.
+
+| Finding | Fix | Mutant, now killed |
+|---|---|---|
+| 1. The id-less path's `if row is None: return False` (a never-synced id-less note renamed) was untested. | `test_never_synced_id_less_rename_syncs_fresh_with_no_row_at_src`: `is_another_document` is False, and the worker syncs dst with its own id and no error. | the guard removed → `TypeError` |
+| 2. Deviation 1's fence strip was unpinned: `shingles(strip_fence(body))` → `shingles(body)` survived. | `test_derived_fence_on_the_destination_does_not_count_against_the_note`: dst is the stored body plus a 200-word derived-links fence (about 36 / 236 unstripped); the rename keeps the id and the backlink. | `shingles(body)` |
+
+After the round: 20 passed in the file; all 11 mutants killed, each in a fresh `git archive` copy, deleted afterwards.
 
 ## Deviations
 
