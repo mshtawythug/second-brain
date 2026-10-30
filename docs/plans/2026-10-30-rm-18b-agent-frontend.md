@@ -207,9 +207,14 @@ generated GUARDS row:
 2. **Bracket notation:** `["href" | "src" | "srcset" | "style" | "srcdoc" | "action" |
    "formaction" | "location"]`, and `.style[`.
 3. **Navigation and URL setters:** `open(`, `.srcset =`, `.action =` / `.formAction =`. The last
-   is scoped with `(?<!dataset)`: `ask_view.js` sets `link.dataset.action = "open"` and
-   `button.dataset.action = "cancel"` (the tab's own `data-action` markers). `open(` hit nothing.
+   is scoped with `(?<!\.dataset)`: `ask_view.js` sets `link.dataset.action = "open"` and
+   `button.dataset.action = "cancel"` (the tab's own `data-action` markers). The DOT matters
+   (round 3): the round-2 `(?<!dataset)` also let `dataset.action = x`, `formdataset.action = x`
+   and `dataset.formAction = x` through, since any identifier ending in "dataset" satisfied it;
+   those are now isolation cases (`ASK_ACTION_LOOKALIKES`), and `link?.dataset.action` stays a
+   positive control. `open(` hit nothing.
 
 **The guard is a regression net, not a parser.** It reads source text, so an indirection can always
 slip past it. The defences are the textContent-only rule and the CSP (`script-src 'self'`, no
 `unsafe-inline`). Gaps found after this round go to the backlog, not into another widening here.
+Known so far: whitespace after the dot (`a. href = x`, `a. src = x`) slips every dotted pattern.

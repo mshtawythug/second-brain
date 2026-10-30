@@ -384,10 +384,12 @@ ASK_FORBIDDEN_SINKS: tuple[tuple[str, str, str], ...] = (
     (".style[", r"\.style\s*\[", 'answer.style["background"] = result.answer;'),
     ("open(", r"\bopen\s*\(", "window.open(result.answer);"),
     (".srcset =", r"\.srcset\s*=(?!=)", "answer.srcset = result.answer;"),
-    # `dataset.action` is excluded: it is the tab's own `data-action` marker
-    # (`link.dataset.action = "open"`, `button.dataset.action = "cancel"`), not a
-    # form's submit URL.
-    (".action / .formAction =", r"(?<!dataset)\.(?:formA|a)ction\s*=(?!=)",
+    # `<element>.dataset.action` is excluded: it is the tab's own `data-action`
+    # marker (`link.dataset.action = "open"`, `button.dataset.action = "cancel"`),
+    # not a form's submit URL. The lookbehind needs the DOT before `dataset`, so a
+    # variable merely NAMED `dataset` (or `formdataset`) is still caught
+    # (ASK_ACTION_LOOKALIKES).
+    (".action / .formAction =", r"(?<!\.dataset)\.(?:formA|a)ction\s*=(?!=)",
      "answer.formAction = result.answer;"),
 )
 
@@ -404,6 +406,18 @@ ASK_ALLOWED_ATTRIBUTE_CALLS = (
     'button.setAttribute("aria-disabled", "true");',
     'node.setAttributeNS(null, "aria-hidden", "true");',
     'link.dataset.action = "open";',
+    'button.dataset.action = "cancel";',
+    'link?.dataset.action = "open";',
+)
+
+#: Writes that only LOOK like the `dataset.action` exclusion: a form held in a
+#: variable called `dataset`, an identifier ending in it, or a `formAction` on one.
+#: Each must be caught by the `.action / .formAction =` pattern alone.
+ASK_ACTION_LOOKALIKES = (
+    "dataset.action = x;",
+    "formdataset.action = x;",
+    "dataset.formAction = x;",
+    "const dataset = form; dataset.action = x;",
 )
 
 #: The ONE ``.href`` assignment the tab may make: ``noteLink`` in ``ask_view.js``,
@@ -3163,6 +3177,12 @@ def test_each_forbidden_ask_sink_is_matched_by_its_own_pattern_alone(
     and the row would still look like proof.
     """
     assert ask_sinks_found(example) == [name]
+
+
+@pytest.mark.parametrize("write", ASK_ACTION_LOOKALIKES)
+def test_a_dataset_lookalike_action_write_is_still_caught(write: str) -> None:
+    """The exclusion is `<element>.dataset`, not any identifier ending in `dataset`."""
+    assert ask_sinks_found(write) == [".action / .formAction ="]
 
 
 def test_the_on_handler_example_is_caught_by_the_attribute_allowlist() -> None:
