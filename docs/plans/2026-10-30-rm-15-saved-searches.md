@@ -129,8 +129,41 @@
   window, and was never reported before).
 - `brief.py` grows (≈ 315 → ≈ 400 with the renderers); it stays well under 800.
 
-## Mutation proofs (run in a `git archive` copy)
+## What the end-to-end run found, and the fix
 
-Recorded in the PR body: `ON CONFLICT DO NOTHING` removed; `GREATEST` removed; the `FOR UPDATE`
-removed; the window filter removed; the fallback skip removed; the mark-every-pending-key set
-narrowed to shown hits; `exclude_confidential` dropped from the unnotified view; the per-watch cap.
+The e2e run (real CLI, a scratch database on 5434, `BRAIN_EMBEDDER=none`, a scratch vault) showed
+the matches `brain watch add` seeds as already seen listed in the terminal brief and in
+`brain watch hits` as if a check had found them. **D13, a seed is not a hit:** a seed is the only
+row recorded seen and notified in one transaction, so its `notified_at` equals its
+`first_seen_at`; `hits_since` leaves those rows out (`saved_search.NOT_SEED_SQL`). A hit a check
+finds is inserted unnotified and marked by a later transaction, so the two always differ.
+Regression tests in `tests/test_saved_search_check.py` and `tests/test_saved_search.py`.
+
+## Mutation proofs
+
+Run at `fcb3779` in a `git archive` copy (`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` purged
+before each run, `PYTHONPATH` pinned to the copy's `src`, the import path checked by realpath to be
+the copy's). Each mutation is asserted to have applied (the original text gone, the mutant
+present) before its test runs; the copy is restored from a second pristine archive between runs.
+Baseline: the 13 target tests pass; after the last restore they pass again.
+
+| Id | Mutation | Killed by |
+|---|---|---|
+| M1 | `ON CONFLICT … DO NOTHING` removed from the hit insert | `test_a_new_document_is_reported_once` |
+| M2 | `GREATEST(last_checked_at, %s)` → `%s` | `test_last_checked_at_never_moves_backwards` |
+| M3 | `FOR UPDATE` removed from `lock_watch` | `test_two_concurrent_checks_report_each_hit_once` |
+| M4 | the check's window dropped (`updated_after=None`) | `test_an_old_untouched_match_outside_the_window_is_not_a_hit` |
+| M5 | the semantic fallback skip removed | `test_a_semantic_check_that_falls_back_records_nothing_and_keeps_its_window` |
+| M6 | `pending` collects only rows that pass the lens | `test_unnotified_view_withholds_confidential_but_still_marks_them` |
+| M7 | the lens in `unnotified_view` disabled | `test_wiki_lists_five_gated_hits_marks_all_and_a_second_run_lists_none` |
+| M8 | the per-watch cap disabled | `test_unnotified_view_caps_each_watch_and_counts_the_rest` |
+| M9 | `NOT_SEED_SQL` dropped from `hits_since` | `test_seeded_matches_are_not_hits_in_the_terminal_set` |
+| M10 | `withheld` compares the watch fields too | `test_watch_fields_alone_do_not_cost_a_second_suggestion_call` |
+| M11 | MCP `brain_watch_check` records (`check_*` for `peek_*`) | `test_check_peeks_and_never_records_even_with_the_embedder_down` |
+| M12 | MCP `brain_watch_check` drops the lens | `test_check_applies_the_lens` |
+| M13 | `assemble_brief` reads hits without the migration-029 guard | `test_a_brief_without_migration_029_still_builds` |
+| M14 | `build_brief` never marks | `test_wiki_lists_five_gated_hits_marks_all_and_a_second_run_lists_none` |
+
+M10 survived its first run: the old test's two payloads carried equal watch fields when
+`withheld` was computed. The test now uses a skipped semantic watch, whose note is on the terminal
+payload only at that point (`fcb3779`), and M10 is killed.
