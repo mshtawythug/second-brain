@@ -174,7 +174,7 @@ class StepGuardEmbedder:
 
     def __init__(self, inner: Embedder, handle: _Cancellable, deadline: Deadline) -> None:
         self._inner = inner
-        self._guard = _Guard(handle, deadline)
+        self._guard: _Guard | None = _Guard(handle, deadline)
         self.dim = inner.dim
         # C5, as in ProgressEmbedder: both flags live outside the Embedder
         # Protocol, and each is read with the default its one reader uses. Dropped,
@@ -196,8 +196,19 @@ class StepGuardEmbedder:
         return self._inner.count_tokens(text)
 
     def embed(self, texts: list[str], *, input_type: str = "document") -> list[list[float]]:
-        self._guard()
+        if self._guard is not None:
+            self._guard()
         return self._inner.embed(texts, input_type=input_type)
+
+    def release(self) -> None:
+        """Drop the guard, and with it the job, when the job ends.
+
+        ``search._query_embed`` registers every query embedder in a module-level
+        dict that outlives the job. Through the guard, that entry would keep the
+        handle, the job and its result (quoted document text) alive past the
+        10-minute retention (A10). After release the wrapper only embeds.
+        """
+        self._guard = None
 
 
 def ask_failure(exc: Exception) -> JobError:
@@ -250,26 +261,14 @@ def ask_runner(
             guard()
             handle.progress(step, done=iteration, total=total)
 
-        with ctx.connect() as conn:
-            result = ask(
-                conn,
-                ctx.cfg,
-                embedder=StepGuardEmbedder(ingest_runtime.embedder(), handle, deadline),
-                chat=guarded_chat(ask_runtime.chat, handle, deadline),
-                question=spec.question,
-                mode=HYBRID_MODE,
-                no_loop=spec.no_loop,
-                limit=ctx.cfg.ask_docs_per_iter,
-                max_iterations=ctx.cfg.ask_max_iterations,
-                # A7: an answer draws on confidential bodies only where this
-                # server would serve them.
-                exclude_confidential=not ctx.serve_confidential_bodies,
-                on_step=on_step,
+        embedder = StepGuardEmbedder(ingest_runtime.embedder(), handle, deadline)
+        try:
+            result, levels = _ask_and_record(
+                ctx, handle, embedder, guarded_chat(ask_runtime.chat, handle, deadline),
+                spec, on_step,
             )
-            levels = _stored_sensitivity(conn, [c.document_id for c in result.citations])
-            # The last cancel point: nothing has been recorded yet (A4).
-            handle.check_cancelled()
-            _record_opens(ctx, conn, result)
+        finally:
+            embedder.release()
         elapsed_ms = int((ask_runtime.clock() - started) * 1000)
         logger.info(
             "ui ask job %s: %d citations in %d ms",
@@ -278,6 +277,38 @@ def ask_runner(
         return _payload(ctx, result, levels, elapsed_ms)
 
     return run
+
+
+def _ask_and_record(
+    ctx: UiContext,
+    handle: JobHandle,
+    embedder: StepGuardEmbedder,
+    chat: ChatJson,
+    spec: AskSpec,
+    on_step: Callable[[str, int], None],
+) -> tuple[AskResult, dict[str, str]]:
+    """Run the ask, read the cited levels back, then (past the last cancel point) record."""
+    with ctx.connect() as conn:
+        result = ask(
+            conn,
+            ctx.cfg,
+            embedder=embedder,
+            chat=chat,
+            question=spec.question,
+            mode=HYBRID_MODE,
+            no_loop=spec.no_loop,
+            limit=ctx.cfg.ask_docs_per_iter,
+            max_iterations=ctx.cfg.ask_max_iterations,
+            # A7: an answer draws on confidential bodies only where this
+            # server would serve them.
+            exclude_confidential=not ctx.serve_confidential_bodies,
+            on_step=on_step,
+        )
+        levels = _stored_sensitivity(conn, [c.document_id for c in result.citations])
+        # The last cancel point: nothing has been recorded yet (A4).
+        handle.check_cancelled()
+        _record_opens(ctx, conn, result)
+    return result, levels
 
 
 def _stored_sensitivity(

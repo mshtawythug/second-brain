@@ -24,7 +24,7 @@ filter, the per-kind retention for `"ask"`, and the wiring (`context.py`, `serve
 | `src/brain/ui/context.py` | `ask_runtime: AskRuntime \| None = None`. |
 | `src/brain/ui/server.py` | `build_context` builds `AskRuntime(chat=chat.chat_json)` and passes `retain_for_by_kind={ASK_KIND: ASK_RETAIN_FOR}` to the registry. |
 | `src/brain/ui/app.py` | The two routes. |
-| Tests | `tests/test_ask_on_step.py` (new), `tests/test_ui_ask_service.py` (new, runner on `run_next()`), `tests/test_ui_ask_routes.py` (new, 5434), `tests/test_ui_jobs.py` (eviction on get/cancel), `tests/test_ui_security.py` (ask rows). |
+| Tests | `tests/test_ask_on_step.py` (new), `tests/test_ui_ask_service.py` (new, runner on `run_next()`), `tests/test_ui_ask_routes.py` (new, 5434), `tests/test_ui_jobs_evict_on_read.py` (eviction on get/cancel; new, because `test_ui_jobs.py` is at 797), `tests/test_ui_security.py` (ask rows). |
 | Docs | `docs/cli-reference.md` (`brain ui` section), `CHANGELOG.md` (Unreleased), the backlog row (item 9), Appendix B's RM-18a row (follow-up commit), memory `cli.md` / `types.md`. |
 
 No over-ceiling file is touched, so no CLAUDE.md hop is owed. No knob is added, so

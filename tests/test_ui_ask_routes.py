@@ -273,6 +273,9 @@ def test_a_confidential_document_is_cited_only_when_bodies_are_served(
     if serve_bodies:
         assert cited == [sealed]
         assert result["citations"][0]["title"] == "Sealed memo"
+        # The STORED level, read back (aud-79 A1): never assumed "normal".
+        assert result["citations"][0]["sensitivity"] == "confidential"
+        assert result["citations"][0]["withheld"] is False
     else:
         assert cited == []
         assert "Sealed memo" not in str(result)

@@ -93,7 +93,9 @@ def lens_ask_result(
     paraphrase it. Keyed on the BODIES flag, not the titles one: an ask is a
     requested surface, unlisted and read only by its id (A7, A10; plan doc D1).
     With bodies withheld, retrieval already excluded confidential documents, so
-    this is the second, fail-closed layer.
+    this is the second, fail-closed layer. It cannot be the only one: the answer
+    can paraphrase a retrieved document it does not cite, which no citation lens
+    sees. The guarantee rests on ``exclude_confidential`` at retrieval (layer 1).
     """
     if result is None:
         return None
