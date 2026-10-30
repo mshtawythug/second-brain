@@ -548,3 +548,21 @@ def test_a_draft_capture_drops_the_suggestions_derived_from_it() -> None:
     assert "Capture beta" not in body
     assert "- [ ] todo body text one" in body
     assert "suggestion derived from todo text" not in body
+
+
+def test_a_draft_todo_alone_drops_the_suggestions() -> None:
+    # The todo's document is not among the captures, so only the todo leg removes anything.
+    brief = _brief(
+        open_todos=[
+            TodoRow(
+                document_id="d9", document_title="Draft action items", ingested_at=AT,
+                state="open", text="draft-only todo text",
+            )
+        ]
+    )
+
+    _, body = render_delivery(without_drafts(brief, {"d9"}), include_todos=True)
+
+    assert "Capture alpha" in body and "Capture beta" in body
+    assert "draft-only todo text" not in body
+    assert "suggestion derived from todo text" not in body
