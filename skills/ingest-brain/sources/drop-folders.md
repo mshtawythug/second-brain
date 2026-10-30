@@ -6,7 +6,11 @@ Part of the [`ingest-brain`](../SKILL.md) skill. Its safety rules apply to this 
 one), **moves** each into the folder's `imported/` sub-folder, and ingests it from there.
 Images (`.png`, `.jpg`, `.jpeg`) are OCR'd by the local `tesseract` into `screenshot`
 documents, stored **confidential** by default, on every path: `brain ingest x.png` and
-`brain ingest-dir --ext png` too, unless `--sensitivity normal` is passed. It **refuses without `--dir PATH` or
+`brain ingest-dir --ext png` too, unless `--sensitivity normal` is passed. Voice memos
+(`.m4a`, `.mp3`, `.wav`) in a folder configured with `kind = "voice"` are transcribed on this
+machine by whisper.cpp into `voice` documents, also **confidential** by default; only the
+transcript enters the brain. They need `BRAIN_WHISPER_MODEL` (a model file the user downloads
+themselves; never download one for them) and `whisper-cli`. It **refuses without `--dir PATH` or
 `--configured`, and `--since Nd`** (1d to 365d).
 
 The command moves the user's files, so:
@@ -31,4 +35,6 @@ re-checked, adding nothing),
 OCR timeout or the secret guard: the file stays in `imported/` and is not retried), `failed`
 (a transient failure: the file is moved back; the reason is a class name). Exit 1 means a
 file failed or a folder was skipped. The usual cause is that OCR is off or `tesseract` is
-missing, and the command prints the fix.
+missing (or, for a voice folder, `BRAIN_WHISPER_MODEL` is unset or `whisper-cli` is missing), and
+the command prints the fix. A memo longer than `BRAIN_WHISPER_MAX_MINUTES` is `rejected`; a
+`warning: … was not transcribed (…, failure N of 3)` line means whisper failed and the memo goes back to be retried; the third failure on the same memo rejects it.

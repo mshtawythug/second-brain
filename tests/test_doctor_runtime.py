@@ -578,11 +578,12 @@ def test_all_healthy_yields_no_failures(
     # RM-32 adds "ocr", off (ok) under tests/ocr_isolation_plugin.py.
     # RM-36 adds "apple notes", ok here because _healthy_osascript pins its path to a file.
     # RM-33 adds "drop folders": none configured (ok) in the suite's isolated $BRAIN_HOME.
+    # RM-38 adds "voice memos": off (ok) under tests/voice_isolation_plugin.py.
     assert [c.check for c in checks] == [
         "config", "daemons", "vault watcher", "brief delivery", "reranker", "github", "ocr",
-        "apple notes", "drop folders",
+        "apple notes", "drop folders", "voice memos",
     ]
-    assert [c.status for c in checks] == ["ok"] * 9
+    assert [c.status for c in checks] == ["ok"] * 10
 
 
 def test_every_failing_check_names_a_remedy(

@@ -511,17 +511,29 @@ No environment variable: the folders `brain ingest-folder --configured` reads ar
 | Key | Default | Purpose |
 |---|---|---|
 | `path` | (required) | The folder. Absolute or starting with `~`; stored resolved. A folder that does not exist (an unplugged volume) is skipped with a warning naming its entry; the others still run. |
-| `kind` | `screenshot` | The source kind its documents get; any kind `brain ingest-stdin --source` accepts. |
-| `extensions` | `[".png", ".jpg", ".jpeg"]` | Which files are taken; each must be one an extractor reads. |
-| `sensitivity` | `confidential` | `normal` or `confidential`. A screenshot can show anything, so the default is confidential. |
+| `kind` | `screenshot` | The source kind its documents get; any kind `brain ingest-stdin --source` accepts. `voice` for voice memos (RM-38). |
+| `extensions` | `[".png", ".jpg", ".jpeg"]`; `[".m4a", ".mp3", ".wav"]` when `kind = "voice"` | Which files are taken; each must be one an extractor reads. |
+| `sensitivity` | `confidential` | `normal` or `confidential`. A screenshot or a memo can hold anything, so the default is confidential. |
 | `auto` | `true` | `false`: only `brain ingest-folder --dir PATH` uses the folder, never `--configured`. |
 | `mode` | `ingest` | The only mode; `capture` arrives with RM-39 and is refused until then. |
 
 An unknown key, a bad value, or two entries for one folder is a `ConfigError`
 naming the entry and key (`folder[1].kind`), never the value. Images are read
-with the `BRAIN_OCR*` knobs above. The opt-in LaunchAgent is
-`brain-install-launchd --with-dropfolders`; see
+with the `BRAIN_OCR*` knobs above, and voice memos with the `BRAIN_WHISPER_*` knobs below.
+The opt-in LaunchAgent is `brain-install-launchd --with-dropfolders`; see
 [guides/drop-folders.md](guides/drop-folders.md).
+
+### `BRAIN_WHISPER_MODEL` — voice memos (RM-38)
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BRAIN_WHISPER_MODEL` | (unset: off) | A whisper.cpp model file (`ggml-*.bin`), absolute or starting with `~`. Unset means voice memos are off; brain never downloads a model. The file must be a regular file owned by you (or root), not group- or world-writable, in directories only you or root can write (a sticky one such as `/tmp` is fine), and not inside a drop folder; otherwise voice memos are off and `brain doctor` says why. Read by `brain/settings/voice.py`. |
+| `BRAIN_WHISPER_MAX_MINUTES` | `60` | The longest memo transcribed, 1 to 600. A longer one is skipped (`rejected`). Whisper's timeout is twice the memo's length plus 60 s, so this also bounds how long one memo can hold a run. |
+
+Voice memos also need `whisper-cli` on `PATH` (`brew install whisper-cpp`) and macOS's
+`afinfo` and `afconvert`. `brain doctor`'s `voice memos` line says which is missing; it names
+the model by file name only. The tools inherit only `PATH`, `HOME`, `LANG` and `TMPDIR`. See
+[guides/drop-folders.md](guides/drop-folders.md#voice-memos-rm-38).
 
 ### `BRAIN_BRIEF_DELIVERY` — send the daily brief to yourself
 

@@ -155,3 +155,62 @@ def test_a_missing_folder_warns_by_index_not_path(home: Path, agents: Path, tmp_
     assert "folder[1]" in check.detail
     assert "the other folders still run" in check.detail
     assert "unplugged-volume" not in check.detail
+
+
+# --- RM-38: voice-memo folders ------------------------------------------------------------
+
+
+def _voice_check(home: Path, agents: Path, env: dict[str, str], whisper=None):
+    (check,) = drop_folders_doctor_check(
+        launchd_dir=agents, brain_home=home, env=env, which=lambda _: ON_PATH, whisper=whisper
+    )
+    return check
+
+
+def test_voice_folders_with_voice_off_warn_with_the_fix(
+    home: Path, agents: Path, tmp_path: Path
+) -> None:
+    (home / "drop-folders.toml").write_text(_folder(tmp_path, "memos", 'kind = "voice"'))
+
+    check = _voice_check(home, agents, {"BRAIN_OCR": "auto"})
+
+    assert check.status == "warn"
+    assert "1 folder(s) take voice memos, which are skipped" in check.detail
+    assert "BRAIN_WHISPER_MODEL" in check.detail
+
+
+def test_voice_folders_with_whisper_ready_are_ok(
+    home: Path, agents: Path, tmp_path: Path
+) -> None:
+    from brain.ingest.whisper import WhisperSetup
+    from brain.settings.voice import VoiceSettings
+
+    (home / "drop-folders.toml").write_text(_folder(tmp_path, "memos", 'kind = "voice"'))
+    ready = WhisperSetup(VoiceSettings(Path("/m/ggml.bin"), 60), "/bin/whisper-cli", None)
+
+    check = _voice_check(home, agents, {"BRAIN_OCR": "off"}, whisper=ready)
+
+    assert check.status == "ok"
+    assert "1 folder(s)" in check.detail
+
+
+def test_a_bad_whisper_knob_warns_naming_the_variable(
+    home: Path, agents: Path, tmp_path: Path
+) -> None:
+    (home / "drop-folders.toml").write_text(_folder(tmp_path, "memos", 'kind = "voice"'))
+
+    check = _voice_check(home, agents, {"BRAIN_WHISPER_MAX_MINUTES": "zz-nope"})
+
+    assert check.status == "warn"
+    assert "BRAIN_WHISPER_MAX_MINUTES" in check.detail
+    assert "zz-nope" not in check.detail
+
+
+def test_an_image_folder_never_reads_the_whisper_knobs(
+    home: Path, agents: Path, tmp_path: Path
+) -> None:
+    (home / "drop-folders.toml").write_text(_folder(tmp_path, "shots"))
+
+    check = _voice_check(home, agents, {"BRAIN_OCR": "auto", "BRAIN_WHISPER_MAX_MINUTES": "0"})
+
+    assert check.status == "ok"

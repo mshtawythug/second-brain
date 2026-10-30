@@ -72,11 +72,16 @@ CAST = frozenset(
 # seeds text, not images, and has no sensitivity field, so a demo screenshot
 # would neither exercise the path (the move-first runner, the OCR) nor show the
 # right tier. ``tests/test_cli_ingest_folder.py`` covers it.
+# ``voice`` (RM-38): a voice memo is a local whisper.cpp transcript of an audio
+# file moved into a drop folder's ``imported/``, ``confidential`` by default; the
+# manifest seeds text, not audio, and the demo has no whisper model, so a demo memo
+# would exercise neither the transcription nor the tier.
+# ``tests/test_cli_ingest_folder_voice.py`` covers it.
 # The exemption is checked against the canonical set below, so it cannot outlive
 # the kind, and any kind added later still fails this guard until it is either
 # seeded or exempted here.
 DEMO_EXEMPT_KINDS = frozenset(
-    {"calendar", "jira", "github", "applenotes", "notion", "screenshot"}
+    {"calendar", "jira", "github", "applenotes", "notion", "screenshot", "voice"}
 )
 EXPECTED_SOURCES = VALID_SOURCE_KINDS - DEMO_EXEMPT_KINDS
 
