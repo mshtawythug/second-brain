@@ -681,3 +681,33 @@ def test_a_first_run_counts_each_attendee_once_per_document(
         "SELECT email, occurrence_count FROM directory_entries WHERE source = 'calendar'"
     ).fetchall()
     assert {str(r[0]): int(r[1]) for r in rows} == counts  # an unchanged re-run adds nothing
+
+
+def test_a_renamed_attendee_reaches_the_directory(
+    test_db: psycopg.Connection[Any], gws: fx.FakeGws, embedder: CountingEmbedder
+) -> None:
+    """aud-96: the post-write re-record on a body change.
+
+    Renaming an attendee changes the body (names live there) but not the
+    participants (the address is the same), so only the post-write record can
+    add the new name to the directory.
+    """
+    assert _run().exit_code == 0
+    renamed = ("Blake Renamed", fx.BLAKE[1])
+    master = fx.series_master(attendees=[fx.owner(), fx.attendee(fx.AVERY), fx.attendee(renamed)])
+    gws.masters = {fx.SERIES_ID: master}
+
+    result = _run()
+
+    assert result.exit_code == 0, result.output
+    assert f"updated {fx.SERIES_TITLE}" in result.output
+    rows = test_db.execute(
+        "SELECT display_name FROM directory_entries WHERE source = 'calendar' AND email = %s",
+        (fx.BLAKE[1],),
+    ).fetchall()
+    assert "blake renamed" in {str(r[0]).lower() for r in rows}
+    search = CliRunner().invoke(
+        app, ["search", "platform sync", "--source", "calendar", "--person", renamed[0], "--json"]
+    )
+    assert search.exit_code == 0, search.output
+    assert fx.SERIES_TITLE in [hit["title"] for hit in json.loads(search.stdout)]
