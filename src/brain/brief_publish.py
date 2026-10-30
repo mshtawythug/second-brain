@@ -142,9 +142,10 @@ def build_brief(
     # When the two payloads are equal there is nothing to re-derive from, and
     # reusing the one call is exact rather than an approximation. Being wrong
     # here can only cost a second Ollama call, never a disclosure.
-    # The watch fields are left out: the two payloads list different hit sets
-    # by construction, and no hit reaches the suggestion prompt (RM-15 plan, D4).
-    withheld = published is not None and _without_watches(published) != _without_watches(
+    # The watch fields and the new entities are left out: the two payloads list
+    # different sets by construction, and neither reaches the suggestion prompt
+    # (RM-15 plan, D4; RM-17).
+    withheld = published is not None and _suggestion_inputs(published) != _suggestion_inputs(
         data
     )
     if enrich:
@@ -253,5 +254,5 @@ def _check_notes(checks: list[CheckResult], *, published: bool) -> list[WatchNot
     return notes
 
 
-def _without_watches(brief: BriefData) -> BriefData:
-    return replace(brief, watch_hits=[], watch_notes=[])
+def _suggestion_inputs(brief: BriefData) -> BriefData:
+    return replace(brief, watch_hits=[], watch_notes=[], new_entities=[])

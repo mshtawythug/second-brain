@@ -5,7 +5,8 @@ synthesize next-step suggestions. No CLI, no MCP, no terminal formatting — the
 callers (CLI + MCP) format the result. Reads recent captures (via
 :mod:`brain.activity`), open action items (via :mod:`brain.todo`), and pinned
 docs from the interactions log, plus the saved-search ("watch") hits first seen
-inside the capture window (RM-15, :mod:`brain.saved_search`).
+inside the capture window (RM-15, :mod:`brain.saved_search`), and the people, orgs and
+projects new this week (RM-17, :mod:`brain.brief_entities`).
 
 The LLM leg goes through :func:`brain.chat.chat_json` — NOT
 :mod:`brain.enrichment` — so this module never imports the enricher (which would
@@ -23,7 +24,7 @@ from typing import Any
 
 import psycopg
 
-from . import chat
+from . import brief_entities, chat
 from .activity import recent_captures
 from .config import Config
 from .errors import EnrichmentError, describe_failure
@@ -82,6 +83,8 @@ class BriefData:
     watch_hits: list[WatchHit] = field(default_factory=list)
     #: Per-watch "and N more" counts and skipped checks, for the same section.
     watch_notes: list[WatchNote] = field(default_factory=list)
+    #: Entities first seen this week (RM-17), under this payload's confidential lens.
+    new_entities: list[brief_entities.NewEntity] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the wire shape shared by ``brain brief --json`` + MCP."""
@@ -138,6 +141,7 @@ class BriefData:
                 }
                 for note in self.watch_notes
             ],
+            "new_entities": [entity.to_dict() for entity in self.new_entities],
         }
 
 
@@ -157,10 +161,10 @@ def assemble_brief(
     passes today so this stays deterministic under test). Suggestions are filled
     separately by :func:`suggest_next_steps`.
 
-    ``exclude_confidential`` (F6) is threaded to ALL FOUR reads below, and it
-    has to be all four: they are independent queries against ``documents`` — a
-    time window, a body scan, an interaction join, and the watch hits — so
-    closing any one of them closes none of the others.
+    ``exclude_confidential`` (F6) is threaded to ALL FIVE reads below, and it
+    has to be all five: they are independent queries against ``documents`` — a
+    time window, a body scan, an interaction join, the watch hits, and the new
+    entities' aggregate — so closing any one of them closes none of the others.
 
     The watch hits are the TERMINAL set (every hit first seen in the last
     ``since_hours``, notified or not); no check runs here, so MCP ``brain_brief``
@@ -205,6 +209,9 @@ def assemble_brief(
         pinned=pinned,
         suggestions=[],
         watch_hits=watch_hits,
+        new_entities=brief_entities.for_brief(
+            conn, cfg, exclude_confidential=exclude_confidential
+        ),
     )
 
 
@@ -356,6 +363,8 @@ def _render_brief_body(brief: BriefData) -> str:
     watch_lines = watch_section_lines(brief)
     if watch_lines:
         lines += ["", "## Watch hits", "", *[f"- {line}" for line in watch_lines]]
+    if entity_lines := brief_entities.section_lines(brief.new_entities):
+        lines += ["", f"## {brief_entities.SECTION_TITLE}", "", *[f"- {e}" for e in entity_lines]]
 
     if brief.suggestions:
         lines += ["", "## Suggested next steps", ""]
@@ -363,6 +372,15 @@ def _render_brief_body(brief: BriefData) -> str:
             lines.append(f"{i}. {suggestion}")
 
     return "\n".join(lines) + "\n"
+
+
+def terminal_sections(brief: BriefData) -> list[tuple[str, list[str]]]:
+    """``cli._print_brief``'s optional sections as ``(heading, lines)``; empty ones are left out."""
+    sections = [
+        ("👀  Watch hits", watch_section_lines(brief)),
+        (f"🆕  {brief_entities.SECTION_TITLE}", brief_entities.section_lines(brief.new_entities)),
+    ]
+    return [(heading, lines) for heading, lines in sections if lines]
 
 
 def watch_section_lines(brief: BriefData) -> list[str]:

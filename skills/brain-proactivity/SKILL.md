@@ -66,9 +66,9 @@ corpus.
 
 ## Daily digest — `brain brief`
 
-Recent captures, open todos, pins, and best-effort LLM next-step
-suggestions. Surfaces **titles and todo texts only — never document
-bodies**.
+Recent captures, open todos, pins, people/orgs/projects new this week
+(graph on), and best-effort LLM next steps. Surfaces **titles, todo
+texts and entity names only — never document bodies**.
 
 ```bash
 brain brief                              # today's digest to the terminal

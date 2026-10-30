@@ -4886,7 +4886,7 @@ register_review_extra_commands(review_app)
 
 def _print_brief(data: Any) -> None:
     """Print the daily brief to stdout (titles + todo texts only)."""
-    from .brief import watch_section_lines
+    from .brief import terminal_sections
 
     typer.echo(f"━━━ Brain Brief · {data.date.isoformat()} ━━━")
     typer.echo("\n📥  Recent captures")
@@ -4908,9 +4908,9 @@ def _print_brief(data: Any) -> None:
             typer.echo(f"  • {pin.title}")
     else:
         typer.echo("  (no pinned docs)")
-    if watch_lines := watch_section_lines(data):
-        typer.echo("\n👀  Watch hits")
-        for line in watch_lines:
+    for heading, lines in terminal_sections(data):  # watch hits, then new this week (RM-17)
+        typer.echo(f"\n{heading}")
+        for line in lines:
             typer.echo(f"  • {line}")
     if data.suggestions:
         typer.echo("\n💡  Suggested next steps")
