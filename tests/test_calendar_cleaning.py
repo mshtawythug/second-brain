@@ -42,6 +42,8 @@ ADVERSARIAL = [
     "meet.google.com/abc-defg-hij",
     "tel:+15550101234",
     "+1 555 123 4567,,998877#",
+    # caught by the one-tap rule alone (no keyword, under 7 digits)
+    "Then press ,,4242#",
     "Meeting ID: 123 Passcode: 456",
     # conference hosts the first list missed, and ordinary links
     "https://example.zoomgov.com/j/1612345",
@@ -51,6 +53,8 @@ ADVERSARIAL = [
     "https://docs.example.com/d/abc/edit?usp=sharing",
     "https://forms.example.com/?email=bob%40example.com",
     "www.example.com/agenda",
+    # caught by the www. rule alone (no scheme, no path)
+    "see www.example.com",
     "mailto:bob@example.com",
     # addresses: full-width, obfuscated, no dot
     "ｂｏｂ＠example.com",
