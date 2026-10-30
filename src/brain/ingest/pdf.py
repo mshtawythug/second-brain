@@ -1,4 +1,13 @@
-"""PDF extractor — pypdf primary, pdfplumber fallback, OCR for image-only pages (RM-32)."""
+"""PDF extractor — pypdf primary, pdfplumber fallback, OCR for image-only pages (RM-32).
+
+**Known residuals of the OCR memory bounds.** The page bitmap is capped (``MAX_PIXELS``,
+``MAX_SIDE_PX``), and so are the image objects pdfium decodes to draw it
+(``MAX_IMAGE_PIXELS``, counted through Form XObjects to ``MAX_FORM_DEPTH``). Annotations and
+form fields are not drawn. Three image sources are not page objects, so they are NOT
+counted: images inside tiling patterns, soft masks (``/SMask``), and Type3 glyph images. A
+PDF built around one of them can still make pdfium decode a large image. The systemic fix is
+a process-level memory guard (backlog BL-32), not more counting here.
+"""
 import ctypes
 import io
 import logging
@@ -45,6 +54,11 @@ MAX_SIDE_PX = 32_767
 #: a 30,000 px square flate image (an 875 KB file) peaking at 1.11 GB. 4x MAX_PIXELS leaves
 #: headroom for a real scan, which embeds about one page-sized image.
 MAX_IMAGE_PIXELS = 4 * MAX_PIXELS
+#: How deep the image count descends into nested Form XObjects. pypdfium2's own default (15)
+#: is shallower than pdfium draws, so a deeper image went uncounted. pdfium's parser itself
+#: stops loading forms at level 40 (measured, pypdfium2 5.14; pinned by a test), so 64 covers
+#: everything it draws; a Form at the last level is refused rather than assumed empty.
+MAX_FORM_DEPTH = 64
 #: A page that only fits under :data:`MAX_PIXELS` below 50 dpi is skipped: text that small
 #: is not legible to tesseract, so rendering it would cost memory and read nothing.
 MIN_RENDER_DPI = 50
@@ -109,10 +123,19 @@ def embedded_image_pixels(page: pypdfium2.PdfPage) -> int:
     ``PdfImage.get_px_size`` reads the image dictionary only, so nothing is decoded (rev-99
     measured 28 MB of RSS on a page whose one image is 30,000 px square). Each draw is
     counted, so an image drawn twice counts twice, which can only overstate the decode.
+
+    Raises :class:`PageTooLargeError` when a Form XObject sits at the last level
+    :data:`MAX_FORM_DEPTH` lets ``get_objects`` reach: its contents are not visited, so they
+    cannot be counted, and the page is refused rather than assumed to hold nothing.
     """
     total = 0
-    for image in page.get_objects(filter=(pdfium_c.FPDF_PAGEOBJ_IMAGE,)):
-        width, height = image.get_px_size()
+    kinds = (pdfium_c.FPDF_PAGEOBJ_IMAGE, pdfium_c.FPDF_PAGEOBJ_FORM)
+    for obj in page.get_objects(filter=kinds, max_depth=MAX_FORM_DEPTH):
+        if obj.type == pdfium_c.FPDF_PAGEOBJ_FORM:
+            if obj.level >= MAX_FORM_DEPTH - 1:  # get_objects descends only below this level
+                raise PageTooLargeError("form nesting too deep to count its images")
+            continue
+        width, height = obj.get_px_size()
         total += width * height
     return total
 
@@ -151,7 +174,10 @@ def render_page_png(
     scale = render_scale(width, height, max_pixels=max_pixels)
     _check_embedded_images(page, max_image_pixels)
     # Grayscale: one byte a pixel instead of three, and tesseract binarises anyway.
-    image = page.render(scale=scale, grayscale=True).to_pil()
+    # No annotations or form fields: a scan needs neither, and their appearance streams can
+    # hold images the count above does not see.
+    bitmap = page.render(scale=scale, grayscale=True, draw_annots=False, may_draw_forms=False)
+    image = bitmap.to_pil()
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
@@ -247,7 +273,8 @@ def _has_image(document: pypdfium2.PdfDocument, max_pages: int) -> bool:
     Only the first ``max_pages`` pages are loaded: those are the only ones OCR would render.
     """
     for page in islice(document, max_pages):
-        if next(page.get_objects(filter=(pdfium_c.FPDF_PAGEOBJ_IMAGE,)), None) is not None:
+        images = page.get_objects(filter=(pdfium_c.FPDF_PAGEOBJ_IMAGE,), max_depth=MAX_FORM_DEPTH)
+        if next(images, None) is not None:
             return True
     return False
 

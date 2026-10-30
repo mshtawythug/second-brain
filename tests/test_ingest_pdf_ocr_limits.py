@@ -18,6 +18,7 @@ from pathlib import Path
 
 import psycopg
 import pypdfium2
+import pypdfium2.raw as pdfium_c
 import pytest
 from PIL import Image
 from reportlab.lib.utils import ImageReader
@@ -27,6 +28,7 @@ from brain.errors import describe_failure
 from brain.ingest import ingest_document
 from brain.ingest.ocr import PAGE_TIMEOUT_S, OcrSetup
 from brain.ingest.pdf import (
+    MAX_FORM_DEPTH,
     MAX_IMAGE_PIXELS,
     MAX_PIXELS,
     MAX_SIDE_PX,
@@ -376,6 +378,9 @@ def test_a_page_whose_images_exceed_the_bound_is_skipped_before_render(
 
 
 class _UnreadableImage:
+    type = pdfium_c.FPDF_PAGEOBJ_IMAGE
+    level = 0
+
     def get_px_size(self) -> tuple[int, int]:
         raise pypdfium2.PdfiumError("synthetic unreadable image")
 
@@ -389,7 +394,7 @@ class _PageWithUnreadableImage:
     def get_size(self) -> tuple[float, float]:
         return (612.0, 792.0)
 
-    def get_objects(self, filter: tuple[int, ...]) -> Iterator[_UnreadableImage]:
+    def get_objects(self, filter: tuple[int, ...], max_depth: int) -> Iterator[_UnreadableImage]:
         yield _UnreadableImage()
 
     def render(self, **_: object) -> object:
@@ -405,6 +410,151 @@ def test_an_unreadable_image_size_fails_closed() -> None:
 
     assert not page.rendered
     assert describe_failure(caught.value) == "PageTooLargeError from PdfiumError"
+
+
+def _nested_forms_pdf(path: Path, depth: int) -> Path:
+    """A letter page drawing ``depth`` Form XObjects nested in a chain, a 40 x 30 px image last."""
+    first_form = 6
+    image_number = first_form + depth
+    draw = b"q /F Do Q"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        f"/Resources << /XObject << /F {first_form} 0 R >> >> /Contents 5 0 R >>".encode(),
+        b"<< >>",  # object 4 is unused: keeps the page's numbers the same as the other builders
+        f"<< /Length {len(draw)} >>\nstream\n".encode() + draw + b"\nendstream",
+    ]
+    for level in range(depth):
+        last = level == depth - 1
+        name, target = (b"/Im0", image_number) if last else (b"/F", first_form + level + 1)
+        body = b"q " + name + b" Do Q"
+        objects.append(
+            f"<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] /Resources << /XObject << "
+            f"{name.decode()} {target} 0 R >> >> /Length {len(body)} >>\nstream\n".encode()
+            + body
+            + b"\nendstream"
+        )
+    pixels = b"\xff" * (40 * 30)
+    objects.append(
+        f"<< /Type /XObject /Subtype /Image /Width 40 /Height 30 /ColorSpace /DeviceGray "
+        f"/BitsPerComponent 8 /Length {len(pixels)} >>\nstream\n".encode()
+        + pixels
+        + b"\nendstream"
+    )
+    return _write_pdf(path, objects)
+
+
+def _first_page_image_pixels(path: Path) -> int:
+    document = pypdfium2.PdfDocument(str(path))
+    try:
+        return embedded_image_pixels(document[0])
+    finally:
+        document.close()
+
+
+def test_an_image_below_pypdfium2s_default_depth_is_counted(tmp_path: Path) -> None:
+    """At 20 nested forms the image sits past ``get_objects``' default ``max_depth`` of 15."""
+    path = _nested_forms_pdf(tmp_path / "deep.pdf", 20)
+
+    assert MAX_FORM_DEPTH == 64
+    assert _first_page_image_pixels(path) == 40 * 30
+
+
+#: The deepest Form level pdfium's parser loads, measured with pypdfium2 5.14: a chain of 41
+#: forms ends at level 40, and a longer chain is cut there, its deeper forms and their
+#: images never loaded, so never drawn or decoded either.
+PDFIUM_MAX_FORM_LEVEL = 40
+
+
+def test_an_image_at_the_deepest_level_pdfium_parses_is_counted(tmp_path: Path) -> None:
+    path = _nested_forms_pdf(tmp_path / "deep.pdf", PDFIUM_MAX_FORM_LEVEL)
+
+    assert _first_page_image_pixels(path) == 40 * 30
+
+
+def test_pdfium_loads_no_form_past_level_40(tmp_path: Path) -> None:
+    """Pins the assumption that makes 64 a safe depth: pdfium stops parsing at level 40.
+
+    If a pdfium upgrade parses deeper, this fails, and ``MAX_FORM_DEPTH`` must be revisited.
+    """
+    path = _nested_forms_pdf(tmp_path / "deeper.pdf", 48)
+    document = pypdfium2.PdfDocument(str(path))
+    try:
+        kinds = (pdfium_c.FPDF_PAGEOBJ_IMAGE, pdfium_c.FPDF_PAGEOBJ_FORM)
+        objects = list(document[0].get_objects(filter=kinds, max_depth=MAX_FORM_DEPTH))
+    finally:
+        document.close()
+
+    assert max(obj.level for obj in objects) == PDFIUM_MAX_FORM_LEVEL
+    assert not any(obj.type == pdfium_c.FPDF_PAGEOBJ_IMAGE for obj in objects)
+
+
+class _FormObject:
+    type = pdfium_c.FPDF_PAGEOBJ_FORM
+
+    def __init__(self, level: int) -> None:
+        self.level = level
+
+
+class _PageWithNestedForms:
+    """A page whose object tree reaches ``depth`` levels of Form XObjects."""
+
+    def __init__(self, depth: int) -> None:
+        self.depth = depth
+        self.asked_depth: int | None = None
+
+    def get_objects(self, filter: tuple[int, ...], max_depth: int) -> Iterator[_FormObject]:
+        self.asked_depth = max_depth
+        return (_FormObject(level) for level in range(min(self.depth, max_depth)))
+
+
+def test_a_form_at_the_last_countable_level_is_refused() -> None:
+    """A Form at level 63 has contents ``get_objects`` would not visit: fail closed."""
+    page = _PageWithNestedForms(MAX_FORM_DEPTH)
+
+    with pytest.raises(PageTooLargeError, match="nesting"):
+        embedded_image_pixels(page)  # type: ignore[arg-type]
+
+    assert page.asked_depth == MAX_FORM_DEPTH
+
+
+def test_forms_short_of_the_last_level_are_walked_and_hold_nothing() -> None:
+    page = _PageWithNestedForms(MAX_FORM_DEPTH - 1)
+
+    assert embedded_image_pixels(page) == 0  # type: ignore[arg-type]
+
+
+class _RecordingPage:
+    """A page with no images whose ``render`` records its keyword arguments."""
+
+    def __init__(self) -> None:
+        self.render_kwargs: dict[str, object] = {}
+
+    def get_size(self) -> tuple[float, float]:
+        return (612.0, 792.0)
+
+    def get_objects(self, filter: tuple[int, ...], max_depth: int) -> Iterator[object]:
+        return iter(())
+
+    def render(self, **kwargs: object) -> _RecordingPage:
+        self.render_kwargs = kwargs
+        return self
+
+    def to_pil(self) -> Image.Image:
+        return Image.new("L", (4, 4), 255)
+
+
+def test_the_render_draws_no_annotations_and_no_form_fields() -> None:
+    """Annotation appearance streams can hold images the count does not see; a scan has none."""
+    page = _RecordingPage()
+
+    png = render_page_png(page)  # type: ignore[arg-type]
+
+    assert png.startswith(b"\x89PNG")
+    assert page.render_kwargs["draw_annots"] is False
+    assert page.render_kwargs["may_draw_forms"] is False
+    assert page.render_kwargs["grayscale"] is True
 
 
 # ---------------------------------------------------------------------------

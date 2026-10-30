@@ -472,7 +472,14 @@ would fit only below 50 dpi, whose long side would not fit, or whose short side
 would be under one pixel, is skipped, so a forged page size (a huge or a very thin
 MediaBox) cannot exhaust memory. The images embedded in a page are bounded too:
 pdfium decodes each at its own size, so a page whose images hold more than 280
-million pixels (counted from their headers, without decoding) is skipped. One document gets at most
+million pixels (counted from their headers, without decoding, through nested
+forms) is skipped. Annotations and form fields are not drawn.
+
+**Known residuals.** Three image sources are not page objects, so they are not
+counted: images inside tiling patterns, soft masks (`/SMask`), and Type3 glyph
+images. A PDF built around one of them can still make pdfium decode a large
+image while OCR runs. The systemic fix is a process-level memory guard (backlog
+BL-32). One document gets at most
 10 minutes of OCR in total; at the deadline OCR stops, keeps the pages read so
 far, and logs a count. This matters because `brain ui` ingests on one job worker
 that cannot be cancelled. The text is stored
