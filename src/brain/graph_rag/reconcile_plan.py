@@ -148,8 +148,9 @@ class ReconcilePlan:
         plan that is current here stays current until this transaction commits.
 
         It is also the write transaction's first touch of the document, and it
-        takes ``FOR KEY SHARE`` on its row (``relational.key_share_doc_meta``)
-        before any graph row is written. A concurrent ``DELETE`` of the document
+        takes ``FOR KEY SHARE`` on its row
+        (``relational.fetch_doc_inputs(..., key_share=True)``) before any graph
+        row is written. A concurrent ``DELETE`` of the document
         therefore waits for this transaction instead of deadlocking with its
         cascade.
         """

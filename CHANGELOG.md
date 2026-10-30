@@ -25,8 +25,12 @@ git tag scheme:
 ### Fixed — the graph build survives a concurrent delete; a reconcile re-checks the participants (RM-27)
 
 - **`brain graphrag build` no longer stops when a document is deleted while it runs.** A document
-  deleted after the build listed it is now skipped. The build report (`BuildResult`) counts it as
-  `skipped_deleted`. Before, the whole build stopped with a "not found" error.
+  deleted after the build listed it but before the build read it is now skipped, and the build
+  report (`BuildResult`) counts it as `skipped_deleted`. One deleted later in its reconcile
+  (during the model call, or while waiting on the graph write lock) is dropped and counted as
+  `skipped`, as before. Before, the whole build stopped with a "not found" error. The
+  `brain graphrag build` footer and the MCP build tool do not show `skipped_deleted` yet
+  (follow-up BL-26).
 - **A reconcile no longer commits people from participants that were just edited.** The graph
   write used to check only that the document's body was unchanged. An edit that changed only the
   participants (a recipient added to a thread) could be overtaken by an older reconcile, which then

@@ -167,8 +167,10 @@ def build_graph(
     only current contributions — and the AGE mirror is rebuilt fresh from the
     relational source-of-truth (entities + ``MENTIONED_IN`` + ``Document``
     vertices + ``CO_OCCURS``). A zero-document corpus ends empty in both stores.
-    No document short-circuits, so ``reconciled + skipped_deleted == processed``
-    and ``skipped == 0``.
+    No document short-circuits on its watermark, but ``skipped`` can still be
+    nonzero: a concurrent edit, or a delete after a document's read phase, makes
+    its plan stale, ``is_current`` drops it, and the result counts as
+    ``skipped``. So ``reconciled + skipped + skipped_deleted == processed``.
 
     ``force`` is incompatible with ``limit`` (a clear-then-partial-rebuild would
     permanently lose the un-rebuilt remainder) — passing both raises
