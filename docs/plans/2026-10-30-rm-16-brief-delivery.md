@@ -92,9 +92,10 @@ No migration.
   parameterized query, only when delivery is on) and `brief_delivery.without_drafts` removes their
   captures, pins, todos and watch hits, so the counts drop with them. A failed lookup skips delivery
   (fail closed). A watch's "and N more" count may still include drafts: it is a count, not a title.
-  The suggestions were derived from every todo and cannot be traced to one, so when a draft's todo
-  is removed the suggestions are dropped too (round 2, R2-1); they are not re-derived, which would
-  put an LLM call on the delivery path.
+  The suggestions were derived from every capture title and todo text (`brief._build_suggest_prompt`;
+  pins and watch hits are not in that prompt) and cannot be traced to one, so when a draft's
+  capture or todo is removed the suggestions are dropped too (round 2 R2-1 for todos, round 3 R3-1
+  for captures); they are not re-derived, which would put an LLM call on the delivery path.
 - **D14, delivery off is decided by `BRAIN_BRIEF_DELIVERY` alone** (rev-82 H1). `_deliver` reads
   `load_delivery_channel` first and returns, silently, when it is `none`; only then does it load
   and validate the other knobs. `brain doctor` still validates them all and WARNs.

@@ -535,3 +535,16 @@ def test_a_brief_without_draft_todos_keeps_its_suggestions() -> None:
 
     assert "1. suggestion derived from todo text" in body
     assert "- [ ] todo body text one" in body
+
+
+def test_a_draft_capture_drops_the_suggestions_derived_from_it() -> None:
+    # sec-82 R3-1: the suggestion prompt reads capture TITLES as well as todo text
+    # (brief._build_suggest_prompt), so a removed draft capture takes the suggestions too,
+    # even when no todo was removed.
+    brief = _brief()  # captures d1, d2; its one todo belongs to d1
+
+    _, body = render_delivery(without_drafts(brief, {"d2"}), include_todos=True)
+
+    assert "Capture beta" not in body
+    assert "- [ ] todo body text one" in body
+    assert "suggestion derived from todo text" not in body
