@@ -197,3 +197,18 @@ Baseline: the 13 target tests pass; after the last restore they pass again.
 M10 survived its first run: the old test's two payloads carried equal watch fields when
 `withheld` was computed. The test now uses a skipped semantic watch, whose note is on the terminal
 payload only at that point (`fcb3779`), and M10 is killed.
+
+### Review-round mutation proofs
+
+Run at `90c7b18`, with the same harness as above. The baseline of 9 target tests passes, and it passes again after the last restore.
+
+| Id | Mutation | Killed by |
+|---|---|---|
+| R1a | `build_matcher` reads the knob eagerly | `test_a_bad_min_cosine_leaves_a_lexical_brief_working`, `test_a_bad_min_cosine_skips_semantic_watches_only` |
+| R1b | `_cosine_floor` lets the `ConfigError` out | `test_a_bad_min_cosine_skips_semantic_watches_only`, `test_a_bad_min_cosine_skips_a_semantic_watch_with_a_note` |
+| R1c | `build_brief` checks watches without migration 029 | `test_a_bad_min_cosine_without_migration_029_still_builds` |
+| R2a | the lexical overflow count is dropped | `test_a_lexical_check_over_the_limit_counts_what_it_could_not_record` |
+| R2b | `capped` is never set | `test_a_semantic_check_that_fills_the_limit_says_more_may_exist` |
+| R2c | the page gets the count | `test_a_check_over_the_limit_is_noted_with_its_count_only_in_the_terminal` |
+| R3a | `NOT_SEED_SQL` reverts to `notified_at IS DISTINCT FROM first_seen_at` | `test_a_real_hit_marked_in_its_checks_transaction_is_still_a_hit` |
+| R3b | the seed is written with `seeded = FALSE` | `test_seeded_matches_are_not_hits_in_the_terminal_set` |
