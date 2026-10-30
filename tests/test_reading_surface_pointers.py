@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_brain_skills_sync import _skill_reference_files
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README = REPO_ROOT / "README.md"
 CLI_REFERENCE = REPO_ROOT / "docs" / "cli-reference.md"
@@ -257,12 +259,13 @@ def test_reading_docs_name_no_removed_wiki_surface(doc: Path) -> None:
 
 @pytest.mark.parametrize(
     "skill",
-    sorted((REPO_ROOT / "skills").glob("*/SKILL.md")),
-    ids=lambda p: p.parent.name,
+    [*sorted((REPO_ROOT / "skills").glob("*/SKILL.md")), *_skill_reference_files()],
+    ids=lambda p: p.relative_to(REPO_ROOT / "skills").as_posix(),
 )
 def test_skills_name_no_removed_wiki_surface(skill: Path) -> None:
     text = skill.read_text(encoding="utf-8")
-    assert not _removed_surfaces_in(text), (skill.parent.name, _removed_surfaces_in(text))
+    where = skill.relative_to(REPO_ROOT).as_posix()
+    assert not _removed_surfaces_in(text), (where, _removed_surfaces_in(text))
 
 
 def test_cli_reference_setup_and_doctor_name_no_wiki_dependency() -> None:
@@ -290,7 +293,7 @@ def test_no_live_doc_links_the_renamed_vault_doc() -> None:
     docs = REPO_ROOT / "docs"
     live = [README, *docs.glob("*.md"), *(docs / "guides").glob("*.md")]
     live += [REPO_ROOT / name for name in ("CONTRIBUTING.md", "SECURITY.md", "AGENTS.md")]
-    live += sorted((REPO_ROOT / "skills").glob("*/SKILL.md"))
+    live += sorted((REPO_ROOT / "skills").glob("*/SKILL.md")) + _skill_reference_files()
     stale = re.compile(r"(?:docs/|\]\()vault-and-wiki\.md")
     hits = [
         str(p.relative_to(REPO_ROOT))

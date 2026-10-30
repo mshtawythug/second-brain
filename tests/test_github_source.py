@@ -14,6 +14,7 @@ from brain.source_kinds import validate_source_kind
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INGEST_SKILL = REPO_ROOT / "skills" / "ingest-brain" / "SKILL.md"
+GITHUB_RECIPE = REPO_ROOT / "skills" / "ingest-brain" / "sources" / "github.md"
 STATIC_JS = REPO_ROOT / "src" / "brain" / "ui" / "static" / "js"
 
 
@@ -38,10 +39,11 @@ def test_github_has_no_month_grouping() -> None:
 
 
 def _github_section() -> str:
-    text = INGEST_SKILL.read_text(encoding="utf-8")
-    match = re.search(r"^## GitHub PRs.*?(?=^## )", text, re.DOTALL | re.MULTILINE)
-    assert match, "ingest-brain has no '## GitHub PRs' section"
-    return " ".join(match.group(0).split())  # line wrapping is not part of the contract
+    """The whole recipe file: since the skill split, it holds nothing but the recipe."""
+    assert GITHUB_RECIPE.is_file(), "ingest-brain has no sources/github.md recipe"
+    text = GITHUB_RECIPE.read_text(encoding="utf-8")
+    assert text.startswith("# GitHub PRs"), "sources/github.md does not open with its H1"
+    return " ".join(text.split())  # line wrapping is not part of the contract
 
 
 def test_the_recipe_names_the_scope_and_the_refusal() -> None:
@@ -76,6 +78,11 @@ def test_the_table_row_and_the_safety_rule_exist() -> None:
     text = INGEST_SKILL.read_text(encoding="utf-8")
 
     assert "| The user's own GitHub PRs, issues, READMEs | `brain ingest-github" in text
+    assert (
+        "| The user's own GitHub PRs, issues, READMEs | `brain ingest-github --mine --since "
+        "YYYY-MM-DD` | **REFUSES without `--repo`/`--mine` and `--since`.** Read "
+        "[sources/github.md](sources/github.md). |"
+    ) in text, "the routing row must send the agent to the recipe"
     assert "- **GitHub: the user's own activity, date-bounded.**" in text
 
 

@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_brain_skills_sync import _skill_reference_files
+
 REPO_ROOT = Path(__file__).parent.parent
 SKILLS_DIR = REPO_ROOT / "skills"
 SYNC_SCRIPT = REPO_ROOT / "bin" / "brain-skills-sync"
@@ -124,10 +126,25 @@ def _routing_files() -> list[Path]:
     return [*_repo_skill_files(), PACKAGED_SKILL]
 
 
+def _agent_read_files() -> list[Path]:
+    """Every file an agent reads: the skills plus the reference files they send it to.
+
+    A recipe moved out of a SKILL.md into ``sources/*.md`` is still a recipe an
+    agent follows, so the text guards below must follow it there.
+    """
+    return [*_routing_files(), *_skill_reference_files()]
+
+
 def _skill_id(path: Path) -> str:
-    """Stable id for a skill file — its directory name, or ``templates/skill``."""
+    """Stable id for a skill file — its directory name, or ``templates/skill``.
+
+    A reference file is named by its path under ``skills/``
+    (``ingest-brain/sources/jira.md``).
+    """
     if path == PACKAGED_SKILL:
         return "templates/skill"
+    if path.name != "SKILL.md":
+        return path.relative_to(SKILLS_DIR).as_posix()
     return path.parent.name
 
 
@@ -257,7 +274,7 @@ def test_every_retrieval_skill_mentions_recall(skill_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("skill_path", _routing_files(), ids=_skill_id)
+@pytest.mark.parametrize("skill_path", _agent_read_files(), ids=_skill_id)
 def test_no_skill_teaches_an_unbounded_show_loop(skill_path: Path) -> None:
     """No skill may pair loop language with a `brain show` invocation.
 
@@ -327,7 +344,7 @@ def test_measured_ceiling_lives_in_exactly_two_files() -> None:
 
     carriers = {
         path
-        for path in [*_routing_files(), docs_page]
+        for path in [*_agent_read_files(), docs_page]
         if _MEAN_VARIANTS.search(path.read_text(encoding="utf-8"))
     }
 
