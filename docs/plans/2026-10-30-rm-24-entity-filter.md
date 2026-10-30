@@ -98,11 +98,21 @@ check dropped; the graph-off check dropped; MCP mapping to `INTERNAL_ERROR`.
    pick a type. One optional parameter beside the first keeps to the "one parameter" spirit.
 2. **The resolver also tries the strip-all concept key.** The ticket says `canonical_key =
    lower(name)`. Concept entities have been keyed by strip-all since concepts-v6 (`Acme Platform`
-   → `acmeplatform`), so `lower(name)` alone misses every multi-word concept. It still reaches
-   step 4's name match, but only when nothing else matched.
+   → `acmeplatform`), so `lower(name)` alone misses every multi-word concept by key. Such a name
+   would then resolve only through step 4's display-name match, which runs only when no key matched.
 3. **The facet predicate gets the filter at its rebuild sites, not through a shared object.** The
    ticket says the facets see the filter "because they share the predicate". In fact the CLI and
    MCP each rebuild the facet predicate from the same keyword arguments, so both rebuild sites take
    `**entity_kw`. AC 3 is tested on both surfaces.
 4. **`brain explain` does not get `--entity`.** The ticket names `brain search` only, and the
    `cli_search.py` budget (≤ 15) has no room for a second command.
+5. **Two refusals the ticket does not name.** `--entity-type` without `--entity`, and an
+   `--entity-type` outside the graph's five types, are both exit 2 / `INVALID_PARAMS`
+   (`EntityFilterError`). Without them, the first would be silently ignored, and the second would
+   match nothing and report "not found".
+
+## Found, not fixed
+
+MCP `brain_search`'s facet predicate omits `updated_after` / `updated_before`, so with `facets=true`
+and an F9 edit range, the facet counts describe a wider set than the results. The CLI passes both.
+This predates RM-24 and is outside its scope; it is reported, not changed here.
