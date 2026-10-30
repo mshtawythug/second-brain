@@ -16,7 +16,9 @@ is checked for the three things the front end depends on:
 4. ``GET /api/jobs``, which a queued ask reads to decide whether an ingest is AHEAD
    of it, gives each job the keys the stub's :func:`listed_job` gives, with a
    ``created_at`` in the same form as the ask's own, so the FIFO comparison the tab
-   makes on the stub is the comparison it makes on the wire.
+   makes on the stub is the comparison it makes on the wire;
+5. ``GET /api/ask/config`` has the stub's keys (:data:`CONFIG_KEYS`), including
+   ``max_history_turns``, which the tab reads rather than restating (RM-18c).
 
 No Ollama; all data synthetic.
 """
@@ -41,6 +43,8 @@ from tests.ui_ask_harness import (
     AFTER,
     BEFORE,
     CITATION_KEYS,
+    CONFIG_KEYS,
+    ENABLED,
     LISTED_KEYS,
     RESULT_KEYS,
     SNAPSHOT_KEYS,
@@ -176,3 +180,14 @@ def test_the_job_listing_has_the_stubs_keys_and_comparable_times(
     assert when <= asked
     for stub in (BEFORE, AFTER):
         assert datetime.fromisoformat(stub).tzinfo is not None
+
+
+def test_the_config_has_the_stubs_keys_and_history_cap(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    client = TestClient(create_app(_ctx(test_db, tmp_path, _SchemaChat())), base_url=ORIGIN)
+
+    config = client.get("/api/ask/config").json()
+
+    assert set(config) == CONFIG_KEYS
+    assert config["max_history_turns"] == ENABLED["max_history_turns"]

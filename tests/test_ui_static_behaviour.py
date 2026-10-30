@@ -2366,7 +2366,7 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
     # guard is green while looking at an empty list. Renaming the property at
     # all eleven sites is the shape that produces that.
     ("hidden-toggle-scan-finds-nothing", check_hidden_toggles_survive_the_cascade,
-     "static/*", ".hidden =", ".hiddenFlag =", 25),
+     "static/*", ".hidden =", ".hiddenFlag =", 26),
     # The DISCOVERY clause. `toast()`'s element stops being resolvable, the site
     # count is unchanged so the first assertion stays green, and only
     # "cannot tell what this hides" can fire. A guard that skipped the site

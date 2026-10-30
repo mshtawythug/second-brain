@@ -16,12 +16,13 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 import psycopg
 
+from .ask_history import AskTurn, cap_history, history_block
 from .chat import coerce_bool
 from .search import SearchResult, hybrid_search
 from .search_fallback import SearchFallback, fallback_json
@@ -174,8 +175,12 @@ class _ReflectVerdict:
 # ---------------------------------------------------------------------------
 
 
-def _plan_prompt(question: str) -> str:
-    """Build the plan-step prompt: decompose ``question`` into sub-queries."""
+def _plan_prompt(question: str, history: Sequence[AskTurn] = ()) -> str:
+    """Build the plan-step prompt: decompose ``question`` into sub-queries.
+
+    ``history`` (already capped, RM-18c) is the one place earlier turns enter any
+    prompt; reflect and synthesis never take it (RM-18c.D1).
+    """
     return (
         "You are a retrieval planner for a personal knowledge base. Decompose "
         "the user's question into 1 to 3 focused search sub-queries that, "
@@ -183,18 +188,20 @@ def _plan_prompt(question: str) -> str:
         "sub-query should be a short keyword phrase, not a full sentence. "
         "Respond ONLY with a JSON object of the form "
         '{"sub_queries": ["...", "..."]}.\n\n'
-        f"Question: {question}"
+        f"{history_block(history)}Question: {question}"
     )
 
 
-def _call_plan_step(chat: ChatJson, cfg: Config, question: str) -> list[str]:
+def _call_plan_step(
+    chat: ChatJson, cfg: Config, question: str, history: Sequence[AskTurn] = ()
+) -> list[str]:
     """Run the plan step and return 1-3 sub-queries (clamped + de-duplicated).
 
     Returns an empty list only if the model produced no usable string
     sub-queries; the caller then falls back to ``[question]``.
     """
     body = chat(
-        _plan_prompt(question),
+        _plan_prompt(question, history),
         schema={"sub_queries": "list"},
         cfg=cfg,
         model=cfg.ask_model,
@@ -579,6 +586,7 @@ def ask(
     exclude_confidential: bool = False,
     fallback: bool = True,
     on_step: OnStep | None = None,
+    history: Sequence[AskTurn] = (),
 ) -> AskResult:
     """Agentic plan -> retrieve -> reflect -> synthesize loop over the corpus.
 
@@ -592,10 +600,18 @@ def ask(
     are produced. ``OllamaUnavailable`` / ``EnrichmentError`` from any LLM step
     propagates to the caller (no silent degradation). A failed query embed
     falls back to text-only retrieval unless ``fallback=False``.
+
+    ``history`` holds a follow-up's earlier turns (RM-18c). It is untrusted, so it
+    is capped here (:func:`brain.ask_history.cap_history`, with the embedder's own
+    tokenizer) whoever the caller is, and it reaches the plan prompt only. The
+    no-loop path has no plan step, so ``no_loop`` with any turn is a ``ValueError``
+    rather than history dropped without a word.
     """
     _validate_mode(mode)
     if max_iterations < 1:
         raise ValueError(f"max_iterations must be >= 1 (got {max_iterations})")
+    if no_loop and history:
+        raise ValueError("history needs the planning loop; it cannot be used with no_loop")
     if no_loop:
         return ask_no_loop(
             conn,
@@ -615,7 +631,8 @@ def ask(
 
     # Step 1 — Plan. Fall back to the raw question when the planner yields none.
     _step(on_step, "plan", 1)
-    sub_queries = _call_plan_step(chat, cfg, question)
+    turns = cap_history(history, cost=embedder.count_tokens)
+    sub_queries = _call_plan_step(chat, cfg, question, turns)
     fallback_used = False
     if not sub_queries:
         sub_queries = [question]

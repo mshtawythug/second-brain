@@ -289,8 +289,14 @@
         <div class="agent-field">
           <label for="agent-question">Question</label>
           <textarea id="agent-question" rows="3" required
-                    aria-describedby="agent-question-hint"></textarea>
+                    aria-describedby="agent-question-hint agent-follow-up-text"></textarea>
           <p class="agent-hint" id="agent-question-hint"></p>
+        </div>
+        <!-- RM-18c: shown after "Follow up". The quoted question is set as text. -->
+        <div class="agent-follow-up" id="agent-follow-up" hidden>
+          <p class="agent-follow-up-text" id="agent-follow-up-text"></p>
+          <p class="agent-hint" id="agent-follow-up-hint"></p>
+          <button class="ghost-btn" id="agent-follow-up-clear" type="button">New question</button>
         </div>
         <div class="agent-check">
           <input type="checkbox" id="agent-no-loop">

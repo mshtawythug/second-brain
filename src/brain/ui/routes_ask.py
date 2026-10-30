@@ -1,6 +1,9 @@
-"""`/api/ask` — the Agent tab's config and the ask submit (RM-18a).
+"""`/api/ask` — the Agent tab's config and the ask submit (RM-18a; follow-ups RM-18c).
 
-Thin: gate → capped read → validate → submit. Status and cancel reuse
+Thin: gate → capped read → validate → submit. A follow-up's ``history`` is
+untrusted: this module checks its SHAPE only, and ``brain.ask.ask`` applies the
+3-turn, 2,000-token cap itself (``brain.ask_history``), so no caller reaches the
+plan prompt with more. Status and cancel reuse
 ``/api/jobs/{id}`` and ``/api/jobs/{id}/cancel`` (``routes_jobs``); an ask job is
 never listed there (A10).
 """
@@ -12,6 +15,7 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ..ask_history import MAX_HISTORY_ANSWER_CHARS, MAX_HISTORY_TURNS, AskTurn
 from ._http import context_of, ok, parse_json_object, read_body_capped
 from .ask_service import (
     ASK_MODES,
@@ -26,14 +30,20 @@ from .ingest_schemas import encodes_utf8
 from .routes_ingest import queue_errors
 from .routes_jobs import job_payload
 
-#: The cap ON THE WIRE. JSON escaping can grow a question up to 12 bytes a
-#: character (an astral character is two ``\uXXXX`` escapes); 1 KiB covers the
-#: rest of the object. Over it: 413 before any parse.
-MAX_ASK_WIRE_BYTES = 12 * MAX_QUESTION_CHARS + 1024
+#: The cap ON THE WIRE. JSON escaping can grow a string up to 12 bytes a
+#: character (an astral character is two ``\uXXXX`` escapes): the question plus
+#: three maximal earlier turns (RM-18c), and 2 KiB for the rest of the object.
+#: Over it: 413 before any parse. More turns than three fit only when they are
+#: short, and the cap in ``ask`` drops the oldest.
+MAX_ASK_WIRE_BYTES = (
+    12 * (MAX_QUESTION_CHARS + MAX_HISTORY_TURNS * (MAX_QUESTION_CHARS + MAX_HISTORY_ANSWER_CHARS))
+    + 2048
+)
 
 #: The fields an ask request may carry. Anything else is a 400, so a client that
-#: believes it chose a mode, or sent history (RM-18c), is told it did not.
-_ASK_FIELDS = frozenset({"question", "no_loop"})
+#: believes it chose a mode is told it did not.
+_ASK_FIELDS = frozenset({"question", "no_loop", "history"})
+_TURN_FIELDS = frozenset({"question", "answer"})
 
 
 async def ask_config(request: Request) -> JSONResponse:
@@ -44,6 +54,7 @@ async def ask_config(request: Request) -> JSONResponse:
             "enabled": reason is None,
             "reason": reason,
             "max_question_chars": MAX_QUESTION_CHARS,
+            "max_history_turns": MAX_HISTORY_TURNS,
             "modes": list(ASK_MODES),
         }
     )
@@ -77,4 +88,47 @@ def parse_ask(payload: Mapping[str, Any]) -> AskSpec:
     no_loop = payload.get("no_loop", False)
     if not isinstance(no_loop, bool):
         raise UiBadRequest("no_loop must be true or false", code="invalid_no_loop")
-    return AskSpec(question=question, no_loop=no_loop)
+    history = parse_history(payload.get("history", []))
+    if no_loop and history:
+        # ask_no_loop has no plan step, the only step that reads history (RM-18c).
+        raise UiBadRequest(
+            "a follow-up needs the planning loop; send no_loop false",
+            code="history_requires_loop",
+        )
+    return AskSpec(question=question, no_loop=no_loop, history=history)
+
+
+def parse_history(raw: Any) -> tuple[AskTurn, ...]:
+    """A follow-up's earlier turns, oldest first, shape-checked (RM-18c).
+
+    A list of ``{question, answer}`` objects, each a non-empty UTF-8 string within
+    its character cap. Every turn is checked; only the newest
+    :data:`~brain.ask_history.MAX_HISTORY_TURNS` are kept (oldest dropped first, as
+    ``ask``'s own cap would), so an :class:`AskSpec` never holds more. The token cap
+    is ``ask``'s.
+    """
+    if not isinstance(raw, list):
+        raise UiBadRequest("history must be a list of turns", code="invalid_history")
+    turns = [_parse_turn(item) for item in raw]
+    return tuple(turns[-MAX_HISTORY_TURNS:])
+
+
+def _parse_turn(item: Any) -> AskTurn:
+    if not isinstance(item, dict) or set(item) != _TURN_FIELDS:
+        raise UiBadRequest(
+            "each history turn must be {question, answer}", code="invalid_history"
+        )
+    question, answer = item["question"], item["answer"]
+    for text in (question, answer):
+        if not isinstance(text, str) or not text.strip() or not encodes_utf8(text):
+            raise UiBadRequest(
+                "each history turn needs a non-empty question and answer",
+                code="invalid_history",
+            )
+    if len(question) > MAX_QUESTION_CHARS or len(answer) > MAX_HISTORY_ANSWER_CHARS:
+        raise UiBadRequest(
+            f"a history turn's question is at most {MAX_QUESTION_CHARS} characters "
+            f"and its answer at most {MAX_HISTORY_ANSWER_CHARS}",
+            code="history_turn_too_long",
+        )
+    return AskTurn(question=question.strip(), answer=answer.strip())

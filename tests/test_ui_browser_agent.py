@@ -347,3 +347,176 @@ def test_an_ask_resumes_after_a_reload_and_never_shows_in_the_ingest_tab(
     page.wait_for_timeout(1500)           # past one poll: nothing else is resumed
     assert page.locator("#ingest-jobs > li").count() == 0
     assert page.locator("#ingest-jobs-empty").is_visible()
+
+
+# ------------------------------------------- RM-18c: follow-up questions -----
+
+_QUICK_ANSWER = "Plonk ships quarkle [1]."
+
+
+def _ask_next(ask_harness: AskHarness, scenario: str, **kwargs: Any) -> Any:
+    """Ask, then wait for THIS turn: until it is prepended, turn 0 is the last one.
+
+    Keyed on the newest row's job id, not the row count: at 20 turns a new ask
+    evicts the oldest, so the count does not move.
+    """
+    page = ask_harness.page
+    newest = "() => document.querySelector('#agent-turns > li')?.dataset.jobId || ''"
+    before = page.evaluate(newest)
+    ask_harness.ask(scenario, **kwargs)
+    page.wait_for_function(f"(before) => ({newest})() !== before", arg=before,
+                           timeout=SETTLE_MS)
+    return ask_harness.settled()
+
+
+def _follow_up(ask_harness: AskHarness, index: int = 0) -> None:
+    ask_harness.turn(index).locator("button.turn-follow-up").click()
+    ask_harness.page.locator("#agent-follow-up").wait_for(state="visible")
+
+
+def test_a_fresh_ask_sends_no_history(ask_harness: AskHarness) -> None:
+    # RM-18c AC2: the body is exactly what RM-18b sent.
+    ask_harness.open_tab()
+    _ask_next(ask_harness, "quick", words="first")
+    _ask_next(ask_harness, "quick", words="second")
+
+    assert [set(body) for body in ask_harness.fake.asks] == [{"question", "no_loop"}] * 2
+
+
+def test_follow_up_sends_the_previous_turns_and_then_stops(ask_harness: AskHarness) -> None:
+    """Pressing Follow up is the only way history is sent, at most three turns of it."""
+    page = ask_harness.page
+    ask_harness.open_tab()
+    _ask_next(ask_harness, "quick", words="turn one")
+
+    _follow_up(ask_harness)
+    notice = page.locator("#agent-follow-up")
+    assert "scenario:quick turn one" in notice.inner_text()
+    # A follow-up always plans (plan doc D3): Quick answer is off while it is set.
+    assert page.locator("#agent-no-loop").is_disabled()
+    assert not page.locator("#agent-no-loop").is_checked()
+    # A11y (rev-85 item 4): the button names the question it follows up, by a job
+    # id (never model text).
+    button = ask_harness.turn(0).locator("button.turn-follow-up")
+    question_id = ask_harness.turn(0).locator(".turn-question").get_attribute("id")
+    assert question_id == f"turn-{1:032x}-question"   # the harness's first job id
+    assert button.get_attribute("aria-describedby") == question_id
+    follow = _ask_next(ask_harness, "quick", words="turn two")
+    assert page.locator("#agent-follow-up").is_hidden()   # back to a fresh ask
+    assert page.locator("#agent-no-loop").is_enabled()
+    assert "Follow-up to: scenario:quick turn one" in follow.inner_text()
+
+    # Chain three more: each carries the conversation, never more than three turns.
+    for n in ("three", "four", "five"):
+        _follow_up(ask_harness)
+        _ask_next(ask_harness, "quick", words=f"turn {n}")
+
+    histories = [body.get("history") for body in ask_harness.fake.asks]
+    def turn(name: str) -> dict[str, str]:
+        return {"question": f"scenario:quick turn {name}", "answer": _QUICK_ANSWER}
+    assert histories == [
+        None,
+        [turn("one")],
+        [turn("one"), turn("two")],
+        [turn("one"), turn("two"), turn("three")],
+        [turn("two"), turn("three"), turn("four")],       # the oldest went first
+    ]
+    assert all(body["no_loop"] is False for body in ask_harness.fake.asks)
+
+    # And the next plain ask is fresh again.
+    _ask_next(ask_harness, "quick", words="unrelated")
+    assert "history" not in ask_harness.fake.asks[-1]
+    # D1: the conversation lives in the page, never in storage.
+    stored = page.evaluate("() => JSON.stringify(Object.entries(sessionStorage))"
+                           " + JSON.stringify(Object.entries(localStorage))")
+    assert "quarkle" not in stored.lower() and "turn" not in stored.lower()
+
+
+def test_new_question_clears_a_follow_up(ask_harness: AskHarness) -> None:
+    page = ask_harness.page
+    ask_harness.open_tab()
+    _ask_next(ask_harness, "quick", words="turn one")
+    _follow_up(ask_harness)
+
+    page.click("#agent-follow-up-clear")
+    assert page.locator("#agent-follow-up").is_hidden()
+    assert page.locator("#agent-no-loop").is_enabled()
+    _ask_next(ask_harness, "quick", words="turn two")
+
+    assert "history" not in ask_harness.fake.asks[-1]
+
+
+@pytest.mark.parametrize("scenario", ["withheld", "fails", "hostile"])
+def test_only_a_shown_answer_can_be_followed_up(ask_harness: AskHarness, scenario: str) -> None:
+    # A withheld answer is null and a failed ask has none: nothing to send. A hostile
+    # answer is a string, so it CAN be followed up, and its text is sent as typed.
+    ask_harness.open_tab()
+    turn = _ask_next(ask_harness, scenario)
+
+    offered = turn.locator("button.turn-follow-up").count()
+    assert offered == (1 if scenario == "hostile" else 0)
+    if offered:
+        _follow_up(ask_harness)
+        _ask_next(ask_harness, "quick")
+        assert ask_harness.fake.asks[-1]["history"] == [
+            {"question": "scenario:hostile quarkle zibbit", "answer": HOSTILE_ANSWER}]
+        assert _elements(ask_harness.page, "img") == 0
+
+
+def test_a_resumed_turn_offers_no_follow_up(ask_harness: AskHarness) -> None:
+    # After a reload the question is not known (ids only are stored), so there is
+    # no conversation to continue.
+    page = ask_harness.page
+    ask_harness.open_tab()
+    _ask_next(ask_harness, "quick")
+    page.reload()
+    page.wait_for_selector("#tab-notes")
+    ask_harness.open_tab()
+    turn = ask_harness.settled()
+
+    assert turn.locator(".turn-answer").inner_text() == _QUICK_ANSWER
+    assert turn.locator("button.turn-follow-up").count() == 0
+    assert page.locator("#agent-follow-up").is_hidden()
+
+
+def test_the_follow_up_hint_and_chain_use_the_servers_turn_cap(ask_harness: AskHarness) -> None:
+    # rev-85 item 5: the number comes from /api/ask/config, never from index.html.
+    page = ask_harness.page
+    ask_harness.fake.config = {**ask_harness.fake.config, "max_history_turns": 2}
+    ask_harness.open_tab()
+    _ask_next(ask_harness, "quick", words="turn one")
+    for n in ("two", "three"):
+        _follow_up(ask_harness)
+        assert "the last 2 questions and answers" in page.locator("#agent-follow-up").inner_text()
+        _ask_next(ask_harness, "quick", words=f"turn {n}")
+    _follow_up(ask_harness)
+    _ask_next(ask_harness, "quick", words="turn four")
+
+    assert [len(body.get("history", [])) for body in ask_harness.fake.asks] == [0, 1, 2, 2]
+    assert [t["question"] for t in ask_harness.fake.asks[-1]["history"]] == [
+        "scenario:quick turn two", "scenario:quick turn three"]
+
+
+def test_a_follow_up_is_spent_by_the_submit_that_evicts_its_turn(ask_harness: AskHarness) -> None:
+    """rev-85 item 6. The oldest of 20 turns is followed up; sending that follow-up
+    adds a 21st turn, which evicts the one it quoted. The context is already spent:
+    the notice is gone and the next ask is fresh."""
+    page = ask_harness.page
+    ask_harness.open_tab()
+    _ask_next(ask_harness, "quick", words="turn oldest")
+    for n in range(2, 21):
+        _ask_next(ask_harness, "quick", words=f"filler {n}")
+    assert page.locator("#agent-turns > li").count() == 20
+    _follow_up(ask_harness, 19)
+    assert "turn oldest" in page.locator("#agent-follow-up").inner_text()
+
+    _ask_next(ask_harness, "quick", words="after eviction")
+
+    questions = page.locator("#agent-turns .turn-question").all_inner_texts()
+    assert len(questions) == 20 and "scenario:quick turn oldest" not in questions
+    assert ask_harness.fake.asks[-1]["history"] == [
+        {"question": "scenario:quick turn oldest", "answer": _QUICK_ANSWER}]
+    assert page.locator("#agent-follow-up").is_hidden()
+    assert page.locator("#agent-no-loop").is_enabled()
+    _ask_next(ask_harness, "quick", words="fresh again")
+    assert "history" not in ask_harness.fake.asks[-1]

@@ -22,6 +22,25 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — follow-up questions in the Agent tab (RM-18c)
+
+- **Follow up** on an answer in `brain ui`'s Agent tab asks the next question
+  with the earlier turns as context, so "and when?" plans searches for the
+  thing you were asking about. A chain of follow-ups carries at most the last
+  three questions and answers.
+- Only the search plan sees the earlier turns. The new answer is written from
+  the current question and what the searches find now, so a claim from an
+  earlier answer cannot reach it without a citation.
+- The earlier turns come from the answers the page is showing. Nothing new is
+  stored in the browser: a reload ends the conversation, and only ask ids are
+  remembered, as before. A question asked without pressing **Follow up** sends
+  no history. A follow-up always plans, so *Quick answer* is off for it.
+- `POST /api/ask` accepts `history: [{question, answer}]`. The server checks its
+  shape (400 `invalid_history`, `history_turn_too_long`; `history_requires_loop`
+  with `no_loop`) and caps it itself, at three turns and 2,000 tokens, oldest
+  dropped first. `GET /api/ask/config` reports `max_history_turns`. `brain ask`
+  and MCP `brain_ask` are unchanged.
+
 ### Added — the brief lists who and what is new this week (RM-17)
 
 - **`brain brief` gains a "New this week" section**: the people, organisations
