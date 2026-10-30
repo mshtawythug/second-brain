@@ -28,10 +28,13 @@
   color: var(--ink);
 }
 
+/* rem, not --measure: `ch` resolves against THIS element's UI-sized face, which
+   made a 48ch column about 360px wide. The reading measure is applied where the
+   reading face is, on the answer itself. */
 .agent-pane .agent-layout {
   display: grid;
   gap: var(--s-5);
-  max-width: calc(var(--measure) + 4rem);
+  max-width: 46rem;
   padding: var(--s-6) var(--s-7);
 }
 
@@ -213,8 +216,9 @@
 .agent-pane .turn-detail p { margin: var(--s-2) 0 0; line-height: var(--lead-dense); }
 .agent-pane .turn-detail .turn-answer {
   margin-top: var(--s-3);
+  max-width: var(--measure);
   font-family: var(--font-read);
-  font-size: var(--t-title);
+  font-size: var(--t-body);
   line-height: var(--lead-read);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
