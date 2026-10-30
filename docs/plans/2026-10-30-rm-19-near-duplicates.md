@@ -19,7 +19,7 @@ or deleted (RM-19.D1).
 | File | Change |
 |---|---|
 | `src/brain/migrations/030_near_duplicates.sql` | **New.** `document_minhash` and `near_duplicates` exactly as the ticket gives them, plus the GIN index on `bands`; wrapped in `BEGIN`/`COMMIT`, every statement `IF NOT EXISTS`. |
-| `src/brain/near_dup.py` | **New pure leaf.** `words`, `token_count`, `shingles`, `signature`, `band_hashes`, `to_signed64`, `estimated_jaccard`, `verifies`, `same_thread`, `ordered_pair`, `compute` → `MinHash`. No I/O, no new dependency. |
+| `src/brain/near_dup.py` | **New pure leaf.** `words`, `token_count`, `shingles`, `signature`, `band_hashes`, `to_signed64`, `estimated_jaccard`, `meets_cut` (the one definition of the 0.85 cut, inclusive; the store verifies every candidate through it), `same_thread`, `ordered_pair`, `compute` → `MinHash`. No I/O, no new dependency. |
 | `src/brain/near_dup_store.py` | **New.** Every SQL statement: `tables_present`, `scan` → `ScanReport`, `refresh_document`, `check_document` → `list[DuplicateRef]`, `list_pairs` → `list[PairRow]`, `count_open`, `set_status`, `brief_lines`. |
 | `src/brain/cli_dedup.py` | **New.** `brain dedup scan [--all] [--limit N]`, `list [--status …] [--limit N] [--json]`, `dismiss A B`, `confirm A B`. |
 | `src/brain/cli_registry.py` | One import and one `EXTENSION_REGISTRARS` entry, `("dedup", register_dedup)`. |

@@ -254,7 +254,7 @@ def _verified_partners(
         if near_dup.same_thread(thread_id, partner_thread):
             continue
         estimate = near_dup.estimated_jaccard(minhash.signature, partner_signature)
-        if estimate >= near_dup.JACCARD_CUT:
+        if near_dup.meets_cut(estimate):
             verified[str(partner)] = estimate
     return verified
 

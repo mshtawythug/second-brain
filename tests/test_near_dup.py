@@ -6,6 +6,7 @@ depends on real content.
 from __future__ import annotations
 
 import hashlib
+import math
 import random
 import uuid
 
@@ -185,34 +186,40 @@ def test_estimate_tracks_the_exact_jaccard(seed: int) -> None:
     assert abs(estimate - exact) < 0.15
 
 
-def test_one_sentence_changed_in_400_words_verifies() -> None:
+def test_one_sentence_changed_in_400_words_meets_the_cut() -> None:
     # AC1 (pure half).
     base = _text(400, 21)
     a = near_dup.compute(base)
     b = near_dup.compute(_with_sentence_changed(base))
 
     assert a is not None and b is not None
-    assert near_dup.verifies(a.signature, b.signature)
+    assert near_dup.meets_cut(near_dup.estimated_jaccard(a.signature, b.signature))
     assert set(a.bands) & set(b.bands), "a near-copy must share at least one band"
 
 
-def test_unrelated_texts_do_not_verify() -> None:
+def test_unrelated_texts_do_not_meet_the_cut() -> None:
     a = near_dup.compute(_text(400, 31))
     b = near_dup.compute(_text(400, 32))
 
     assert a is not None and b is not None
-    assert not near_dup.verifies(a.signature, b.signature)
+    assert not near_dup.meets_cut(near_dup.estimated_jaccard(a.signature, b.signature))
 
 
-def test_verification_cut_is_inclusive_at_085() -> None:
+def test_the_cut_is_inclusive_at_exactly_085() -> None:
+    assert near_dup.JACCARD_CUT == 0.85
+    assert near_dup.meets_cut(0.85)
+    assert near_dup.meets_cut(1.0)
+    assert not near_dup.meets_cut(math.nextafter(0.85, 0.0))
+
+
+def test_the_cut_on_signature_estimates_either_side_of_085() -> None:
     sig = tuple(range(128))
-    # 109/128 = 0.8516 agree (passes); 108/128 = 0.84375 (fails).
+    # 109/128 = 0.8516 agree (meets the cut); 108/128 = 0.84375 (does not).
     passing = sig[:109] + tuple(v + 10_000 for v in sig[109:])
     failing = sig[:108] + tuple(v + 10_000 for v in sig[108:])
 
-    assert near_dup.JACCARD_CUT == 0.85
-    assert near_dup.verifies(sig, passing)
-    assert not near_dup.verifies(sig, failing)
+    assert near_dup.meets_cut(near_dup.estimated_jaccard(sig, passing))
+    assert not near_dup.meets_cut(near_dup.estimated_jaccard(sig, failing))
 
 
 def test_estimated_jaccard_refuses_mismatched_lengths() -> None:

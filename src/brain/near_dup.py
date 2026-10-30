@@ -136,9 +136,12 @@ def estimated_jaccard(sig_a: Sequence[int], sig_b: Sequence[int]) -> float:
     return sum(1 for a, b in zip(sig_a, sig_b, strict=True) if a == b) / len(sig_a)
 
 
-def verifies(sig_a: Sequence[int], sig_b: Sequence[int]) -> bool:
-    """Whether two signatures are near-duplicates (estimated Jaccard >= :data:`JACCARD_CUT`)."""
-    return estimated_jaccard(sig_a, sig_b) >= JACCARD_CUT
+def meets_cut(estimate: float) -> bool:
+    """Whether an estimated Jaccard makes a near-duplicate (``>=`` :data:`JACCARD_CUT`, inclusive).
+
+    The one definition of the cut: :mod:`brain.near_dup_store` verifies every candidate here.
+    """
+    return estimate >= JACCARD_CUT
 
 
 def same_thread(thread_a: str | None, thread_b: str | None) -> bool:
