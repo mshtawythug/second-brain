@@ -236,7 +236,7 @@ def _guarded(note_id: str, run: _Run, step: Any) -> None:
         typer.secho(f"  failed {note_id}: {describe_failure(exc)}", fg="red", err=True)
         outcome = "failed"
     run.counts[outcome] += 1
-    if outcome not in ("unchanged", "empty", "skipped", "same_body", "failed"):
+    if outcome not in ("unchanged", "skipped", "same_body", "failed"):
         typer.echo(f"  {outcome} {note_id}")
 
 
@@ -256,7 +256,7 @@ def _ingest_note(conn: psycopg.Connection[Any], note: an.Note, run: _Run) -> str
 
 
 def _write(conn: psycopg.Connection[Any], note_id: str, doc: ExtractedDoc, run: _Run) -> str:
-    """Ingest one note; return ``ingested|updated|refreshed|unchanged|same_body``."""
+    """Ingest one note; ``ingested|updated|refreshed|unchanged|empty|same_body``."""
     stored = stored_document(conn, an.SOURCE_KIND, note_id)
     result = ingest_document(
         conn,
@@ -279,18 +279,22 @@ def _write(conn: psycopg.Connection[Any], note_id: str, doc: ExtractedDoc, run: 
     _emit_egress_notice(result.egress_notice)
     if result.created or result.body_changed:
         return "ingested" if result.created else "updated"
-    if stored is None:
-        # No (applenotes, id) row, yet nothing was written: ingest_document fell back
-        # to its content-hash match and found ANOTHER note's document with this exact
-        # body (two empty or template notes). Its row is not this note's, so its
-        # metadata is not patched, and force would replace it; the note is reported.
+    if result.document_id is None:
+        # Nothing to chunk, so no document (ingest_document's insert path). The
+        # pre-check in _ingest_note catches an empty body first; this is the backstop.
+        return "empty"
+    if stored is None or result.document_id != stored[0]:
+        # The returned row is not this note's (applenotes, id) document: with no row
+        # of its own, ingest_document fell back to its content-hash match and found
+        # ANOTHER note's document with this exact body (two copies of one template).
+        # That row's metadata is not patched, and force would replace it; the note
+        # is reported instead. Unchanged/refreshed only ever describe the note's own row.
         typer.secho(f"  same body as another note: {note_id}", fg="yellow", err=True)
         return "same_body"
-    assert result.document_id is not None  # every non-replace path returns the row id
     return refresh_volatile(
         conn,
         document_id=result.document_id,
-        stored=stored[1] if stored is not None else {},
+        stored=stored[1],
         metadata=doc.metadata,
         keys=an.VOLATILE_KEYS,
         vault_root=run.cfg.vault_path,

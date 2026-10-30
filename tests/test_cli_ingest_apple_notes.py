@@ -21,6 +21,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from brain.cli import app
+from brain.ingest import IngestResult
 from brain.ingest import apple_notes as an
 from brain.ingest.apple_notes import JXA_SCRIPT, AppleNotesError
 from tests import apple_notes_fixtures as fx
@@ -299,7 +300,73 @@ def test_an_empty_note_is_counted_and_not_stored(
         "1 ingested, 0 updated, 0 refreshed, 0 unchanged, 1 empty, 0 skipped, "
         "0 same body as another note, 0 failed"
     ) in result.output
+    assert f"  empty {fx.note_id(1)}" in result.output  # reported by id
     assert set(_docs(test_db)) == {fx.note_id(2)}
+
+
+@pytest.mark.parametrize(
+    "body", ["<div>   </div>", "<div>&nbsp;\t</div>", '<p><a href="javascript:x"></a></p>']
+)
+def test_a_whitespace_only_note_is_empty_and_ingest_is_never_called(
+    body: str, notes: fx.FakeOsascript, embedder: CountingEmbedder,
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """aud-104's second Notion case: an empty body makes no chunks and no document."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "brain.cli_ingest_apple_notes.ingest_document",
+        lambda *_a, **k: calls.append(k["source_external_id"]),
+    )
+    notes.notes = [fx.note(1, body=body)]
+
+    result = _run(*FOLDER)
+
+    assert f"  empty {fx.note_id(1)}" in result.output
+    assert "0 ingested, 0 updated, 0 refreshed, 0 unchanged, 1 empty" in result.output
+    assert calls == []
+
+
+def test_no_document_from_ingest_is_empty_never_unchanged(
+    notes: fx.FakeOsascript, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backstop: ``ingest_document`` returning no row (nothing to chunk) is ``empty``."""
+    monkeypatch.setattr(
+        "brain.cli_ingest_apple_notes.ingest_document",
+        lambda *_a, **_k: IngestResult(document_id=None, created=False),
+    )
+    notes.notes = [fx.note(1)]
+
+    result = _run(*FOLDER)
+
+    assert result.exit_code == 0, result.output
+    assert f"  empty {fx.note_id(1)}" in result.output
+    assert "0 refreshed, 0 unchanged, 1 empty" in result.output
+
+
+def test_a_row_that_is_not_the_notes_own_is_never_refreshed(
+    notes: fx.FakeOsascript, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unchanged/refreshed only describe the note's own (applenotes, id) row: a stored note
+    for which ingest returns some other document id is reported, and nothing is patched.
+    """
+    notes.notes = [fx.note(1)]
+    _run(*FOLDER)
+    own = _docs(test_db)[fx.note_id(1)]
+    monkeypatch.setattr(
+        "brain.cli_ingest_apple_notes.ingest_document",
+        lambda *_a, **_k: IngestResult(
+            document_id="00000000-0000-4000-8000-000000000099", created=False
+        ),
+    )
+    notes.notes = [fx.note(1, folder=fx.OTHER_FOLDER, modified="2026-10-26T00:00:00Z")]
+
+    result = _run("--folder", fx.OTHER_FOLDER)
+
+    assert f"same body as another note: {fx.note_id(1)}" in result.output
+    assert "0 refreshed, 0 unchanged" in result.output
+    assert _docs(test_db)[fx.note_id(1)]["metadata"] == own["metadata"]
 
 
 def test_an_unreadable_entry_is_reported(
