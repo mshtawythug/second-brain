@@ -152,6 +152,23 @@ def test_a_cross_type_alias_is_not_ambiguous(test_db: psycopg.Connection[Any]) -
     assert _resolve(test_db, "Sam", rules=rules) == sorted([source, target])
 
 
+def test_a_cross_type_alias_with_an_absent_target_is_still_ambiguous(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    # aud-91 M20: a source counts as its target's type only when the target row was
+    # found. With no `sam rivera` row the topic stays a topic, so a person of the
+    # same name makes the match ambiguous.
+    seed_entity(test_db, name="Sam", canonical_key="sam", entity_type="topic")
+    seed_entity(test_db, name="Sam", canonical_key="sam", entity_type="person")
+    rules = [AliasRule("topic", "sam", "person", "sam rivera")]
+
+    with pytest.raises(EntityAmbiguous) as exc_info:
+        _resolve(test_db, "Sam", rules=rules)
+
+    assert "topic" in str(exc_info.value)
+    assert "person" in str(exc_info.value)
+
+
 def test_alias_redirects_a_merged_source_already_deleted(
     test_db: psycopg.Connection[Any],
 ) -> None:
