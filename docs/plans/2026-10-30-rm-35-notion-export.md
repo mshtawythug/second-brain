@@ -173,7 +173,8 @@ case ("its own command"), so the export reader is its own module behind its own 
   every page. Nothing is forced (`--force` would replace
   the other document). A stored page re-exported with another page's text fails loudly
   (`failed <id>: UniqueViolation`, the stdin content-hash index) and keeps its old body;
-  the calendar and GitHub commands share the first shape and are worse there (BL-34).
+  the calendar and GitHub commands shared the first shape and were worse there (BL-34, since
+  fixed by #106 with `volatile_patch.settle`; Notion keeps its own own-row check, see BL-33).
 - A corrupt LZMA member maps to the corrupt sentence; files are decoded `utf-8-sig`;
   `NotionPage.has_last_edited` and `last_edited()`'s bool are gone; the naive last-edited time
   stored as UTC is documented (ruling). The shared run loop is BL-33 (ruling: not in this PR).
