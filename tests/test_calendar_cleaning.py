@@ -190,3 +190,20 @@ def test_the_invitation_block_is_dropped_even_when_unterminated() -> None:
     doc = _only_doc(_event_with("Planning", description=text))
 
     assert doc.doc.content.endswith("Keep this.")
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["Join Zoom Meeting", "Join with Google Meet", "join the Teams call", "Join Webex meeting"],
+)
+def test_a_join_instruction_line_is_dropped(line: str) -> None:
+    doc = _only_doc(_event_with("Planning", description=f"Agenda first.\n{line}\nAgenda last."))
+
+    assert line not in doc.doc.content
+    assert "Agenda first." in doc.doc.content and "Agenda last." in doc.doc.content
+
+
+def test_a_line_that_only_mentions_joining_survives() -> None:
+    doc = _only_doc(_event_with("Planning", description="Join us for cake afterwards"))
+
+    assert "Join us for cake afterwards" in doc.doc.content

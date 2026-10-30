@@ -17,7 +17,8 @@ Per line, in this order:
 3. **The whole line is dropped** when what is left looks like dial-in material:
    - a keyword: PIN, passcode, password, Passwort, Kennwort, code, meeting ID,
      conference ID, access code, bridge, dial-in, "join by phone", "one tap",
-     or a ``tel:`` / ``sip:`` link. Hyphens and spaces inside a keyword are
+     a join instruction ("Join Zoom Meeting", "Join with Google Meet"), or a
+     ``tel:`` / ``sip:`` link. Hyphens and spaces inside a keyword are
      optional. The short words ``pin``, ``code``, ``bridge`` and ``id`` count
      only when a ``:``, ``#``, ``=`` or a digit follows, so "code review"
      survives;
@@ -42,6 +43,7 @@ _KEYWORD = re.compile(
     r"pass[\s-]*(?:code|word|wort)|kenn[\s-]*wort|"
     r"meeting[\s-]*(?:id|number|code)|conference[\s-]*(?:id|code)|access[\s-]*code|"
     r"dial[\s-]*in|join\s+by\s+phone|one[\s-]*tap|\b(?:tel|sip|callto):|"
+    r"^\s*join\b.*\b(?:meeting|meet|zoom|teams|webex|call)\b|"
     r"\b(?:pin|code|bridge|id)\b\s*(?:[:#=]|\d)",
     re.IGNORECASE,
 )
