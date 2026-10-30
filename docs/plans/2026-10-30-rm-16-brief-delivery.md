@@ -13,8 +13,9 @@ risks. Branch `feat/rm-16-brief-delivery`, from `second-brain/master` at `92438f
 | `src/brain/settings/brief_delivery.py` | **New leaf.** `BriefDeliverySettings` (`channel`, `include_todos`, `recipient`, `slack_webhook_url` with `repr=False`) and `load_brief_delivery_settings(env)`. |
 | `src/brain/brief_delivery.py` | **New.** `DeliveryChannel` Protocol, `DeliveryError` / `DeliveryAuthError`, `GwsEmailChannel`, `SlackWebhookChannel`, `run_gws` (the real runner), `render_delivery`, `deliver_brief`, `DeliveryOutcome`, `make_channel`. |
 | `src/brain/brief_publish.py` | `build_brief` delivers the published payload after the page is written, and marks watch hits notified only when delivery did not fail. Two keyword seams: `delivery_env`, `delivery_channel`. |
-| `src/brain/ingest/gmail.py` | `_build_query` appends `-(from:me subject:"[brain brief]")`, and `list_messages` always sends `q` (the dead `if q:` branch is gone). Net +2 against `92438fe` (669 → 671; budget +5). |
-| `src/brain/cli_ingest.py` | `ingest-gmail`'s help names the skipped `[brain brief]` mail: one sentence reworded in place, **net-zero** (a CLAUDE.md ceiling-table file; its row gains a descriptive hop). |
+| `src/brain/brief_mail.py` | **New leaf.** `SUBJECT_PREFIX`, `is_own_brief_mail(from, subject, owner)` and `is_own_brief_message(msg, owner)`: pure, so `ingest/gmail.py` uses them without importing the delivery code. |
+| `src/brain/ingest/gmail.py` | `read_thread_messages(stubs, *, owner)`: each stub's full message, minus the owner's own delivered briefs. `_build_query` is unchanged from `92438fe` (Deviations 11). +7 against `92438fe` (669 → 676; the ticket's budget is +5). |
+| `src/brain/cli_ingest.py` | `ingest-gmail` reads each thread through `read_thread_messages` and skips a thread left empty (+2), with a module-docstring pointer (+3), and its help names the skipped `[brain brief]` mail (reworded in place). +5 against `92438fe` (848 → 853), recorded inline, in the docstring and in its CLAUDE.md row. |
 | `src/brain/doctor_delivery.py` | **New leaf.** The `brief delivery` doctor row, beside `doctor_watcher.py` (same shape: imports `doctor_runtime._check`, composed in lazily). |
 | `src/brain/doctor_runtime.py` | The wiring only: one deferred import, one call, a docstring line (+5 of the shared +60 budget, §2.2). The first draft put the probe here (+37) and was moved out so the nine later probe tickets keep the budget. Net +4 against `92438fe` (563 → 567). |
 | `tests/delivery_isolation_plugin.py` | Forces `BRAIN_BRIEF_DELIVERY=none` per test, like `rerank_isolation_plugin.py`. Registered in `tests/conftest.py`. |
@@ -76,9 +77,10 @@ No migration.
 - **D10, the doctor row** reports the channel and its prerequisite: `off`; `email` with `gws` on
   `PATH` or not; `slack` with the webhook set (never the URL); a configuration error as a WARN with
   the leaf's message. It never fails doctor.
-- **D11, the Gmail exclusion** is appended to every query `_build_query` returns, so `q` is never
-  empty any more (`list_messages` always sends it). Since review round 1 it is
-  `-(from:me subject:"[brain brief]")`: only the owner's own brief mail is skipped.
+- **D11, the owner's own brief mail is skipped after the fetch, not in the query** (round 2; rounds
+  0 and 1 appended a query exclusion, `-subject:…` then `-(from:me subject:…)`). A message is
+  skipped only when its `From` is the owner AND its subject starts with `[brain brief]`
+  (Deviations 11). Third-party mail with that subject, and the owner's other mail, are ingested.
 - **D12, the test isolation plugin.** `build_brief` reads `os.environ` when no `delivery_env` is
   given (the CLI path). `tests/delivery_isolation_plugin.py` sets `BRAIN_BRIEF_DELIVERY=none` and
   deletes the other two knobs per test, so a developer's `.env` can never make the suite send mail.
@@ -121,7 +123,7 @@ No migration.
 | 3 one POST through `MockTransport`; a non-Slack URL is a `ConfigError` | `test_slack_channel_posts_once`, `test_a_non_slack_webhook_url_is_a_config_error` |
 | 4 a failing channel: page written, one WARNING, auth names `bin/gws-reauth` | `test_build_brief_survives_a_failing_channel`, `test_an_auth_failure_warning_names_gws_reauth` |
 | 5 the URL in no log line or error | `test_webhook_url_never_reaches_a_log_record_or_an_error` |
-| 6 every Gmail query excludes the subject | `test_every_gmail_query_excludes_the_brief_subject` |
+| 6 the owner's delivered brief is never ingested back (in Python, Deviations 11) | `test_only_the_owners_own_brief_mail_is_skipped`, `test_the_owners_own_brief_mail_is_recognised`, `test_anything_else_is_not_the_owners_brief`, `test_the_prefix_is_the_one_delivery_sends` |
 
 ## Deviations
 
@@ -131,10 +133,11 @@ No migration.
 4. **`tests/test_doctor_runtime.py::test_all_healthy_yields_no_failures`** enumerates the exact runtime-check list; it now includes `brief delivery`.
 5. **RM-17's entities section does not exist yet**; RM-17 adds it to `render_delivery`.
 6. **Synthetic `hooks.slack.com` test URLs are assembled from parts.** The leaf must accept that host and AC3 needs a valid URL, but GitHub push protection rejects Slack's documented placeholder as a literal. Non-Slack cases use `hooks.example.invalid`. Nothing in the tests or the E2E run contacts Slack or Google.
-7. **D11 renames an existing test.** `tests/test_cli_ingest_gmail.py::test_list_messages_no_scope_omits_q_param` encoded the old "no `q`" behaviour that AC6 removes; it is now `test_list_messages_no_scope_sends_only_the_brief_exclusion` and asserts `q == BRIEF_EXCLUSION`.
+7. **An existing test was renamed in round 1 and restored in round 2.** Round 1 renamed `tests/test_cli_ingest_gmail.py::test_list_messages_no_scope_omits_q_param` to `test_list_messages_no_scope_sends_only_the_brief_exclusion`, because the query then always carried the exclusion. Round 2 took the exclusion out of the query (11), so the test and `_build_query` are back exactly as at `92438fe`.
 8. **Drafts are removed at the delivery-payload boundary, not from the local page** (sec-82 1, D13). The page is the owner's own vault note and keeps listing drafts as before; only what leaves the machine drops them.
 9. **The email body stays in `gws`'s argv** (sec-82 4). `gws gmail +send --help` offers the body only as `--body <TEXT>`, with no stdin or file option, so the body is visible to a local `ps` for at most the 30 s timeout. Accepted on a single-user machine.
 10. **The DNS lookup is not covered by the 10 s Slack timeout** (sec-82 7). httpx's timeout bounds connect, read, write and pool; `getaddrinfo` runs before it and is bounded by the OS resolver. Accepted, no code change.
+11. **AC6 is met in Python, not in the Gmail query** (round 2, R2-2). The ticket asks the query builder to append the exclusion. What Gmail makes of a negated group (`-(from:me subject:…)`, or `{-from:me -subject:…}`) cannot be checked offline, and a read-only count probe could not run because `gws`'s token had lapsed. A misread would silently drop all of the owner's sent mail from every scoped ingest. So the query is unchanged. `ingest.gmail.read_thread_messages` drops a fetched message only when BOTH its `From` address is the owner's (`BRAIN_USER_EMAIL`, case-insensitive, display name ignored) AND its subject starts with `[brain brief]` (`brain.brief_mail.is_own_brief_message`). A reply or forward (`Re:` / `Fwd:`) is ingested, because it carries the owner's own words. `ingest_gmail` skips a thread left empty. Consequences: `gmail.py` grows by 7 lines, not the ticket's +5, and `cli_ingest.py` (over the ceiling) by 5, recorded. And `--dry-run`, which reads only each thread's first message for its subject, still lists a brief thread under "would ingest".
 
 ## Risks
 
@@ -170,3 +173,10 @@ No migration.
   stay as defence in depth, as the fix list asked.
 - Cleanups: the dead `if q:` branch, a stray blank line in `doctor_runtime.py`, the line deltas
   recomputed (Files table).
+
+## Review round 2 (rev-82, sec-82 at `e008422`)
+
+- R2-1: `without_drafts` drops the suggestions whenever it removes a draft's todo (D13).
+- R2-2: the Gmail query exclusion is gone; the owner's own brief mail is skipped in Python on the
+  fetched `From` and `Subject` (D11, Deviations 11). The read-only count probe that would have
+  settled the query's meaning failed on `gws` authentication (exit 2), so no counts exist.

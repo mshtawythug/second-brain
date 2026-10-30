@@ -39,6 +39,9 @@ from typing import Literal, Protocol
 import httpx
 
 from .brief import BriefData, watch_section_lines
+
+# Fixed, so a mail filter can label it and ``ingest-gmail`` can skip the owner's copy.
+from .brief_mail import SUBJECT_PREFIX
 from .errors import BrainError, describe_failure
 from .settings.brief_delivery import (
     CHANNEL_EMAIL,
@@ -52,8 +55,6 @@ _logger = logging.getLogger(__name__)
 EMAIL_TIMEOUT_S = 30.0
 SLACK_TIMEOUT_S = 10.0
 
-#: Fixed, so a mail filter can label it and ``ingest/gmail.py`` can exclude it.
-SUBJECT_PREFIX = "[brain brief]"
 
 #: Markers of a ``gws`` authorization failure in its stderr (the cases ``bin/gws-reauth`` fixes).
 #: The stderr is read only to classify; it is never kept, logged or raised.

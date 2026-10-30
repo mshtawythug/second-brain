@@ -23,6 +23,9 @@ at the top of :func:`ingest_stdin`, reasoned inline at the guard:
 guard was the only thing standing between a typo and a permanently mis-bucketed
 row that the facet panel counts but the facet click never returns.
 
+**RM-16 grew it by two lines:** ``ingest_gmail`` skips a thread left empty once
+``ingest.gmail.read_thread_messages`` has dropped the owner's own delivered briefs.
+
 That this module cannot import from ``cli`` -- the cycle described above -- is
 exactly why the kind set now lives in :mod:`brain.source_kinds` rather than in
 either file.
@@ -594,7 +597,9 @@ def ingest_gmail(
         conn.autocommit = True
         for tid, ts in threads.items():
             try:
-                messages = [gmail_ingest.read_message(stub["id"]) for stub in ts]
+                messages = gmail_ingest.read_thread_messages(ts, owner=cfg.user_email)
+                if not messages:  # RM-16: only the owner's own delivered briefs; never ingested
+                    continue
                 doc = gmail_ingest.to_extracted_thread(messages)
                 result = ingest_document(
                     conn,

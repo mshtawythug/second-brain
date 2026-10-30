@@ -538,21 +538,20 @@ def test_list_messages_builds_full_query() -> None:
     assert cmd[-2:] == ["--format", "json"]
 
 
-def test_list_messages_no_scope_sends_only_the_brief_exclusion() -> None:
-    """With no scope flags, ``q`` is the delivered-brief exclusion and nothing else.
+def test_list_messages_no_scope_omits_q_param() -> None:
+    """With no scope flags, ``list_messages`` sends no ``q`` param.
 
     Wave Q1-A (2026-05-11) removed the ``-in:drafts`` belt-and-braces
     filter from ``list_messages``. Drafts are now included in query
     results and stamped ``draft=TRUE`` at ingest time instead of being
-    skipped. Until RM-16 the ``q`` key was omitted entirely here; since
-    RM-16 every query excludes the emailed brief's subject, so ``q`` is that
-    one term (``tests/test_gmail_query_brief_exclusion.py``) and still no
-    drafts filter.
+    skipped. With no scope flags and no explicit query the ``q`` key is
+    omitted entirely, letting Gmail return all messages.
     """
 
     def runner(cmd: list[str]) -> str:
         params = json.loads(cmd[6])
-        assert params["q"] == gmail_ingest.BRIEF_EXCLUSION
+        # No q key at all — omitting the param returns everything.
+        assert "q" not in params
         assert params["userId"] == "me"
         return json.dumps({"resultSizeEstimate": 0})
 

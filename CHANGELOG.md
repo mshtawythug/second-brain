@@ -40,9 +40,10 @@ git tag scheme:
   brief sends them again.
 - `brain doctor` gains a `brief delivery` row (the channel and its
   prerequisite, never the webhook URL).
-- `brain ingest-gmail` never ingests a delivered brief: every Gmail query it
-  builds ends with `-(from:me subject:"[brain brief]")`, so `q` is never empty
-  any more, and mail from anyone else with that subject is still ingested.
+- `brain ingest-gmail` never ingests your own delivered brief: a fetched message
+  is skipped when it is from `BRAIN_USER_EMAIL` and its subject starts with
+  `[brain brief]`. Mail from anyone else with that subject, and your other mail,
+  are still ingested. The Gmail query itself is unchanged.
 - Draft documents are never delivered (they stay on the local page), and the
   Slack post turns link previews off.
 

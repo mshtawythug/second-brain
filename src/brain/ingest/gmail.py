@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 
+from brain.brief_mail import is_own_brief_message
 from brain.config import BOILERPLATE_PATTERNS
 
 # Re-using the shared Re/Fwd-prefix helper from vault.slug rather than
@@ -46,9 +47,6 @@ class GmailError(RuntimeError):
 
 
 Runner = Callable[[list[str]], str]
-#: RM-16: the owner's own emailed briefs (``brief_delivery.SUBJECT_PREFIX``), kept out of every
-#: query; a stranger's mail with that subject is still ingested (sec-82 6).
-BRIEF_EXCLUSION = '-(from:me subject:"[brain brief]")'
 
 
 def _build_query(
@@ -81,7 +79,6 @@ def _build_query(
         parts.append(f"after:{since}")
     if until:
         parts.append(f"before:{until}")
-    parts.append(BRIEF_EXCLUSION)
     return " ".join(parts)
 
 
@@ -104,7 +101,9 @@ def list_messages(
     q = _build_query(
         query=query, label=label, since=since, until=until, from_addr=from_addr
     )
-    params: dict[str, Any] = {"userId": "me", "maxResults": max_results, "q": q}
+    params: dict[str, Any] = {"userId": "me", "maxResults": max_results}
+    if q:
+        params["q"] = q
     out = _run(
         [
             "gws", "gmail", "users", "messages", "list",
@@ -135,6 +134,12 @@ def read_message(message_id: str, *, runner: Runner | None = None) -> dict[str, 
     )
     parsed: dict[str, Any] = json.loads(out)
     return parsed
+
+
+def read_thread_messages(stubs: list[dict[str, Any]], *, owner: str | None) -> list[Any]:
+    """The stubs' full messages, minus the owner's own delivered briefs (RM-16, ``brief_mail``)."""
+    messages = [read_message(stub["id"]) for stub in stubs]
+    return [msg for msg in messages if not is_own_brief_message(msg, owner)]
 
 
 def _headers_to_dict(headers: list[dict[str, str]]) -> dict[str, str]:
