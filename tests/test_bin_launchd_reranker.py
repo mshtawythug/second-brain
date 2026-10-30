@@ -400,6 +400,8 @@ def _assert_reranker_untouched_and_others_installed(
     (warning,) = [line for line in stderr.splitlines() if line.startswith("WARNING")]
     assert _RERANKER in warning and variable in warning
     assert value not in stderr
+    # Only the variable's name: never the exception's message (RM-28's rule).
+    assert "must be" not in warning and "no model file" not in warning, warning
 
 
 @pytest.mark.parametrize(

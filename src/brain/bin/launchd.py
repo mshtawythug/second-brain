@@ -66,6 +66,18 @@ class LaunchdError(BrainError):
     """Raised when a launchd plist render or launchctl operation fails."""
 
 
+class RerankerConfigError(LaunchdError):
+    """An unusable ``com.brain.reranker`` input (RM-14b).
+
+    ``variable`` names the setting. The sticky path's WARNING prints only that,
+    never the message, so it cannot quote a value.
+    """
+
+    def __init__(self, variable: str, message: str) -> None:
+        super().__init__(message)
+        self.variable = variable
+
+
 def resolve_launchctl() -> str:
     """The ``launchctl`` to run: ``$BRAIN_LAUNCHCTL``, else the bare name on ``PATH``.
 
@@ -149,20 +161,23 @@ def resolve_rerank_model(brain_home: Path) -> Path:
         return brain_home / "models" / DEFAULT_RERANK_GGUF_NAME
     model = Path(raw).expanduser()
     if not model.is_absolute():
-        raise LaunchdError("BRAIN_RERANK_GGUF must be an absolute path (or start with ~)")
+        raise RerankerConfigError(
+            "BRAIN_RERANK_GGUF", "BRAIN_RERANK_GGUF must be an absolute path (or start with ~)"
+        )
     return model
 
 
 def _reranker_inputs(brain_home: Path) -> tuple[Path, int]:
     """The model path and port ``com.brain.reranker`` is rendered with.
 
-    Raises :class:`LaunchdError`, naming the variable and never its value, when
+    Raises :class:`RerankerConfigError`, naming the variable and never its value, when
     the model path is relative or names no file, or ``BRAIN_RERANK_URL`` is not
     one the job can serve.
     """
     model = resolve_rerank_model(brain_home)
     if not model.is_file():
-        raise LaunchdError(
+        raise RerankerConfigError(
+            "BRAIN_RERANK_GGUF",
             f"no model file at BRAIN_RERANK_GGUF's path (default "
             f"$BRAIN_HOME/models/{DEFAULT_RERANK_GGUF_NAME}). Download it, or set "
             f"BRAIN_RERANK_GGUF; see {_GUIDE}"
@@ -186,7 +201,8 @@ def resolve_rerank_port(brain_home: Path) -> int:
     try:
         return launchd_rerank_port(env)
     except ConfigError as exc:
-        raise LaunchdError(f"com.brain.reranker: {exc}") from None
+        # A ConfigError from the settings leaf names variables, never a value.
+        raise RerankerConfigError("BRAIN_RERANK_URL", f"com.brain.reranker: {exc}") from None
 
 
 def render_plist(
@@ -292,9 +308,11 @@ def install_plists(
         try:
             rerank_model, rerank_port = _reranker_inputs(brain_home)
             optional = (_RERANKER_LABEL,)
-        except LaunchdError as exc:
+        except RerankerConfigError as exc:
             print(
-                f"WARNING: {_RERANKER_LABEL} left as installed, not re-rendered: {exc}",
+                f"WARNING: {_RERANKER_LABEL} left as installed, not re-rendered: "
+                f"{exc.variable} is unusable. Fix it and run brain-install-launchd; "
+                f"see {_GUIDE}",
                 file=sys.stderr,
             )
     launchd_dir.mkdir(parents=True, exist_ok=True)
