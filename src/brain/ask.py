@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -67,6 +68,18 @@ _CITATION_RE = re.compile(r"\[(\d+)\]")
 # (out-of-range) markers out of the final answer text — the marker AND the space
 # that precedes it are removed so " foo [99] bar" collapses cleanly to "foo bar".
 _MARKER_WITH_LEAD_RE = re.compile(r"\s*\[(\d+)\]")
+
+
+#: Called with ``("plan" | "retrieve" | "reflect" | "synthesize", iteration)`` before
+#: each step (RM-18a). The Agent tab's runner reports progress and checks its cancel
+#: and deadline here; whatever it raises propagates, since this module has no
+#: ``except`` clause.
+OnStep = Callable[[str, int], None]
+
+
+def _step(on_step: OnStep | None, step: str, iteration: int) -> None:
+    if on_step is not None:
+        on_step(step, iteration)
 
 
 class ChatJson(Protocol):
@@ -513,6 +526,7 @@ def ask_no_loop(
     backend: GraphBackend | None = None,
     exclude_confidential: bool = False,
     fallback: bool = True,
+    on_step: OnStep | None = None,
 ) -> AskResult:
     """Single retrieve + synthesize pass (the ``--no-loop`` fast path).
 
@@ -522,6 +536,7 @@ def ask_no_loop(
     """
     _validate_mode(mode)
     session_id = uuid.uuid4().hex
+    _step(on_step, "retrieve", 1)
     docs, graph_summary, retrieval_fallback = _retrieve(
         conn,
         cfg,
@@ -534,6 +549,7 @@ def ask_no_loop(
         fallback=fallback,
         session_id=session_id,
     )
+    _step(on_step, "synthesize", 1)
     raw_answer = _call_synthesize_step(chat, cfg, question, docs, graph_summary)
     answer = _sanitize_answer(raw_answer, len(docs))
     citations = _build_citations(answer, docs)
@@ -562,6 +578,7 @@ def ask(
     backend: GraphBackend | None = None,
     exclude_confidential: bool = False,
     fallback: bool = True,
+    on_step: OnStep | None = None,
 ) -> AskResult:
     """Agentic plan -> retrieve -> reflect -> synthesize loop over the corpus.
 
@@ -591,11 +608,13 @@ def ask(
             backend=backend,
             exclude_confidential=exclude_confidential,
             fallback=fallback,
+            on_step=on_step,
         )
 
     session_id = uuid.uuid4().hex
 
     # Step 1 — Plan. Fall back to the raw question when the planner yields none.
+    _step(on_step, "plan", 1)
     sub_queries = _call_plan_step(chat, cfg, question)
     fallback_used = False
     if not sub_queries:
@@ -612,6 +631,7 @@ def ask(
     for iteration in range(1, max_iterations + 1):
         iterations_used = iteration
         # Step 2 — Retrieve (dedup across iterations).
+        _step(on_step, "retrieve", iteration)
         new_doc_found = False
         for sub_query in sub_queries:
             results, graph_summary, leg_fallback = _retrieve(
@@ -637,6 +657,7 @@ def ask(
         # Step 3 — Reflect (skip on the last iteration or when nothing new).
         if iteration >= max_iterations or not new_doc_found:
             break
+        _step(on_step, "reflect", iteration)
         verdict = _call_reflect_step(
             chat, cfg, question, list(all_docs.values())
         )
@@ -650,6 +671,7 @@ def ask(
     # Step 4 — Synthesize over the accumulated, deduplicated documents.
     docs = list(all_docs.values())
     combined_graph_summary = _join_graph_summaries(graph_summaries)
+    _step(on_step, "synthesize", iterations_used)
     raw_answer = _call_synthesize_step(
         chat, cfg, question, docs, combined_graph_summary
     )
