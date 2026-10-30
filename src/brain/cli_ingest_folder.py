@@ -13,14 +13,26 @@ is what "only an explicit run" means), else the defaults: kind ``screenshot``,
 ``.png/.jpg/.jpeg``, ``confidential``. The opt-in LaunchAgent ``com.brain.dropfolders``
 runs ``brain ingest-folder --configured --since 2d`` every 10 minutes.
 
-**OCR.** A folder that takes images is skipped, with the fix printed, when OCR is off
-or ``tesseract`` is missing: otherwise every run would move each file and move it back.
+**OCR and whisper.** A folder that takes images is skipped, with the fix printed, when
+OCR is off or ``tesseract`` is missing, and a folder that takes audio when voice memos
+cannot run (:mod:`brain.ingest.whisper`): otherwise every run would move each file and
+move it back. Whisper's knobs are read only when some folder takes audio, so a bad one
+never stops a screenshot folder.
+
+**Voice memos** (RM-38) are transcribed by :func:`~brain.ingest.voice.extract_voice`,
+with whisper's own timeout (``2 × duration + 60 s``), not what is left of the run's
+deadline (RM-38.D1): the deadline stops new files from starting, never a memo already
+being transcribed, so one run can last about two hours at the 60-minute cap.
 
 **Failures.** A failure that would repeat on every run (an image that cannot be read,
 is too large or times out in OCR, another malformed file, the secret guard) is raised
 as :class:`~brain.drop_folder.RejectedFileError`, so the file stays in ``imported/`` as
 ``rejected``; any other failure (the database, the embedder) moves it back for the next
-run. ``OcrUnavailableError`` is the second kind: it is configuration, not the file.
+run. ``OcrUnavailableError`` is the second kind: it is configuration, not the file. So
+are :data:`~brain.ingest.voice.TRANSIENT_VOICE_ERRORS` (RM-38.D4): whisper failing on the
+WAV this run converted points at the model or the binary. Each prints a WARNING naming the
+file's ``imported/`` name (its content hash) and the class, so a memo that fails every run
+is visible in every run's log.
 
 **Exit codes.** 0 when nothing failed (files left for the next run included); 1 when a
 file failed or was rejected, or a folder could not be used; 2 for the scope refusal.
@@ -68,12 +80,15 @@ from .ingest.image import ImageError, OcrUnavailableError, extract_image, ocr_un
 from .ingest.ocr import OcrSetup, resolve_ocr
 from .ingest.outcome import IngestOutcome, classify
 from .ingest.text_safety import one_line
+from .ingest.voice import TRANSIENT_VOICE_ERRORS, VoiceError, extract_voice
+from .ingest.whisper import WhisperSetup, resolve_whisper
 from .sensitivity import VALID_SENSITIVITY_LEVELS
 from .settings.drop_folders import (
     CONFIG_NAME,
     DEFAULT_EXTENSIONS,
     DEFAULT_KIND,
     DEFAULT_SENSITIVITY,
+    VOICE_EXTENSIONS,
     load_drop_folders,
 )
 
@@ -97,6 +112,8 @@ _STATUS = {
 
 #: The production OCR resolver; tests swap it for a fake (``monkeypatch.setattr``).
 ocr_resolver: Callable[[Mapping[str, str]], OcrSetup] = resolve_ocr
+#: The production whisper resolver (RM-38); tests swap it for a fake the same way.
+whisper_resolver: Callable[[Mapping[str, str]], WhisperSetup] = resolve_whisper
 
 
 def ingest_folder(
@@ -143,12 +160,19 @@ def ingest_folder(
         return
     cfg = Config.load()  # publishes the .env chain, so the OCR knobs below read it
     ocr = ocr_resolver(os.environ)
-    usable, failed = _check_ocr(folders, ocr)
+    whisper = _whisper_for(folders)
+    usable, failed = _check_tools(folders, ocr, whisper)
     if dry_run:
         failed = _dry_run(usable, cutoff) or failed
     elif usable:
         run_failed = _ingest_all(
-            cfg, usable, cutoff, ocr=ocr, enrich=enrich, allow_secrets=allow_secrets
+            cfg,
+            usable,
+            cutoff,
+            ocr=ocr,
+            whisper=whisper if isinstance(whisper, WhisperSetup) else None,
+            enrich=enrich,
+            allow_secrets=allow_secrets,
         )
         failed = failed or run_failed
     if failed:
@@ -206,14 +230,33 @@ def _folders_or_exit(directory: Path | None) -> list[DropFolder]:
     ]
 
 
-def _check_ocr(folders: list[DropFolder], ocr: OcrSetup) -> tuple[list[DropFolder], bool]:
-    """Skip, with the fix, every image folder when OCR cannot run. ``(usable, any_skipped)``."""
-    hint = ocr_unavailable_hint(ocr)
-    if hint is None:
-        return folders, False
-    usable = [f for f in folders if not f.extensions & IMAGE_EXTENSIONS]
+def _whisper_for(folders: list[DropFolder]) -> WhisperSetup | str | None:
+    """Whisper for the audio folders: ``None`` when no folder takes audio, the
+    ``ConfigError``'s text (it names the variable, never the value) on a bad knob."""
+    if not any(f.extensions & VOICE_EXTENSIONS for f in folders):
+        return None
+    try:
+        return whisper_resolver(os.environ)
+    except ConfigError as exc:
+        return str(exc)
+
+
+def _check_tools(
+    folders: list[DropFolder], ocr: OcrSetup, whisper: WhisperSetup | str | None
+) -> tuple[list[DropFolder], bool]:
+    """Skip, with the fix, each folder whose files cannot be read. ``(usable, any_skipped)``."""
+    ocr_hint = ocr_unavailable_hint(ocr)
+    voice_hint = whisper.unavailable if isinstance(whisper, WhisperSetup) else whisper
+    usable: list[DropFolder] = []
     for folder in folders:
-        if folder not in usable:
+        hint = None
+        if folder.extensions & IMAGE_EXTENSIONS and ocr_hint is not None:
+            hint = ocr_hint
+        elif folder.extensions & VOICE_EXTENSIONS and voice_hint is not None:
+            hint = voice_hint
+        if hint is None:
+            usable.append(folder)
+        else:
             typer.secho(f"skipped {one_line(str(folder.path))}: {hint}", fg="red", err=True)
     return usable, len(usable) < len(folders)
 
@@ -247,6 +290,7 @@ class _Context:
     ocr: OcrSetup
     enrich: bool
     allow_secrets: bool
+    whisper: WhisperSetup | None = None  # None: no folder in this run takes audio (RM-38)
 
 
 def _ingest_all(
@@ -255,6 +299,7 @@ def _ingest_all(
     cutoff: datetime,
     *,
     ocr: OcrSetup,
+    whisper: WhisperSetup | None,
     enrich: bool,
     allow_secrets: bool,
 ) -> bool:
@@ -267,6 +312,7 @@ def _ingest_all(
         ocr=ocr,
         enrich=enrich,
         allow_secrets=allow_secrets,
+        whisper=whisper,
     )
     failed = False
     with connect(cfg.database_url) as conn:
@@ -294,12 +340,12 @@ def _ingest_step(ctx: _Context, folder: DropFolder) -> IngestFn:
         conn: psycopg.Connection[Any], path: Path, *, title: str, timeout: float
     ) -> str:
         try:
-            if path.suffix.lower() in IMAGE_EXTENSIONS:
-                doc = extract_image(path, ocr=ctx.ocr, timeout=timeout)
-            else:
-                doc = extract_path(path)
+            doc = _extract(ctx, path, timeout)
         except OcrUnavailableError:
             raise  # configuration, not this file: it goes back for the next run
+        except TRANSIENT_VOICE_ERRORS as exc:
+            _warn_retry(path, exc)
+            raise  # the machine, not this memo (RM-38.D4): it goes back too
         except (ImageError, ValueError) as exc:
             # Unreadable, too large, an OCR timeout, a malformed file: every run would fail.
             raise RejectedFileError("the file cannot be read") from exc
@@ -313,6 +359,26 @@ def _ingest_step(ctx: _Context, folder: DropFolder) -> IngestFn:
         return _STATUS[outcome]
 
     return ingest
+
+
+def _extract(ctx: _Context, path: Path, timeout: float) -> ExtractedDoc:
+    suffix = path.suffix.lower()
+    if suffix in IMAGE_EXTENSIONS:
+        return extract_image(path, ocr=ctx.ocr, timeout=timeout)
+    if suffix in VOICE_EXTENSIONS:
+        # Whisper's own timeout, not the run's remainder (RM-38.D1, module docstring).
+        return extract_voice(path, whisper=ctx.whisper)
+    return extract_path(path)
+
+
+def _warn_retry(path: Path, exc: VoiceError) -> None:
+    """Name the memo (its ``imported/`` name carries its hash) and the class, never more."""
+    typer.secho(
+        f"warning: {one_line(path.name)} was not transcribed ({describe_failure(exc)}); "
+        f"it goes back to the folder and is retried next run (see {GUIDE})",
+        fg="yellow",
+        err=True,
+    )
 
 
 def _ingest(

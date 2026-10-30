@@ -23,7 +23,8 @@ forced off for every test), with its one-line comment. Its growth on
 feat/rm-16-brief-delivery is a fourth, tests/delivery_isolation_plugin.py (brief delivery
 forced off for every test), with its one-line comment. Its growth on feat/rm-32-ocr is a
 fifth, tests/ocr_isolation_plugin.py (OCR forced off for every test), with its one-line
-comment. No line count is given here: it
+comment. Its growth on feat/rm-38-voice-memos is a sixth, tests/voice_isolation_plugin.py
+(voice memos forced off for every test), with its one-line comment. No line count is given here: it
 would be stale as soon as written (``wc -l tests/conftest.py``).
 """
 
@@ -55,12 +56,14 @@ from tests.db_lock import concurrent_suite_message, try_acquire_suite_lock
 # tests.rerank_isolation_plugin forces the reranker off per test (RM-14a, that module).
 # tests.delivery_isolation_plugin forces brief delivery off per test (RM-16, that module).
 # tests.ocr_isolation_plugin forces OCR off per test (RM-32, that module).
+# tests.voice_isolation_plugin forces voice memos off per test (RM-38, that module).
 pytest_plugins = (
     "tests.browser_timeout",
     "tests.env_isolation",
     "tests.rerank_isolation_plugin",
     "tests.delivery_isolation_plugin",
     "tests.ocr_isolation_plugin",
+    "tests.voice_isolation_plugin",
 )
 
 load_dotenv()

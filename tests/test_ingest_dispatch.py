@@ -35,7 +35,9 @@ PRE_RM07_EXTRACTOR_FOR = {
 # RM-33's image extractor, listed after the built-ins but kept out of directory
 # walks, so ``brain ingest-dir``'s default walk is still exactly the table above.
 IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg"]
-ALL_EXTENSIONS = PRE_RM07_EXTENSIONS + IMAGE_EXTENSIONS
+# RM-38's voice-memo extractor: the same, after the images.
+AUDIO_EXTENSIONS = [".m4a", ".mp3", ".wav"]
+ALL_EXTENSIONS = PRE_RM07_EXTENSIONS + IMAGE_EXTENSIONS + AUDIO_EXTENSIONS
 
 PROBE_EXTENSION = ".probe"
 PROBE_TITLE = "probe-title"
@@ -102,6 +104,20 @@ def test_images_use_the_image_extractor_and_stay_out_of_walks() -> None:
         assert spec.name == "image"
         assert spec.load() is extract_image
         assert spec.in_directory_walks is False
+
+
+def test_audio_uses_the_voice_extractor_and_stays_out_of_walks() -> None:
+    """RM-38 AC4: ``.m4a``/``.mp3``/``.wav`` dispatch to ``extract_voice``, never in a walk."""
+    from brain.ingest.voice import extract_voice
+
+    for ext in AUDIO_EXTENSIONS:
+        spec = dispatch.spec_for(Path(f"memo{ext.upper()}"))
+        assert spec is not None
+        assert spec.name == "voice"
+        assert spec.load() is extract_voice
+        assert spec.in_directory_walks is False
+        assert spec.default_sensitivity == "confidential"
+        assert dispatch.default_sensitivity(Path(f"memo{ext}")) == "confidential"
 
 
 def test_package_reexports_are_the_dispatch_functions() -> None:

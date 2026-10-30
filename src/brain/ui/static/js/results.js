@@ -21,6 +21,7 @@ const SOURCE_ICONS = {
   applenotes: "🗒️",
   notion: "📓",
   screenshot: "📸",
+  voice: "🎙️",
 };
 
 /* `vault` is the fallback, matching `sourceIconFor`. It is a real glyph rather

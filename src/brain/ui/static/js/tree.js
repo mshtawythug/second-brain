@@ -82,6 +82,7 @@ const MONTH_GROUPED_PATHS = new Set([
   "_ingested/gmail",
   "_ingested/calendar",
   "_ingested/screenshot",
+  "_ingested/voice",
 ]);
 
 const MONTHS = [

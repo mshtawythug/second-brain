@@ -30,6 +30,8 @@ process:
     Composed in from :mod:`brain.doctor_apple_notes` (RM-36): can ``osascript`` run here?
 ``drop folders``
     Composed in from :mod:`brain.doctor_drop_folders` (RM-33): do the folders load and OCR?
+``voice memos``
+    Composed in from :mod:`brain.doctor_voice` (RM-38): can memos be transcribed here?
 ``vault watcher`` / ``retired daemon``
     Composed in from :mod:`brain.doctor_watcher` (wiki-to-ui phase 8): is the
     vault-sync watcher installed or running (A9), and is the retired
@@ -113,6 +115,7 @@ def runtime_doctor_checks(
     from .doctor_github import github_doctor_check
     from .doctor_ocr import ocr_doctor_check
     from .doctor_reranker import reranker_doctor_check
+    from .doctor_voice import voice_doctor_check
     from .doctor_watcher import retired_daemon_doctor_check, watcher_doctor_check
 
     resolved_dir = launchd_dir if launchd_dir is not None else _default_launchd_dir()
@@ -138,6 +141,7 @@ def runtime_doctor_checks(
         *ocr_doctor_check(),
         *apple_notes_doctor_check(platform=resolved_platform),
         *drop_folders_doctor_check(launchd_dir=resolved_dir),
+        *voice_doctor_check(),
     ]
 
 

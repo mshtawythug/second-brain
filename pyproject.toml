@@ -843,6 +843,7 @@ markers = [
   # synthetic image-only PDF. NOT deselected: it skips itself when `tesseract`
   # is not on PATH, so it runs wherever the binary exists.
   "live_ocr: runs the real tesseract binary; skips when it is not installed",
+  "live_whisper: runs the real afinfo, afconvert and whisper-cli on a synthetic WAV; skips without them and BRAIN_LIVE_WHISPER_MODEL",
   # brain-rebuild advisory-lock + real-DB tests. These need the test Postgres
   # container (port 5434) to be up but do NOT require Ollama. Included in the
   # default suite (not excluded by the addopts -m filter) because the test DB

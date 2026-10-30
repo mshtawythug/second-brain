@@ -76,3 +76,69 @@ This installs the `com.brain.dropfolders` LaunchAgent, which runs
 To read a file again (a `rejected` one included), delete its document if it has one
 (`brain rm`), then `brain ingest <folder>/imported/<file>`; an image is stored
 confidential unless you pass `--sensitivity normal`.
+
+## Voice memos (RM-38)
+
+A drop folder can also take voice memos (`.m4a`, `.mp3`, `.wav`). Each memo is transcribed
+on this machine by whisper.cpp, and only the transcript enters the brain: the audio stays in
+the folder's `imported/`, and the 16 kHz WAV made for whisper is deleted straight after.
+Nothing leaves the machine.
+
+### 1. Install whisper.cpp and a model
+
+```bash
+brew install whisper-cpp        # provides whisper-cli
+```
+
+brain never downloads a model. Download one yourself from the `ggerganov/whisper.cpp`
+repository on Hugging Face and put it anywhere, for example `~/models/`. The recommended
+model is `ggml-base.en.bin` (English only, about 148 MB). **No real model was run by the
+tests that shipped this feature:** they use a fake transcriber. To check a model on your
+machine, run the one live test with `BRAIN_LIVE_WHISPER_MODEL` naming the file:
+`BRAIN_LIVE_WHISPER_MODEL=~/models/ggml-base.en.bin pytest tests/test_ingest_voice.py -m live_whisper`.
+
+Then name the model in `$BRAIN_HOME/.env`:
+
+```bash
+BRAIN_WHISPER_MODEL=~/models/ggml-base.en.bin
+BRAIN_WHISPER_MAX_MINUTES=60    # the default; longer memos are skipped
+brain doctor                    # the `voice memos` line should be OK
+```
+
+`afinfo` and `afconvert`, which read and convert the audio, are built into macOS.
+
+### 2. Configure a folder
+
+```toml
+[[folder]]
+path = "~/VoiceMemos"
+kind = "voice"
+```
+
+`kind = "voice"` gives the folder the audio extensions and stores each memo
+**confidential** (a memo is private by nature); set `sensitivity = "normal"` on the entry to
+change that. Get memos in by sharing or exporting them from the Voice Memos app into the
+folder. brain never reads the Voice Memos app's own store.
+
+### What happens to a memo
+
+- `afinfo` reads its length (10 s timeout). A memo longer than `BRAIN_WHISPER_MAX_MINUTES` is
+  `rejected` and left in `imported/`.
+- `afconvert` makes a 16 kHz mono WAV (60 s timeout); the WAV's size is checked against the
+  cap again.
+- `whisper-cli` transcribes it, with a timeout of twice the memo's length plus a minute. The
+  run's own 8-minute limit stops *new* files from starting, never a memo already being
+  transcribed, so at the 60-minute cap one run can last about **two hours** (at most 2 × 60 +
+  1 minutes of transcription, plus the run's 8 minutes). The LaunchAgent never starts a second
+  run while one is still going.
+- A memo of silence adds no document and stays in `imported/`.
+- **Rejected, never retried:** too long, not readable as audio, or any timeout. To try one
+  again, `brain ingest <folder>/imported/<file>`. It is stored confidential, under source
+  `manual`, unless you pass `--sensitivity normal`.
+- **Moved back, retried next run:** whisper failing on the converted WAV, which points at the
+  model or the binary rather than the memo. Each time, the run prints a warning naming the
+  memo's `imported/` name (it carries the content hash) and the error class. A memo that
+  shows up in that warning run after run is the one to look at: check `brain doctor`, then
+  try `brain ingest` on it by hand.
+- With voice memos off (no `BRAIN_WHISPER_MODEL`), no model file, or no `whisper-cli`, voice
+  folders are skipped with the fix printed, and their files are not moved.

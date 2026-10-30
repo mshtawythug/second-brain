@@ -22,6 +22,37 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — voice memos, transcribed on this machine (RM-38)
+
+- A drop folder with `kind = "voice"` takes `.m4a`, `.mp3` and `.wav` memos (shared or
+  exported from the Voice Memos app; brain never reads the app's own store). Each is
+  transcribed locally: macOS's `afinfo` reads its length (10 s timeout), `afconvert` makes a
+  16 kHz mono WAV in a private temporary folder (60 s), and `whisper-cli` from whisper.cpp
+  (`brew install whisper-cpp`) transcribes it, with a timeout of twice the memo's length plus a
+  minute. Only the transcript enters the brain, as a `voice_memo` document under the new
+  `voice` source kind (🎙️ in `brain ui`, month headers under `_ingested/voice`), stored
+  **confidential** by default on every path; the folder's `sensitivity` or `--sensitivity`
+  overrides it. The tools get no stdin, only `PATH`, `HOME`, `LANG` and `TMPDIR` from the
+  environment, and their stderr is never read.
+- `BRAIN_WHISPER_MODEL` names a whisper.cpp model file; unset means voice memos are off, and
+  brain never downloads one. `BRAIN_WHISPER_MAX_MINUTES` (default 60, up to 600) is the longest
+  memo transcribed. The converted WAV's size is checked against the cap too, so a file whose
+  header understates its length is still caught.
+- A memo over the cap, one that is not audio, or any timeout is `rejected` and stays in
+  `imported/`; `brain ingest <imported file>` tries it again. Whisper failing on the converted
+  audio points at the model or the binary, so the memo is moved back for the next run, with a
+  warning naming its `imported/` name and the error class. A memo's transcription runs on its
+  own timeout, not the run's 8-minute limit, which only stops new files from starting. With
+  voice memos off or `whisper-cli` missing, voice folders are skipped with the fix printed,
+  and their files are not moved.
+- `brain ingest <memo>.m4a` works too (source `manual`, confidential by default); with voice
+  memos off it is a one-line refusal. Audio stays out of `brain ingest-dir`'s default walk and
+  is not uploadable in `brain ui`.
+- `brain doctor` gains a `voice memos` line, and its `drop folders` line warns when a voice
+  folder cannot be transcribed. No real whisper model is run by the test suite; one
+  `live_whisper` test runs the real tools when `BRAIN_LIVE_WHISPER_MODEL` names a model.
+  Guide: `docs/guides/drop-folders.md#voice-memos-rm-38`.
+
 ### Added — screenshots from a drop folder become searchable (RM-33)
 
 - `brain ingest-folder --dir PATH --since 7d` (one folder) or

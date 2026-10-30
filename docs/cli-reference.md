@@ -817,7 +817,7 @@ brain ingest-notion ~/Downloads/Export-abc123.zip --max 50 --tag notion
   refuses prints `refused <page id>: N finding(s)`, and its warn and redact notices are labelled
   with the page id.
 
-## Drop folders (screenshots)
+## Drop folders (screenshots, voice memos)
 
 `brain ingest-folder` (RM-33) ingests the files saved into a drop folder: a
 screenshot folder, for one. It requires `--dir PATH` (one folder) or
@@ -860,6 +860,16 @@ brain ingest-folder --configured --since 2d          # what the LaunchAgent runs
   unless the folder or `--sensitivity` says otherwise). An image with no
   recognised text stays in `imported/` and adds no document. With OCR off or no
   `tesseract`, image folders are skipped with the fix printed, and exit 1.
+- **Voice memos** (`.m4a`, `.mp3`, `.wav`, RM-38) in a `kind = "voice"` folder
+  are transcribed locally by whisper.cpp (`afinfo`, `afconvert`, `whisper-cli`)
+  into a `voice_memo` document (source `voice`, stored **confidential** unless the
+  folder or `--sensitivity` says otherwise); only the transcript enters the brain.
+  A memo over `BRAIN_WHISPER_MAX_MINUTES`, one that is not audio, and any timeout
+  are `rejected`; whisper failing on the converted audio moves it back, with a
+  warning naming its `imported/` name and the error class. A memo's transcription
+  runs on its own timeout (twice its length plus a minute), not the run's 8
+  minutes. With voice memos off or `whisper-cli` missing, voice folders are
+  skipped with the fix printed, and exit 1.
 - **Bounds.** At most 200 files a folder and 8 minutes a run; the rest are left
   where they are for the next run, and the report says how many. `screenshot`
   skips concept extraction; summaries follow `BRAIN_ENRICH_MIN_TOKENS`, which
@@ -872,7 +882,9 @@ brain ingest-folder --configured --since 2d          # what the LaunchAgent runs
   used. Failures are printed by class only.
 
 `brain ingest <file>.png` works too (source `manual`, stored **confidential**
-unless `--sensitivity normal`; `brain ingest-dir --ext png` likewise). File names
+unless `--sensitivity normal`; `brain ingest-dir --ext png` likewise), and so does
+`brain ingest <memo>.m4a` (RM-38; the same default; with voice memos off it is a
+one-line refusal, exit 1). Audio is not in `brain ingest-dir`'s default walk either. File names
 are printed, and titles stored, on one line with control characters removed. Images are not in `brain ingest-dir`'s default walk; `--ext png` adds
 them. The folder file and the `com.brain.dropfolders` LaunchAgent
 (`brain-install-launchd --with-dropfolders`) are in

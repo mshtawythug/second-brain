@@ -5,10 +5,14 @@ A list of ``[[folder]]`` tables; a missing file means no folders::
     [[folder]]
     path = "~/Pictures/Screenshots"   # required; must exist; stored resolved
     kind = "screenshot"               # default; any VALID_SOURCE_KINDS member
-    extensions = [".png", ".jpg", ".jpeg"]  # default; each served by an extractor
-    sensitivity = "confidential"      # default: a screenshot can show anything
+    extensions = [".png", ".jpg", ".jpeg"]  # default for its kind; each served by an extractor
+    sensitivity = "confidential"      # default: a screenshot or a memo can hold anything
     auto = true                       # false: only `brain ingest-folder --dir` uses it
     mode = "ingest"                   # the only mode until RM-39 adds "capture"
+
+**A folder's default extensions follow its kind** (RM-38.D2): ``kind = "voice"`` takes
+:data:`VOICE_EXTENSIONS` (``.m4a``, ``.mp3``, ``.wav``); every other kind takes the image
+set, :data:`DEFAULT_EXTENSIONS`. A folder that lists ``extensions`` keeps them.
 
 The folders are a file rather than ``BRAIN_*`` variables because each is a table;
 the settings-leaf rule (§2.3) still holds: one loader, one frozen value type
@@ -36,6 +40,10 @@ from brain.source_kinds import VALID_SOURCE_KINDS
 CONFIG_NAME = "drop-folders.toml"
 DEFAULT_KIND = "screenshot"
 DEFAULT_EXTENSIONS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg"})
+#: The voice-memo extractor's extensions (RM-38), a ``voice`` folder's default.
+VOICE_EXTENSIONS: frozenset[str] = frozenset({".m4a", ".mp3", ".wav"})
+#: A kind's default extensions; a kind not listed takes :data:`DEFAULT_EXTENSIONS`.
+KIND_EXTENSIONS: dict[str, frozenset[str]] = {"voice": VOICE_EXTENSIONS}
 DEFAULT_SENSITIVITY = CONFIDENTIAL
 _KEYS = frozenset({"path", "mode", "kind", "extensions", "sensitivity", "auto"})
 
@@ -106,7 +114,7 @@ def _folder(index: int, table: dict[str, Any]) -> DropFolder | None:
     if not isinstance(auto, bool):
         raise ConfigError(f"{where}.auto must be true or false")
     path = _path(where, table.get("path"))
-    extensions = _extensions(where, table.get("extensions"))
+    extensions = _extensions(where, table.get("extensions"), kind)
     if path is None:
         return None
     return DropFolder(
@@ -130,9 +138,9 @@ def _path(where: str, raw: object) -> Path | None:
     return path.resolve(strict=True)
 
 
-def _extensions(where: str, raw: object) -> frozenset[str]:
+def _extensions(where: str, raw: object, kind: str) -> frozenset[str]:
     if raw is None:
-        return DEFAULT_EXTENSIONS
+        return KIND_EXTENSIONS.get(kind, DEFAULT_EXTENSIONS)
     # Lazy: the registry is only needed when a folder names its own extensions.
     from brain.ingest.dispatch import supported_extensions
 
