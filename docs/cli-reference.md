@@ -671,8 +671,9 @@ brain ingest-calendar --since 2026-10-01 --until 2026-10-31 --calendar primary -
   the description, all with every link and address removed. Attendee addresses
   are stored only as participants, which is what `--person` matches. Google's
   joining block and any line carrying a dial-in number, a PIN, a passcode or a
-  meeting ID are dropped. A title loses only the dial-in part ("Project ID:
-  ENG-123 kickoff" is stored as "Project kickoff"). The rules prefer privacy to
+  meeting ID are dropped. A title keeps the words before the secret: "Weekly
+  sync, passcode is 7Hk2pQ" is stored as "Weekly sync", and a keyword with no
+  value ("Password manager rollout") stays. The rules prefer privacy to
   recall: an ordinary description line that looks like a dial-in ("Discuss the
   access code rollout") is dropped too.
 - **What metadata holds:** the start time, which dates the document (`sent_at`,

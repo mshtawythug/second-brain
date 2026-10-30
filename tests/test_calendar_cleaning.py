@@ -244,7 +244,7 @@ ORDINARY_TITLES = [
     ("Q4 budget: 1 250 000 USD", "Q4 budget: USD"),
     ("Password manager rollout", "Password manager rollout"),
     ("Join the teams offsite planning", "Join the teams offsite planning"),
-    ("Project ID: ENG-123 kickoff", "Project kickoff"),
+    ("Project ID: ENG-123 kickoff", "Project"),
     ("Interview round 2 (ID 4471)", "Interview round 2"),
     ("Code review: parser", "Code review: parser"),
     ("1:1 with Avery at 10:30", "1:1 with Avery at 10:30"),
@@ -252,8 +252,17 @@ ORDINARY_TITLES = [
     ("Weekly sync PIN 4321", "Weekly sync"),
     ("Standup, dial-in: +1 555 010 0199", "Standup"),
     # what a removed dial-in leaves behind is tidied away
-    ("Sync (PIN 4321) weekly", "Sync weekly"),
+    ("Sync (PIN 4321) weekly", "Sync"),
+    # a credential keyword with no value stays (sec-96 T1 allowlist)
+    ("Access code rollout", "Access code rollout"),
+    ("Reset password", "Reset password"),
+    ("Meeting ID card", "Meeting ID card"),
+    # short words without a value, and words that merely contain one
+    ("ID card renewal", "ID card renewal"),
+    ("Covid 19 update", "Covid 19 update"),
+    ("pinned agenda and codebase tour", "pinned agenda and codebase tour"),
     ("Call +1 323-555-0100,,123456789# US", "Call US"),
+    ("Call (+1 323 555 0100) team", "Call team"),
 ]
 
 
@@ -268,7 +277,7 @@ def test_a_title_keeps_words_a_description_line_would_lose() -> None:
     """Title mode removes spans; the same text as a description line goes whole."""
     doc = _only_doc(_event_with("Project ID: ENG-123 kickoff", description="Agenda."))
 
-    assert doc.doc.title == "Project kickoff"
+    assert doc.doc.title == "Project"
     assert "Location" not in doc.doc.content  # the location is line mode: dropped
 
 
@@ -287,3 +296,65 @@ def test_a_description_line_is_over_removed_by_design(line: str) -> None:
 
     assert line not in doc.doc.content
     assert doc.doc.content.endswith("Keep.")
+
+
+# --- title truncation (sec-96 T1-T4) ---------------------------------------------
+
+CREDENTIAL_PROBES = [
+    ("Sync - passcode abcXYZ", "abcXYZ"),
+    ("Weekly sync, passcode is 7Hk2pQ", "7Hk2pQ"),
+    ("access code ABCD-EFGH", "ABCD-EFGH"),
+    ("Kennwort geheim", "geheim"),
+    ("passcode: abc XYZ 123", "XYZ"),
+    ("passcode=a b", "=a"),
+    ("Team PIN-4321", "4321"),
+    ("Team PIN4321", "4321"),
+    ("Team P.I.N. 4321", "4321"),
+    ("Team code is 4321", "4321"),
+    ("Team code \u2014 4321", "4321"),
+    ("Team code -> 4321", "4321"),
+    ("Sync passcode\n4321", "4321"),
+    ("Call skype:live:samplename", "samplename"),
+    ("pwd hunter2 for the share", "hunter2"),
+]
+
+
+@pytest.mark.parametrize(("text", "secret"), CREDENTIAL_PROBES)
+def test_a_credential_value_survives_in_no_field(text: str, secret: str) -> None:
+    doc = _only_doc(_event_with(text))
+
+    assert secret not in doc.doc.title
+    assert secret not in doc.doc.content
+    assert all(secret not in (name or "") for name, _email in doc.attendees)
+    _assert_no_secret(doc.doc.title)
+
+
+@pytest.mark.parametrize(
+    ("title", "kept"),
+    [
+        ("Sync - passcode abcXYZ", "Sync"),
+        ("Weekly sync, passcode is 7Hk2pQ", "Weekly sync"),
+        ("Team PIN4321", "Team"),
+        ("Sync passcode\n4321", "Sync"),
+        ("Call skype:live:samplename", "Call"),
+    ],
+)
+def test_a_title_keeps_the_words_before_a_credential(title: str, kept: str) -> None:
+    assert _only_doc(_event_with(title, description="Agenda.")).doc.title == kept
+
+
+def test_a_bare_value_on_the_line_after_a_dial_in_line_is_dropped() -> None:
+    text = "Passcode:\n424242\nNext item here\nMeeting ID\n884 112\n\nAfter a blank line"
+
+    body = _only_doc(_event_with("Planning", description=text)).doc.content
+
+    assert "424242" not in body and "884" not in body
+    assert "Next item here" in body and "After a blank line" in body
+
+
+def test_a_longer_line_after_a_dial_in_line_is_kept() -> None:
+    text = "Discuss the access code rollout\nNext topic: budget planning"
+
+    body = _only_doc(_event_with("Planning", description=text)).doc.content
+
+    assert "Next topic: budget planning" in body

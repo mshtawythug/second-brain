@@ -11,7 +11,7 @@ import pytest
 
 from brain.ingest import calendar as cal
 from brain.ingest.calendar import CalendarDoc, CalendarError
-from brain.ingest.calendar_text import clean_description, clean_line
+from brain.ingest.calendar_text import clean_description, clean_line, clean_title
 from tests import calendar_fixtures as fx
 
 _MIN = datetime(2026, 10, 1, tzinfo=UTC)
@@ -278,13 +278,27 @@ def test_clean_line_of_a_location_that_is_only_a_link_is_empty() -> None:
     assert clean_line(None) == ""
 
 
+def test_clean_title_of_a_non_string_is_empty() -> None:
+    assert clean_title(None) == ""
+    assert clean_title(42) == ""
+
+
+def test_a_non_string_title_gets_the_placeholder() -> None:
+    event = {**fx.single(), "summary": 42}
+
+    assert _by_id(_build([event]))[fx.SINGLE_ID].doc.title == "(calendar event)"
+
+
 def test_clean_description_of_a_non_string_is_empty() -> None:
     assert clean_description(None) == ""
     assert clean_description(42) == ""
 
 
-def test_clean_line_joins_an_embedded_newline() -> None:
-    assert clean_line("Room 4\nPIN 4321\nfloor 2") == "Room 4 floor 2"
+def test_clean_line_judges_its_lines_together() -> None:
+    """A location's lines are joined first (sec-96 T3), so a keyword and its value
+    on two lines are seen together and the location goes whole."""
+    assert clean_line("Room 4 passcode\n4321") == ""
+    assert clean_line("Room 4\nfloor 2") == "Room 4 floor 2"
 
 
 # --- merging a run into what is stored (rev-96 R1) --------------------------------

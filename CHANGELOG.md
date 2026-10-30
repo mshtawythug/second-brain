@@ -33,8 +33,8 @@ git tag scheme:
   `--person`, and dated by their start time. Attendee addresses are stored only as participants,
   never in the body. One cleaner treats the title, location, description and attendee names: it
   removes every link and address (obfuscated forms included) and drops any line with a dial-in
-  number, PIN, passcode or meeting ID. A title loses only the dial-in part, so it stays findable
-  by name. The rules prefer privacy to recall, so an ordinary line that looks like a dial-in is
+  number, PIN, passcode or meeting ID. A title keeps the words before the secret, so it stays
+  findable by name. The rules prefer privacy to recall, so an ordinary line that looks like a dial-in is
   dropped too. Declined, untitled, cancelled, working-location and
   out-of-office entries are skipped, and private events (or Google's legacy `confidential`
   visibility) are stored as `confidential`. The `gws` read gets a 120-second timeout and a 16 MiB

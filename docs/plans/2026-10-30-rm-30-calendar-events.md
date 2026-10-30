@@ -50,11 +50,21 @@ explained below.
      separators; `pwd` / `pw` (with a value) and `Kennung` are keywords; addresses may have spaces
      around `@` and the dots; `tel:` / `sip:` links are removed with the other links. The date
      mask covers `M/D/YYYY`, `D.M.YYYY`, `YYYY.MM.DD`, `YYYY/MM/DD` and two-digit years.
-   - **Titles are cleaned span by span** (`clean_title`): the keyword with its value, the one-tap
-     token and the digit run are removed, not the whole title, so "Project ID: ENG-123 kickoff"
-     keeps "Project kickoff". A keyword with no value is not a secret and stays in a title
-     ("Password manager rollout"). Descriptions, locations and display names keep whole-line
-     dropping.
+   - **Titles keep the words before the secret** (`clean_title`, sec-96 T1–T4). A title's lines
+     are joined into one. A credential keyword (passcode, password, Passwort, Kennwort, Kennung,
+     access code, meeting ID, conference ID, `pwd`, `pw`) truncates the title from the keyword to
+     the end, whatever follows ("Weekly sync, passcode is 7Hk2pQ" keeps "Weekly sync"), unless it
+     has no value: it ends the title, or only "rollout", "manager", "reset", "policy" or "card"
+     follow ("Password manager rollout" and "Access code rollout" stay). A short word with a value
+     (`PIN 4321`, `PIN-4321`, `PIN4321`, `P.I.N. 4321`, `code is 4321`, `code — 4321`,
+     `ID: ENG-123`) truncates the same way ("Project ID: ENG-123 kickoff" keeps "Project"). A
+     dial-in keyword loses its value, and digit runs and one-tap forms are removed in place.
+     `skype:` links are removed with the others. Descriptions, locations and display names keep
+     whole-line dropping; a location's lines are joined first too, and in a description a line
+     that ends with a credential also takes the next line when it is a bare value (at most three
+     tokens: "Passcode:" then "424242").
+   - **Accepted residual risk.** A bare value with no keyword and under seven digits ("Sync
+     123456") and digits spelled out as words ("PIN four three two one") are not recognised.
    - **The documented trade, privacy over recall (S6).** Outside a title, "Discuss the access code
      rollout", "password reset policy discussion" and "Meeting ID card" are dropped as dial-in
      lines, and "Year 2026 2027 2028 planning" as a digit run. In every field, "node.js/react" and
