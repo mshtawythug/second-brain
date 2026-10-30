@@ -22,6 +22,23 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — your pull requests, issues and READMEs as documents (RM-31)
+
+- `brain ingest-github` reads your code-host activity through the `gh` CLI and
+  its own login. It refuses to run without `--repo OWNER/REPO` or `--mine`, and
+  `--since` (exit 2), and stops at 500 documents a run, saying so. One document
+  per PR, issue and README, deduplicated by `<owner>/<repo>#<n>` and
+  `<owner>/<repo>:README` under the new `github` source.
+- The body keeps only your own comments; `--with-thread` adds everyone's. State,
+  counts and labels live in metadata, so a merged PR is a metadata-only update
+  (no re-chunk, no re-embed), and an unchanged item is not read again.
+- Items from private or internal repositories, or from a repository whose
+  visibility could not be read, are stored `confidential`. No `gh` output or
+  stderr is printed or stored: every error names only the command and its exit
+  code.
+- `brain doctor` has a `github` row (is `gh` on `PATH`?), and the `ingest-brain`
+  skill has a recipe for the GitHub MCP connector when `gh` is not installed.
+
 ### Fixed — the vault watcher no longer loses a delete across a shutdown or a lost connection (RM-26)
 
 - A file deleted (or renamed away) just as the watcher shut down, or while it

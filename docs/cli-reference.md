@@ -648,6 +648,52 @@ Dates passed to `--since` / `--until` are converted into Gmail `after:` /
 `before:` query terms, so use Gmail's `YYYY/MM/DD` shape. Raw `--query` is
 passed through and can use any Gmail search syntax.
 
+## GitHub ingest
+
+`brain ingest-github` (RM-31) stores your own pull requests, issues and
+repository READMEs as documents, through the `gh` CLI and its own login
+(`gh auth login`); brain stores no token. It requires `--repo OWNER/REPO`
+(repeatable) or `--mine`, **and** `--since YYYY-MM-DD`. Otherwise it exits 2
+with "ingest-github requires --repo or --mine, and --since".
+
+```bash
+brain ingest-github --mine --since 2026-10-01 --dry-run
+brain ingest-github --mine --since 2026-10-01 --tag github
+brain ingest-github --repo example-org/example-repo --since 2026-09-01 --with-thread
+```
+
+- **Scope.** `--mine` alone is your activity everywhere: PRs you authored, are
+  assigned or reviewed, and issues you authored or are assigned. `--repo` alone
+  is every PR and issue in the named repositories updated since `--since`. Both
+  together is your activity in those repositories. Organisation-wide pulls and
+  commits are not read.
+- **One document per PR or issue** (source `github`, content types `github_pr`
+  and `github_issue`, deduplicated by `<owner>/<repo>#<number>`), and one per
+  README (`github_readme`, `<owner>/<repo>:README`). READMEs are read for each
+  `--repo` repository and, with `--mine`, for the result repositories you own;
+  `--no-readmes` skips them.
+- **What the body holds:** the title line, the description and **your own**
+  comments (issue comments, review bodies and inline review comments).
+  Other people's comments are added only with `--with-thread`; their logins are
+  not stored in the body otherwise.
+- **What metadata holds:** the state (`open`, `closed` or `merged`), the draft
+  flag, the review and comment counts, the labels, and the update, close and
+  merge times. When only these change, a re-run updates the metadata without
+  re-chunking or re-embedding. An item whose update time has not moved is not
+  read again. The creation time dates the document (`sent_at`).
+- **Sensitivity.** Items and READMEs from a repository that is not public
+  (private, or an enterprise `internal` one) are stored as `confidential`, and
+  so is anything from a repository whose visibility could not be read.
+- **Cap and cost.** At most 500 documents a run: PRs and issues first, newest
+  first, then READMEs in the budget left. The command says when it stopped at
+  the cap. Every new document gets a summary (`--no-enrich` skips it), and when
+  the graph is on, concept extraction takes minutes per document in the
+  watcher's graph lane, so a full 500-document run keeps the lane busy for days.
+  Start with a short `--since`.
+- `--dry-run` lists what would be read and writes nothing. Without `gh` on
+  `PATH` the command exits 1 with an install hint, and `brain doctor`'s `github`
+  row warns.
+
 ## Status and health
 
 ```bash

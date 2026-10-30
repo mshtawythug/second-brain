@@ -18,9 +18,13 @@ from brain.vault import links
 # shows RM-07 changed no kind.
 PRE_RM07_KINDS = frozenset({"manual", "krisp", "gmail", "slack"})
 
+# Every kind added since, one per source ticket, so a kind cannot appear (or
+# vanish) without a line here naming the ticket that did it.
+ADDED_KINDS = frozenset({"github"})  # RM-31
 
-def test_source_kind_set_unchanged() -> None:
-    assert source_kinds.VALID_SOURCE_KINDS == PRE_RM07_KINDS
+
+def test_source_kind_set_is_pre_rm07_plus_the_named_additions() -> None:
+    assert source_kinds.VALID_SOURCE_KINDS == PRE_RM07_KINDS | ADDED_KINDS
 
 
 def test_vault_links_source_kinds_is_canonical() -> None:

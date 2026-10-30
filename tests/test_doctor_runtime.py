@@ -543,6 +543,7 @@ def test_all_healthy_yields_no_failures(
     launchd_dir = tmp_path / "agents"
     launchd_dir.mkdir()
     _install_plists(launchd_dir, *_LABELS)
+    monkeypatch.setattr("brain.doctor_github.shutil.which", lambda _name: "/usr/local/bin/gh")
 
     with patch(
         "brain.doctor_runtime.subprocess.run",
@@ -555,10 +556,11 @@ def test_all_healthy_yields_no_failures(
     # R3 (phase 9): the dormant wiki's "wiki build" check is gone from the set.
     # RM-16 adds "brief delivery", off (ok) under tests/delivery_isolation_plugin.py.
     # RM-14b adds "reranker", not configured (ok) under tests/rerank_isolation_plugin.py.
+    # RM-31 adds "github", ok here because ``gh`` is found (``shutil.which`` is pinned above).
     assert [c.check for c in checks] == [
-        "config", "daemons", "vault watcher", "brief delivery", "reranker"
+        "config", "daemons", "vault watcher", "brief delivery", "reranker", "github"
     ]
-    assert [c.status for c in checks] == ["ok", "ok", "ok", "ok", "ok"]
+    assert [c.status for c in checks] == ["ok", "ok", "ok", "ok", "ok", "ok"]
 
 
 def test_every_failing_check_names_a_remedy(

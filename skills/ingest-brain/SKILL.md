@@ -36,6 +36,7 @@ notes, see `brain-authoring`.
 | Gmail messages | `brain ingest-gmail` | **REFUSES without a scope flag.** See Gmail section. |
 | Krisp transcript / Slack thread / arbitrary text | `brain ingest-stdin` | The MCP→stdin chain. See Krisp + Slack sections. |
 | Krisp action items as a separate doc | `brain enrich --krisp-action-items` (handoff) + `brain ingest-stdin --content-type krisp_action_items` | See `brain-todo` for the full flow. |
+| The user's own GitHub PRs, issues, READMEs | `brain ingest-github --mine --since YYYY-MM-DD` | **REFUSES without `--repo`/`--mine` and `--since`.** See GitHub section. |
 
 ## Files and directories
 
@@ -161,6 +162,32 @@ Pick `--external-id` so it's stable across re-ingests. Channel-id + thread-ts
 is the canonical Slack identifier; thread-ts alone is also unique within a
 workspace.
 
+## GitHub PRs, issues and READMEs
+
+**Prefer the CLI**: `brain ingest-github` reads through the user's own `gh` login. It
+**refuses without `--repo OWNER/REPO` or `--mine`, and `--since`**, stops at 500 documents a
+run, keeps only the user's own comments unless `--with-thread`, and stores private
+repositories as **confidential**. Start with a short `--since` and a `--dry-run`: every new
+document gets a summary and, with the graph on, minutes of concept extraction.
+
+**Without `gh`, use the GitHub MCP connector** (`search_pull_requests` / `search_issues`, then
+`pull_request_read` / `issue_read`). The recipe is the scope: only the user's own items
+(`author:@me` or `assignee:@me`, never an organisation) with an `updated:>=YYYY-MM-DD` bound;
+refuse a search with no date bound. Body: the title line, the description and the user's own
+comments; state goes in `--metadata`, never the body. Pass `--sensitivity confidential` for any
+private repository:
+
+```bash
+echo "<owner>/<repo>#<n>: <title>
+
+<description>
+
+<the user's own comments>" | brain ingest-stdin --source github \
+  --external-id "<owner>/<repo>#<n>" --title "<owner>/<repo>#<n> — <title>" \
+  --content-type github_pr --date YYYY-MM-DD --tag github \
+  --metadata '{"repo": "<owner>/<repo>", "state": "<state>"}'
+```
+
 ## Tags on ingest
 
 Every ingest command takes one or more `--tag` flags. Tags are
@@ -206,6 +233,8 @@ If `brain doctor` flags an Ollama / Postgres issue, route to `brain-maintenance`
 
 - **Never bulk-ingest the inbox.** `brain ingest-gmail` enforces this with the
   scope-flag requirement; respect the spirit when picking scopes.
+- **GitHub: the user's own activity, date-bounded.** Never an organisation-wide
+  pull; private repositories are always confidential.
 - **Don't invent content for stdin ingests.** If the MCP returned nothing,
   tell the user — don't generate a placeholder transcript.
 - **No untagged dumps.** Always pass `--tag` so the user can find/clean the
