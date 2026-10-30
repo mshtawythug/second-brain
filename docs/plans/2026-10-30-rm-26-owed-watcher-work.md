@@ -128,3 +128,13 @@ journaled, replay keeps the journal on a DB error, no journal means no-op.
   the same relative path. Accepted: the watcher is one vault per `BRAIN_HOME`.
 * **fsync under `state.lock`** on the closed-watcher drop: only after shutdown,
   when no timer is armed, so nothing contends for the lock.
+
+## Round 2 (PR #95 review)
+
+| Finding | Fix |
+|---|---|
+| M1: the replay rotates the journal after queuing graph removes on the not-yet-started lane; a setup failure before `lane.start()` lost them. | `run_watcher` wraps the setup from the replay to `lane.start()`; on any failure it owes `lane.undrained_removes()` again (an unstarted lane returns its pending removes), then re-raises. |
+| M2: a move's two delete branches (destination gone; destination is another document) did not capture the source row's id. And capturing alone is not enough for the second branch: on the re-run the source row is gone, so `is_another_document` is False and the re-run takes the rename path, which never deletes. | `_handle_move` threads `job.capture` to both `_handle_delete` calls, and `_job_runner` calls `owed_work.settle_capture` after every job: every captured, never-handed id whose row is gone is handed to the graph once, whichever branch the re-run took. The ghost handling moved out of `delete_vault_rows` into `settle_capture`, so there is one place for it. No branch is left open. |
+| L3: a torn or short line could swallow the next entry. | A short `os.write` is a failure (`TornJournalWrite`, logged by class). A file that does not end in a newline gets one before the next line. A new journal's directory is fsynced. |
+| L4: a worker alive past its join never reached its queued jobs. | `_take_queued` drains the queue without blocking (the sentinel is put back), and its delete/move jobs are owed. A race only duplicates an entry, and the replay is idempotent. |
+| L5, L6 | A blank line in a replay test's journal; the closed-watcher comment no longer says deletes need prune. |
