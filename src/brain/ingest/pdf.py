@@ -1,4 +1,5 @@
 """PDF extractor — pypdf primary, pdfplumber fallback, OCR for image-only pages (RM-32)."""
+import ctypes
 import io
 import logging
 import math
@@ -31,11 +32,14 @@ TESSERACT_HINT = (
     "(brew install tesseract), or set BRAIN_OCR=off to silence this"
 )
 
-#: The most pixels one page may render to (pdfium rounds each side up, so to within one row
-#: and one column): A0 at 200 dpi is about 62 Mpx. A page's MediaBox
-#: is the untrusted file's to set (200,000 pt square asks for ~309 Gpx), and neither pdfium
-#: nor ``to_pil()`` applies Pillow's decompression-bomb limit, so the cap is enforced here.
+#: The most pixels one page's bitmap may hold, counted as pdfium allocates it (each side
+#: rounded UP to a whole pixel): A0 at 200 dpi is about 62 Mpx. A page's MediaBox is the
+#: untrusted file's to set (200,000 pt square asks for ~309 Gpx), and neither pdfium nor
+#: ``to_pil()`` applies Pillow's decompression-bomb limit, so the cap is enforced here.
 MAX_PIXELS = 70_000_000
+#: The longest side, in pixels, a bitmap may have: tesseract's own limit. A thin page
+#: (0.01 x 3.5e8 pt) is small in area but rounds up to a 1 x 972,222,223 px bitmap.
+MAX_SIDE_PX = 32_767
 #: A page that only fits under :data:`MAX_PIXELS` below 50 dpi is skipped: text that small
 #: is not legible to tesseract, so rendering it would cost memory and read nothing.
 MIN_RENDER_DPI = 50
@@ -53,18 +57,41 @@ class PageTooLargeError(OcrError):
     """A page would render below :data:`MIN_RENDER_DPI` to fit :data:`MAX_PIXELS`."""
 
 
-def render_scale(width_pt: float, height_pt: float, *, max_pixels: int = MAX_PIXELS) -> float:
-    """The render scale for a page of this size: 200 dpi, cut so the bitmap fits ``max_pixels``.
+def _fit_scale(width_pt: float, height_pt: float, max_pixels: int) -> float:
+    """The largest scale ``s`` with ``(w*s + 1) * (h*s + 1) <= max_pixels``.
 
-    Raises :class:`PageTooLargeError` when that scale is below :data:`MIN_RENDER_DPI`, or when
-    the size is not a positive finite area (a degenerate MediaBox).
+    pdfium rounds each side up, so ``ceil(w*s) * ceil(h*s)`` is what it allocates, and that
+    is at most ``(w*s + 1) * (h*s + 1)``. Solving that quadratic for ``s`` in the stable
+    form (no cancellation for a thin page) keeps the real bitmap under the cap, where
+    ``sqrt(max_pixels / (w*h))`` let the rounding push it over: badly, for a thin page.
     """
-    area = width_pt * height_pt
-    if not (math.isfinite(area) and area > 0):
-        raise PageTooLargeError("page has no positive area")
-    scale = min(RENDER_DPI / 72, math.sqrt(max_pixels / area))
+    budget = max_pixels - 1
+    perimeter = width_pt + height_pt
+    root = math.sqrt(perimeter * perimeter + 4 * width_pt * height_pt * budget)
+    return 2 * budget / (perimeter + root)
+
+
+def render_scale(width_pt: float, height_pt: float, *, max_pixels: int = MAX_PIXELS) -> float:
+    """The render scale for a page of this size: 200 dpi, cut so the bitmap fits both caps.
+
+    The bitmap pdfium allocates (each side rounded up) never has more than ``max_pixels``
+    pixels. Raises :class:`PageTooLargeError` when the scale would be below
+    :data:`MIN_RENDER_DPI`, when a side of that bitmap would be longer than
+    :data:`MAX_SIDE_PX`, or when either side is not a positive finite number (a degenerate
+    MediaBox, ``-100 x -100`` included).
+    """
+    sides_ok = all(math.isfinite(side) and side > 0 for side in (width_pt, height_pt))
+    if not sides_ok:
+        raise PageTooLargeError("page has no positive finite size")
+    scale = min(RENDER_DPI / 72, _fit_scale(width_pt, height_pt, max_pixels))
     if scale < MIN_RENDER_DPI / 72:
         raise PageTooLargeError("page too large to render legibly")
+    width_px, height_px = math.ceil(width_pt * scale), math.ceil(height_pt * scale)
+    if max(width_px, height_px) > MAX_SIDE_PX:
+        raise PageTooLargeError("page side too long to render")
+    # No separate ``width_px * height_px > max_pixels`` check: _fit_scale already sizes the
+    # scale from the rounded-up bitmap, so that check could never fire (see the grid test in
+    # tests/test_ingest_pdf_ocr_limits.py, which asserts the post-condition).
     return scale
 
 
@@ -201,7 +228,18 @@ def _ocr_pages(
             text = engine.image_to_text(
                 png, lang=setup.settings.lang, timeout=min(PAGE_TIMEOUT_S, remaining)
             )
-        except (OcrError, pypdfium2.PdfiumError, OSError, MemoryError) as exc:
+        except (
+            OcrError,
+            pypdfium2.PdfiumError,
+            OSError,
+            MemoryError,
+            ArithmeticError,
+            ValueError,
+            ctypes.ArgumentError,
+        ) as exc:
+            # The last three are what a pathological page size can raise on its way into
+            # pdfium's ctypes layer (a side past a C int is an ArgumentError); each skips
+            # the page like any other failure.
             # Class only: an OcrError never carries recognised text, and nothing else may.
             logger.warning("OCR skipped page %d of %d: %s", index + 1, total, describe_failure(exc))
             continue
