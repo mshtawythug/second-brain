@@ -158,6 +158,12 @@ No migration.
   `unfurl_links` and `unfurl_media` to false. sec 6: D11's narrower exclusion, named in
   `ingest-gmail`'s help and `docs/cli-reference.md`. sec 7: Deviations 10.
 - aud 2: the Slack host gate is pinned by `api.slack.com`, `evilhooks.slack.com` and
-  `hooks.evil-slack.com` cases.
+  `hooks.evil-slack.com` cases; the `endswith("slack.com")` mutation dies.
+- **Two of aud 1b's layers are redundant by design, and a mutation shows it.** Dropping the
+  `httpx.URL(raw).host` comparison alone survives: `urlsplit`'s hostname check refuses every case
+  once whitespace, control characters, userinfo and a port are refused, and no parser differential
+  between the two is known. Dropping the explicit 65,536-character cap alone survives too: httpx
+  refuses a longer URL itself (`InvalidURL`), which the leaf maps to the same `ConfigError`. Both
+  stay as defence in depth, as the fix list asked.
 - Cleanups: the dead `if q:` branch, a stray blank line in `doctor_runtime.py`, the line deltas
   recomputed (Files table).
