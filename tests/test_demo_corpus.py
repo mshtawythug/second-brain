@@ -38,7 +38,19 @@ CAST = frozenset(
 # the same re-export route and is pinned by identity in
 # ``tests/test_ui_schemas.py``; there is no reason for the demo guard to be the
 # one copy that can drift.
-EXPECTED_SOURCES = VALID_SOURCE_KINDS
+#
+# A kind may be EXEMPTED, by name and with its reason, and nothing else is.
+# ``calendar`` (RM-30): a calendar event is a short sourced document of the same
+# shape the corpus already shows (a Krisp meeting, a Gmail thread), so seeding one
+# adds no search behaviour, while the calendar path itself (the ``gws`` read, one
+# document per series, ``metadata.occurrences``) cannot run from a manifest seed;
+# ``tests/test_cli_ingest_calendar.py`` covers it. Keeping it out also keeps the
+# 22-doc count that the demo tests, docs and recorded demo tape pin. The exemption
+# is checked against the canonical set below, so it cannot outlive the kind, and
+# any kind added later still fails this guard until it is either seeded or
+# exempted here.
+DEMO_EXEMPT_KINDS = frozenset({"calendar"})
+EXPECTED_SOURCES = VALID_SOURCE_KINDS - DEMO_EXEMPT_KINDS
 
 # Real-provider email domains that must NEVER appear (generic provider domains,
 # not PII — safe to name). All demo emails are ``…@…​.example.com``.
@@ -79,7 +91,13 @@ def test_corpus_has_exactly_22_docs() -> None:
     assert len(load_corpus()) == 22
 
 
-def test_corpus_covers_all_four_source_kinds() -> None:
+def test_demo_exemptions_are_real_kinds() -> None:
+    assert DEMO_EXEMPT_KINDS <= VALID_SOURCE_KINDS, (
+        f"exempted kinds that no longer exist: {DEMO_EXEMPT_KINDS - VALID_SOURCE_KINDS}"
+    )
+
+
+def test_corpus_covers_every_non_exempt_source_kind() -> None:
     sources = {record["source"] for record in load_corpus()}
     assert sources >= EXPECTED_SOURCES, f"missing source kinds: {EXPECTED_SOURCES - sources}"
     # No stray/unknown source kinds either.

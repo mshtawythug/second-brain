@@ -72,6 +72,18 @@ explained below.
    "declined"`), events with no title, `eventType` `workingLocation` or `outOfOffice`, and
    `status == "cancelled"`.
 
+10. **Demo corpus: `calendar` is exempted, not seeded** (option (b), decided with the coordinator
+    because RM-34 makes the same change in parallel). `tests/test_demo_corpus.py` requires the
+    demo corpus to cover every source kind. It gains RM-34's shape: a named `DEMO_EXEMPT_KINDS`
+    with a written reason per kind, and an assert that the exemptions are real kinds. A calendar
+    event is a short sourced document of a shape the corpus already shows, and the calendar
+    path (the `gws` read, series, occurrences) cannot run from a manifest seed. Seeding one
+    would bump the 22-doc count pinned in the demo tests, `cli_demo.py`, `docs/cli-reference.md`
+    and the recorded `docs/assets/demo.tape`, and would collide with RM-34 if both seeded. The
+    cost: the demo does not show `_ingested/calendar`'s month grouping. `ADDED_KINDS` in
+    `tests/test_source_kinds_identity.py` uses the same name and text as RM-34, so the merge is
+    a set union.
+
 ## Tests (TDD; synthetic data only, `example.com`, made-up titles)
 
 - `tests/test_extract_policy.py` — unit tests of the helper and the constants.

@@ -15,13 +15,15 @@ from brain.ui import schemas
 from brain.vault import links
 
 # The set as it was before RM-07, restated here on purpose: this pin is what
-# shows RM-07 changed no kind. Each later source ticket adds its kind here, in
-# the same change that adds it to ``brain.source_kinds``.
+# shows RM-07 changed no kind.
 PRE_RM07_KINDS = frozenset({"manual", "krisp", "gmail", "slack"})
+
+# Every kind added since, one per source ticket, so a kind cannot appear (or
+# vanish) without a line here naming the ticket that did it.
 ADDED_KINDS = frozenset({"calendar"})  # RM-30
 
 
-def test_source_kind_set_is_pinned() -> None:
+def test_source_kind_set_is_pre_rm07_plus_the_named_additions() -> None:
     assert source_kinds.VALID_SOURCE_KINDS == PRE_RM07_KINDS | ADDED_KINDS
 
 
