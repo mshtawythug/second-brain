@@ -101,19 +101,25 @@ can change, and the host is always `127.0.0.1`, so the job never listens beyond 
 
 - **The port** is `BRAIN_RERANK_URL`'s, so the job listens where searches look for it: 8081
   when the variable is unset. It is read from your shell, else from `$BRAIN_HOME/.env`. The
-  installer refuses a URL whose host is not `127.0.0.1`, `localhost` or `::1`, and one without
-  an explicit port in 1024–65535 (`http://127.0.0.1` alone, or `:80`). The host in the URL
-  never reaches the job: it binds `127.0.0.1` either way, so use `127.0.0.1` in the URL too.
-  To change the port, set it and run `brain-install-launchd` again.
-
+  URL must be `http://127.0.0.1:PORT` or `http://localhost:PORT`, with PORT in 1024–65535.
+  The job serves plain HTTP on IPv4 loopback, so the installer refuses `https://`, `[::1]`,
+  any other host, and a URL without an explicit port (`http://127.0.0.1` alone, or `:80`):
+  searches could never reach the job at those. To change the port, set it and run
+  `brain-install-launchd` again.
 - **The model path** is `BRAIN_RERANK_GGUF`, taken from your shell, else from
-  `$BRAIN_HOME/.env`, else `$BRAIN_HOME/models/bge-reranker-v2-m3-Q8_0.gguf`. The installer
-  refuses `--with-reranker` when that file does not exist. To change the path, set it and run
+  `$BRAIN_HOME/.env`, else `$BRAIN_HOME/models/bge-reranker-v2-m3-Q8_0.gguf`. It must be
+  absolute (or start with `~`): the job runs in `$BRAIN_HOME`, not in the directory you ran
+  the installer from, so a relative path is refused. The installer also refuses
+  `--with-reranker` when the file does not exist. To change the path, set it and run
   `brain-install-launchd` again.
 - **It stays installed.** `brain-up` runs `brain-install-launchd` without flags on every start.
   That run re-renders and reloads a reranker job that is already installed, and never removes
-  it. A model file that has gone missing does not stop `brain-up`; `brain doctor` reports the
-  dead job instead.
+  it. If the model path or `BRAIN_RERANK_URL` has since gone bad (a moved model, a relative
+  path, a URL the job cannot serve), that run leaves the installed reranker job exactly as it
+  was. It prints one `WARNING: com.brain.reranker left as installed, not re-rendered: …`
+  line naming the variable, and installs the watcher and the brief as usual, so `brain-up`
+  does not fail. Fix the value and run `brain-install-launchd` again. `--with-reranker` does
+  not have this leniency: with a bad value it fails before touching anything.
 - **Logs:** `$BRAIN_HOME/logs/com.brain.reranker.err.log` (llama-server writes its log to
   stderr) and `….out.log`.
 - **Restarts are throttled** to one a minute (`ThrottleInterval` 60), so a missing model or a

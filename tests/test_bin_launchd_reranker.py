@@ -190,9 +190,7 @@ def test_port_from_brain_home_dotenv(brain_home: Path) -> None:
     assert resolve_rerank_port(brain_home) == 8091
 
 
-@pytest.mark.parametrize(
-    "url", ["http://localhost:9001", "http://[::1]:9001", "http://127.0.0.1:9001/"]
-)
+@pytest.mark.parametrize("url", ["http://localhost:9001", "http://127.0.0.1:9001/"])
 def test_port_from_a_loopback_url(
     brain_home: Path, monkeypatch: pytest.MonkeyPatch, url: str
 ) -> None:
@@ -208,6 +206,10 @@ def test_port_from_a_loopback_url(
         "http://0.0.0.0:8081",
         "http://reranker.example.invalid:8081",
         "http://user:pw@127.0.0.1:8081",
+        # Loopback, but the job serves plain HTTP on 127.0.0.1 only (rev-98 F2):
+        # with these the reranker could never be reached and would be skipped.
+        "http://[::1]:8081",
+        "https://127.0.0.1:8081",
     ],
 )
 def test_a_non_loopback_url_is_refused_without_echoing_it(
@@ -372,22 +374,131 @@ def test_a_later_flagless_install_keeps_and_re_renders_it(
     assert any(c.startswith("bootstrap") and _RERANKER in c for c in calls)
 
 
-def test_the_sticky_re_render_does_not_refuse_a_missing_model(
+def _installed_reranker(
     tmp_path: Path, brain_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``brain-up`` must not fail because the model moved; doctor reports the dead daemon."""
+) -> tuple[Path, Path, Path, bytes]:
+    """A good ``--with-reranker`` install; returns (stub, log, agents, the plist's bytes)."""
     model = _gguf(tmp_path)
-    stub, _log = _recorder(tmp_path)
+    stub, log = _recorder(tmp_path)
     agents = tmp_path / "agents"
     monkeypatch.setenv("BRAIN_RERANK_GGUF", str(model))
     install_plists(
         brain_home=brain_home, launchd_dir=agents, launchctl=str(stub), with_reranker=True
     )
-    model.unlink()
+    log.unlink()
+    return stub, log, agents, (agents / f"{_RERANKER}.plist").read_bytes()
+
+
+def _assert_reranker_untouched_and_others_installed(
+    log: Path, agents: Path, before: bytes, stderr: str, variable: str, value: str
+) -> None:
+    assert (agents / f"{_RERANKER}.plist").read_bytes() == before
+    calls = _calls(log)
+    assert not any(_RERANKER in c for c in calls), calls
+    for label in _INSTALLED_LABELS:
+        assert any(c.startswith("bootstrap") and label in c for c in calls), (label, calls)
+    (warning,) = [line for line in stderr.splitlines() if line.startswith("WARNING")]
+    assert _RERANKER in warning and variable in warning
+    assert value not in stderr
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("BRAIN_RERANK_URL", "http://10.9.8.7:8091"),
+        ("BRAIN_RERANK_URL", "http://127.0.0.1:80"),
+        ("BRAIN_RERANK_GGUF", "models/relative.gguf"),
+        ("BRAIN_RERANK_GGUF", "/synthetic/moved/away.gguf"),
+    ],
+    ids=["non-loopback-url", "bad-port", "relative-model", "missing-model"],
+)
+def test_the_sticky_re_render_warns_and_leaves_the_reranker_untouched(
+    tmp_path: Path,
+    brain_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    variable: str,
+    value: str,
+) -> None:
+    """aud-98 / the coordinator's F3 ruling: ``brain-up`` must not fail, nor skip the
+    watcher and brief, because the reranker's configuration went bad after install."""
+    stub, log, agents, before = _installed_reranker(tmp_path, brain_home, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv(variable, value)
 
     install_plists(brain_home=brain_home, launchd_dir=agents, launchctl=str(stub))
 
-    assert (agents / f"{_RERANKER}.plist").exists()
+    _assert_reranker_untouched_and_others_installed(
+        log, agents, before, capsys.readouterr().err, variable, value
+    )
+
+
+def test_install_main_exits_normally_when_the_sticky_reranker_is_skipped(
+    tmp_path: Path,
+    brain_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stub, log, agents, before = _installed_reranker(tmp_path, brain_home, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("BRAIN_HOME", str(brain_home))
+    monkeypatch.setenv("BRAIN_LAUNCHD_DIR", str(agents))
+    monkeypatch.setenv("BRAIN_LAUNCHCTL", str(stub))
+    monkeypatch.setenv("BRAIN_RERANK_URL", "http://10.9.8.7:8091")
+
+    install_main([])  # returns, so the console script exits 0
+
+    _assert_reranker_untouched_and_others_installed(
+        log, agents, before, capsys.readouterr().err, "BRAIN_RERANK_URL", "10.9.8.7"
+    )
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [("BRAIN_RERANK_URL", "http://10.9.8.7:8091"), ("BRAIN_RERANK_GGUF", "models/rel.gguf")],
+)
+def test_with_reranker_still_fails_closed(
+    tmp_path: Path,
+    brain_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+    value: str,
+) -> None:
+    """The explicit flag still refuses, before any launchctl call."""
+    stub, log, agents, _before = _installed_reranker(tmp_path, brain_home, monkeypatch)
+    monkeypatch.setenv(variable, value)
+
+    with pytest.raises(LaunchdError, match=variable):
+        install_plists(
+            brain_home=brain_home, launchd_dir=agents, launchctl=str(stub), with_reranker=True
+        )
+
+    assert _calls(log) == []
+
+
+def test_a_relative_model_path_is_refused_whatever_the_cwd(
+    tmp_path: Path, brain_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rev-98 F1: llama-server runs in $BRAIN_HOME, not the installer's cwd. A
+    relative path that exists under the cwd must not pass the check and then
+    point at nothing once launchd starts the job."""
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "models").mkdir(parents=True)
+    (elsewhere / "models" / "x.gguf").write_bytes(b"GGUF synthetic")
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("BRAIN_RERANK_GGUF", "models/x.gguf")
+
+    with pytest.raises(LaunchdError, match="BRAIN_RERANK_GGUF") as exc:
+        resolve_rerank_model(brain_home)
+
+    assert "models/x.gguf" not in str(exc.value)
+
+
+def test_a_relative_model_path_in_the_dotenv_is_refused(brain_home: Path) -> None:
+    (brain_home / ".env").write_text("BRAIN_RERANK_GGUF=x.gguf\n", encoding="utf-8")
+
+    with pytest.raises(LaunchdError, match="absolute"):
+        resolve_rerank_model(brain_home)
 
 
 def test_uninstall_removes_it(

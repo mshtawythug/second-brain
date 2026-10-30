@@ -31,9 +31,11 @@ git tag scheme:
   LaunchAgent that runs `llama-server --embedding --pooling rank --reranking` on
   `127.0.0.1`. Its arguments are fixed in the template; only the model path
   (`BRAIN_RERANK_GGUF`) and the port vary. The port is `BRAIN_RERANK_URL`'s, so the job listens
-  where searches look: 8081 by default. The host is always `127.0.0.1`. The installer refuses
-  the flag when the model file is missing, and refuses a non-loopback `BRAIN_RERANK_URL` or a
-  port outside 1024–65535. The agent stays installed: the flagless install `brain-up` runs re-renders it and
+  where searches look: 8081 by default. The host is always `127.0.0.1`. The flag fails before
+  touching anything when the model path is relative or names no file, or when
+  `BRAIN_RERANK_URL` is not `http://127.0.0.1:PORT` / `http://localhost:PORT` with PORT in
+  1024–65535. On `brain-up`'s flagless run, a value that has since gone bad leaves the installed
+  job as it was. That run prints one WARNING naming the variable and installs the other jobs. The agent stays installed: the flagless install `brain-up` runs re-renders it and
   never removes it, and `brain-uninstall-launchd` removes it.
 - **`brain doctor`** gains a `reranker` line. With `BRAIN_RERANKER=llamacpp` it calls
   `GET {BRAIN_RERANK_URL}/health` with a 2 s timeout, and it reports `not running` or

@@ -136,13 +136,38 @@ def resolve_rerank_model(brain_home: Path) -> Path:
     (the installer never calls ``Config.load``; see
     :func:`brain.install_config.brain_home_dotenv_value`), then
     ``$BRAIN_HOME/models/<DEFAULT_RERANK_GGUF_NAME>``, where the guide puts it.
+
+    A value that is not absolute after ``~`` expansion is a :class:`LaunchdError`
+    (rev-98): a file check would resolve it against the installer's cwd, while
+    ``llama-server`` runs in ``$BRAIN_HOME``, so the check could pass and the job
+    then die on every start. The message names the variable, never its value.
     """
     raw = os.environ.get("BRAIN_RERANK_GGUF") or brain_home_dotenv_value(
         brain_home, "BRAIN_RERANK_GGUF"
     )
-    if raw:
-        return Path(raw).expanduser()
-    return brain_home / "models" / DEFAULT_RERANK_GGUF_NAME
+    if not raw:
+        return brain_home / "models" / DEFAULT_RERANK_GGUF_NAME
+    model = Path(raw).expanduser()
+    if not model.is_absolute():
+        raise LaunchdError("BRAIN_RERANK_GGUF must be an absolute path (or start with ~)")
+    return model
+
+
+def _reranker_inputs(brain_home: Path) -> tuple[Path, int]:
+    """The model path and port ``com.brain.reranker`` is rendered with.
+
+    Raises :class:`LaunchdError`, naming the variable and never its value, when
+    the model path is relative or names no file, or ``BRAIN_RERANK_URL`` is not
+    one the job can serve.
+    """
+    model = resolve_rerank_model(brain_home)
+    if not model.is_file():
+        raise LaunchdError(
+            f"no model file at BRAIN_RERANK_GGUF's path (default "
+            f"$BRAIN_HOME/models/{DEFAULT_RERANK_GGUF_NAME}). Download it, or set "
+            f"BRAIN_RERANK_GGUF; see {_GUIDE}"
+        )
+    return model, resolve_rerank_port(brain_home)
 
 
 def resolve_rerank_port(brain_home: Path) -> int:
@@ -225,11 +250,15 @@ def install_plists(
 ) -> None:
     """Write the installed jobs' plists and load them into launchd. Idempotent.
 
-    ``with_reranker`` also installs the opt-in ``com.brain.reranker``, and is
-    refused (before any launchctl call) when its GGUF is missing. Without it,
-    an optional label is re-rendered and reloaded only when its plist already
-    exists (sticky), with no file check: ``brain-up`` must not fail because a
-    model moved, and ``brain doctor`` reports the dead agent.
+    ``with_reranker`` also installs the opt-in ``com.brain.reranker``, and fails
+    closed (before any launchctl call) when its model path or
+    ``BRAIN_RERANK_URL`` is unusable. Without it, the reranker is re-rendered and
+    reloaded only when its plist already exists (sticky). On that path an
+    unusable model path or URL leaves the installed plist untouched and prints
+    one WARNING to stderr, naming the variable and never its value. Every other
+    job is still installed: ``brain-up`` runs this flagless on every start, and
+    must not fail, or skip the watcher and the brief, because the reranker's
+    configuration went bad after it was installed.
 
     First, each retired label (``com.brain.build`` at R2) is booted out, errors
     suppressed because "not loaded" is its normal answer, and its plist deleted.
@@ -250,21 +279,24 @@ def install_plists(
     vault was rewritten to the default on the next ``brain-up``.
     """
     launchctl = launchctl if launchctl is not None else resolve_launchctl()
-    rerank_model = resolve_rerank_model(brain_home)
-    if with_reranker and not rerank_model.is_file():
-        raise LaunchdError(
-            f"--with-reranker: no model at {rerank_model}. Download it, or set "
-            f"BRAIN_RERANK_GGUF; see {_GUIDE}"
-        )
-    optional = tuple(
-        label
-        for label in _OPTIONAL_LABELS
-        if (with_reranker and label == _RERANKER_LABEL)
-        or (launchd_dir / f"{label}.plist").exists()
-    )
-    # Read only when the reranker job is rendered, so a bad URL cannot break an
-    # install that never opted in; refused here, before any launchctl call.
-    rerank_port = resolve_rerank_port(brain_home) if _RERANKER_LABEL in optional else None
+    # The reranker's inputs are read only when its job is rendered, so a bad
+    # value cannot touch an install that never opted in. Before any launchctl
+    # call: the flag fails closed; the sticky path warns and leaves it alone.
+    rerank_model: Path | None = None
+    rerank_port: int | None = None
+    optional: tuple[str, ...] = ()
+    if with_reranker:
+        rerank_model, rerank_port = _reranker_inputs(brain_home)
+        optional = (_RERANKER_LABEL,)
+    elif (launchd_dir / f"{_RERANKER_LABEL}.plist").exists():
+        try:
+            rerank_model, rerank_port = _reranker_inputs(brain_home)
+            optional = (_RERANKER_LABEL,)
+        except LaunchdError as exc:
+            print(
+                f"WARNING: {_RERANKER_LABEL} left as installed, not re-rendered: {exc}",
+                file=sys.stderr,
+            )
     launchd_dir.mkdir(parents=True, exist_ok=True)
 
     # Install the foreground wrapper scripts the plists reference.

@@ -51,6 +51,9 @@ DEFAULT_MAX_CHARS = 1500
 #: The ports RM-14b's launchd job may bind: unprivileged, so never below 1024.
 MIN_LAUNCHD_PORT = 1024
 MAX_LAUNCHD_PORT = 65535
+#: The URL hosts that reach the job, which serves plain HTTP on a literal
+#: 127.0.0.1: not ``::1`` (an IPv6 socket it never opens), and no ``https``.
+_LAUNCHD_URL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _URL_SCHEMES = frozenset({"http", "https"})
@@ -108,12 +111,24 @@ def launchd_rerank_port(env: Mapping[str, str]) -> int:
     ``127.0.0.1`` in the template. The URL must pass the same loopback check
     searches apply, and name an explicit port in [1024, 65535]. Unset, it is
     :data:`DEFAULT_RERANK_URL`'s 8081.
+
+    Stricter than searches on two points (rev-98): the scheme must be ``http``
+    and the host ``127.0.0.1`` or ``localhost``, because the job serves plain
+    HTTP on IPv4 loopback. ``https://`` or ``[::1]`` would pass the search-side
+    check and then never reach it, so every search would skip the reranker.
     """
-    port = urlsplit(_loopback_url(env)).port
-    if port is None or not MIN_LAUNCHD_PORT <= port <= MAX_LAUNCHD_PORT:
+    parts = urlsplit(_loopback_url(env))
+    port = parts.port
+    if (
+        parts.scheme != "http"
+        or parts.hostname not in _LAUNCHD_URL_HOSTS
+        or port is None
+        or not MIN_LAUNCHD_PORT <= port <= MAX_LAUNCHD_PORT
+    ):
         raise ConfigError(
-            f"BRAIN_RERANK_URL must name an explicit port in "
-            f"[{MIN_LAUNCHD_PORT}, {MAX_LAUNCHD_PORT}] for the reranker's launchd job"
+            f"BRAIN_RERANK_URL must be http://127.0.0.1:PORT or http://localhost:PORT, "
+            f"PORT in [{MIN_LAUNCHD_PORT}, {MAX_LAUNCHD_PORT}], for the reranker's "
+            f"launchd job"
         )
     return port
 
