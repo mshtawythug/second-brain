@@ -22,6 +22,32 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — `brain ingest-apple-notes`: named Apple Notes folders (RM-36)
+
+- `brain ingest-apple-notes --folder NAME` (repeatable, required; macOS only)
+  stores the notes of the named folders as documents of the new `applenotes`
+  source, read through `osascript -l JavaScript`. The program sent to Notes is
+  fixed and read-only; folder names reach it as JSON data only. Bodies are
+  converted from Notes' HTML to Markdown by a stdlib converter (headings,
+  lists, checklists, links); attachments are skipped and locked notes are never
+  read (they are counted). Notes are stored `confidential` unless
+  `--sensitivity normal`. `--since`, `--max` (default 200, the rest reported),
+  `--dry-run`, `--tag` and `--no-enrich` are offered. Dedup is by the Notes id;
+  a moved note updates only its metadata. Without `--folder` it exits 2; off
+  macOS, 1. `/usr/bin/osascript` (never a `PATH` lookup) is stopped after 120 s;
+  the converter is linear, nesting and output are capped, and a body over
+  2,000,000 characters is skipped. `brain doctor` gains an
+  `apple notes` row, and `docs/guides/apple-notes.md` documents macOS's
+  Automation permission prompt.
+- `brain.ingest.capped_process` holds the timeout-and-stdout-cap runner that
+  `gh` (RM-31) used, now shared with the `osascript` reader; `gh`'s behaviour
+  and messages are unchanged.
+- Shared leaves, behaviour unchanged: `brain.ingest.volatile_patch` (the
+  stored-row lookup and the metadata-only refresh that `ingest-calendar`,
+  `ingest-github` and `ingest-apple-notes` each carried) and
+  `brain.ingest.text_safety.one_line` (moved from `github_docs`, which
+  re-exports it).
+
 ### Added — image-only PDFs are OCR'd (RM-32)
 
 - A scanned PDF or a photographed receipt used to ingest as an empty document

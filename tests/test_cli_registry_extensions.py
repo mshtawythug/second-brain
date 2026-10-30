@@ -97,13 +97,13 @@ def test_extension_command_lists_after_every_builtin_command(
 
 def test_shipped_extension_tuple_registers_exactly_the_shipped_sub_apps() -> None:
     """The shipped tuple: RM-15's ``watch``, RM-19's ``dedup``, RM-21's ``tags``, RM-30's
-    ``ingest-calendar`` and RM-31's ``ingest-github``.
+    ``ingest-calendar``, RM-31's ``ingest-github`` and RM-36's ``ingest-apple-notes``.
 
     RM-06 shipped the tuple empty and this test pinned that; RM-15 is the first module behind
-    the seam, RM-19 the second, RM-21 the third, RM-30 the fourth, RM-31 the fifth. A new
-    extension module updates the expected names here. ``ingest-calendar`` and ``ingest-github``
-    are commands, not sub-apps, so they
-    lists after the built-in commands and before every sub-app.
+    the seam, RM-19 the second, RM-21 the third, RM-30 the fourth, RM-31 the fifth, RM-36 the
+    sixth. A new extension module updates the expected names here. ``ingest-calendar``,
+    ``ingest-github`` and ``ingest-apple-notes`` are commands, not sub-apps, so they
+    list after the built-in commands and before every sub-app.
     """
     # Arrange
     app = _builtin_app()
@@ -119,6 +119,7 @@ def test_shipped_extension_tuple_registers_exactly_the_shipped_sub_apps() -> Non
         "tags",
         "ingest-calendar",
         "ingest-github",
+        "ingest-apple-notes",
     ]
     assert before == ["mmm-first", "ooo-last", "nnn-group"]
     assert _help_command_names(app) == [
@@ -126,6 +127,7 @@ def test_shipped_extension_tuple_registers_exactly_the_shipped_sub_apps() -> Non
         "ooo-last",
         "ingest-calendar",
         "ingest-github",
+        "ingest-apple-notes",
         "nnn-group",
         "watch",
         "dedup",

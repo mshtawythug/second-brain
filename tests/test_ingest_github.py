@@ -415,12 +415,3 @@ def test_a_blank_readme_is_none() -> None:
     api = {f"repos/{fx.PUBLIC_REPO}/readme": json.dumps(fx.readme("  \n"))}
 
     assert github.fetch_readme(fx.PUBLIC_REPO, runner=fx.FakeGh(api=api)) is None
-
-
-def test_killing_a_group_that_is_already_gone_is_quiet(tmp_path: Path) -> None:
-    import subprocess
-
-    proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
-    proc.wait()
-
-    github._kill_group(proc)  # no ProcessLookupError escapes

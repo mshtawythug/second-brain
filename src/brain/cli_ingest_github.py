@@ -54,7 +54,7 @@ from .cli_ingest import (
 from .config import Config
 from .db import connect
 from .errors import SecretGuardError, describe_failure
-from .ingest import Embedder, ingest_document, update_document
+from .ingest import Embedder, ingest_document
 from .ingest import github as gh
 from .ingest.github import GithubError, SearchHit, SearchScope
 from .ingest.github_docs import (
@@ -64,6 +64,7 @@ from .ingest.github_docs import (
     build_readme_document,
     one_line,
 )
+from .ingest.volatile_patch import refresh_volatile, stored_document
 from .sensitivity import CONFIDENTIAL, DEFAULT_SENSITIVITY
 from .tags import normalize_tags
 
@@ -244,7 +245,9 @@ def _ingest_all(
             _guarded(
                 gd.external_id,
                 run,
-                lambda d=gd: _write(conn, d, run, stored=_stored_metadata(conn, d.external_id)),
+                lambda d=gd: _write(
+                    conn, d, run, stored=stored_document(conn, gh.SOURCE_KIND, d.external_id)
+                ),
             )
     if unreadable:
         typer.echo(f"{unreadable} README(s) could not be read (none, or the read failed)")
@@ -293,7 +296,7 @@ def _is_private(repo: str, run: _Run) -> bool:
 
 def _ingest_hit(conn: psycopg.Connection[Any], hit: SearchHit, run: _Run) -> str:
     confidential = _is_private(hit.repo, run)
-    stored = _stored_metadata(conn, hit.external_id)
+    stored = stored_document(conn, gh.SOURCE_KIND, hit.external_id)
     if stored is not None and (
         stored[1].get("updated_at") == (hit.updated_at or None)
         and stored[1].get("with_thread") == run.with_thread
@@ -337,35 +340,15 @@ def _write(
     if result.created or result.body_changed:
         return "ingested" if result.created else "updated"
     assert result.document_id is not None  # every non-replace path returns the row id
-    stored_meta = stored[1] if stored is not None else {}
-    patch = {
-        key: gd.doc.metadata[key]
-        for key in (*VOLATILE_KEYS, "with_thread", "repo_private")
-        if key in gd.doc.metadata and stored_meta.get(key) != gd.doc.metadata[key]
-    }
-    if not patch:
-        return "unchanged"
-    # Metadata only: no new_content and no embedder, so no re-chunk and no embed.
-    update_document(
+    return refresh_volatile(
         conn,
         document_id=result.document_id,
-        metadata_patch=patch,
+        stored=stored[1] if stored is not None else {},
+        metadata=gd.doc.metadata,
+        keys=(*VOLATILE_KEYS, "with_thread", "repo_private"),
         vault_root=run.cfg.vault_path,
         graph_syncer=run.graph_syncer,
     )
-    return "refreshed"
-
-
-def _stored_metadata(
-    conn: psycopg.Connection[Any], external_id: str
-) -> tuple[str, dict[str, Any]] | None:
-    """``(document id, metadata)`` of the stored github document, or ``None``."""
-    row = conn.execute(
-        "SELECT d.id::text, d.metadata FROM documents d JOIN sources s ON s.id = d.source_id "
-        "WHERE s.kind = %s AND s.external_id = %s",
-        (gh.SOURCE_KIND, external_id),
-    ).fetchone()
-    return None if row is None else (str(row[0]), row[1] or {})
 
 
 def register(app: typer.Typer) -> None:

@@ -47,8 +47,9 @@ class InvalidSourceKind(BrainError):
 #: from the Atlassian MCP connector into ``brain ingest-stdin --source jira``.
 #: ``github`` (RM-31): ``brain ingest-github`` (``gh``), or the ``ingest-brain``
 #: skill's recipe through the GitHub MCP connector into ``brain ingest-stdin``.
+#: ``applenotes`` (RM-36): ``brain ingest-apple-notes`` (``osascript``, macOS).
 VALID_SOURCE_KINDS: frozenset[str] = frozenset(
-    {"manual", "krisp", "gmail", "slack", "calendar", "jira", "github"}
+    {"manual", "krisp", "gmail", "slack", "calendar", "jira", "github", "applenotes"}
 )
 
 

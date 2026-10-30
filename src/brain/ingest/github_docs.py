@@ -25,13 +25,13 @@ protocol points 3 and 6):
 """
 from __future__ import annotations
 
-import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from . import ExtractedDoc
 from .github import RawItem, Readme
+from .text_safety import one_line  # re-exported: it lived here first (RM-31)
 
 __all__ = [
     "CONTENT_TYPES",
@@ -196,17 +196,6 @@ def build_readme_document(repo: str, readme: Readme, *, confidential: bool) -> G
         ),
         confidential=confidential,
     )
-
-
-def one_line(text: str) -> str:
-    """``text`` on one line with every control and format character removed.
-
-    A title is someone else's text and reaches the terminal (``--dry-run``, the
-    document lists), where an ESC or other Unicode category ``C*`` character
-    could drive the terminal. Whitespace runs collapse to one space first.
-    """
-    collapsed = " ".join(text.split())
-    return "".join(ch for ch in collapsed if not unicodedata.category(ch).startswith("C"))
 
 
 def _text(value: Any) -> str:

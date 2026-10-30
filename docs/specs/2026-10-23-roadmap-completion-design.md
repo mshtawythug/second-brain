@@ -3655,7 +3655,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-33 | Images and the drop-folder runner | M | 7 | RM-06, RM-32 | TODO |
 | RM-34 | Jira issues | S | 7 | RM-07 | DONE (#97) |
 | RM-35 | Notion export | M | 7 | RM-06, RM-07 | TODO |
-| RM-36 | Apple Notes | M | 7 | RM-06, RM-07 | TODO |
+| RM-36 | Apple Notes | M | 7 | RM-06, RM-07 | DONE (#103) |
 | RM-37 | External vault sync with deletions | M | 7 | RM-07 | TODO |
 | RM-38 | Voice memos | M | 7 | RM-33 | TODO |
 | RM-39 | Mobile share-sheet capture | S | 7 | RM-33 | TODO |
