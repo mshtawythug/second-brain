@@ -12,7 +12,7 @@ import warnings
 import zipfile
 from collections.abc import Callable, Iterator
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 
 import pytest
 
@@ -491,7 +491,7 @@ def test_a_file_named_zip_that_is_not_one_is_refused(tmp_path: Path, content: by
 # --- the central directory is bounded before zipfile parses it (sec-104 L3) ----------
 
 
-def _never(_path: Path) -> zipfile.ZipFile:
+def _never(_fh: BinaryIO) -> zipfile.ZipFile:
     raise AssertionError("zipfile parsed an archive the directory guard should have refused")
 
 
@@ -593,6 +593,24 @@ def test_a_zip64_archive_with_prepended_data_is_accepted(
     with open_export(archive, limits=ExportLimits(max_files=4)) as export:
         assert len(export.files) == 4
     _refused_unparsed(archive, "more files than the cap", ExportLimits(max_files=3))
+
+
+def test_zipfile_reads_the_file_object_the_guard_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rev-104 L2: a zip swapped in at the path right after the guard is never parsed."""
+    archive = _many(tmp_path / "e.zip", 2)
+    swapped = _many(tmp_path / "swapped.zip", 9)
+    guard = na._check_central_directory
+
+    def guard_then_swap(fh: BinaryIO, limits: ExportLimits) -> None:
+        guard(fh, limits)
+        os.replace(swapped, archive)
+
+    monkeypatch.setattr(na, "_check_central_directory", guard_then_swap)
+
+    with open_export(archive, limits=ExportLimits(max_files=3)) as export:
+        assert _paths(export.files) == {"f0.png", "f1.png"}
 
 
 class _ManyInfos:

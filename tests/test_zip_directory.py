@@ -152,6 +152,20 @@ def test_extensible_data_before_the_locator_is_refused(monkeypatch: pytest.Monke
     assert info.value.reason == zd.CORRUPT
 
 
+def test_a_valid_record_only_at_the_locator_s_offset_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clause 1 (rev-104): a fixed zipfile reads the record at the offset; an unfixed one
+    reads the 56 zero bytes just before the locator. Nothing is there, so it is refused."""
+    data = _with_extensible_data(_zip64(4, monkeypatch), b"\x00" * 56)
+    assert _zipfile_count(data) == 4  # this (fixed) zipfile reads the record at the offset
+
+    with pytest.raises(zd.ZipDirectoryError) as info:
+        _locate(data)
+
+    assert info.value.reason == zd.CORRUPT
+
+
 def test_a_record_both_before_the_locator_and_at_its_offset_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

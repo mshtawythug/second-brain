@@ -6,7 +6,8 @@ declared size and ignoring its declared count. An untrusted archive therefore
 has to be bounded first, and by the same directory ``zipfile`` will read:
 
 - :func:`locate` picks the end record as ``zipfile._EndRecData`` and
-  ``_EndRecData64`` do (copied, not called: they are private). A ZIP64 locator
+  ``_EndRecData64`` do in CPython 3.11.15, which carries the CVE-2025-8291 fix
+  (copied, not called: they are private). A ZIP64 locator
   is followed whenever its signature precedes the end record. ``pyproject``
   allows any 3.11+ patch release, and releases without the CVE-2025-8291 fix
   read the ZIP64 record just before the locator, while fixed ones read it at
@@ -116,14 +117,19 @@ def _zip64(fh: BinaryIO, record: _EndRecord) -> _EndRecord:
     offset -= _ZIP64.size
     if disk != 0 or disks > 1 or reloff > offset:
         raise ZipDirectoryError(CORRUPT)
+    # Clause 1: the record must sit just before the locator, where an unfixed
+    # zipfile reads it. A record only at the locator's offset (nothing here) is
+    # refused too: a fixed zipfile would read it, an unfixed one would not.
     fh.seek(offset)
     data = fh.read(_ZIP64.size)
     if not data.startswith(_ZIP64_SIG):
-        raise ZipDirectoryError(CORRUPT)  # what an unfixed zipfile would read is no record
+        raise ZipDirectoryError(CORRUPT)
+    # Clause 2: with the offset elsewhere, ANY record signature there is refused:
+    # a fixed zipfile reads that one first, an unfixed one the one above.
     if reloff != offset:
         fh.seek(reloff)
         if fh.read(len(_ZIP64_SIG)) == _ZIP64_SIG:
-            raise ZipDirectoryError(CORRUPT)  # fixed and unfixed zipfile would differ
+            raise ZipDirectoryError(CORRUPT)
         # Otherwise prepended data (a self-extracting stub): both read the record
         # just before the locator, as this does.
     _sig, size, *_versions_disks, _here, entries, dir_size, dir_offset = _ZIP64.unpack(data)

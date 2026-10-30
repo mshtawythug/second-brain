@@ -47,10 +47,10 @@ import stat
 import zipfile
 import zlib
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 from ..errors import BrainError
 from . import zip_directory
@@ -235,9 +235,10 @@ class ZipExport:
     def __init__(self, archive: zipfile.ZipFile, limits: ExportLimits) -> None:
         self._zip = archive
         self._budget = _Budget(limits)
-        # ``open_export`` walked the directory before ``zipfile`` parsed it; this is
-        # the backstop for a ``zipfile`` that reads a different one (an unfixed
-        # 3.11+ patch release, sec-104), and refuses what it parsed past the cap.
+        # ``open_export`` walked the directory before ``zipfile`` parsed it. This is
+        # defence in depth for a ``zipfile`` that reads a different one (an unfixed
+        # 3.11+ patch release, sec-104): it refuses what was parsed past the cap,
+        # but runs after the parse, so it does not bound memory; the walk does.
         infos = archive.infolist()
         if len(infos) > limits.max_files:
             raise NotionExportError(_TOO_MANY)
@@ -271,14 +272,13 @@ class ZipExport:
         return self._budget.charge(data)
 
 
-def _check_central_directory(path: Path, limits: ExportLimits) -> None:
+def _check_central_directory(fh: BinaryIO, limits: ExportLimits) -> None:
     """Bound the directory ``zipfile`` will read, before it reads it (sec-104 L3)."""
     try:
-        with path.open("rb") as fh:
-            directory = zip_directory.locate(fh)
-            if directory.size > limits.max_files * _CD_BYTES_PER_ENTRY:
-                raise NotionExportError(_TOO_MANY)
-            zip_directory.count_entries(fh, directory, limits.max_files)
+        directory = zip_directory.locate(fh)
+        if directory.size > limits.max_files * _CD_BYTES_PER_ENTRY:
+            raise NotionExportError(_TOO_MANY)
+        zip_directory.count_entries(fh, directory, limits.max_files)
     except zip_directory.ZipDirectoryError as exc:
         reason = _TOO_MANY if exc.reason == zip_directory.TOO_MANY else _CORRUPT
         raise NotionExportError(reason) from exc
@@ -289,12 +289,14 @@ def open_export(
     path: Path,
     *,
     limits: ExportLimits | None = None,
-    open_zip: Callable[[Path], zipfile.ZipFile] = zipfile.ZipFile,
+    open_zip: Callable[[BinaryIO], zipfile.ZipFile] = zipfile.ZipFile,
 ) -> Iterator[ExportReader]:
     """Open ``path`` (a folder or a ``.zip``) for listing and reading; refuse anything else.
 
-    ``open_zip`` is the seam tests use to prove an archive was refused before
-    ``zipfile`` was asked to parse it.
+    A zip is opened once: the directory guard and ``zipfile`` read the same file
+    object, so a file swapped in at ``path`` between the two is never parsed
+    (rev-104 L2). ``open_zip`` is the seam tests use to prove an archive was
+    refused before ``zipfile`` was asked to parse it.
     """
     caps = limits or ExportLimits()
     if path.is_dir():
@@ -302,10 +304,11 @@ def open_export(
         return
     if path.suffix.lower() != _ZIP_SUFFIX or not path.is_file():
         raise NotionExportError(_NOT_AN_EXPORT)
-    try:
-        _check_central_directory(path, caps)
-        archive = open_zip(path)
-    except (zipfile.BadZipFile, OSError, EOFError, ValueError) as exc:
-        raise NotionExportError(_CORRUPT) from exc
-    with archive:
+    with ExitStack() as stack:
+        try:
+            fh = stack.enter_context(path.open("rb"))
+            _check_central_directory(fh, caps)
+            archive = stack.enter_context(open_zip(fh))
+        except (zipfile.BadZipFile, OSError, EOFError, ValueError) as exc:
+            raise NotionExportError(_CORRUPT) from exc
         yield ZipExport(archive, caps)

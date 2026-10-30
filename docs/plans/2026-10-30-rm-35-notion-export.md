@@ -154,7 +154,9 @@ case ("its own command"), so the export reader is its own module behind its own 
   prepended fallback and the old record checks were replaced by the parsed-count backstop, the
   record required before the locator, the fixed/unfixed divergence refusal and the new record
   consistency check. Those, with the six other directory rules, were re-run as one batch of 10
-  (the disk rule caps batches): all 10 killed.
+  (the disk rule caps batches): all 10 killed. A further batch for rev-104's additions (the
+  single file object, the guard call, the size cap, both placement clauses, the backstop): all 6
+  killed.
 - `tests/test_skills_token_routing.py::test_skills_sync_is_not_drifted` fails locally until
   `bin/brain-skills-sync` runs after merge, because SKILL.md gained the Notion row (CI skips it).
 
@@ -209,6 +211,17 @@ extensible data is now refused, as no Notion export carries it. `ZipExport`'s pa
 is back as a backstop for a zipfile that reads another directory, tested through a fake
 `open_zip`. Tests: sec's shape (`notion_fixtures.old_zipfile_bypass`), a record both before the
 locator and at its offset, extensible data, and prepended data still accepted.
+
+**rev-104 confirmation and L2 (at `19734c7`).** rev-104 reached the same residual from CPython's
+source. The placement rule is two explicit clauses in `_zip64`: (1) the record must sit just
+before the locator, so a valid record only at the locator's offset (nothing before it) is
+refused; (2) with the offset elsewhere, any record signature at the offset is refused. Both are
+tested. The mirror's docstring names the source it copies: CPython 3.11.15, which carries the
+CVE-2025-8291 fix. rev L2: the zip is opened once, and the guard and `zipfile` read the same file
+object (`open_zip` now takes a `BinaryIO`), so a file swapped in at the path between the two is
+never parsed; tested by swapping it right after the guard returns. The restored parsed-count
+check runs after the parse and is defence in depth only: it does not bound memory. The walk
+does.
 
 **Inode reuse (found by CI on Linux).** ext4 reuses a freed inode number at once, so an
 unlink-then-create at the same path can carry the listed `(st_dev, st_ino)`. A regular file
