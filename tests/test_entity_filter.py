@@ -93,6 +93,53 @@ def test_alias_with_no_target_yet_resolves_to_the_source(
     assert _resolve(test_db, "Harbor", rules=rules) == [source]
 
 
+def test_an_alias_target_in_another_tenant_is_not_followed(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    # aud-91: the alias-target lookup is tenant-scoped. The rule's target exists only
+    # under OTHER_TENANT, so resolving under TENANT returns the source alone.
+    source = seed_entity(test_db, name="Harbor", canonical_key="harbor")
+    seed_entity(
+        test_db, name="Harbor Light", canonical_key="harborlight", tenant_id=OTHER_TENANT
+    )
+    rules = [AliasRule("project", "harbor", "project", "harborlight")]
+
+    assert _resolve(test_db, "Harbor", rules=rules) == [source]
+
+
+def test_an_alias_target_in_both_tenants_resolves_to_this_tenants_row(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    source = seed_entity(test_db, name="Harbor", canonical_key="harbor")
+    mine = seed_entity(test_db, name="Harbor Light", canonical_key="harborlight")
+    theirs = seed_entity(
+        test_db, name="Harbor Light", canonical_key="harborlight", tenant_id=OTHER_TENANT
+    )
+    rules = [AliasRule("project", "harbor", "project", "harborlight")]
+
+    got = _resolve(test_db, "Harbor", rules=rules)
+
+    assert got == sorted([source, mine])
+    assert theirs not in got
+
+
+def test_a_name_matched_alias_source_also_returns_its_target(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    # aud-91: neither key form of "Pat Morgan" ("pat morgan", "patmorgan") is any
+    # entity's canonical_key, so only the display-name fallback finds the source, and
+    # the fallback must still follow the source's alias rule to its target.
+    source = seed_entity(
+        test_db, name="Pat Morgan", canonical_key="pat@example.com", entity_type="person"
+    )
+    target = seed_entity(
+        test_db, name="P. Morgan", canonical_key="pmorgan", entity_type="person"
+    )
+    rules = [AliasRule("person", "pat@example.com", "person", "pmorgan")]
+
+    assert _resolve(test_db, "Pat Morgan", rules=rules) == sorted([source, target])
+
+
 def test_a_cross_type_alias_is_not_ambiguous(test_db: psycopg.Connection[Any]) -> None:
     # Ambiguity is judged after the redirect: a topic source that a rule maps to a
     # person counts as that person, so one name of "two types" is one entity.
