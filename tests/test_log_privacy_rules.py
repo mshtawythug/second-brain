@@ -239,16 +239,27 @@ def test_t2_spares_a_class_only_store(body: str) -> None:
     assert log_privacy_violations(_function(body)) == []
 
 
-def test_t2_store_allowlist_is_keyed_by_the_whole_statement() -> None:
-    """T2/S7: the allowlisted store passes only at its site, and only with its own value."""
+def test_t2_store_allowlist_is_keyed_by_module_function_and_whole_statement() -> None:
+    """T2/S7: the allowlisted store passes only in its module and function, with its statement."""
     module, func, statement = ("ui/jobs.py", "_fail", "job.error = error")
-    head = f"def {func}(self, job, error: JobError, other: JobError) -> None:\n"
+    params = "(self, job, error: JobError, other: JobError) -> None:\n"
+
+    def source(name: str, body: str) -> str:
+        return f"def {name}{params}    {body}\n"
 
     assert (module, func, statement) in STORE_ALLOWLIST
     assert all(STORE_ALLOWLIST.values()) and all(RAW_ALLOWLIST.values()), "an entry has no reason"
-    assert log_privacy_violations(f"{head}    {statement}\n", module) == []
-    assert log_privacy_violations(f"{head}    {statement}\n", "elsewhere.py") != []
-    assert log_privacy_violations(f"{head}    job.error = other\n", module) != [], (
+    assert log_privacy_violations(source(func, statement), module) == []
+    assert log_privacy_violations(source(func, statement), "elsewhere.py") != [], (
+        "the store allowlist is not keyed by module"
+    )
+    assert log_privacy_violations(source("_renamed", statement), module) != [], (
+        "the store allowlist is not keyed by function"
+    )
+    assert log_privacy_violations(source(func, "job.other = error"), module) != [], (
+        "the store allowlist is not keyed by target"
+    )
+    assert log_privacy_violations(source(func, "job.error = other"), module) != [], (
         "the store allowlist is keyed by target, not by the whole statement"
     )
 
