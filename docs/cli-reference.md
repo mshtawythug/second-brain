@@ -907,6 +907,8 @@ brain ingest-folder --configured --since 2d          # what the LaunchAgent runs
   runs on its own timeout (twice its length plus a minute), not the run's 8
   minutes. With voice memos off or `whisper-cli` missing, voice folders are
   skipped with the fix printed, and exit 1.
+- **Capture folders** (`mode = "capture"`, RM-39) make each `.md`/`.txt` file a
+  capture-inbox note and delete it; see [`brain capture import`](#brain-capture-import-phone-shares-rm-39).
 - **Bounds.** At most 200 files a folder and 8 minutes a run; the rest are left
   where they are for the next run, and the report says how many. `screenshot`
   skips concept extraction; summaries follow `BRAIN_ENRICH_MIN_TOKENS`, which
@@ -1015,6 +1017,27 @@ brain capture review --auto   # non-interactive: LLM-routes items out by tag
 optionally adding `-t/--tag` alongside the always-on `inbox` tag. `brain capture
 list` shows what's waiting; `brain capture review` walks each item so you can
 promote it into a real note, retag, or discard it.
+
+### brain capture import (phone shares, RM-39)
+
+```bash
+brain capture import --dir ~/"Library/Mobile Documents/com~apple~CloudDocs/Brain Inbox" --since 7d --dry-run
+brain capture import --dir ~/"Library/Mobile Documents/com~apple~CloudDocs/Brain Inbox" --since 7d
+```
+
+Imports the files the "Save to Brain" iOS Shortcut writes into a capture folder
+([guides/mobile-capture.md](guides/mobile-capture.md)). Each `.md`/`.txt` file is moved
+into `imported/` (RM-33's runner), made a capture-inbox note (`capture/`, tagged
+`inbox`, titled from its first words), and then **deleted**. Only a leading `---` block's
+`sensitivity:` line is read from the file. It can raise the note to `confidential`,
+never lower the folder's level, and a block that does not close (or an unknown level) means
+`confidential`. The same file (name and bytes) is one note. Per-file statuses:
+`ingested`, `duplicate`, `empty`, `written` (the note is in the vault but not yet indexed:
+the next vault sync does it), `rejected` (over 1 MiB or not UTF-8: kept in `imported/`),
+and `failed` (moved back, retried next run). The command refuses without `--dir PATH` and `--since Nd`
+(exit 2), and refuses a folder configured with `mode = "ingest"` (exit 2). It exits 1 when a file
+failed or was rejected. `brain ingest-folder --configured` runs capture folders through
+the same code.
 
 `capture review` is interactive and its discard path deletes a document, so it
 is deliberately not something an agent should drive unattended — the

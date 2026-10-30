@@ -45,6 +45,11 @@ turned into ``SystemExit`` (:func:`~brain.ingest.capped_process.sigterm_as_syste
 rev-107 F1), so a ``launchctl bootout`` mid-whisper kills whisper's process group and
 removes the decoded WAV instead of leaving both behind.
 
+**A capture folder** (``mode = "capture"``, RM-39) gets
+:func:`brain.capture_import.importer` as its ingest step, the same one ``brain capture
+import`` uses, so the two cannot diverge; each shared file becomes an inbox note and its
+``imported/`` copy is deleted (:mod:`brain.capture_import`).
+
 **Exit codes.** 0 when nothing failed (files left for the next run included); 1 when a
 file failed or was rejected, or a folder could not be used; 2 for the scope refusal.
 Failures are printed by class only (``describe_failure``), and every file name and path
@@ -64,6 +69,7 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 import typer
 
+from . import capture_import
 from .cli_ingest import (
     _ALLOW_SECRETS_HELP,
     _build_embedder,
@@ -208,10 +214,18 @@ def _scope_or_exit(
 ) -> datetime:
     if since is None or (directory is None) == (not configured):
         _refuse(SCOPE_REFUSAL)
+    return since_or_exit(since, SCOPE_REFUSAL, now=now)
+
+
+def since_or_exit(since: str | None, refusal: str, *, now: datetime) -> datetime:
+    """The cutoff ``--since Nd`` names (1d to 365d); else ``refusal`` and exit 2.
+
+    Shared with ``brain capture import`` (RM-39), which has its own scope refusal.
+    """
     match = _SINCE.fullmatch(since or "")
     days = int(match.group(1)) if match else 0
     if not 1 <= days <= MAX_SINCE_DAYS:
-        _refuse(f"{SCOPE_REFUSAL}: --since must be 1d to {MAX_SINCE_DAYS}d")
+        _refuse(f"{refusal}: --since must be 1d to {MAX_SINCE_DAYS}d")
     return now - timedelta(days=days)
 
 
@@ -280,7 +294,7 @@ def _check_tools(
     return usable, len(usable) < len(folders)
 
 
-def _dry_run(folders: list[DropFolder], cutoff: datetime) -> bool:
+def _dry_run(folders: list[DropFolder], cutoff: datetime, *, verb: str = "ingest") -> bool:
     """List what a run would take; ``True`` when a folder could not be read."""
     until = datetime.now(UTC) - timedelta(seconds=SETTLE_S)
     failed = False
@@ -296,7 +310,7 @@ def _dry_run(folders: list[DropFolder], cutoff: datetime) -> bool:
             continue
         typer.echo(f"{one_line(str(folder.path))}: {len(found)} file(s)")
         for path in found:
-            typer.echo(f"  would ingest  {one_line(path.name)}")
+            typer.echo(f"  would {verb}  {one_line(path.name)}")
     return failed
 
 
@@ -357,6 +371,13 @@ def _folder_error(exc: DropFolderError | OSError) -> str:
 
 
 def _ingest_step(ctx: _Context, folder: DropFolder) -> IngestFn:
+    if folder.mode == "capture":  # RM-39: the one path `brain capture import` uses too
+        return capture_import.importer(
+            capture_import.CaptureContext(
+                cfg=ctx.cfg, embedder=ctx.embedder, sensitivity=folder.sensitivity
+            )
+        )
+
     def ingest(
         conn: psycopg.Connection[Any], path: Path, *, title: str, timeout: float
     ) -> str:

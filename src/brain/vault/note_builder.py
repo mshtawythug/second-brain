@@ -28,12 +28,16 @@ from .slug import slugify
 from .templates import render_template
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     import psycopg
 
     from ..config import Config
     from ..ingest import Embedder
+
+
+#: The fields :func:`_build_note_text` owns; ``extra_frontmatter`` never sets one.
+_MANAGED_FIELDS = frozenset({"id", "title", "created", "updated", "kind", "tags"})
 
 
 def _build_embedder(cfg: Config) -> Embedder:
@@ -56,6 +60,7 @@ def _build_note_text(
     today: date_cls,
     now: datetime,
     body: str | None = None,
+    extra_frontmatter: Mapping[str, str] | None = None,
 ) -> tuple[str, str]:
     """Render a template + force the brain-canonical frontmatter fields.
 
@@ -97,7 +102,8 @@ def _build_note_text(
 
     document_id = str(uuid.uuid4())
     iso_now = now.isoformat(timespec="seconds")
-    fields: dict[str, Any] = dict(existing_fields)
+    extras = {k: v for k, v in (extra_frontmatter or {}).items() if k not in _MANAGED_FIELDS}
+    fields: dict[str, Any] = {**existing_fields, **extras}
     # Brain-managed fields override the template's choices in a fixed order
     # so frontmatter ordering is stable across runs.
     fields["id"] = document_id
@@ -144,6 +150,7 @@ def create_vault_note(
     template: str = "note",
     folder: str = "",
     embedder: Embedder | None = None,
+    extra_frontmatter: Mapping[str, str] | None = None,
 ) -> str:
     """Author a vault-tier note: render, write to disk, sync, return its id.
 
@@ -152,7 +159,9 @@ def create_vault_note(
     placeholder body when provided, writes the file under ``vault_path`` (in
     ``folder`` if given), then runs a single-file sync so the note is indexed
     as ``kind='vault'`` (the tier ``sync_one_file`` infers for any file outside
-    ``_ingested/``).
+    ``_ingested/``). It is :func:`write_vault_note` then :func:`index_vault_note`;
+    a caller that must tell a failure before the write from one after it (RM-39's
+    capture import) calls the two itself.
 
     ``embedder`` lets a caller inject a pre-built embedder (``brain note new``
     passes the one it built so test fakes wired onto
@@ -177,8 +186,24 @@ def create_vault_note(
     converts a permanent silent inconsistency into an immediate error at the
     call site that got it wrong.
     """
-    from .sync import sync_one_file
+    require_autocommit(conn, vault_path)
+    target, document_id = write_vault_note(
+        vault_path=vault_path,
+        title=title,
+        body=body,
+        tags=tags,
+        template=template,
+        folder=folder,
+        extra_frontmatter=extra_frontmatter,
+    )
+    index_vault_note(
+        conn, cfg=cfg, vault_path=vault_path, target=target, embedder=embedder
+    )
+    return document_id
 
+
+def require_autocommit(conn: psycopg.Connection[Any], vault_path: Path) -> None:
+    """Refuse a non-autocommit connection before any file is written (see above)."""
     if not conn.autocommit:
         raise VaultNoteSyncError(
             [
@@ -192,6 +217,22 @@ def create_vault_note(
             ]
         )
 
+
+def write_vault_note(
+    *,
+    vault_path: Path,
+    title: str,
+    body: str | None = None,
+    tags: Sequence[str] = (),
+    template: str = "note",
+    folder: str = "",
+    extra_frontmatter: Mapping[str, str] | None = None,
+) -> tuple[Path, str]:
+    """Render and write a new note; return ``(its path, its document id)``.
+
+    Touches no database. Raises :class:`~brain.errors.VaultNoteSyncError`, with
+    nothing written, when the template is missing or ``folder`` escapes the vault.
+    """
     template_path = vault_path / "_templates" / f"{template}.md"
     if not template_path.is_file():
         raise VaultNoteSyncError(
@@ -208,6 +249,7 @@ def create_vault_note(
         today=today,
         now=now,
         body=body,
+        extra_frontmatter=extra_frontmatter,
     )
 
     base_dir = vault_path / folder if folder else vault_path
@@ -224,6 +266,23 @@ def create_vault_note(
     base_dir.mkdir(parents=True, exist_ok=True)
     target = _unique_target(base_dir, slugify(title))
     target.write_text(file_text, encoding="utf-8")
+    return target, document_id
+
+
+def index_vault_note(
+    conn: psycopg.Connection[Any],
+    *,
+    cfg: Config,
+    vault_path: Path,
+    target: Path,
+    embedder: Embedder | None = None,
+) -> None:
+    """Sync the note at ``target`` into the database (``sync_one_file``).
+
+    Raises :class:`~brain.errors.VaultNoteSyncError` on a per-file sync error;
+    the file stays on disk either way.
+    """
+    from .sync import sync_one_file
 
     active_embedder = embedder if embedder is not None else _build_embedder(cfg)
     report = sync_one_file(
@@ -235,4 +294,3 @@ def create_vault_note(
     )
     if report.errors:
         raise VaultNoteSyncError(report.errors)
-    return document_id

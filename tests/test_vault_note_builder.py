@@ -15,6 +15,7 @@ from brain.config import Config
 from brain.errors import VaultNoteSyncError
 from brain.vault import create_vault_note, init_vault
 from brain.vault.frontmatter import parse_frontmatter
+from brain.vault.note_builder import index_vault_note, write_vault_note
 
 
 def _init_vault(vault_path: Path) -> None:
@@ -356,3 +357,186 @@ def test_create_vault_note_builds_embedder_from_cfg_when_absent(
     ).fetchone()
     assert row is not None
     assert row[0] == "vault"
+
+
+# ---------------------------------------------------------------------------
+# RM-39: the write / index split and ``extra_frontmatter``.
+# ---------------------------------------------------------------------------
+
+
+def test_write_vault_note_writes_the_file_and_touches_no_database(
+    test_db: psycopg.Connection, tmp_path: Path
+) -> None:
+    # Arrange
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    # Act
+    target, doc_id = write_vault_note(
+        vault_path=vault, title="Written only", body="the body", tags=["Inbox"],
+        folder="capture",
+    )
+
+    # Assert
+    assert target == vault / "capture" / "written-only.md"
+    fields, body = parse_frontmatter(target.read_text(encoding="utf-8"))
+    assert fields["id"] == doc_id
+    assert fields["tags"] == ["inbox"]
+    assert body.strip() == "the body"
+    assert test_db.execute("SELECT count(*) FROM documents").fetchone() == (0,)
+
+
+def test_write_vault_note_refuses_before_writing(tmp_path: Path) -> None:
+    # Arrange: no _templates/ at all, and a folder that escapes the vault.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    # Act / Assert
+    with pytest.raises(VaultNoteSyncError):
+        write_vault_note(vault_path=vault, title="No template", body="x")
+    _init_vault(vault)
+    with pytest.raises(VaultNoteSyncError):
+        write_vault_note(vault_path=vault, title="Escape", body="x", folder="../out")
+    assert not (tmp_path / "out").exists()
+
+
+def test_extra_frontmatter_lands_but_never_overrides_brain_managed_fields(
+    test_db: psycopg.Connection, tmp_path: Path, fake_embedder
+) -> None:
+    # Arrange
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    # Act
+    doc_id = create_vault_note(
+        test_db,
+        cfg=Config.load(),
+        vault_path=vault,
+        title="With extras",
+        body="content",
+        tags=["inbox"],
+        embedder=fake_embedder,
+        extra_frontmatter={
+            "sensitivity": "confidential",
+            "capture_import": "abc123",
+            "id": "not-a-real-id",
+            "title": "forged",
+            "kind": "ingested",
+            "tags": ["forged"],
+        },
+    )
+
+    # Assert
+    row = test_db.execute(
+        "SELECT title, kind, tags, sensitivity, metadata, vault_path FROM documents "
+        "WHERE id = %s",
+        (doc_id,),
+    ).fetchone()
+    assert row is not None
+    title, kind, tags, sensitivity, metadata, vault_path = row
+    assert (title, kind, tags, sensitivity) == ("With extras", "vault", ["inbox"], "confidential")
+    assert metadata.get("capture_import") == "abc123"
+    fields, _ = parse_frontmatter((vault / vault_path).read_text(encoding="utf-8"))
+    assert fields["id"] == doc_id
+
+
+def test_create_vault_note_is_write_then_index(
+    test_db: psycopg.Connection, tmp_path: Path, fake_embedder
+) -> None:
+    """create_vault_note's behaviour is unchanged by the split: one file, one row,
+    the row's id is the file's id, and an index error leaves the file on disk."""
+    # Arrange
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    cfg = Config.load()
+
+    # Act
+    target, doc_id = write_vault_note(vault_path=vault, title="Two step", body="b")
+    index_vault_note(test_db, cfg=cfg, vault_path=vault, target=target, embedder=fake_embedder)
+
+    # Assert
+    row = test_db.execute("SELECT vault_path FROM documents WHERE id = %s", (doc_id,)).fetchone()
+    assert row == ("two-step.md",)
+
+
+def test_index_vault_note_raises_on_a_sync_error_and_keeps_the_file(
+    test_db: psycopg.Connection, tmp_path: Path, fake_embedder
+) -> None:
+    # Arrange: a note whose frontmatter has no title is a per-file sync error.
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    target = vault / "broken.md"
+    target.write_text("---\nid: x\n---\nbody\n", encoding="utf-8")
+
+    # Act / Assert
+    with pytest.raises(VaultNoteSyncError):
+        index_vault_note(
+            test_db, cfg=Config.load(), vault_path=vault, target=target, embedder=fake_embedder
+        )
+    assert target.exists()
+
+
+def test_extra_tags_never_replace_the_brain_managed_tags(tmp_path: Path) -> None:
+    # Arrange
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    # Act: no tags argument, and a forged ``tags`` in the extras.
+    target, _ = write_vault_note(
+        vault_path=vault, title="No tags", body="b", extra_frontmatter={"tags": "forged"}
+    )
+
+    # Assert
+    fields, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+    assert fields["tags"] == []
+
+
+def test_a_template_with_malformed_frontmatter_still_makes_a_note(tmp_path: Path) -> None:
+    # Arrange
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    (vault / "_templates" / "broken.md").write_text(
+        "---\ntitle: [unclosed\n---\ntemplate body\n", encoding="utf-8"
+    )
+
+    # Act
+    target, doc_id = write_vault_note(vault_path=vault, title="From broken", template="broken")
+
+    # Assert: a fresh header, and the raw rendered template as the body.
+    fields, body = parse_frontmatter(target.read_text(encoding="utf-8"))
+    assert (fields["id"], fields["title"], fields["tags"]) == (doc_id, "From broken", [])
+    assert "template body" in body
+
+
+def test_a_template_without_tags_gets_an_empty_list(tmp_path: Path) -> None:
+    # Arrange
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    (vault / "_templates" / "bare.md").write_text("---\nnote: x\n---\nbody\n", encoding="utf-8")
+
+    # Act
+    target, _ = write_vault_note(vault_path=vault, title="Bare", template="bare")
+
+    # Assert
+    fields, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+    assert fields["tags"] == []
+
+
+def test_a_third_note_with_one_title_is_suffixed_3(tmp_path: Path) -> None:
+    # Arrange
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+
+    # Act
+    targets = [write_vault_note(vault_path=vault, title="Same", body="b")[0] for _ in range(3)]
+
+    # Assert
+    assert [t.name for t in targets] == ["same.md", "same-2.md", "same-3.md"]
+
+
+def test_the_default_embedder_comes_from_config() -> None:
+    from brain.vault.note_builder import _build_embedder
+
+    embedder = _build_embedder(Config.load())
+
+    assert embedder.dim > 0

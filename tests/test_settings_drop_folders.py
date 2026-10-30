@@ -12,6 +12,7 @@ import pytest
 from brain.config import ConfigError
 from brain.drop_folder import DropFolder
 from brain.settings.drop_folders import (
+    CAPTURE_EXTENSIONS,
     CONFIG_NAME,
     DEFAULT_EXTENSIONS,
     DEFAULT_KIND,
@@ -134,7 +135,11 @@ def test_extensions_are_lowercased(home: Path, drop: Path) -> None:
 @pytest.mark.parametrize(
     ("body", "where"),
     [
-        ('mode = "capture"', "folder[0].mode"),
+        ('mode = "capture"\nkind = "manual"', "folder[0].kind"),
+        ('mode = "capture"\nextensions = [".png"]', "folder[0].extensions"),
+        ('mode = "capture"\nextensions = []', "folder[0].extensions"),
+        ('mode = "capture"\nextensions = ".md"', "folder[0].extensions"),
+        (f'mode = "capture"\nkind = "{SECRET_LOOKING}"', "folder[0].kind"),
         (f'mode = "{SECRET_LOOKING}"', "folder[0].mode"),
         (f'kind = "{SECRET_LOOKING}"', "folder[0].kind"),
         ("kind = 3", "folder[0].kind"),
@@ -164,11 +169,48 @@ def test_a_bad_value_names_the_key_and_never_the_value(
     assert SECRET_LOOKING.replace("-", "_") not in str(err.value)
 
 
-def test_capture_mode_says_when_it_arrives(home: Path, drop: Path) -> None:
+def test_a_capture_folder_takes_text_files_and_defaults_to_normal(
+    home: Path, drop: Path
+) -> None:
+    """RM-39: a capture folder has no kind, takes .md/.txt, and is ``normal`` by default
+    (a capture note's default; a share can still escalate itself to confidential)."""
     _write(home, f'[[folder]]\npath = "{drop}"\nmode = "capture"\n')
 
-    with pytest.raises(ConfigError, match="RM-39"):
-        load_drop_folders(home)
+    (folder,) = load_drop_folders(home).folders
+
+    assert folder == DropFolder(
+        path=drop.resolve(),
+        mode="capture",
+        kind=None,
+        extensions=CAPTURE_EXTENSIONS,
+        sensitivity="normal",
+        auto=True,
+    )
+    assert frozenset({".md", ".txt"}) == CAPTURE_EXTENSIONS
+
+
+def test_a_capture_folder_keeps_its_listed_extensions_and_sensitivity(
+    home: Path, drop: Path
+) -> None:
+    _write(
+        home,
+        f'[[folder]]\npath = "{drop}"\nmode = "capture"\nextensions = [".MD"]\n'
+        'sensitivity = "confidential"\nauto = false\n',
+    )
+
+    (folder,) = load_drop_folders(home).folders
+
+    assert (folder.extensions, folder.sensitivity, folder.auto) == (
+        frozenset({".md"}),
+        "confidential",
+        False,
+    )
+
+
+def test_the_capture_extensions_are_served_by_an_extractor() -> None:
+    from brain.ingest.dispatch import supported_extensions
+
+    assert set(supported_extensions()) >= CAPTURE_EXTENSIONS
 
 
 @pytest.mark.parametrize(

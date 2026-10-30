@@ -603,11 +603,158 @@ def test_a_file_named_imported_refuses_the_folder(tmp_path: Path) -> None:
         _run(_folder(tmp_path), _Ingest())
 
 
-def test_capture_mode_is_refused_until_rm39(tmp_path: Path) -> None:
-    with pytest.raises(DropFolderError, match="RM-39"):
-        _run(_folder(tmp_path, mode="capture", kind=None), _Ingest())
+# ---------------------------------------------------------------------------
+# mode = "capture" (RM-39): the imported/ copy is deleted after a success
+# ---------------------------------------------------------------------------
 
-    assert not (tmp_path / IMPORTED_DIR).exists()
+TEXT = frozenset({".md", ".txt"})
+
+
+def _capture(path: Path) -> DropFolder:
+    return _folder(path, mode="capture", kind=None, extensions=TEXT, sensitivity="normal")
+
+
+@pytest.mark.parametrize("status", ["ingested", "unchanged", "empty", "written"])
+def test_a_capture_success_deletes_the_imported_copy(tmp_path: Path, status: str) -> None:
+    _drop(tmp_path, "share.md", b"a shared link")
+    ingest = _Ingest(answers=[status])
+
+    report = _run(_capture(tmp_path), ingest)
+
+    assert [(o.name, o.status, o.detail) for o in report.outcomes] == [("share.md", status, "")]
+    assert ingest.seen_bytes == [b"a shared link"]
+    assert ingest.calls[0][0].name == f"share-{_sha8(b'a shared link')}.md"
+    assert _tree(tmp_path) == {}
+
+
+def test_an_ingest_folder_keeps_the_imported_copy(tmp_path: Path) -> None:
+    _drop(tmp_path, "shot.png", b"png bytes")
+
+    _run(_folder(tmp_path), _Ingest())
+
+    assert _tree(tmp_path) == {f"{IMPORTED_DIR}/shot-{_sha8(b'png bytes')}.png": b"png bytes"}
+
+
+def test_a_rejected_capture_stays_in_imported(tmp_path: Path) -> None:
+    _drop(tmp_path, "share.md", b"too odd")
+    rejected = drop_folder.RejectedFileError("no")
+
+    report = _run(_capture(tmp_path), _Ingest(answers=[rejected]))
+
+    assert report.outcomes[0].status == "rejected"
+    assert _tree(tmp_path) == {f"{IMPORTED_DIR}/share-{_sha8(b'too odd')}.md": b"too odd"}
+
+
+def test_a_transient_capture_failure_moves_the_file_back(tmp_path: Path) -> None:
+    _drop(tmp_path, "share.md", b"retry me")
+
+    report = _run(_capture(tmp_path), _Ingest(answers=[OSError("db down")]))
+
+    assert report.outcomes[0].status == "failed"
+    assert _tree(tmp_path) == {"share.md": b"retry me"}
+
+
+def test_a_capture_dropped_twice_deletes_both_copies(tmp_path: Path) -> None:
+    body = b"the same share"
+    (tmp_path / IMPORTED_DIR).mkdir()
+    (tmp_path / IMPORTED_DIR / f"share-{_sha8(body)}.md").write_bytes(body)
+    _drop(tmp_path, "share.md", body)
+    ingest = _Ingest(answers=["unchanged"])
+
+    report = _run(_capture(tmp_path), ingest)
+
+    assert [(o.status, o.detail) for o in report.outcomes] == [("duplicate", "")]
+    assert len(ingest.calls) == 1
+    assert _tree(tmp_path) == {}
+
+
+def test_a_rejected_duplicate_capture_keeps_the_imported_copy(tmp_path: Path) -> None:
+    body = b"rejected twice"
+    imported = tmp_path / IMPORTED_DIR / f"share-{_sha8(body)}.md"
+    imported.parent.mkdir()
+    imported.write_bytes(body)
+    _drop(tmp_path, "share.md", body)
+
+    report = _run(_capture(tmp_path), _Ingest(answers=[drop_folder.RejectedFileError("no")]))
+
+    assert report.outcomes[0].status == "rejected"
+    assert _tree(tmp_path) == {f"{IMPORTED_DIR}/share-{_sha8(body)}.md": body}
+
+
+def test_a_locked_imported_copy_is_kept_and_said_so_never_failed(tmp_path: Path) -> None:
+    body = b"locked share"
+    dst = f"share-{_sha8(body)}.md"
+    _drop(tmp_path, "share.md", body)
+
+    report = _run(_capture(tmp_path), _Ingest(), unlink=_locked(dst))
+
+    assert [(o.status, o.detail) for o in report.outcomes] == [
+        ("ingested", "imported copy kept (PermissionError[EPERM])")
+    ]
+    assert not report.failed
+    assert _tree(tmp_path) == {f"{IMPORTED_DIR}/{dst}": body}
+
+
+def test_a_locked_duplicate_reports_both_kept_copies(tmp_path: Path) -> None:
+    body = b"locked twice"
+    dst = f"share-{_sha8(body)}.md"
+    (tmp_path / IMPORTED_DIR).mkdir()
+    (tmp_path / IMPORTED_DIR / dst).write_bytes(body)
+    _drop(tmp_path, "share.md", body)
+
+    report = _run(
+        _capture(tmp_path), _Ingest(answers=["unchanged"]), unlink=_locked("share.md", dst)
+    )
+
+    assert [(o.status, o.detail) for o in report.outcomes] == [
+        (
+            "duplicate",
+            "drop copy kept (PermissionError[EPERM]); imported copy kept (PermissionError[EPERM])",
+        )
+    ]
+
+
+def test_a_file_swapped_in_under_the_imported_name_is_never_deleted(tmp_path: Path) -> None:
+    """Only the file this run moved is deleted: a file that took its imported/ name
+    during the import (identity differs) stays."""
+    _drop(tmp_path, "share.md", b"original")
+
+    class _Swap(_Ingest):
+        def __call__(self, conn: Any, path: Path, *, title: str, timeout: float) -> str:
+            status = super().__call__(conn, path, title=title, timeout=timeout)
+            path.unlink()
+            path.write_bytes(b"someone else's file")
+            return status
+
+    report = _run(_capture(tmp_path), _Swap())
+
+    assert report.outcomes[0].status == "ingested"
+    dst = f"share-{_sha8(b'original')}.md"
+    assert _tree(tmp_path) == {f"{IMPORTED_DIR}/{dst}": b"someone else's file"}
+
+
+def test_a_capture_run_skips_dataless_files_and_icloud_stubs(tmp_path: Path) -> None:
+    """RM-39 AC3: an evicted share and a ``.icloud`` placeholder wait for their download."""
+    _drop(tmp_path, "evicted.md", b"evicted share")
+    _drop(tmp_path, ".pending.md.icloud", b"placeholder")
+    _drop(tmp_path, "local.md", b"local share")
+
+    def lstat(path: Any) -> Any:
+        st = os.lstat(path)
+        return _FakeStat(st, st_flags=SF_DATALESS) if Path(path).name == "evicted.md" else st
+
+    ingest = _Ingest()
+    report = _run(_capture(tmp_path), ingest, lstat=lstat)
+
+    assert [o.name for o in report.outcomes] == ["local.md"]
+    assert ingest.seen_bytes == [b"local share"]
+    assert _tree(tmp_path) == {"evicted.md": b"evicted share", ".pending.md.icloud": b"placeholder"}
+
+
+def test_a_capture_folder_needs_no_kind(tmp_path: Path) -> None:
+    report = _run(_capture(tmp_path), _Ingest())
+
+    assert report.outcomes == ()
 
 
 def test_an_ingest_folder_needs_a_kind(tmp_path: Path) -> None:

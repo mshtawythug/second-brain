@@ -22,6 +22,36 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — share from the phone into the capture inbox (RM-39)
+
+- A "Save to Brain" iOS Shortcut (step by step in `docs/guides/mobile-capture.md`) writes what
+  you share, plus an optional comment, as a `.md` file into an iCloud Drive folder. On the Mac,
+  that folder is a drop folder with the new `mode = "capture"`. Each file becomes a
+  capture-inbox note (`capture/`, tagged `inbox`, titled as `brain capture` titles one), and the
+  file is then **deleted**, because the folder is in iCloud. There is no HTTP endpoint and no
+  network surface on the Mac (RM-39.D1).
+- `brain capture import --dir PATH --since Nd [--dry-run]` imports one capture folder.
+  `brain ingest-folder --configured` (and the drop-folder LaunchAgent) runs capture folders with
+  the others. Both go through `brain.capture_import.import_file`, so they cannot diverge.
+- **The shared file is untrusted.** No YAML parser reads it: only a leading `---` block's
+  `sensitivity:` line is honoured, and every other key is dropped. A share can raise the
+  folder's level to `confidential`, never lower it. An unknown level, or a block that does not
+  close within 40 lines and 4 KiB, means `confidential`. A file over 1 MiB, or one that is not
+  UTF-8, is `rejected` and stays in `imported/`. Shared text is not scanned for secrets (as
+  with `brain capture`).
+- **Content is never lost or written twice.** A failure before the note is written moves the
+  file back for the next run. Once the note file exists, an indexing failure is reported
+  `written` (the next vault sync indexes it), and the file is deleted rather than retried. The
+  same file (name and bytes) is one note: its key is kept as `capture_import` in the note's
+  frontmatter.
+- A capture folder takes `.md`/`.txt` and defaults to `normal` sensitivity; naming a `kind`
+  for it is an error. Evicted iCloud files and `.icloud` placeholders wait until they download.
+  The guide states that shares pass through Apple's iCloud and recommends Advanced Data
+  Protection.
+- `brain.vault.note_builder.create_vault_note` is now `write_vault_note` followed by
+  `index_vault_note`, with no change in behaviour. Both take an `extra_frontmatter` mapping,
+  which can never set a brain-managed field.
+
 ### Added — voice memos, transcribed on this machine (RM-38)
 
 - A drop folder with `kind = "voice"` takes `.m4a`, `.mp3` and `.wav` memos (shared or

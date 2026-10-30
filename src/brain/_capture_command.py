@@ -1,8 +1,9 @@
-"""`brain capture` quick-capture inbox sub-app (Plan 09 Phases 1-2)."""
+"""`brain capture` quick-capture inbox sub-app (Plan 09 Phases 1-2; `import`, RM-39)."""
 from __future__ import annotations
 
 import sys
-from datetime import date
+from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -11,15 +12,18 @@ import typer
 from brain import capture as capture_mod
 from brain.config import Config
 from brain.db import connect
+from brain.drop_folder import DropFolder
 from brain.errors import EnrichmentError, OllamaUnavailable, VaultNoteSyncError
 from brain.format import emit_json
 from brain.ingest import apply_tags
+from brain.ingest.text_safety import one_line
 from brain.queries import (
     DocumentRow,
     count_documents_with_tag,
     list_documents,
     list_existing_tags,
 )
+from brain.sensitivity import DEFAULT_SENSITIVITY
 from brain.tags import normalize_tags
 from brain.vault.note_builder import create_vault_note
 
@@ -467,3 +471,99 @@ def capture_list(
     for r in rows:
         kind = r.source_kind or "manual"
         typer.echo(f"{r.id[:8]}  {kind:<8}  {r.content_type:<10}  {r.title}")
+
+
+# ---------------------------------------------------------------------------
+# RM-39 — `brain capture import`: shared files from the phone become inbox notes.
+# ---------------------------------------------------------------------------
+
+_IMPORT_REFUSAL = "capture import requires --dir PATH and --since Nd"
+
+
+@capture_app.command("import")
+def capture_import_cmd(
+    directory: Path | None = typer.Option(
+        None,
+        "--dir",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        help="The folder the Save to Brain Shortcut writes into (its configured entry, "
+        "if it has one).",
+    ),
+    since: str | None = typer.Option(
+        None, "--since", help="Only files modified in the last N days, as Nd (1d to 365d)."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="List what would be imported."),
+) -> None:
+    """Import shared text files into the inbox: each becomes a capture note.
+
+    Requires --dir PATH and --since Nd. Each file is moved to imported/, made an
+    inbox note, then deleted; `sensitivity: confidential` frontmatter is honoured.
+
+    The phone-side Shortcut: docs/guides/mobile-capture.md.
+    """
+    # Lazy: the drop-folder CLI pulls the extractor registry, which `brain capture`
+    # itself never needs.
+    from brain import capture_import, cli_ingest_folder
+    from brain.drop_folder import DropFolderError, run
+
+    if directory is None:
+        typer.secho(_IMPORT_REFUSAL, fg="red", err=True)
+        raise typer.Exit(code=2)
+    cutoff = cli_ingest_folder.since_or_exit(since, _IMPORT_REFUSAL, now=datetime.now(UTC))
+    folder = _capture_folder_or_exit(directory)
+    if dry_run:
+        # 1 when the folder could not be read (``_dry_run`` printed why).
+        raise typer.Exit(code=int(cli_ingest_folder._dry_run([folder], cutoff, verb="import")))
+    cfg = Config.load()
+    from brain import cli as _cli
+
+    ctx = capture_import.CaptureContext(
+        cfg=cfg,
+        embedder=_cli._build_embedder(cfg),  # type: ignore[attr-defined]
+        sensitivity=folder.sensitivity,
+    )
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        try:
+            report = run(conn, folder, since=cutoff, ingest=capture_import.importer(ctx))
+        except (DropFolderError, OSError) as exc:
+            where = one_line(str(folder.path))
+            message = cli_ingest_folder._folder_error(exc)
+            typer.secho(f"skipped {where}: {message}", fg="red", err=True)
+            raise typer.Exit(code=1) from exc
+    cli_ingest_folder._print_report(report)
+    if report.failed:
+        raise typer.Exit(code=1)
+
+
+def _capture_folder_or_exit(directory: Path) -> DropFolder:
+    """``directory``'s configured entry, which must be a capture folder; else the defaults."""
+    from brain.config import ConfigError, _brain_home_root
+    from brain.settings.drop_folders import CAPTURE_EXTENSIONS, load_drop_folders
+
+    try:
+        configured = load_drop_folders(_brain_home_root()).folders
+    except ConfigError as exc:
+        typer.secho(str(exc), fg="red", err=True)  # names the entry and key, never a value
+        raise typer.Exit(code=1) from exc
+    path = directory.resolve()
+    match = next((f for f in configured if f.path == path), None)
+    if match is None:
+        return DropFolder(
+            path=path,
+            mode="capture",
+            kind=None,
+            extensions=CAPTURE_EXTENSIONS,
+            sensitivity=DEFAULT_SENSITIVITY,
+        )
+    if match.mode != "capture":
+        typer.secho(
+            f"{one_line(str(path))} is configured as an ingest folder; "
+            "run `brain ingest-folder` on it",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    return match

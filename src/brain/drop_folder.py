@@ -51,6 +51,12 @@ An ingest that reads no text (the ``"empty"`` outcome) leaves the file in
 the original stem on one line (``one_line``: no control or format characters),
 capped at :data:`MAX_TITLE_CHARS`, else the ``imported/`` stem.
 
+**A capture folder** (``mode = "capture"``, RM-39) is the same run with one addition:
+after any success (the ingest step returned) the ``imported/`` copy is deleted, by
+identity, because that folder is in iCloud Drive and the content now lives in the vault
+(RM-39.D2). A rejected file stays in ``imported/``; a transient failure moves it back. A
+copy that cannot be deleted (a locked file) is kept, and the outcome's detail says so.
+
 **Bounds.** At most ``max_files`` files and ``deadline_s`` seconds a run; files past
 either are left exactly where they are, counted as ``deferred``. The ingest step gets
 what is left of the deadline as its timeout.
@@ -110,7 +116,7 @@ Clock = Callable[[], float]
 
 
 class DropFolderError(BrainError):
-    """The folder cannot be used: an unsafe ``imported/``, or a mode not built yet."""
+    """The folder cannot be used: an unsafe ``imported/``, or an ingest folder with no kind."""
 
 
 class MoveRaceError(BrainError):
@@ -227,15 +233,19 @@ def run(
     ``unlink`` are test seams. One file never aborts the folder: an unexpected
     ``OSError`` from a file is that file's ``failed`` outcome (rev-105 N1).
     """
-    if folder.mode != "ingest":
-        raise DropFolderError(f"mode {folder.mode!r} is not available until RM-39")
-    if folder.kind is None:
+    if folder.mode == "ingest" and folder.kind is None:
         raise DropFolderError("an ingest folder needs a source kind")
     wall = now if now is not None else time.time()
     until = datetime.fromtimestamp(wall - SETTLE_S, UTC)
     with _open_dirs(folder.path) as dirs:
         files = scan(folder, since=since, until=until, lstat=lstat)
-        mover = _Mover(dirs, link=link or _hard_link, write=write, unlink=unlink or _unlink)
+        mover = _Mover(
+            dirs,
+            link=link or _hard_link,
+            write=write,
+            unlink=unlink or _unlink,
+            delete_on_success=folder.mode == "capture",
+        )
         start = clock()
         outcomes: list[FileOutcome] = []
         for index, src in enumerate(files):
@@ -357,12 +367,15 @@ class _Mover:
     copy from the already-open source fd. Either way the new name must then be a regular
     file with the expected identity, or it is removed and :class:`MoveRaceError` raised;
     and the old name is unlinked only while it is still the file that was moved.
+    ``delete_on_success``: a capture folder's run (RM-39), whose ``imported/`` copy is
+    deleted once the ingest step succeeds.
     """
 
     dirs: _Dirs
     link: Link
     write: Write
     unlink: Unlink = _unlink
+    delete_on_success: bool = False
 
     def move(
         self, name: str, to_name: str, *, fd: int, identity: tuple[int, int], digest: str,
@@ -440,7 +453,10 @@ def _one(
         digest = _sha256_fd(fd)
         identity = _identity(st)
         dst_name = _imported_name(name, digest)
-        step = _Step(conn, ingest, timeout, name, dst_name, mover.dirs, mover.unlink)
+        step = _Step(
+            conn, ingest, timeout, name, dst_name, mover.dirs, mover.unlink,
+            mover.delete_on_success,
+        )
         try:
             moved = mover.move(name, dst_name, fd=fd, identity=identity, digest=digest)
         except FileExistsError:
@@ -456,7 +472,7 @@ def _one(
         except Exception as exc:  # noqa: BLE001 - any other failure moves the file back
             detail = describe_failure(exc)
             return FileOutcome(name, "failed", _move_back(dst_name, name, mover, detail, digest))
-        return FileOutcome(name, status)
+        return FileOutcome(name, status, step.consume(moved))
     finally:
         os.close(fd)
 
@@ -476,6 +492,7 @@ class _Step:
     dst_name: str
     dirs: _Dirs
     unlink: Unlink = _unlink
+    delete_on_success: bool = False
 
     def ingest_moved(self, identity: tuple[int, int]) -> str:
         """Ingest ``imported/<dst_name>``, which must still be the file with ``identity``.
@@ -488,6 +505,20 @@ class _Step:
             raise MoveRaceError("imported/ changed during the run")
         title = _title(self.name, self.dst_name)
         return self.ingest(self.conn, dst, title=title, timeout=self.timeout)
+
+    def consume(self, identity: tuple[int, int]) -> str:
+        """In a capture folder, delete the ingested ``imported/`` copy (RM-39.D2).
+
+        ``""``, or why it was kept. Only while it is still the file with ``identity``;
+        never raises, as the content is already stored.
+        """
+        if not self.delete_on_success:
+            return ""
+        try:
+            _unlink_if_same(self.dst_name, self.dirs.imported, identity, self.unlink)
+        except OSError as exc:  # a locked file: EPERM
+            return f"imported copy kept ({describe_failure(exc)})"
+        return ""
 
 
 def _duplicate(step: _Step, identity: tuple[int, int], digest: str) -> FileOutcome:
@@ -524,7 +555,8 @@ def _duplicate(step: _Step, identity: tuple[int, int], digest: str) -> FileOutco
     except Exception as exc:  # noqa: BLE001 - transient: keep the drop copy for the next run
         return FileOutcome(name, "failed", describe_failure(exc))
     status = "duplicate" if status == "unchanged" else status
-    return FileOutcome(name, status, _drop_copy_kept(step, identity).removeprefix("; "))
+    kept = (_drop_copy_kept(step, identity).removeprefix("; "), step.consume(_identity(dst_st)))
+    return FileOutcome(name, status, "; ".join(k for k in kept if k))
 
 
 def _drop_copy_kept(step: _Step, identity: tuple[int, int]) -> str:

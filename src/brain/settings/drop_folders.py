@@ -8,11 +8,17 @@ A list of ``[[folder]]`` tables; a missing file means no folders::
     extensions = [".png", ".jpg", ".jpeg"]  # default for its kind; each served by an extractor
     sensitivity = "confidential"      # default: a screenshot or a memo can hold anything
     auto = true                       # false: only `brain ingest-folder --dir` uses it
-    mode = "ingest"                   # the only mode until RM-39 adds "capture"
+    mode = "ingest"                   # or "capture": each file becomes an inbox note
 
 **A folder's default extensions follow its kind** (RM-38.D2): ``kind = "voice"`` takes
 :data:`VOICE_EXTENSIONS` (``.m4a``, ``.mp3``, ``.wav``); every other kind takes the image
 set, :data:`DEFAULT_EXTENSIONS`. A folder that lists ``extensions`` keeps them.
+
+**A capture folder** (``mode = "capture"``, RM-39) turns each shared text file into a
+capture-inbox note (:mod:`brain.capture_import`), so it has no ``kind`` (naming one is
+an error); its extensions default to, and may only be a subset of,
+:data:`CAPTURE_EXTENSIONS`; and its sensitivity defaults to ``normal``, a capture note's
+default (a share can still mark itself confidential).
 
 The folders are a file rather than ``BRAIN_*`` variables because each is a table;
 the settings-leaf rule (§2.3) still holds: one loader, one frozen value type
@@ -35,6 +41,7 @@ from typing import Any
 from brain.config import ConfigError
 from brain.drop_folder import DropFolder
 from brain.sensitivity import CONFIDENTIAL, VALID_SENSITIVITY_LEVELS
+from brain.sensitivity import DEFAULT_SENSITIVITY as NORMAL
 from brain.source_kinds import VALID_SOURCE_KINDS
 
 CONFIG_NAME = "drop-folders.toml"
@@ -45,6 +52,8 @@ VOICE_EXTENSIONS: frozenset[str] = frozenset({".m4a", ".mp3", ".wav"})
 #: A kind's default extensions; a kind not listed takes :data:`DEFAULT_EXTENSIONS`.
 KIND_EXTENSIONS: dict[str, frozenset[str]] = {"voice": VOICE_EXTENSIONS}
 DEFAULT_SENSITIVITY = CONFIDENTIAL
+#: A capture folder's extensions (RM-39): the text files a share arrives as.
+CAPTURE_EXTENSIONS: frozenset[str] = frozenset({".md", ".txt"})
 _KEYS = frozenset({"path", "mode", "kind", "extensions", "sensitivity", "auto"})
 
 
@@ -99,14 +108,13 @@ def _folder(index: int, table: dict[str, Any]) -> DropFolder | None:
     if set(table) - _KEYS:
         raise ConfigError(f"{where} has an unknown key (allowed: {', '.join(sorted(_KEYS))})")
     mode = table.get("mode", "ingest")
-    if mode == "capture":
-        raise ConfigError(f"{where}.mode: 'capture' is not available until RM-39")
-    if mode != "ingest":
-        raise ConfigError(f"{where}.mode must be 'ingest'")
-    kind = table.get("kind", DEFAULT_KIND)
-    if not isinstance(kind, str) or kind not in VALID_SOURCE_KINDS:
-        raise ConfigError(f"{where}.kind must be one of {', '.join(sorted(VALID_SOURCE_KINDS))}")
-    sensitivity = table.get("sensitivity", DEFAULT_SENSITIVITY)
+    if mode not in ("ingest", "capture"):
+        raise ConfigError(f"{where}.mode must be 'ingest' or 'capture'")
+    capture = mode == "capture"
+    if capture and "kind" in table:
+        raise ConfigError(f"{where}.kind is not used by a capture folder; remove it")
+    kind = None if capture else _kind(where, table.get("kind", DEFAULT_KIND))
+    sensitivity = table.get("sensitivity", NORMAL if capture else DEFAULT_SENSITIVITY)
     if not isinstance(sensitivity, str) or sensitivity not in VALID_SENSITIVITY_LEVELS:
         levels = ", ".join(sorted(VALID_SENSITIVITY_LEVELS))
         raise ConfigError(f"{where}.sensitivity must be one of {levels}")
@@ -114,17 +122,38 @@ def _folder(index: int, table: dict[str, Any]) -> DropFolder | None:
     if not isinstance(auto, bool):
         raise ConfigError(f"{where}.auto must be true or false")
     path = _path(where, table.get("path"))
-    extensions = _extensions(where, table.get("extensions"), kind)
+    if kind is None:
+        extensions = _capture_extensions(where, table.get("extensions"))
+    else:
+        extensions = _extensions(where, table.get("extensions"), kind)
     if path is None:
         return None
     return DropFolder(
         path=path,
-        mode="ingest",
+        mode="capture" if capture else "ingest",
         kind=kind,
         extensions=extensions,
         sensitivity=sensitivity,
         auto=auto,
     )
+
+
+def _kind(where: str, kind: object) -> str:
+    if not isinstance(kind, str) or kind not in VALID_SOURCE_KINDS:
+        raise ConfigError(f"{where}.kind must be one of {', '.join(sorted(VALID_SOURCE_KINDS))}")
+    return kind
+
+
+def _capture_extensions(where: str, raw: object) -> frozenset[str]:
+    if raw is None:
+        return CAPTURE_EXTENSIONS
+    allowed = ", ".join(sorted(CAPTURE_EXTENSIONS))
+    if not isinstance(raw, list) or not raw or not all(isinstance(e, str) for e in raw):
+        raise ConfigError(f"{where}.extensions must be a non-empty list of {allowed}")
+    extensions = frozenset(e.lower() for e in raw)
+    if not extensions <= CAPTURE_EXTENSIONS:
+        raise ConfigError(f"{where}.extensions must each be one of {allowed}")
+    return extensions
 
 
 def _path(where: str, raw: object) -> Path | None:
