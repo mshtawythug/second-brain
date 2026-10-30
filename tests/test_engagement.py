@@ -8,13 +8,15 @@ All fixture data is synthetic.
 """
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
 import psycopg
 import pytest
 
-from brain import usage
+from brain import cli, engagement, usage
+from brain.ask import AskResult, Citation
 from brain.engagement import (
     GATE_MIN_DOCUMENTS,
     GATE_MIN_OPENS,
@@ -151,6 +153,89 @@ def test_only_opens_under_a_logged_search_session_count_as_from_search(
 
     assert stats.search_session_reads == 2
     assert stats.search_session_share == pytest.approx(2 / 5)
+
+
+def test_a_session_with_two_logged_searches_counts_its_read_once(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """A JOIN onto search_queries would count the read once per matching search."""
+    (doc,) = _docs(test_db, 1)
+    for query in ("synthetic first", "synthetic refined"):
+        record_search_query(
+            test_db, query=query, result_count=1, session_id=_SEARCH_SESSION,
+            source="mcp",
+        )
+    record_interaction(
+        test_db, document_id=doc, action="opened", source="mcp",
+        session_id=_SEARCH_SESSION,
+    )
+
+    stats = engagement_stats(test_db, days=30)
+
+    assert stats.reads == 1
+    assert stats.search_session_reads == 1
+    assert stats.search_session_share == 1.0
+
+
+def test_the_search_session_check_is_hashed_not_correlated(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """A per-row correlated lookup took 23 s on 30k x 30k rows; a hashed one, 46 ms.
+
+    Postgres cannot turn a sub-select inside an aggregate FILTER into a join,
+    so it runs it as a SubPlan. Only a hashed SubPlan is built once. A
+    correlated one re-scans search_queries for every read row.
+    """
+    plan = "\n".join(
+        str(row[0])
+        for row in test_db.execute(
+            "EXPLAIN (VERBOSE) " + engagement._TOTALS_SQL,
+            {"days": 30, "reads": list(READ_ACTIONS)},
+        ).fetchall()
+    )
+
+    # VERBOSE prints each SubPlan as its own node ("SubPlan 1"), and names
+    # it inside the expression that uses it, as "(hashed SubPlan 1)" when it
+    # is hashed and "(SubPlan 1)" when it runs once per row.
+    names = [
+        line.strip() for line in plan.splitlines()
+        if re.fullmatch(r"SubPlan \d+", line.strip())
+    ]
+    assert names, plan
+    for name in names:
+        uses = re.findall(rf"(hashed )?{name}\b(?!\d)", plan)
+        assert uses.count("hashed ") >= 1, plan
+        assert len(uses) - 1 == uses.count("hashed "), plan
+
+
+def test_an_ask_citation_counts_as_a_read_but_not_a_search_session_read(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """`brain ask` logs one `opened` row per citation, under the ask's own session.
+
+    Those rows are reads (they count toward the gate), but no search is logged
+    under the ask's session, so the search-session share tells them apart.
+    Written through the real CLI writer, so a change to its shape is seen here.
+    """
+    a, b = _docs(test_db, 2)
+    result = AskResult(
+        answer="synthetic answer [1] [2]",
+        citations=[
+            Citation(ref=1, document_id=a, title="t", source_kind=None, snippet="s"),
+            Citation(ref=2, document_id=b, title="t", source_kind=None, snippet="s"),
+        ],
+        iterations_used=1,
+        sub_queries=["synthetic"],
+        fallback_used=False,
+        session_id=_ASK_SESSION.hex,
+    )
+    cli._log_ask_interactions(test_db, result, source="cli")
+
+    stats = engagement_stats(test_db, days=30)
+
+    assert (stats.opens, stats.documents_opened) == (2, 2)
+    assert stats.search_session_reads == 0
+    assert stats.search_session_share == 0.0
 
 
 def test_share_is_none_when_nothing_was_read(test_db: psycopg.Connection[Any]) -> None:

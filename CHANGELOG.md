@@ -34,6 +34,8 @@ git tag scheme:
   needs 500 reads across 100 distinct documents and 30 explicit ratings. These
   are named constants in `brain.engagement`, with their rationale. The
   interactions-aware ranking stage (RM-22b) is built only once the gate is met.
+- Reads include the `opened` row `brain ask` records for each citation in an
+  answer. The search-session share tells them apart from reads after a search.
 - Counts only: no title, query, document id or agent. `brain usage` without
   the flag is byte-identical to before (a golden test captured before the flag
   landed). `--raw-queries` with `--engagement` exits 2.

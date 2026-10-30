@@ -39,11 +39,15 @@ with **the ask's own** `session_id`), `brain_rate` / `brain rate` (ratings, docu
 target), and `brain ui` (`opened`, with the UI search's `session_id`). Nothing writes `clicked`
 today (the wiki that would have is deleted), but the action is allowed, so it is counted.
 
-- **"Opens" for the gate are read events, `opened` + `clicked`.** That is what `brain usage`'s
-  existing `opens` total counts (`usage._READ_ACTIONS`), so the two commands never show the owner
-  two different "opens" numbers. The readout still reports opens and clicks separately, by
-  surface, as the ticket asks. A test pins the action set against `usage._READ_ACTIONS`, so the
-  two cannot drift.
+- **The gate's "opens" are `reads`: `opened` + `clicked`.** That total is what `brain usage`'s
+  report calls "opens" (`usage._READ_ACTIONS`). The readout's `opens` and `clicks`, by surface as
+  the ticket asks, split it: `opens` counts `opened` only (the JSON key too), `clicks` counts
+  `clicked` only. A test pins the action set against `usage._READ_ACTIONS`, so the two cannot
+  drift. *(Reworded in review round 1: this said "opens = opened + clicked", which is true of the
+  gate's reads and of the report's opens, not of the readout's `opens`.)*
+- **Reads include `brain ask`'s citations** (ruling, review round 1). `brain ask`, from the CLI
+  and MCP, writes one `opened` row per citation. Those rows count toward the reads and documents
+  thresholds, and the search-session share tells them apart.
 - **Every count is over document rows (`document_id IS NOT NULL`)**, except `interactions_rows`
   and `interactions_bytes`, which describe the whole table for RM-58. RM-22b ranks documents, so a
   graph-target rating (entity, community, theme) is not data it can learn from. Today graph

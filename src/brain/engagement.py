@@ -5,15 +5,21 @@ ranking stage, default off) is built only once :func:`engagement_gate` says the
 gate is met, and RM-58 (pruning ``interactions``) reads the table-size figures.
 Nothing here changes ranking.
 
-Four rulings, each reached by reading the writers rather than the column names
+Five rulings, each reached by reading the writers rather than the column names
 (``brain_show``, ``brain_ask``, ``brain_rate`` / ``brain rate``, and
 ``brain.ui.telemetry.record_ui_open``):
 
-**"Opens" are read events, ``opened`` + ``clicked``.** That is what
-``brain usage``'s own ``opens`` total counts (``usage._READ_ACTIONS``), so the
-owner never sees two different "opens" numbers. The two actions are still
-reported separately. Nothing writes ``clicked`` since the wiki was deleted, but
-the action is allowed, so it is counted.
+**The gate counts ``reads``: ``opened`` + ``clicked``.** That total is what
+``brain usage``'s own report calls "opens" (``usage._READ_ACTIONS``). The
+readout's ``opens`` and ``clicks`` split it: ``opens`` is ``opened`` only, and
+``clicks`` is ``clicked`` only. Nothing writes ``clicked`` since the wiki was
+deleted, but the action is allowed, so it is counted.
+
+**Reads include ``brain ask``'s citations.** ``brain ask`` (CLI and MCP) records
+one ``opened`` row for each citation in an answer, so those rows count toward
+the gate's reads and documents. They are kept: the owner did read the answer
+built from them. The search-session share is how to tell the two kinds apart,
+because an ask citation is logged under the ask's own session, never a search's.
 
 **Every count is over document rows**, except ``interactions_rows`` and
 ``interactions_bytes``, which describe the whole table for RM-58. RM-22b ranks
@@ -168,12 +174,16 @@ _TOTALS_SQL = """
         COUNT(DISTINCT i.document_id) FILTER (WHERE i.action = ANY(%(reads)s)),
         COUNT(*) FILTER (WHERE i.action = 'rated_useful'),
         COUNT(*) FILTER (WHERE i.action = 'rated_irrelevant'),
+        -- An uncorrelated IN, so Postgres builds one hashed SubPlan. A
+        -- correlated EXISTS here runs once per read row, because a sub-select
+        -- inside an aggregate FILTER cannot become a join: 23 s against 46 ms
+        -- on 30k x 30k synthetic rows. IN also counts a read once however
+        -- many searches share its session, where a JOIN would not.
         COUNT(*) FILTER (
             WHERE i.action = ANY(%(reads)s)
-              AND i.session_id IS NOT NULL
-              AND EXISTS (
-                  SELECT 1 FROM search_queries sq
-                  WHERE sq.session_id = i.session_id
+              AND i.session_id IN (
+                  SELECT sq.session_id FROM search_queries sq
+                  WHERE sq.session_id IS NOT NULL
               )
         )
     FROM interactions i

@@ -430,7 +430,8 @@ brain usage --engagement --json
 Is there enough engagement data for an interactions-aware ranking stage to
 learn from? The readout counts **document** interactions over `--days`:
 
-- opens and clicks, split by surface (`cli` / `mcp` / `ui` / `wiki`)
+- reads, split by surface (`cli` / `mcp` / `ui` / `wiki`) into opens
+  (`opened`) and clicks (`clicked`)
 - distinct documents opened
 - `rated useful` and `rated irrelevant`
 - how many reads came from a search session, and what share of all reads that
@@ -446,15 +447,19 @@ the table size.
 The last line is the **gate**: met when, over the last 90 days, there are at
 least **500 reads (opens + clicks) across at least 100 distinct documents and
 30 explicit ratings**. The gate is **always** judged over 90 days, whatever
-`--days` says, so widening the window cannot meet it. Each count is printed
-beside its threshold:
+`--days` says, so widening the window cannot meet it. Reads include the
+`opened` row `brain ask` records for each citation in an answer; the
+search-session share is how to tell those apart from reads after a search.
+Each count is printed beside its threshold:
 
 ```
 Gate (always the last 90 days): NOT MET — reads 40 of 500 · documents 40 of 100 · ratings 5 of 30
 ```
 
-"Opens" means what it means in the report above: `opened` + `clicked`. The
-output is counts only. No title, query, document id or agent appears in either
+The gate's `reads` equals what the report above calls "opens" (`opened` +
+`clicked`). The readout's `opens` and `clicks` split that total: `opens` counts
+`opened` only (the JSON key too), `clicks` counts `clicked`. The output is
+counts only. No title, query, document id or agent appears in either
 form. `--json` adds a `gate` object (`met`, each count, each `min_*`).
 `--raw-queries` is refused (exit 2), because the readout has no queries, and
 `--limit` has no effect on it. Without `--engagement`, `brain usage` prints
