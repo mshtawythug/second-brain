@@ -22,6 +22,22 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Fixed — the graph build survives a concurrent delete; a reconcile re-checks the participants (RM-27)
+
+- **`brain graphrag build` no longer stops when a document is deleted while it runs.** A document
+  deleted after the build listed it is now skipped. The build report (`BuildResult`) counts it as
+  `skipped_deleted`. Before, the whole build stopped with a "not found" error.
+- **A reconcile no longer commits people from participants that were just edited.** The graph
+  write used to check only that the document's body was unchanged. An edit that changed only the
+  participants (a recipient added to a thread) could be overtaken by an older reconcile, which then
+  wrote the older people. The write now checks every document input the plan read: the body hash,
+  the content type, the source kind, and the participants. If any of them changed, it writes
+  nothing, and the next reconcile indexes the edit.
+- **The short cross-type collapse window is accepted, not fixed.** For a moment between its two
+  steps, a merged concept can show a lower-cased display name. Only the display name is affected,
+  and the second step restores it. The reason it is not worth closing is recorded in
+  `graph_rag/cross_type.py`.
+
 ### Added — `brain ui`: Copy path (RM-23)
 
 - **The note pane has a Copy path button**, so a note can be opened in any editor.
