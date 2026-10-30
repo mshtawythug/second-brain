@@ -122,8 +122,9 @@ _BUILTIN_EXCEPTIONS = frozenset(
 #: set from ``src/brain`` and fail when a new one is missing.
 EXCEPTION_CLASS_NAMES = frozenset(
     {
-        "AgentIdInvalid", "AskTimedOut", "ChatOutputTruncated", "DocumentStillExists",
-        "DraftSkipped", "GraphModeUnavailable", "HostRefused", "IdPrefixAmbiguous",
+        "AgentIdInvalid", "AskTimedOut", "ChatOutputTruncated", "DocumentNotFound",
+        "DocumentStillExists", "DraftSkipped", "EntityAmbiguous", "EntityGraphUnavailable",
+        "EntityNotFound", "GraphModeUnavailable", "HostRefused", "IdPrefixAmbiguous",
         "IdPrefixNotFound", "IdPrefixNotHex", "IdPrefixTooShort", "IngestAmbiguousSource",
         "InvalidSourceKind", "JobCancelled", "JobUnknown", "MigrationLockTimeout",
         "NotCancellable", "OllamaContextOverflow", "OllamaEmbedContextOverflow",
