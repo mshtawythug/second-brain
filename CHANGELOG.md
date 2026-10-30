@@ -22,6 +22,19 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — the brief lists who and what is new this week (RM-17)
+
+- **`brain brief` gains a "New this week" section**: the people, organisations
+  and projects whose first mention in a non-draft document was ingested in the
+  last 7 days, most-mentioned first, at most 10. It is read from the GraphRAG
+  entity tables, so it is absent when `BRAIN_GRAPH_ENABLED=false` or the tables
+  do not exist.
+- Each surface uses its own lens: the terminal and `--json` list every such
+  name; the `--wiki` page, the delivered message and MCP `brain_brief` (by
+  default) leave out an entity known only from confidential documents. An
+  entity known only from drafts is listed nowhere. `brain_brief` and
+  `brain brief --json` carry it as `new_entities`.
+
 ### Added — the daily brief can be delivered to you (RM-16)
 
 - **`BRAIN_BRIEF_DELIVERY`** (`none` by default, `email` or `slack`): once
