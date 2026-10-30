@@ -22,6 +22,22 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Changed — the log-privacy guard covers its three recorded blind spots (RM-28)
+
+- The test guard that keeps exception text out of `src/brain`'s log lines now
+  also catches a value derived from an exception and logged after its `except`
+  block, an exception stored on an attribute or appended to an attribute's
+  container, and a nested `def` or `lambda` (its defaults included) that logs
+  the handler's exception. It follows every binding form (`for`, `with … as`,
+  comprehensions, `match` captures, `except*`), sees `traceback.format_exc()`
+  and `sys.exc_info()`, and fails when an allowlist entry goes stale. Its rules
+  moved to `tests/log_privacy_rules.py`, its allowlists to
+  `tests/log_privacy_allowlists.py`. It found no new leak in `src/brain`; no
+  runtime behaviour changes.
+- What it still cannot see is listed in its module docstring; backlog BL-28
+  tracks the two big classes, exception text interpolated into a new
+  exception's message and exception text echoed to stderr.
+
 ### Fixed — the graph build survives a concurrent delete; a reconcile re-checks the participants (RM-27)
 
 - **`brain graphrag build` no longer stops when a document is deleted while it runs.** A document

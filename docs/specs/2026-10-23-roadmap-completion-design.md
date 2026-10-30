@@ -187,8 +187,8 @@ A ticket is done when **all** of the following hold. A reviewer checks each item
    `mock.patch` and `mocker.patch` are allowed.
 6. **Class-only failure text.** Every log line and every user-visible error for a caught exception
    uses `brain.errors.describe_failure` (the class name), never the exception message.
-   `tests/test_log_privacy.py` (G1) must stay green without a new allowlist entry, unless the ticket
-   argues for one.
+   The G1 guard (`tests/test_log_privacy_rules.py` since RM-28; rules in `tests/log_privacy_rules.py`)
+   must stay green without a new allowlist entry, unless the ticket argues for one.
 7. **Parameterized SQL, explicit timeouts.** Every new HTTP call (httpx), subprocess (`gws`, `gh`,
    `git`, `tesseract`, `whisper-cli`, `afconvert`, `osascript`, `llama-server` probes) and DB connection has an explicit
    timeout. Every external binary is found with `shutil.which` and is a soft dependency: absent, the
@@ -3645,7 +3645,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-25 | H-1 move identity | S | 6 | RM-19 | DONE (#90) |
 | RM-26 | H-2 + H-4 owed watcher work | S | 6 | — | TODO |
 | RM-27 | H-3 graph-lock residuals | S | 6 | — | DONE (#93) |
-| RM-28 | H-5 log-privacy guard | S | 6 | — | TODO |
+| RM-28 | H-5 log-privacy guard | S | 6 | — | DONE (#94) |
 | RM-29 | H-6 class-only error reports | XS | 6 | — | DONE (#92) |
 | RM-30 | Calendar events | M | 7 | RM-06, RM-07 | TODO |
 | RM-31 | Code-host activity | M | 7 | RM-06, RM-07 | TODO |
