@@ -70,11 +70,11 @@ jobs:
     # concluded, so the gate resolves on its first poll and costs ~20 seconds.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    # Backstop for a wedged `gh` call. The in-script deadline (35 min) is the
+    # Backstop for a wedged `gh` call. The in-script deadline (55 min) is the
     # primary bound; without this the loop would be capped only by the 6-hour
     # runner default. A timed-out job is FAILED, so the `needs:` edge still
     # skips the publish.
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
       # Required to list the `ci` workflow's runs. Without it the API call
@@ -105,9 +105,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # `ci.yml`'s `test` job carries `timeout-minutes: 30`, so a run that
-          # started in the same push as this one needs ~30 min plus queue time.
-          TOTAL_TIMEOUT_SECONDS=2100   # 35 min
+          # `ci.yml`'s `test` job carries `timeout-minutes: 45`, so a run that
+          # started in the same push as this one needs ~45 min plus queue time.
+          TOTAL_TIMEOUT_SECONDS=3300   # 55 min
           # A tag push does not trigger ci.yml. If no run EVER appears for this
           # commit, waiting the full budget is pointless — fail early with the
           # actionable message instead.
