@@ -720,8 +720,10 @@ brain ingest-gmail --query 'has:attachment subject:receipt' --since 2026/01/01 -
 - **Sensitivity.** Every thread such a run writes is `confidential`, including
   one already stored as `normal` (its mirror is re-fenced). Nothing lowers it;
   `brain mark-normal` does.
-- **What is stored.** The text, with card numbers (13 to 19 digits that pass
-  the Luhn check) replaced by `[REDACTED:card-number]`, and the secret guard run
+- **What is stored.** The text, with card numbers replaced by
+  `[REDACTED:card-number]` (Luhn-valid, in a card layout: 13 to 19 digits in one
+  run, 4-digit groups joined by one consistent separator, or Amex 4-6-5 / Diners
+  4-6-4; amounts and phone numbers are kept), and the secret guard run
   over the whole thread. The filename appears only in the section heading. The
   thread's `metadata.attachments` lists each attachment's message and part ids,
   type, size, page count and status, never its name.

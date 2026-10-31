@@ -59,6 +59,12 @@ git tag scheme:
   `capped_process.run_capped` gains an opt-in `resource_limits`; `real_gws_runner`'s capped read
   (calendar too) now kills its process group, gives `gws` no stdin and keeps no stderr; the PDF
   extractor also wraps pdfplumber's `PdfminerException`.
+- Review round 2 (rev-117, sec-117): card redaction uses strict layouts only (an unseparated
+  13–19-digit run; 4-digit groups joined by one consistent separator, with at most one wrap;
+  Amex 4-6-5, Diners 4-6-4; always Luhn), so itemized amounts and phone numbers are kept, and
+  Unicode digits and dash/slash separators are handled. The parse child returns text past the
+  cap so redaction happens before the cut, and parses PDFs under pypdf limits lowered to 16 MiB
+  (scoped) with a per-page-reference content budget. BL-41 records the parent-side memory poll.
 
 ### Added — social bookmarks from your own data archive (RM-44, PR #116)
 
