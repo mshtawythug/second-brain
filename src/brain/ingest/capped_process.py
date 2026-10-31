@@ -124,8 +124,14 @@ def run_capped(
 
 
 def kill_group(proc: subprocess.Popen[bytes]) -> None:
-    """SIGKILL ``proc``'s process group (it leads one: ``start_new_session``)."""
-    with contextlib.suppress(ProcessLookupError):  # already gone
+    """SIGKILL ``proc``'s process group (it leads one: ``start_new_session``).
+
+    A group that is already gone is quiet. So is one whose members have all exited
+    but are not yet reaped: macOS answers ``killpg`` on such a group with ``EPERM``,
+    not ``ESRCH`` (RM-43), and an oversized answer from a child that had finished
+    writing was reported as the binary failing to start.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):  # gone, or only zombies
         os.killpg(proc.pid, signal.SIGKILL)
 
 

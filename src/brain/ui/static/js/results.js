@@ -22,6 +22,7 @@ const SOURCE_ICONS = {
   notion: "📓",
   screenshot: "📸",
   voice: "🎙️",
+  code: "💻",
   web: "🌐",
 };
 

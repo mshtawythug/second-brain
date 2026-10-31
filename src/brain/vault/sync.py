@@ -36,6 +36,13 @@ kind is dropped to ``None`` and warned, never rejected and never substituted,
 because a sync that fails a file over a metadata typo is worse than the defect
 it prevents. The reasoning lives on the function; this pointer exists so it can
 be found from the top.
+
+**Grew again (RM-43, BL-35):** :func:`_embed_and_insert_chunks` takes the row's
+``content_type`` and ``metadata`` and chunks through
+:func:`brain.ingest.chunk_dispatch.chunk_for`, so an edited ``code`` mirror is
+re-chunked by definition rather than as prose, and a ``code`` body materializes
+no wiki links (a ``[[x]]`` in code is code; :func:`_link_body`, used by the
+sync and the dry run). Reasoned at the chunk call and at :func:`_link_body`.
 """
 from __future__ import annotations
 
@@ -53,7 +60,7 @@ import yaml
 
 from ..errors import SecretGuardError, describe_failure
 from ..ingest import Embedder, _chunk_search_metadata, _frontmatter_allows_secrets
-from ..ingest.chunker import chunk_text
+from ..ingest.chunk_dispatch import CODE_CONTENT_TYPE, chunk_for
 from ..ingest.guard import apply_guard
 from ..ingest.sub_tokens import extract_sub_tokens
 from ..queries import sync_chunk_search_metadata
@@ -733,7 +740,7 @@ def _sync_one(
             else:
                 report.skipped += 1
         # Count links as if we materialized them — purely informational on dry-run.
-        for parsed in parse_wiki_links(normalized_body):
+        for parsed in parse_wiki_links(_link_body(content_type, normalized_body)):
             target = resolve_link(conn, parsed, exclude_doc_id=document_id)
             if target is None:
                 report.links_unresolved += 1
@@ -904,7 +911,7 @@ def _sync_one(
         _materialize_links(
             conn,
             document_id=document_id,
-            body=normalized_body,
+            body=_link_body(content_type, normalized_body),
             title=title,
             report=report,
         )
@@ -1445,6 +1452,8 @@ def _insert_document(
         content=content,
         title=title,
         tags=tags,
+        content_type=content_type,
+        metadata=metadata,
     )
 
 
@@ -1507,6 +1516,8 @@ def _update_document(
             content=content,
             title=title,
             tags=tags,
+            content_type=content_type,
+            metadata=metadata,
         )
     else:
         # Body unchanged but the parent doc's title / tags may have moved
@@ -1525,6 +1536,8 @@ def _embed_and_insert_chunks(
     content: str,
     title: str,
     tags: list[str],
+    content_type: str,
+    metadata: dict[str, Any],
 ) -> None:
     """Chunk + embed ``content`` and INSERT the resulting chunks.
 
@@ -1538,7 +1551,10 @@ def _embed_and_insert_chunks(
     title/tag hits ahead of body hits — same contract as the ingest
     pipeline.
     """
-    chunks = chunk_text(content, count_tokens=embedder.count_tokens)
+    # RM-43 (BL-35): the chunker the row's content_type calls for, as ingest does,
+    # so an edited ``code`` mirror keeps its definition-level chunks (the metadata
+    # carries their ``path`` header). Grows the file; see the module docstring.
+    chunks = chunk_for(content_type, content, metadata, embedder.count_tokens)
     if not chunks:
         return
     # FTS-only backend (BRAIN_EMBEDDER=none / NullEmbedder): store NULL vectors
@@ -1570,6 +1586,14 @@ def _embed_and_insert_chunks(
                 extract_sub_tokens(c.content),
             ),
         )
+
+
+def _link_body(content_type: str, body: str) -> str:
+    """RM-43: a ``code`` body yields no wiki links (its ``[[x]]`` is code); see the docstring.
+
+    The empty string still lets :func:`_materialize_links` clear the rows it had.
+    """
+    return "" if content_type == CODE_CONTENT_TYPE else body
 
 
 def _materialize_links(

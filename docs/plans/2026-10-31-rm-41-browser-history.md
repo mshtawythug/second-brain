@@ -348,3 +348,5 @@ All sixteen decisions were approved as recommended (team-lead, 2026-10-31).
 - **The secret guard's notice quotes the title.** In `warn` and `reject` mode, the shared
   notice prints the document title with the finding masked. It does this for every source, and
   this ticket keeps that convention.
+- **D12, resolved at the #113 merge (A4).** RM-43 merged first with `v3` (`code`), so this
+  ticket's bump is **`v4`** (`web_page`). The union keeps both types and both docstring lines.

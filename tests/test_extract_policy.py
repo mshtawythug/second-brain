@@ -21,14 +21,19 @@ def test_screenshot_is_a_skipped_type() -> None:
     assert "screenshot" in CONCEPT_SKIP_CONTENT_TYPES
 
 
+def test_code_is_a_skipped_type() -> None:
+    """RM-43: a code file's definition-level chunks are its value; concepts add little."""
+    assert "code" in CONCEPT_SKIP_CONTENT_TYPES
+
+
 def test_web_page_is_a_skipped_type() -> None:
     """RM-41: a page body is its title, URL and host; its concept aspect is skipped."""
     assert "web_page" in CONCEPT_SKIP_CONTENT_TYPES
 
 
 def test_the_policy_version_was_bumped_for_web_page() -> None:
-    """The set changed at RM-33 (v2) and RM-41 (v3), so the version did too."""
-    assert CONCEPT_SKIP_POLICY_VERSION == "v3"
+    """The set changed at RM-33 (v2), RM-43 (v3) and RM-41 (v4), so the version did too."""
+    assert CONCEPT_SKIP_POLICY_VERSION == "v4"
 
 
 def test_skip_watermark_for_a_skipped_type() -> None:
