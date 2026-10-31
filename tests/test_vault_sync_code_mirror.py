@@ -74,7 +74,9 @@ def test_vault_sync_rechunks_an_edited_code_mirror_with_the_code_chunker(
 # --- RM-43: a code body materializes no wiki links ---------------------------------------
 
 NOTE_TITLE = "Gadget Notes"
-LINKING_CODE = f"def gadget():\n    # see [[{NOTE_TITLE}]]\n    return 1\n"
+# The link is on a top-level line: an indented ``[[x]]`` is already skipped as an
+# indented code block by ``vault.links``, so it would not exercise the ``code`` skip.
+LINKING_CODE = f"# see [[{NOTE_TITLE}]]\ndef gadget():\n    return 1\n"
 LINKING_PROSE = f"A synthetic note that points at [[{NOTE_TITLE}]].\n"
 
 
