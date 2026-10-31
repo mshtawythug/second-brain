@@ -394,3 +394,18 @@ def test_no_random_amount_table_loses_text() -> None:
         out = render_section("receipt.pdf", table, max_chars=1000)
 
         assert out is not None and "REDACTED" not in out, table
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Qty Price Amount\n2 4.99 9.98\n1 12.50 12.50\n3 1.00 3.00\n",
+        "1 1299 12.99\n2 450 9.00\n1 375 3.75\n",
+        "Tel 555 0100 1234 567",
+    ],
+)
+def test_rev117_ordinary_numbers_come_back_unchanged(text: str) -> None:
+    """rev-117's repros, exactly: the section body is the text itself, nothing redacted."""
+    out = render_section("receipt.pdf", text, max_chars=1000)
+
+    assert out == f"## Attachment: receipt.pdf\n\n{text.strip()}"
