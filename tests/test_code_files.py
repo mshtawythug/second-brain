@@ -203,6 +203,26 @@ def test_a_file_symlink_out_of_the_tree_is_not_regular_and_not_followed(
     assert cf.read_code_file(root, "out.py") == cf.SKIP_NOT_REGULAR
 
 
+def test_a_symlink_swapped_in_after_the_checks_is_not_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``O_NOFOLLOW``: the file is replaced by an outward symlink between the checks and open."""
+    root = _root(tmp_path)
+    _put(root, "swap.py", b"x = 1\n")
+    outside = tmp_path / "outside.py"
+    outside.write_text("leaked = True\n")
+    real_open = os.open
+
+    def swapping_open(path: str | os.PathLike[str], flags: int, *args: int) -> int:
+        Path(path).unlink()
+        Path(path).symlink_to(outside)
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr("brain.ingest.code_files.os.open", swapping_open)
+
+    assert cf.read_code_file(root, "swap.py") == cf.SKIP_NOT_REGULAR
+
+
 def test_a_directory_and_a_missing_file_are_not_regular(tmp_path: Path) -> None:
     root = _root(tmp_path)
     (root / "submodule").mkdir()
