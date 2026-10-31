@@ -23,7 +23,6 @@ import shutil
 import subprocess
 
 from brain.errors import DirectoryRefreshError
-from brain.ingest.capped_process import run_capped
 
 # Hard cap on stderr included in the translated error message — keeps logs
 # readable when ``gws`` panics with a long Python traceback.
@@ -97,6 +96,12 @@ def _run_capped(args: list[str], *, timeout: float, max_stdout_bytes: int) -> st
     ``/dev/null`` (an auth prompt cannot wait for input) and stderr is discarded unread,
     so no account text it might quote is ever kept.
     """
+    # Imported here, not at module level: ``brain.ingest/__init__`` imports
+    # ``brain.vault.export``, and this module loads during ``brain.vault``'s own
+    # initialization (vault -> link_rewrite -> frontmatter -> derived_links), so a
+    # module-level import made a cold ``import brain.vault`` circular (rev-117, CI).
+    from brain.ingest.capped_process import run_capped
+
     binary = shutil.which(args[0])
     if binary is None:  # pragma: no cover - real_gws_runner checked it just before
         raise DirectoryRefreshError(
