@@ -53,10 +53,12 @@ class InvalidSourceKind(BrainError):
 #: ``voice`` (RM-38): voice memos transcribed locally, from a drop folder.
 #: ``code`` (RM-43): the owner's files in a local git work tree, ``brain ingest-code``.
 #: ``web`` (RM-41): allowlisted browser history and bookmarks, ``brain ingest-web``.
+#: ``social`` (RM-44): posts liked or bookmarked, from a platform's own data archive,
+#: ``brain ingest-bookmarks`` (one kind for any platform, RM-44.D1).
 VALID_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         "manual", "krisp", "gmail", "slack", "calendar", "jira", "github", "applenotes",
-        "notion", "screenshot", "voice", "code", "web",
+        "notion", "screenshot", "voice", "code", "web", "social",
     }
 )
 

@@ -87,12 +87,15 @@ CAST = frozenset(
 # allowlist; the manifest seeds bodies, not browser stores, so a demo web row would
 # exercise neither the allowlist nor the store reader. ``tests/test_cli_ingest_web.py``
 # covers it.
+# ``social`` (RM-44): a post is read from a platform's data archive, whose files are
+# parsed through a prefix and one JSON array; a demo row seeded as a body would exercise
+# neither the parser nor the reader. ``tests/test_cli_ingest_bookmarks.py`` covers it.
 # The exemption is checked against the canonical set below, so it cannot outlive
 # the kind, and any kind added later still fails this guard until it is either
 # seeded or exempted here.
 DEMO_EXEMPT_KINDS = frozenset(
     {"calendar", "jira", "github", "applenotes", "notion", "screenshot", "voice", "code",
-     "web"}
+     "web", "social"}
 )
 EXPECTED_SOURCES = VALID_SOURCE_KINDS - DEMO_EXEMPT_KINDS
 

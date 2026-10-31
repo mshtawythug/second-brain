@@ -72,6 +72,7 @@ from .cli_ingest import (
     _emit_secret_notice,
     _validate_sensitivity_or_exit,
 )
+from .cli_sensitivity_rerun import escalate_stored_sensitivity
 from .config import Config, ConfigError, _brain_home_root
 from .db import connect
 from .errors import SecretGuardError, describe_failure
@@ -89,8 +90,7 @@ from .ingest.browser_store import (
 from .ingest.capped_process import sigterm_as_system_exit
 from .ingest.text_safety import one_line
 from .ingest.volatile_patch import rare_outcomes, refresh_volatile, settle, stored_document
-from .queries import set_document_sensitivity
-from .sensitivity import DEFAULT_SENSITIVITY, is_confidential
+from .sensitivity import DEFAULT_SENSITIVITY
 from .settings.web_allowlist import WebAllowlist, load_web_allowlist
 from .tags import normalize_tags
 from .vault.sensitivity_propagate import propagate_sensitivity_to_vault
@@ -409,31 +409,18 @@ def _apply_explicit_sensitivity(
 ) -> bool:
     """Raise a stored page to an explicit ``--sensitivity confidential``; ``True`` if changed.
 
-    Escalate only (module docstring): an explicit ``normal`` leaves a confidential page
-    as it is and says how to lower it.
+    Escalate only (module docstring), through the rule ``ingest-bookmarks`` shares
+    (:mod:`brain.cli_sensitivity_rerun`).
     """
-    options = run.options
-    if not options.explicit_sensitivity:
-        return False
-    if not is_confidential(options.sensitivity):
-        row = conn.execute(
-            "SELECT sensitivity FROM documents WHERE id = %s", (document_id,)
-        ).fetchone()
-        if row is not None and is_confidential(row[0]):
-            typer.echo(
-                f"  kept confidential {one_line(page.url)} "
-                f"(lower it with: brain mark-normal {document_id[:8]})"
-            )
-        return False
-    if not set_document_sensitivity(conn, document_id=document_id, level=options.sensitivity):
-        return False
-    for failure in propagate_sensitivity_to_vault(
-        conn, document_id, level=options.sensitivity, vault_root=run.cfg.vault_path
-    ):
-        typer.secho(f"  mirror not updated {one_line(page.url)}: {failure.message}",
-                    fg="yellow", err=True)
-    typer.echo(f"  marked confidential {one_line(page.url)}")
-    return True
+    return escalate_stored_sensitivity(
+        conn,
+        document_id,
+        level=run.options.sensitivity,
+        explicit=run.options.explicit_sensitivity,
+        vault_root=run.cfg.vault_path,
+        label=one_line(page.url),
+        propagate=propagate_sensitivity_to_vault,
+    )
 
 
 def _fetched_text(page: br.Page, run: _Run) -> str | None:

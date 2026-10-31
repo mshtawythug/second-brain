@@ -22,6 +22,27 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — social bookmarks from your own data archive (RM-44)
+
+- `brain ingest-bookmarks --format x-archive <archive-dir>` stores the posts you liked or
+  bookmarked on X, from the platform's data-archive export (unzipped). Source `social` (one kind
+  for any platform), content type `social_post`, one document per post keyed `x-<post id>`.
+  Default sensitivity `normal`. `--since` (the post's written date, decoded from its snowflake
+  id), `--max` (2000), `--sensitivity`, `--tag`, `--dry-run`, `--allow-secrets`.
+- Only `data/like.js`, `data/bookmark.js` (if present) and their numbered parts are opened, by
+  fixed name, through directory descriptors with `O_NOFOLLOW`; each must be one plain file.
+  The `window.YTD… =` prefix is matched and the payload is parsed as JSON one element at a
+  time, never executed. Size, total, part and entry caps; an unknown shape refuses the run. A
+  `.zip` is refused (unzip it first). No network code.
+- The stored post URL is built from the id and the handle; the handle is taken from the
+  entry's link only after `web_url.normalize_url` and an exact `/<handle>/status/<id>` match,
+  so no query string or planted link is stored. Re-runs union `collections` in metadata only.
+- `social_post` joins the concept-skip policy (version `v5`); posts are never summarized.
+- The escalate-only `--sensitivity` rule for stored documents moved from `cli_ingest_web.py`
+  into `brain/cli_sensitivity_rerun.py`, shared by both commands; `ingest-web` behaves as
+  before. New: `brain/ingest/social_archive.py`, `brain/ingest/social_posts.py`,
+  `brain/cli_ingest_bookmarks.py`, `brain/cli_sensitivity_rerun.py`.
+
 ### Added — browser history and bookmarks, allowlist only (RM-41, PR #114)
 
 - `brain ingest-web --browser chrome|safari --since YYYY-MM-DD` stores pages you bookmarked, or

@@ -11,6 +11,8 @@ definition-level chunks, a repository delivers up to ``--max-files`` documents a
 run, and a concept list adds little to a function.
 ``web_page`` (RM-41, policy ``v4``) joined because a page's body is its title, URL
 and host (the page text only with ``--fetch``), and one run can write 500 of them.
+``social_post`` (RM-44, policy ``v5``) joined because a liked or bookmarked post is a
+short piece of someone else's text, and one archive run can write 2000 of them.
 
 A skip must still count as done, or ``graph_rag.build``'s backfill would re-plan
 the document as stale forever. So :func:`skip_watermark` is the ONE place that
@@ -40,7 +42,7 @@ __all__ = [
 
 #: ``documents.content_type`` values whose concept aspect is never extracted.
 CONCEPT_SKIP_CONTENT_TYPES: frozenset[str] = frozenset(
-    {"calendar_event", "screenshot", "code", "web_page"}
+    {"calendar_event", "screenshot", "code", "web_page", "social_post"}
 )
 
 #: Bumped whenever :data:`CONCEPT_SKIP_CONTENT_TYPES` changes (module docstring).
@@ -50,7 +52,9 @@ CONCEPT_SKIP_CONTENT_TYPES: frozenset[str] = frozenset(
 #: re-reconciled once the same way.
 #: ``v4`` (RM-41): ``web_page`` added; every ``calendar_event``, ``screenshot`` and
 #: ``code`` document is re-reconciled once the same way.
-CONCEPT_SKIP_POLICY_VERSION = "v4"
+#: ``v5`` (RM-44): ``social_post`` added; every ``calendar_event``, ``screenshot``,
+#: ``code`` and ``web_page`` document is re-reconciled once the same way.
+CONCEPT_SKIP_POLICY_VERSION = "v5"
 
 #: The ``extractor_ver`` a skipped document's concept watermark stores.
 SKIP_EXTRACTOR_VER = "skipped-by-policy"

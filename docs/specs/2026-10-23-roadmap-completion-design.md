@@ -3663,7 +3663,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-41 | Browser history and bookmarks | L | 8 | RM-06, RM-07 | DONE (#114) |
 | RM-42 | Code-aware chunker | M | 8 | RM-07 | DONE (#109) |
 | RM-43 | Code-repository ingestion | M | 8 | RM-06, RM-42 | DONE (#113) |
-| RM-44 | Social bookmarks | S | 8 | RM-06, RM-07 | TODO |
+| RM-44 | Social bookmarks | S | 8 | RM-06, RM-07 | DONE (#PR) |
 | RM-45 | Receipts (Gmail attachments) | M | 8 | RM-32 | TODO |
 | RM-46 | MCP over HTTP | L | 9 | RM-06 | TODO |
 | RM-47 | Multi-host via one brain + read replica | S | 9 | RM-46 | TODO |

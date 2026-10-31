@@ -31,9 +31,15 @@ def test_web_page_is_a_skipped_type() -> None:
     assert "web_page" in CONCEPT_SKIP_CONTENT_TYPES
 
 
-def test_the_policy_version_was_bumped_for_web_page() -> None:
-    """The set changed at RM-33 (v2), RM-43 (v3) and RM-41 (v4), so the version did too."""
-    assert CONCEPT_SKIP_POLICY_VERSION == "v4"
+def test_social_post_is_a_skipped_type() -> None:
+    """RM-44: a liked or bookmarked post is short third-party text; concepts are skipped."""
+    assert "social_post" in CONCEPT_SKIP_CONTENT_TYPES
+
+
+def test_the_policy_version_was_bumped_for_social_post() -> None:
+    """The set changed at RM-33 (v2), RM-43 (v3), RM-41 (v4) and RM-44 (v5), so the version
+    did too."""
+    assert CONCEPT_SKIP_POLICY_VERSION == "v5"
 
 
 def test_skip_watermark_for_a_skipped_type() -> None:
