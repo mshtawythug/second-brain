@@ -808,3 +808,51 @@ def test_a_bookmark_walk_at_its_cap_is_reported(
 
     assert result.exit_code == 0
     assert "stopped reading bookmarks at 3 entries" in result.output
+
+
+# --- sec-114 R1: stuck fetches trip a circuit breaker -----------------------------------------
+
+
+def test_fetch_turns_off_after_three_stuck_workers_and_the_rest_still_ingest(
+    tmp_path: Path, home: Path, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.fetch_fixtures import StallingTransport
+
+    stall = StallingTransport()
+    monkeypatch.setattr(web_fetch, "TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(cli_ingest_web, "make_fetch_client",
+                        lambda: web_fetch.make_client(transport=stall))
+    monkeypatch.setattr(cli_ingest_web, "fetch_resolver", lambda host, port: ["93.184.215.14"])
+    pages = [fx.Page(f"https://example.com/{n}", f"Page {n}", VISITS) for n in range(5)]
+    try:
+        result = _web(_chrome(tmp_path, pages), "--fetch", "--no-enrich")
+    finally:
+        stall.release.set()
+
+    assert result.exit_code == 0, result.output
+    assert stall.calls == cli_ingest_web.MAX_STUCK_FETCHES == 3
+    assert len(_docs(test_db)) == 5
+    assert result.output.count("fetch turned off for the rest of this run: 3 fetches") == 1
+    assert "5 ingested" in result.output
+    assert "3 fetch failed" in result.output
+
+
+def test_ordinary_fetch_failures_do_not_trip_the_breaker(
+    tmp_path: Path, home: Path, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    def refusing(host: str, port: int) -> list[str]:
+        calls.append(1)
+        return ["10.0.0.1"]  # refused: not public, an ordinary WebFetchError
+
+    monkeypatch.setattr(cli_ingest_web, "fetch_resolver", refusing)
+    pages = [fx.Page(f"https://example.com/{n}", f"Page {n}", VISITS) for n in range(5)]
+
+    result = _web(_chrome(tmp_path, pages), "--fetch", "--no-enrich")
+
+    assert result.exit_code == 0
+    assert len(calls) == 5
+    assert "fetch turned off" not in result.output

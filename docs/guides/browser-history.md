@@ -82,6 +82,8 @@ and the copy comes out torn, brain retries once. If the retry fails, it asks you
 browser and run again.
 
 - Only real files are read. A history file that is a symlink, a device or a pipe is refused.
+- Only plain tables are read. A history file whose tables are views or virtual tables (FTS,
+  R-Tree) is refused as an unsupported schema.
 - The copy is counted byte by byte against a 1 GiB limit. A disk that fills up during the copy
   stops the run with one line naming the error (for example `OSError ENOSPC`).
 - A query that runs longer than 60 seconds is stopped.
@@ -99,14 +101,17 @@ Every request, and every redirect, must:
 - resolve only to **public** addresses. A host that resolves to anything on your local
   network, loopback, a cloud metadata address, or a documentation or benchmarking range is
   refused. So is an IPv6 address that wraps one of those (v4-mapped, NAT64). The deprecated 6to4
-  and Teredo tunnel addresses are refused whatever they wrap. The
+  and Teredo tunnel addresses, and local-use NAT64 (`64:ff9b:1::/48`), are refused whatever they
+  wrap. The
   connection goes to the address that was checked, with a fresh connection, and a fresh
   certificate check, for every host.
 
 Each fetch stops after 10 seconds in total (every redirect included) or 1 MiB as sent. It refuses
 compressed responses (any `Content-Encoding` other than `identity`) rather than unpacking them,
 and accepts only HTML or plain text, in an ordinary text encoding. It sends no cookies and ignores
-proxy settings. A page whose fetch is refused or fails is still stored with its title
+proxy settings. If three fetches in one run get stuck on servers that never answer, `--fetch` turns
+itself off for the rest of the run (one warning line), and the remaining pages are stored without
+their text. A page whose fetch is refused or fails is still stored with its title
 and URL. Fetched pages get an auto-summary (`--no-enrich` skips it). Without `--fetch` there is
 no summary, because a title and a URL are too short to summarize.
 

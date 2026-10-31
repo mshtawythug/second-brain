@@ -35,6 +35,11 @@ the escalate-only rule every ingest path follows.
 raising ``SystemExit``, so a closed terminal still removes the snapshot, and
 each run first sweeps this user's stale snapshot directories.
 
+**A circuit breaker on ``--fetch``** (sec-114 R1). A fetch that passes its deadline
+leaves its worker blocked on the server (:mod:`brain.ingest.web_fetch`). After
+:data:`MAX_STUCK_FETCHES` of those, ``--fetch`` turns itself off for the rest of the
+run, with one warning line, and the remaining pages are ingested without their text.
+
 **Cost (protocol point 9).** ``web_page`` skips concept extraction; the summary
 runs only with ``--fetch`` (a title-and-URL body is too short to summarize);
 at most ``--max`` pages a run.
@@ -95,6 +100,9 @@ if TYPE_CHECKING:
     from .graph_rag.sync import GraphSyncer
 
 DEFAULT_MAX = 500
+#: Fetches left stuck on a server that does not answer before ``--fetch`` turns itself
+#: off for the rest of the run (sec-114 R1): each holds a thread and a socket.
+MAX_STUCK_FETCHES = 3
 _COMMAND = "ingest-web"
 SCOPE_REFUSAL = (
     "ingest-web requires --browser chrome|safari and --since YYYY-MM-DD; "
@@ -295,6 +303,7 @@ class _Run:
     embedder: Embedder
     enricher: OllamaEnricher | None
     graph_syncer: GraphSyncer
+    stuck_fetches: int = 0
     counts: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(
             ("ingested", "updated", "refreshed", "unchanged", "empty", "same_body", "failed",
@@ -429,7 +438,7 @@ def _apply_explicit_sensitivity(
 
 def _fetched_text(page: br.Page, run: _Run) -> str | None:
     """The page's text under ``--fetch``; ``None`` (title-and-URL body) when the fetch fails."""
-    if not run.options.fetch:
+    if not run.options.fetch or run.stuck_fetches >= MAX_STUCK_FETCHES:
         return None
     try:
         return web_fetch.fetch_page(
@@ -441,6 +450,16 @@ def _fetched_text(page: br.Page, run: _Run) -> str | None:
     except web_fetch.WebFetchError as exc:
         typer.secho(f"  fetch skipped {one_line(page.url)}: {exc}", fg="yellow", err=True)
         run.counts["fetch_failed"] += 1
+        if isinstance(exc, web_fetch.WebFetchStuckError):
+            run.stuck_fetches += 1
+            if run.stuck_fetches == MAX_STUCK_FETCHES:
+                typer.secho(
+                    f"fetch turned off for the rest of this run: {run.stuck_fetches} fetches "
+                    "are stuck on servers that do not answer; the remaining pages are "
+                    "ingested without their text",
+                    fg="yellow",
+                    err=True,
+                )
         return None
 
 

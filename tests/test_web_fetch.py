@@ -12,7 +12,6 @@ from __future__ import annotations
 import gzip
 import ipaddress
 import ssl
-import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
@@ -22,8 +21,15 @@ import httpx
 import pytest
 
 from brain.ingest import web_fetch as wf
-from brain.ingest.web_fetch import WebFetchError, fetch_page, make_client, public_only
+from brain.ingest.web_fetch import (
+    WebFetchError,
+    WebFetchStuckError,
+    fetch_page,
+    make_client,
+    public_only,
+)
 from brain.settings.web_allowlist import WebAllowlist
+from tests.fetch_fixtures import StallingTransport
 from tests.tls_fixtures import KeepAliveServer, make_ca_and_server_cert
 
 ALLOW = WebAllowlist(exact=frozenset({"example.com", "docs.example.com"}),
@@ -479,19 +485,6 @@ def test_the_cap_counts_the_bytes_on_the_wire_not_decoded_ones(
 # --- sec-114 F4: one wall-clock deadline over every hop ---------------------------------------
 
 
-class StallingTransport(httpx.BaseTransport):
-    """Never answers until released, like a server trickling its headers."""
-
-    def __init__(self) -> None:
-        self.release = threading.Event()
-        self.entered = threading.Event()
-
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        self.entered.set()
-        self.release.wait(30)
-        raise httpx.ReadTimeout("released", request=request)
-
-
 def test_a_stalled_server_cannot_hold_the_fetch_past_its_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -499,7 +492,7 @@ def test_a_stalled_server_cannot_hold_the_fetch_past_its_deadline(
     stall = StallingTransport()
     started = time.monotonic()
     try:
-        with pytest.raises(WebFetchError, match="took longer than 0.3 s"):
+        with pytest.raises(WebFetchStuckError, match="took longer than 0.3 s"):
             fetch_page("https://example.com/doc", ALLOW,
                        client_factory=lambda: make_client(transport=stall),
                        resolver=resolver(PUBLIC))
@@ -512,11 +505,37 @@ def test_a_stalled_server_cannot_hold_the_fetch_past_its_deadline(
 
 
 def test_the_deadline_is_checked_before_every_hop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rev-114 r2 #1: the hop after the deadline is never sent.
+
+    That hop would answer 404, which never reaches the body loop, so only the per-hop
+    guard can produce "took longer" here.
+    """
     ticks = iter([0.0, 0.0] + [wf.TIMEOUT_SECONDS + 1.0] * 10)
     monkeypatch.setattr(wf, "_clock", lambda: next(ticks))
+    recorder = Recorder({"example.com/doc": _redirect("/next"),
+                         "example.com/next": _response(404)})
 
-    with pytest.raises(WebFetchError, match="took longer than"):
-        _fetch({"example.com/doc": _redirect("/next"), "example.com/next": _html("<p>x</p>")})
+    with pytest.raises(WebFetchError, match="took longer than") as caught:
+        fetch_page("https://example.com/doc", ALLOW, client_factory=_factory(recorder),
+                   resolver=resolver(PUBLIC))
+
+    assert not isinstance(caught.value, WebFetchStuckError)
+    assert [r.headers["host"] + r.url.raw_path.decode() for r in recorder.requests] == [
+        "example.com/doc"
+    ]
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_worker_ended_by_a_base_exception_is_a_plain_failure() -> None:
+    def exiting_factory() -> httpx.Client:
+        raise SystemExit(3)
+
+    with pytest.raises(WebFetchError) as caught:
+        fetch_page("https://example.com/doc", ALLOW, client_factory=exiting_factory,
+                   resolver=resolver(PUBLIC))
+
+    assert str(caught.value) == "fetch failed (no result)"
+    assert not isinstance(caught.value, WebFetchStuckError)
 
 
 def test_each_hop_gets_only_the_time_that_remains(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -613,8 +632,12 @@ def _teredo(server: str, client: str) -> str:
         ("64:ff9b::7f00:1", False),
         ("64:ff9b::a9fe:a9fe", False),
         ("64:ff9b::5db8:d70e", True),
-        ("64:ff9b:1:7f00:0:100::", False),  # RFC 6052 /48: 127.0.0.1
-        ("64:ff9b:1:5db8:d7:e00::", True),  # RFC 6052 /48: 93.184.215.14
+        # Local-use NAT64 (RFC 8215) is refused whatever it wraps: the operator picks the
+        # layout, so one address can read public under /48 and private under /96 (R4).
+        ("64:ff9b:1:7f00:0:100::", False),  # /48 layout: 127.0.0.1
+        ("64:ff9b:1:5db8:d7:e00::", False),  # /48 layout: 93.184.215.14
+        ("64:ff9b:1:808:8:800:a00:1", False),  # /48: 8.8.8.8, /96: 10.0.0.1
+        ("64:ff9b:1::5db8:d70e", False),  # /96 layout: 93.184.215.14
         # 6to4 and Teredo are refused outright, whatever they embed (team-lead ruling).
         ("2002:7f00:1::1", False),  # 6to4 of 127.0.0.1
         ("2002:a9fe:a9fe::", False),  # 6to4 of 169.254.169.254
@@ -641,6 +664,7 @@ def test_no_connection_is_kept_alive_and_each_fetch_gets_a_fresh_client() -> Non
     for _ in range(2):
         fetch_page("https://example.com/doc", ALLOW, client_factory=factory,
                    resolver=resolver(PUBLIC))
+        assert made[-1].is_closed  # rev-114 INFO: each fetch closes its own client
 
     assert len(made) == 2 and made[0] is not made[1]
     assert wf.CONNECTION_LIMITS.max_keepalive_connections == 0

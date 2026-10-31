@@ -11,9 +11,12 @@ redirect):
    through the injected :data:`Resolver`, and the hop is refused when ANY address
    fails the injected :data:`AddressPolicy`. The default, :func:`public_only`, is
    an explicit deny list that does not depend on the interpreter's ``ipaddress``
-   tables. It checks the IPv4 address embedded in v4-mapped and NAT64 addresses,
-   and refuses the deprecated 6to4 (``2002::/16``) and Teredo (``2001::/32``)
-   tunnels outright, whatever they embed (team-lead ruling on sec-114 F9).
+   tables. It checks the IPv4 address embedded in v4-mapped and well-known NAT64
+   (``64:ff9b::/96``) addresses, and refuses the deprecated 6to4 (``2002::/16``)
+   and Teredo (``2001::/32``) tunnels outright, whatever they embed (team-lead
+   ruling on sec-114 F9). Local-use NAT64 (``64:ff9b:1::/48``, whose layout the
+   local operator chooses) is never decoded, so it falls outside global unicast
+   and is refused too (sec-114 R4).
 4. **Connect to what was validated.** The request goes to the IP literal; the
    name travels in the ``Host`` header and in httpcore's ``sni_hostname``
    request extension, which sets the TLS server name and so the certificate
@@ -29,7 +32,12 @@ And per fetch:
   :data:`TIMEOUT_SECONDS`; each hop also gets the time that remains as its httpx
   timeout. A server that trickles its headers can hold only the abandoned worker
   (a daemon thread, one socket, httpcore's bounded header buffer) until it stops
-  or the process exits; the run moves on.
+  or the process exits; the run moves on. Such a timeout raises
+  :class:`WebFetchStuckError`, so ``brain ingest-web`` can stop fetching once a
+  few workers are stuck (sec-114 R1). The socket is NOT shut down on timeout:
+  ``httpx.HTTPTransport`` takes no network backend, so the only way to reach the
+  socket is through httpx's and httpcore's private attributes, which this module
+  does not touch.
 - **The body is read raw** (sec-114 F1). A response with any ``Content-Encoding``
   other than ``identity`` is refused, and the bytes counted against
   :data:`MAX_BODY_BYTES` are the bytes on the wire (``iter_raw``), so no
@@ -80,6 +88,7 @@ __all__ = [
     "ClientFactory",
     "Resolver",
     "WebFetchError",
+    "WebFetchStuckError",
     "fetch_page",
     "make_client",
     "public_only",
@@ -148,7 +157,6 @@ _DENIED_V6 = tuple(
 )
 _V4_MAPPED = ipaddress.IPv6Network("::ffff:0:0/96")
 _NAT64 = ipaddress.IPv6Network("64:ff9b::/96")
-_NAT64_LOCAL = ipaddress.IPv6Network("64:ff9b:1::/48")
 
 #: The charsets a server may name (after ``codecs.lookup`` normalization).
 _TEXT_CODECS = frozenset(
@@ -163,6 +171,10 @@ _TEXT_CODEC_FAMILIES = re.compile(r"^(iso8859-\d+|cp125\d)$")
 
 class WebFetchError(BrainError):
     """A page could not be fetched; the message is fixed and quotes no response."""
+
+
+class WebFetchStuckError(WebFetchError):
+    """The fetch passed its deadline and its worker is still blocked on the server."""
 
 
 class _Allowlist(Protocol):
@@ -180,14 +192,14 @@ def public_only(address: IPAddress) -> bool:
 
 
 def _embedded_v4(address: ipaddress.IPv6Address) -> tuple[ipaddress.IPv4Address, ...] | None:
-    """The IPv4 address a v4-mapped or NAT64 address carries, else ``None``."""
+    """The IPv4 address a v4-mapped or well-known NAT64 address carries, else ``None``.
+
+    Only ``64:ff9b::/96``: a local-use ``64:ff9b:1::/48`` address has no fixed layout
+    (RFC 8215), so it is not decoded and :func:`public_only` refuses it.
+    """
     value = int(address)
     if address in _V4_MAPPED or address in _NAT64:
         return (ipaddress.IPv4Address(value & 0xFFFFFFFF),)
-    if address in _NAT64_LOCAL:
-        # RFC 6052 /48: octets a.b in bits 48-63, the zero u-octet in 64-71, c.d in 72-87.
-        high, low = (value >> 64) & 0xFFFF, (value >> 40) & 0xFFFF
-        return (ipaddress.IPv4Address((high << 16) | low),)
     return None
 
 
@@ -252,10 +264,11 @@ def fetch_page(
     worker = threading.Thread(target=work, name="brain-web-fetch", daemon=True)
     worker.start()
     worker.join(TIMEOUT_SECONDS)
-    if worker.is_alive() or not outcome:
-        raise WebFetchError(f"fetch took longer than {TIMEOUT_SECONDS:g} s")
-    if "error" in outcome:
-        raise WebFetchError(outcome["error"])
+    if worker.is_alive():
+        raise WebFetchStuckError(f"fetch took longer than {TIMEOUT_SECONDS:g} s")
+    if "text" not in outcome:
+        # A worker ended by a BaseException (SystemExit) leaves no outcome at all.
+        raise WebFetchError(outcome.get("error", "fetch failed (no result)"))
     return outcome["text"]
 
 

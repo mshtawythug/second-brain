@@ -804,3 +804,93 @@ def test_an_operational_error_that_is_not_the_deadline_is_retried(
 
     assert len(calls) == 2
     assert "took longer" not in str(caught.value)
+
+
+# --- sec-114 R2: a wide folder of shared references costs no stack ----------------------------
+
+
+def test_a_wide_folder_of_shared_references_is_walked_in_constant_memory() -> None:
+    """One folder holding 200,000 references to one leaf: a stack of children would hold
+    200,000 entries before the first duplicate is skipped; child iterators hold one."""
+    import tracemalloc
+
+    leaf = {"WebBookmarkType": "WebBookmarkTypeLeaf", "URLString": A}
+    folder = {"WebBookmarkType": "WebBookmarkTypeList", "Children": [leaf] * 200_000}
+
+    tracemalloc.start()
+    try:
+        found, malformed, truncated = bs._walk([folder], bs._safari_node)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert (found, malformed, truncated) == ((BookmarkRow(A, ""),), 0, False)
+    assert peak < 256 * 1024
+
+
+def test_the_walk_keeps_document_order() -> None:
+    tree = {"type": "folder", "children": [
+        {"type": "url", "url": "https://example.com/1", "name": "1"},
+        {"type": "folder", "children": [
+            {"type": "url", "url": "https://example.com/2", "name": "2"}]},
+        {"type": "url", "url": "https://example.com/3", "name": "3"},
+    ]}
+
+    found, _, _ = bs._walk([tree], bs._chrome_node)
+
+    assert [row.title for row in found] == ["1", "2", "3"]
+
+
+# --- sec-114 R3: virtual tables are not real tables -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "statements",
+    [
+        pytest.param(
+            ("ALTER TABLE urls RENAME TO urls_real",
+             "CREATE VIRTUAL TABLE urls USING fts5(id, url, title)",
+             "INSERT INTO urls SELECT id, url, title FROM urls_real"),
+            id="fts5",
+        ),
+        pytest.param(
+            ("ALTER TABLE visits RENAME TO visits_real",
+             "CREATE VIRTUAL TABLE visits USING rtree(url, visit_time, visit_time_max)",
+             "INSERT INTO visits SELECT url, MIN(visit_time), MAX(visit_time) FROM visits_real"
+             " GROUP BY url"),
+            id="rtree",
+        ),
+    ],
+)
+def test_a_virtual_table_in_place_of_a_table_is_refused(
+    tmp_path: Path, statements: tuple[str, ...]
+) -> None:
+    profile = _chrome(tmp_path, pages=[fx.Page(A, "A", IN_WINDOW)])
+    with sqlite3.connect(profile / "History") as conn:
+        for statement in statements:
+            conn.execute(statement)
+    conn.close()
+
+    with pytest.raises(UnsupportedSchemaError, match="not a table"):
+        read_browser("chrome", profile, fx.SINCE)
+
+
+def test_defensive_mode_is_set_where_python_offers_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[int, bool]] = []
+
+    class Connection:
+        def setconfig(self, op: int, enable: bool) -> bool:
+            calls.append((op, enable))
+            return enable
+
+    monkeypatch.setattr(sqlite3, "SQLITE_DBCONFIG_DEFENSIVE", 1010, raising=False)
+
+    assert bs._defensive(Connection()) is True
+    assert calls == [(1010, True)]
+
+
+def test_defensive_mode_is_skipped_where_python_lacks_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delattr(sqlite3, "SQLITE_DBCONFIG_DEFENSIVE", raising=False)
+
+    assert bs._defensive(object()) is False
+    assert bs._defensive(sqlite3.connect(":memory:")) is False

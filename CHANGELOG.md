@@ -44,7 +44,9 @@ git tag scheme:
 - Security round (sec-114): the fetch refuses compressed responses and counts raw bytes. The
   deadline is wall-clock over every hop. `public_only` is an explicit deny list that decodes
   the IPv4 inside v4-mapped and NAT64 addresses and refuses 6to4 and Teredo outright. There
-  is no connection reuse across hosts, and only text codecs are honoured.
+  is no connection reuse across hosts, and only text codecs are honoured. Local-use NAT64 is
+  refused. After three fetches stuck on servers that never answer, `--fetch` turns itself off for
+  the run. Virtual tables are refused like views.
   `;` path parameters are dropped. Allowlist entries must be ASCII names (no addresses in any
   form, no localhost). The store copy reads only regular files and is byte-counted; views and
   long queries are refused. Bookmarks are walked once per node with a node cap. SIGHUP and

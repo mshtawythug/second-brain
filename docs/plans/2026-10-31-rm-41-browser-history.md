@@ -386,3 +386,15 @@ All sixteen decisions were approved as recommended (team-lead, 2026-10-31).
 - **rev 3 (= F9):** `fec0::/10` is refused (outside `2000::/3`).
 - **rev 4 (= F14):** the T7 row above.
 - **rev 5:** a blank line before the RM-43 CHANGELOG heading.
+
+## Security round 2 (sec-114 R1–R4) and rev-114 round 2 (team-lead rulings)
+
+| # | Ruling | Where |
+|---|---|---|
+| R1 | A circuit breaker: a fetch past its deadline whose worker is still alive raises `WebFetchStuckError`. After `MAX_STUCK_FETCHES` (3), `--fetch` turns itself off for the rest of the run with one warning line, and the remaining pages ingest without text. The socket is **not** shut down on timeout. `httpx.HTTPTransport` takes no network backend, so the socket can only be reached through httpx and httpcore private attributes, which this code does not touch. | `cli_ingest_web._fetched_text`, `web_fetch.fetch_page` |
+| R2 | The bookmark walk keeps one child iterator per open folder, so the stack is bounded by the depth cap, not by a folder's width. | `browser_store._walk` |
+| R3 | `sqlite_master.sql` must start with `CREATE TABLE`, so fts5, rtree and other virtual tables are refused. `SQLITE_DBCONFIG_DEFENSIVE` is set where Python offers `setconfig` (3.12+), behind a feature check. | `browser_store._require_tables`, `_defensive` |
+| R4 | Local-use NAT64 `64:ff9b:1::/48` is never decoded, so it falls outside global unicast and is refused. Only `64:ff9b::/96` is decoded and checked. | `web_fetch._embedded_v4` |
+| rev r2 #1 | The per-hop deadline test now ends in a 404 that never reaches a body loop, and asserts that only hop 0 was sent. The `if False` mutant of the per-hop guard dies. | `tests/test_web_fetch.py` |
+| rev r2 #2 | The CHANGELOG blank line was already fixed in d4435ee. | — |
+| rev INFO | Each fetch's client is asserted closed after the fetch. | `tests/test_web_fetch.py` |

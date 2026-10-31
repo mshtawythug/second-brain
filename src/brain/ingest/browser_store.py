@@ -32,15 +32,19 @@ torn WAL tail by its frame checksums; a torn main file raises
 ``sqlite3.DatabaseError``, so a read is retried once on a fresh snapshot, then
 fails as :class:`StoreUnreadableError`.
 
-**A hostile store cannot hang the read** (sec-114 F6). Every object read must be
-a real table in ``sqlite_master`` (a view could hide an unbounded recursive
-query), and every query runs under a progress handler that aborts it after
-:data:`QUERY_TIMEOUT_SECONDS`. Every column read is checked first (``PRAGMA
-table_info``); one missing raises :class:`UnsupportedSchemaError`.
+**A hostile store cannot hang the read** (sec-114 F6, R3). Every object read must
+be a real table in ``sqlite_master``: not a view (which could hide an unbounded
+recursive query) and not a virtual table (FTS and R-Tree are the historical home of
+SQLite's memory-safety bugs). Where Python offers it (3.12+), the connection also runs
+in ``SQLITE_DBCONFIG_DEFENSIVE`` mode. And every query runs under a progress
+handler that aborts it after :data:`QUERY_TIMEOUT_SECONDS`. Every column read is
+checked first (``PRAGMA table_info``); one missing raises
+:class:`UnsupportedSchemaError`.
 
-**Bookmarks are walked once per node** (sec-114 F2). A binary plist can
+**Bookmarks are walked once per node** (sec-114 F2, R2). A binary plist can
 reference one object many times, or itself; the walk skips a node it has
-already visited and stops after :data:`MAX_BOOKMARK_NODES`.
+already visited, stops after :data:`MAX_BOOKMARK_NODES`, and keeps one child
+iterator per open folder, so a very wide folder costs no memory of its own.
 
 **A killed run** (SIGKILL, a power cut) cannot remove its copy, which holds the
 whole history. :func:`sweep_stale_snapshots`, run when ``brain ingest-web``
@@ -58,6 +62,7 @@ import errno
 import json
 import os
 import plistlib
+import re
 import shutil
 import sqlite3
 import stat
@@ -113,6 +118,8 @@ TEMP_PREFIX = "brain-web-"
 STALE_SNAPSHOT_S = 3 * 60 * 60
 _SQLITE_TIMEOUT_SECONDS = 5.0
 _COPY_CHUNK = 1024 * 1024
+#: A plain table's stored ``sql``: ``CREATE TABLE`` (a virtual table says ``CREATE VIRTUAL``).
+_PLAIN_TABLE = re.compile(r"\s*CREATE\s+TABLE\b", re.IGNORECASE)
 _OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 
@@ -388,6 +395,7 @@ def _query(browser: str, copy: Path, since: datetime) -> Sequence[Sequence[Any]]
     try:
         conn.execute("PRAGMA trusted_schema=OFF")
         conn.execute("PRAGMA query_only=ON")
+        _defensive(conn)
         conn.set_progress_handler(past_deadline, _PROGRESS_OPS)
         if browser == "chrome":
             return list(_query_chrome(conn, since))
@@ -402,17 +410,37 @@ def _query(browser: str, copy: Path, since: datetime) -> Sequence[Sequence[Any]]
         conn.close()
 
 
+def _defensive(conn: Any) -> bool:
+    """Turn on ``SQLITE_DBCONFIG_DEFENSIVE`` where Python offers it (3.12+); ``True`` if set.
+
+    Defensive mode refuses the writes and the schema tricks a hostile file could use to
+    corrupt itself further (sec-114 R3). ``conn`` is ``Any`` so a test can pass a stand-in
+    on an interpreter without ``setconfig``.
+    """
+    setconfig = getattr(conn, "setconfig", None)
+    flag = getattr(sqlite3, "SQLITE_DBCONFIG_DEFENSIVE", None)
+    if setconfig is None or flag is None:
+        return False
+    setconfig(flag, True)
+    return True
+
+
 def _require_tables(conn: sqlite3.Connection, browser: str) -> None:
-    """Every object read is a real table with every column read (sec-114 F6)."""
+    """Every object read is a real table with every column read (sec-114 F6, R3).
+
+    ``sqlite_master.type`` is ``table`` for a virtual table too (FTS, R-Tree: the
+    modules SQLite's memory-safety bugs have historically lived in), so the stored
+    ``sql`` must also start with ``CREATE TABLE``.
+    """
     columns = _LAYOUTS[browser].columns
     marks = ", ".join("?" for _ in columns)
-    kinds = dict(
-        conn.execute(
-            f"SELECT name, type FROM sqlite_master WHERE name IN ({marks})", tuple(columns)
-        ).fetchall()
-    )
+    rows = conn.execute(
+        f"SELECT name, type, sql FROM sqlite_master WHERE name IN ({marks})", tuple(columns)
+    ).fetchall()
+    objects = {name: (kind, sql) for name, kind, sql in rows}
     for table, wanted in columns.items():
-        if kinds.get(table) != "table":
+        kind, sql = objects.get(table, (None, None))
+        if kind != "table" or not _PLAIN_TABLE.match(sql if isinstance(sql, str) else ""):
             raise UnsupportedSchemaError(browser)
         present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         if not set(wanted) <= present:
@@ -495,19 +523,26 @@ def _read_bounded(fd: int, limit: int) -> bytes:
 
 
 def _walk(roots: list[Any], visit: Any) -> tuple[tuple[BookmarkRow, ...], int, bool]:
-    """Walk the tree iteratively, each node once (sec-114 F2).
+    """Walk the tree depth-first, each node once (sec-114 F2, R2).
 
-    ``visit(node)`` → ``(bookmark | None, children | None, ok)``. A node already
-    visited (a shared plist reference, or a cycle) is skipped; past
-    :data:`MAX_BOOKMARK_NODES` the walk stops and reports it.
+    ``visit(node)`` → ``(bookmark | None, children | None, ok)``. The stack holds one
+    child ITERATOR per open folder, never the children themselves, so its size is
+    bounded by the depth cap however wide a folder is (a plist folder can hold millions
+    of one-byte references to one leaf). A node already visited (a shared plist
+    reference, or a cycle) is skipped; past :data:`MAX_BOOKMARK_NODES` the walk stops
+    and reports it.
     """
     found: list[BookmarkRow] = []
     malformed = 0
     seen: set[int] = set()
     walked = 0
-    stack: list[tuple[Any, int]] = [(node, 1) for node in reversed(roots)]
+    stack: list[tuple[Iterator[Any], int]] = [(iter(roots), 1)]
     while stack:
-        node, depth = stack.pop()
+        children, depth = stack[-1]
+        node = next(children, _END)
+        if node is _END:
+            stack.pop()
+            continue
         if isinstance(node, (dict, list)):
             if id(node) in seen:
                 continue
@@ -518,15 +553,19 @@ def _walk(roots: list[Any], visit: Any) -> tuple[tuple[BookmarkRow, ...], int, b
         if depth > MAX_BOOKMARK_DEPTH:
             malformed += 1
             continue
-        bookmark, children, ok = visit(node)
+        bookmark, kids, ok = visit(node)
         if not ok:
             malformed += 1
             continue
         if bookmark is not None:
             found.append(bookmark)
-        for child in reversed(children or []):
-            stack.append((child, depth + 1))
+        if kids:
+            stack.append((iter(kids), depth + 1))
     return tuple(found), malformed, False
+
+
+#: The end of one folder's children (``next``'s default), distinct from every node.
+_END = object()
 
 
 _Visit = tuple[BookmarkRow | None, list[Any] | None, bool]
