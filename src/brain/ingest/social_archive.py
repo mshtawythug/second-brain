@@ -32,6 +32,9 @@ here trusts a name, a link, a size or the code:
   build millions of containers; and each entry is cut down, as it is parsed, to
   the three string fields :mod:`brain.ingest.social_posts` reads
   (``tweetId``, ``fullText``, ``expandedUrl``), so nothing else is retained.
+  An entry with any of those over :data:`MAX_FIELD_CHARS` keeps nothing at all
+  (its post is then skipped as malformed), so no single long string is held
+  until the whole archive is read (sec-116 R1).
 - **Loud on an unknown shape** (the ticket's risk line). A wrong prefix, a
   payload that is not one array, or an element that is not
   ``{"<collection>": {…}}`` refuses the whole run. Field-level problems inside
@@ -70,6 +73,8 @@ MAX_ENTRIES = 500_000
 MAX_CONTAINERS = 2 * MAX_ENTRIES + 1_000_000
 #: The only entry fields kept, and only when they are strings.
 KEPT_FIELDS = ("tweetId", "fullText", "expandedUrl")
+#: A kept field longer than this drops its entry; a post tops out near 25 000 characters.
+MAX_FIELD_CHARS = 65_536
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY
 _DATA_FLAGS = _DIR_FLAGS | os.O_NOFOLLOW
@@ -333,4 +338,7 @@ def _unwrap(element: Any, collection: str) -> dict[str, str]:
     inner = element[collection]
     if not isinstance(inner, dict):
         _refuse(_UNKNOWN_SHAPE)
-    return {key: inner[key] for key in KEPT_FIELDS if isinstance(inner.get(key), str)}
+    kept = {key: inner[key] for key in KEPT_FIELDS if isinstance(inner.get(key), str)}
+    if any(len(value) > MAX_FIELD_CHARS for value in kept.values()):
+        return {}
+    return kept

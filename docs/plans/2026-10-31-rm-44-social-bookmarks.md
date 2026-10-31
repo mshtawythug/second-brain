@@ -156,7 +156,7 @@ run: 2000 short embeds (minutes on local arctic) and no GraphLane model time.
 | FIFO / device / folder swapped in | `O_NONBLOCK` + `fstat` `S_ISREG` on the open fd (no TOCTOU between check and read). | a FIFO named `like.js` returns promptly with the refusal |
 | Hard link to another file | `st_nlink == 1` required, as RM-35 does. | a hard-linked `like.js` |
 | Huge file / file that grows | `fstat` size ≤ `max_file_bytes` (64 MiB) before reading; read at most that **fstat size + 1** bytes, and refuse a file that grew (sec-116 F4); total ≤ `max_read_bytes` (256 MiB) across parts; ≤ `max_parts` (64) per collection. | caps injected small; a file over cap; total over cap; growth simulated by a size cap below the content |
-| Huge JSON / element bombs | **Corrected (sec-116 F2):** element-wise `raw_decode` alone did NOT bound memory (one 16 MiB element of empty arrays peaked at ~25× the file, and every parsed entry was retained). Now a file whose `{` + `[` count passes `max_containers` (2 × `max_entries` + 1 000 000) is refused before parsing, and each entry is cut to its three string fields as it is parsed, so retained memory follows the kept text. `max_entries` (500 000) per run; text over `MAX_TEXT_CHARS` (30 000) skipped as malformed. | entries over cap refuse; a 1 MiB `fullText` is skipped |
+| Huge JSON / element bombs | **Corrected (sec-116 F2):** element-wise `raw_decode` alone did NOT bound memory (one 16 MiB element of empty arrays peaked at ~25× the file, and every parsed entry was retained). Now a file whose `{` + `[` count passes `max_containers` (2 × `max_entries` + 1 000 000) is refused before parsing, and each entry is cut to its three string fields as it is parsed, so retained memory follows the kept text; an entry with any of those over `MAX_FIELD_CHARS` (65 536) keeps nothing and its post is skipped as malformed (sec-116 R1), so no long string is held until the whole archive is read. `max_entries` (500 000) per run; text over `MAX_TEXT_CHARS` (30 000) skipped as malformed. | entries over cap refuse; a 1 MiB `fullText` is skipped; tracemalloc bounds (junk fields, 128 K-character posts) |
 | Deep nesting | `RecursionError` (CPython's scanner raises it) and `ValueError` are caught per file and turned into the fixed "malformed" refusal. | `[` × 200 000 inside an entry |
 | Huge numbers | `tweetId` must be a digit **string** of ≤ 19 chars before `int()`; a JSON number token is wrong shape. An over-long numeric literal elsewhere hits CPython's int-digit limit → `ValueError` → refusal. | `"tweetId": 1e400`, a 5000-digit literal, a 25-digit id string |
 | Wrong encoding / BOM / NUL | Decoded `utf-8` with `errors="strict"` → refusal on invalid bytes (not silently replaced); BOM stripped; control characters never reach the terminal (`one_line`). | invalid UTF-8; a title carrying ESC sequences |
@@ -360,3 +360,9 @@ Each fix landed RED first: the new tests ran against a `git archive` copy of `18
 - **F5 (INFO).** `O_NOCTTY` joins the file-open flags.
 - **F6, F7:** no change, as ruled.
 - **The broader gap** (no source's title is guarded) is backlog row **BL-38**, not fixed here.
+- **R1 (INFO, closed at team-lead's request).** A long `fullText` was held until the whole
+  archive had been read (about 1.3 GiB at the 256 MiB cap). `_unwrap` now drops an entry any of
+  whose kept fields passes `MAX_FIELD_CHARS` (65 536; a post tops out near 25 000), and its post
+  is counted as malformed. Tests: the boundary (65 536 kept, 65 537 dropped, in `fullText` and in
+  `expandedUrl`); the post counted as malformed; tracemalloc on a 13 MB archive of 128 K-character
+  posts retains under 1 MB.

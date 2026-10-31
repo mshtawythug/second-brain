@@ -497,3 +497,50 @@ def test_archive_files_are_opened_without_acquiring_a_terminal() -> None:
     assert sa._FILE_FLAGS & os.O_NOCTTY
     assert sa._FILE_FLAGS & os.O_NOFOLLOW
     assert sa._FILE_FLAGS & os.O_NONBLOCK
+
+
+# --- sec-116 R1: no one string field is held past the cap -----------------------------------------
+
+
+def test_an_entry_with_an_oversized_field_is_dropped_as_it_is_read() -> None:
+    huge = "a" * (sa.MAX_FIELD_CHARS + 1)
+    exact = "b" * sa.MAX_FIELD_CHARS
+    entries = [fx.fields("7", text=huge), fx.fields("8", text="t", expanded_url=huge),
+               fx.fields("9", text=exact)]
+
+    parsed = _parse(fx.payload("like", 0, entries))
+
+    assert parsed == [{}, {}, {"tweetId": "9", "fullText": exact}]
+
+
+def test_an_oversized_post_is_counted_as_malformed(tmp_path: Path) -> None:
+    from brain.ingest import social_posts
+
+    huge = fx.fields(PID, text="a" * (sa.MAX_FIELD_CHARS + 1))
+    root = fx.write_archive(tmp_path / "a", likes=[[huge, fx.fields("99")]])
+
+    read = sa.read_archive(root)
+    collected = social_posts.collect_posts(read.likes, read.bookmarks, now=fx.NOW)
+
+    assert collected.malformed == 1
+    assert [post.post_id for post in collected.posts] == ["99"]
+
+
+def test_oversized_text_is_not_retained(tmp_path: Path) -> None:
+    """sec-116 R1: a long ``fullText`` was held until the whole archive had been read."""
+    entries = [fx.fields(str(1000 + i), text="t" * (sa.MAX_FIELD_CHARS * 2)) for i in range(100)]
+    root = fx.write_archive(tmp_path / "a", likes=[entries])
+    file_size = (root / "data" / "like.js").stat().st_size
+    assert file_size > 10_000_000
+
+    tracemalloc.start()
+    try:
+        read = sa.read_archive(root)
+        gc.collect()
+        retained, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert read.likes == ({},) * 100
+    assert retained < 1_000_000, retained
+    assert peak < 4 * file_size, peak
