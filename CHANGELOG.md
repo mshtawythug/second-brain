@@ -22,7 +22,7 @@ git tag scheme:
 
 ## [Unreleased]
 
-### Added — receipts: Gmail PDF and image attachments (RM-45)
+### Added — receipts: Gmail PDF and image attachments (RM-45, PR #117)
 
 - `brain ingest-gmail --with-attachments` appends the text of each thread's PDF, PNG and JPEG
   attachments to the thread document as `## Attachment: <name>` sections, so a receipt is
