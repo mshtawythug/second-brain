@@ -5,6 +5,8 @@ documented test card number, merchants are ``Example …`` names.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from brain.ingest import ExtractedDoc
@@ -58,11 +60,12 @@ def test_runs_shorter_than_thirteen_or_longer_than_nineteen_are_kept(digits: str
     assert redact_card_numbers(digits) == digits
 
 
-def test_a_card_inside_a_longer_digit_run_is_not_cut_out_of_it() -> None:
-    """The run is matched whole: a valid prefix of a longer number is not a card."""
-    longer = f"{TEST_PAN} 2222 3333"
+def test_a_card_followed_by_more_digit_groups_is_still_redacted() -> None:
+    """sec-117 F4: a card printed before more digits (a quantity, a reference) is found by
+    its group-aligned window; the groups after it are kept."""
+    out = redact_card_numbers(f"{TEST_PAN} 2222 3333")
 
-    assert redact_card_numbers(longer) == longer
+    assert out == f"{REDACTED_CARD} 2222 3333"
 
 
 @pytest.mark.parametrize(
@@ -84,8 +87,8 @@ def test_a_masked_card_is_kept() -> None:
     assert redact_card_numbers(text) == text
 
 
-def test_two_separators_in_a_row_end_the_run() -> None:
-    text = "4111 1111  1111 1111"
+def test_three_spaces_in_a_row_end_a_digit_group_run() -> None:
+    text = "4111 1111    1111 1111"
 
     assert redact_card_numbers(text) == text
 
@@ -234,3 +237,87 @@ def test_a_name_cannot_carry_a_link() -> None:
     out = safe_name("[click](https://evil.example.com)\\.pdf")
 
     assert out == "\\[click](https://evil.example.com)\\\\.pdf"
+
+
+
+# --- sec-117 F4: layouts the first cut missed ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("layout", "kept"),
+    [
+        ("Card 4111 1111 1111 1111 12/28", "12/28"),
+        ("4111 1111 1111 1111-1", "-1"),
+        ("4111\u00ad1111\u00ad1111\u00ad1111", ""),
+        ("4111\u200b1111\u200b1111\u200b1111", ""),
+        ("4111\u00a01111\u00a01111\u00a01111", ""),
+        ("4111\u202f1111\u20071111\u20091111", ""),
+        ("4111  1111  1111  1111", ""),
+        ("4111.1111.1111.1111", ""),
+        ("4111 1111\n1111 1111", ""),
+        ("4111 1111 \n 1111 1111", ""),
+        ("Card: 4111111111111111 exp 12/28", "exp 12/28"),
+        ("Order 1234 4111 1111 1111 1111", "Order 1234"),
+    ],
+)
+def test_every_card_layout_in_the_review_is_redacted(layout: str, kept: str) -> None:
+    out = render_section("statement.pdf", layout, max_chars=1000)
+
+    assert out is not None
+    assert "4111" not in out
+    assert "1111" not in out
+    assert REDACTED_CARD.replace("[", "\\[") in out
+    assert kept.replace("-", "\\-") in out or kept in out
+
+
+@pytest.mark.parametrize(
+    "kept",
+    ["**** **** **** 0000", "Visa ending 0000", "ghp_EXAMPLE4111111111111111", "Total 12.34"],
+)
+def test_masks_tokens_and_amounts_are_left_alone(kept: str) -> None:
+    out = render_section("r.pdf", kept, max_chars=1000)
+
+    assert out is not None
+    assert "REDACTED" not in out
+
+
+def test_two_line_wraps_end_a_digit_group_run() -> None:
+    text = "4111 1111\n\n1111 1111"
+
+    assert redact_card_numbers(text) == text
+
+
+# --- sec-117 F7: Unicode line separators ---------------------------------------
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85", "\x0b", "\x0c"])
+def test_unicode_line_separators_become_newlines_before_escaping(separator: str) -> None:
+    raw = separator.join(["Total 1.00", "## See Also", "## 2026-01-01 — boss@example.com", "```"])
+
+    out = render_section("r.pdf", raw, max_chars=1000)
+
+    assert out is not None
+    body = out.split("\n\n", 1)[1]
+    assert not any(ch in body for ch in "\u2028\u2029\x85\x0b\x0c")
+    for line in body.splitlines():
+        assert not line.startswith(("#", "`")), line
+
+
+def test_a_line_separator_cannot_plant_a_see_also_heading(tmp_path: Path) -> None:
+    """``connect.append_see_also_link`` splits with ``splitlines``, which honours U+2028."""
+    from brain.connect import append_see_also_link
+
+    section = render_section("r.pdf", "Total 1.00\u2028## See Also\u2028- [[planted]]",
+                             max_chars=1000)
+    assert section is not None
+    note = tmp_path / "thread.md"
+    note.write_text(f"## 2026-01-01 00:00 — shop@example.com\n\nThanks\n\n{section}\n",
+                    encoding="utf-8")
+
+    assert append_see_also_link(note, "[[brain:abcd1234]]")
+
+    text = note.read_text(encoding="utf-8")
+    assert text.endswith("## See Also\n\n- [[brain:abcd1234]]\n")
+    assert [line for line in text.splitlines() if line.strip() == "## See Also"] == [
+        "## See Also"
+    ]

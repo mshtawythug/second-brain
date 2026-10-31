@@ -5,11 +5,20 @@ party's (anyone can mail the owner a PDF), and both end up in the thread documen
 body, which ``brain ui`` renders and the vault link parser reads. So before a section
 is built:
 
+- **The text is normalized first** (sec-117 F4, F7): every line break ``str.splitlines``
+  honours (``\r``, ``\v``, ``\f``, U+0085, U+2028, U+2029) becomes ``\n``, so the line
+  escapes below apply to every line any later reader sees; every space separator
+  (NBSP, U+2007, U+202F, …) becomes a space; every other control and format character
+  (soft hyphen, zero-width space) goes. Doing this before redaction is what keeps a
+  ``4111<soft hyphen>1111…`` from turning into a bare number after it was checked.
 - **Card numbers** are redacted whatever ``BRAIN_SECRET_GUARD`` says (the guard has no
-  card pattern): a maximal run of 13 to 19 ASCII digits, single spaces or hyphens
-  allowed between digits, standing as its own word (so a token's digits are left for
-  the guard), that passes the Luhn check. Masked forms (``**** 0000``)
-  are kept: they say which card without being one.
+  card pattern). A digit run is digit groups joined by one to three spaces, tabs, dots
+  or hyphens, or by a single line break; it must stand as its own word (no letter,
+  digit or underscore touching it, so a token's digits are left for the guard). Every
+  window of whole groups holding 13 to 19 digits that passes the Luhn check is
+  redacted, so a card printed before an expiry (``12/28``), a quantity or a reference is
+  still found. Masked forms (``**** 0000``) are kept: they say which card without being
+  one.
 - **Markup is neutralized**, so the text cannot pose as thread structure (a stray
   ``</details>``, a fake ``## <date> — <sender>`` heading, a setext underline, a code
   fence that swallows the sections after it) or pull a remote image or a wikilink into
@@ -18,8 +27,8 @@ is built:
   non-blank character is markdown block punctuation gets a backslash before it.
 - **Names** become one escaped line, capped before escaping.
 
-Text is redacted, then cut, then neutralized, so a cut can never leave half a card
-number behind, and an escape sequence is never cut in two.
+Text is normalized, redacted, then cut, then neutralized, so a cut can never leave half
+a card number behind, and an escape sequence is never cut in two.
 """
 from __future__ import annotations
 
@@ -39,6 +48,7 @@ __all__ = [
     "TRUNCATED_LINE",
     "UNNAMED",
     "neutralize_markup",
+    "normalize_text",
     "redact_card_numbers",
     "render_section",
     "safe_name",
@@ -54,14 +64,21 @@ UNNAMED = "(unnamed attachment)"
 #: The longest name, in characters before escaping, the ellipsis included.
 MAX_NAME_CHARS = 120
 
-#: A maximal digit run that stands as a word: no digit (or digit-and-separator) before
-#: or after it, and no letter or underscore touching it. The word rule keeps the
-#: redaction out of tokens (``ghp_…0000000000000000``): cutting digits out of a
-#: credential would leave the rest of it for the secret guard to miss.
-_CARD_RE = re.compile(
-    r"(?<![0-9A-Za-z_])(?<![0-9][ -])[0-9](?:[ -]?[0-9]){12,18}(?![ -]?[0-9]|[A-Za-z_])"
+#: What may join two digit groups of one card: one to three spaces, tabs, dots or hyphens,
+#: or one line break with blanks around it.
+_GROUP_SEPARATOR = r"(?:[ \t.\-]{1,3}|[ \t]*\n[ \t]*)"
+#: A maximal digit-group run that stands as a word: no letter, digit or underscore
+#: touching either end. The word rule keeps the redaction out of tokens
+#: (``ghp_…0000000000000000``): cutting digits out of a credential would leave the rest
+#: of it for the secret guard to miss.
+_DIGIT_RUN_RE = re.compile(
+    rf"(?<![0-9A-Za-z_])[0-9]+(?:{_GROUP_SEPARATOR}[0-9]+)*(?![0-9A-Za-z_])"
 )
-_SEPARATORS_RE = re.compile(r"[ -]")
+_GROUP_RE = re.compile(r"[0-9]+")
+_MIN_CARD_DIGITS = 13
+_MAX_CARD_DIGITS = 19
+#: Line breaks ``str.splitlines`` honours that are not ``\n``.
+_LINE_BREAK_RE = re.compile("\r\n|[\r\x0b\x0c\x85\u2028\u2029]")
 #: Markdown block punctuation that can open a heading, rule, fence, list or table row.
 _BLOCK_START_RE = re.compile(r"^([ \t]*)([#=\-_*~`+|])", re.MULTILINE)
 _BLANK_RUN_RE = re.compile(r"\n{3,}")
@@ -80,23 +97,55 @@ def _luhn_ok(digits: str) -> bool:
     return total % 10 == 0
 
 
-def _redact_match(match: re.Match[str]) -> str:
-    digits = _SEPARATORS_RE.sub("", match.group(0))
-    return REDACTED_CARD if _luhn_ok(digits) else match.group(0)
+def _card_window(groups: list[re.Match[str]], start: int) -> int | None:
+    """The last group of the longest Luhn-valid card window starting at ``start``."""
+    best = None
+    digits = ""
+    for end in range(start, len(groups)):
+        digits += groups[end].group(0)
+        if len(digits) > _MAX_CARD_DIGITS:
+            break
+        if len(digits) >= _MIN_CARD_DIGITS and _luhn_ok(digits):
+            best = end
+    return best
+
+
+def _redact_run(match: re.Match[str]) -> str:
+    run = match.group(0)
+    groups = list(_GROUP_RE.finditer(run))
+    pieces: list[str] = []
+    kept_from = 0
+    index = 0
+    while index < len(groups):
+        end = _card_window(groups, index)
+        if end is None:
+            index += 1
+            continue
+        pieces.extend([run[kept_from : groups[index].start()], REDACTED_CARD])
+        kept_from = groups[end].end()
+        index = end + 1
+    pieces.append(run[kept_from:])
+    return "".join(pieces)
+
+
+def normalize_text(text: str) -> str:
+    """Line breaks to ``\n``, space separators to a space, other C* characters dropped."""
+    text = _LINE_BREAK_RE.sub("\n", text)
+    kept: list[str] = []
+    for ch in text:
+        category = unicodedata.category(ch)
+        if ch in _KEPT_CONTROLS:
+            kept.append(ch)
+        elif category == "Zs":
+            kept.append(" ")
+        elif not category.startswith("C"):
+            kept.append(ch)
+    return "".join(kept)
 
 
 def redact_card_numbers(text: str) -> str:
-    """``text`` with every Luhn-valid card-number run replaced by :data:`REDACTED_CARD`."""
-    return _CARD_RE.sub(_redact_match, text)
-
-
-def _drop_controls(text: str) -> str:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    return "".join(
-        ch
-        for ch in text
-        if ch in _KEPT_CONTROLS or not unicodedata.category(ch).startswith("C")
-    )
+    """``text``, normalized, with every Luhn-valid card window replaced by :data:`REDACTED_CARD`."""
+    return _DIGIT_RUN_RE.sub(_redact_run, normalize_text(text))
 
 
 def _escape_inline(text: str) -> str:
@@ -107,7 +156,7 @@ def _escape_inline(text: str) -> str:
 
 def neutralize_markup(text: str) -> str:
     """``text`` made inert as markdown and HTML (module docstring), trimmed."""
-    escaped = _escape_inline(_drop_controls(text))
+    escaped = _escape_inline(normalize_text(text))
     escaped = _BLOCK_START_RE.sub(r"\1\\\2", escaped)
     lines = [line.rstrip() for line in escaped.split("\n")]
     return _BLANK_RUN_RE.sub("\n\n", "\n".join(lines)).strip()
@@ -140,7 +189,7 @@ def render_section(raw_name: object, text: str, *, max_chars: int) -> str | None
     ``max_chars`` caps the text (counted after redaction, before escaping); a cut text
     ends with :data:`TRUNCATED_LINE`.
     """
-    body, cut = _cut(redact_card_numbers(text), max_chars)
+    body, cut = _cut(redact_card_numbers(text), max_chars)  # redaction normalizes first
     clean = neutralize_markup(body)
     if not clean:
         return None
