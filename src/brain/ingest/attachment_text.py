@@ -7,7 +7,8 @@ is built:
 
 - **Card numbers** are redacted whatever ``BRAIN_SECRET_GUARD`` says (the guard has no
   card pattern): a maximal run of 13 to 19 ASCII digits, single spaces or hyphens
-  allowed between digits, that passes the Luhn check. Masked forms (``**** 0000``)
+  allowed between digits, standing as its own word (so a token's digits are left for
+  the guard), that passes the Luhn check. Masked forms (``**** 0000``)
   are kept: they say which card without being one.
 - **Markup is neutralized**, so the text cannot pose as thread structure (a stray
   ``</details>``, a fake ``## <date> — <sender>`` heading, a setext underline, a code
@@ -53,8 +54,13 @@ UNNAMED = "(unnamed attachment)"
 #: The longest name, in characters before escaping, the ellipsis included.
 MAX_NAME_CHARS = 120
 
-#: A maximal digit run: no digit (or digit-and-separator) before it, none after it.
-_CARD_RE = re.compile(r"(?<![0-9])(?<![0-9][ -])[0-9](?:[ -]?[0-9]){12,18}(?![ -]?[0-9])")
+#: A maximal digit run that stands as a word: no digit (or digit-and-separator) before
+#: or after it, and no letter or underscore touching it. The word rule keeps the
+#: redaction out of tokens (``ghp_…0000000000000000``): cutting digits out of a
+#: credential would leave the rest of it for the secret guard to miss.
+_CARD_RE = re.compile(
+    r"(?<![0-9A-Za-z_])(?<![0-9][ -])[0-9](?:[ -]?[0-9]){12,18}(?![ -]?[0-9]|[A-Za-z_])"
+)
 _SEPARATORS_RE = re.compile(r"[ -]")
 #: Markdown block punctuation that can open a heading, rule, fence, list or table row.
 _BLOCK_START_RE = re.compile(r"^([ \t]*)([#=\-_*~`+|])", re.MULTILINE)

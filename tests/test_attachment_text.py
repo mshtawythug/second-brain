@@ -65,6 +65,19 @@ def test_a_card_inside_a_longer_digit_run_is_not_cut_out_of_it() -> None:
     assert redact_card_numbers(longer) == longer
 
 
+@pytest.mark.parametrize(
+    "token",
+    [f"ghp_EXAMPLE{TEST_PAN}", f"{TEST_PAN}abc", f"key_{TEST_PAN}", f"x{TEST_PAN}_"],
+)
+def test_digits_inside_a_token_are_left_for_the_secret_guard(token: str) -> None:
+    assert redact_card_numbers(token) == token
+
+
+@pytest.mark.parametrize("framed", [f"({TEST_PAN})", f"card:{TEST_PAN}.", f"#{TEST_PAN}"])
+def test_a_card_framed_by_punctuation_is_redacted(framed: str) -> None:
+    assert TEST_PAN not in redact_card_numbers(framed)
+
+
 def test_a_masked_card_is_kept() -> None:
     text = "Visa **** 0000"
 
