@@ -19,7 +19,7 @@ database (prevention), and a row with no recorded mirror is treated as "mirror
 still owed" so a re-run repairs it (recovery for orphans that already exist, and
 for any future post-commit failure whatever its cause).
 
-Note the oracle question this turned on: ``note_builder._unique_target`` checks
+Note the oracle question this turned on: ``note_builder._write_unique`` checks
 the FILESYSTEM, while the constraint that actually rejects is a DB unique index.
 A row can own a ``vault_path`` whose file is missing — precisely the orphan state
 this bug produced — so the filesystem was never the right authority.
