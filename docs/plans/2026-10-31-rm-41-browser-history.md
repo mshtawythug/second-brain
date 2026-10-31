@@ -381,8 +381,7 @@ All sixteen decisions were approved as recommended (team-lead, 2026-10-31).
   `CONNECTION_LIMITS` is the only guard left, and asserts that `b.example` is refused with two
   connections. A mutant that drops the limits is killed. `make_client` gains a `verify` test
   seam (production passes none).
-- **rev 2 (= F4):** the deadline is checked at the top of every hop
-  (`test_the_deadline_is_checked_before_every_hop`).
+- **rev 2 (= F4):** the deadline is checked at the top of every hop. At d4435ee the test did not pin it (its post-deadline hop returned HTML, so the body-loop check hid a missing guard); fixed in 32ebacd (rev round 2 #1 below: a 404 hop, only hop 0 sent).
 - **rev 3 (= F9):** `fec0::/10` is refused (outside `2000::/3`).
 - **rev 4 (= F14):** the T7 row above.
 - **rev 5:** a blank line before the RM-43 CHANGELOG heading.
@@ -398,3 +397,10 @@ All sixteen decisions were approved as recommended (team-lead, 2026-10-31).
 | rev r2 #1 | The per-hop deadline test now ends in a 404 that never reaches a body loop, and asserts that only hop 0 was sent. The `if False` mutant of the per-hop guard dies. | `tests/test_web_fetch.py` |
 | rev r2 #2 | The CHANGELOG blank line was already fixed in d4435ee. | — |
 | rev INFO | Each fetch's client is asserted closed after the fetch. | `tests/test_web_fetch.py` |
+- **R4, wording (team-lead, 2026-10-31):** local-use NAT64 `64:ff9b:1::/48` is DENIED outright,
+  whatever it wraps. Only the well-known `64:ff9b::/96` is decode-and-check. In code the deny
+  holds because the /48 is never decoded and lies outside `2000::/3`. The pinned forms
+  `64:ff9b:1:808:8:800:a00:1`, `64:ff9b:1:5db8:d7:e00::` and `64:ff9b:1::5db8:d70e` all
+  return False.
+- **make_client trust (sec-114 INFO):** the docstring now says certifi's CA bundle, not the system
+  trust store.

@@ -224,7 +224,9 @@ def make_client(
 
     ``transport`` and ``verify`` are test seams: a MockTransport, or a context that
     trusts a synthetic test CA. Production passes neither, so certificates are
-    checked against the system's trust store.
+    checked against certifi's CA bundle: httpx's default, and with ``trust_env=False``
+    the ``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` variables are ignored too. The macOS
+    keychain is not consulted (sec-114 INFO).
     """
     return httpx.Client(
         verify=verify,
