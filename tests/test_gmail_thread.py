@@ -861,3 +861,29 @@ def test_the_newest_h2_spells_the_address_the_way_the_summary_does() -> None:
         "under a raw-HTML-passthrough renderer that is an injection vector, and "
         "under CommonMark it is an autolink"
     )
+
+
+# --- RM-45: the rendered-message rule is shared with the attachment pass ----
+
+
+def test_rendered_messages_drops_drafts_from_a_mixed_thread_in_date_order() -> None:
+    """A mixed thread renders its sent messages only, oldest first (RM-45)."""
+    from brain.ingest.gmail import rendered_messages
+
+    late = _make_message(msg_id="m2", internal_date="2000")
+    early = _make_message(msg_id="m1", internal_date="1000")
+    draft = _make_message(msg_id="m3", internal_date="1500", label_ids=["DRAFT"])
+
+    kept = rendered_messages([late, draft, early])
+
+    assert [m["id"] for m in kept] == ["m1", "m2"]
+
+
+def test_rendered_messages_keeps_every_message_of_an_all_draft_thread() -> None:
+    """An all-draft thread renders every draft, oldest first (RM-45)."""
+    from brain.ingest.gmail import rendered_messages
+
+    second = _make_message(msg_id="d2", internal_date="2000", label_ids=["DRAFT"])
+    first = _make_message(msg_id="d1", internal_date="1000", label_ids=["DRAFT"])
+
+    assert [m["id"] for m in rendered_messages([second, first])] == ["d1", "d2"]

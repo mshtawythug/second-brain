@@ -506,6 +506,14 @@ def _format_thread_section(msg: dict[str, Any], *, collapsed: bool) -> str:
     return f"## {escaped_heading}\n\n{body}"
 
 
+def rendered_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The messages a thread body renders, oldest first: every one if all are drafts, else
+    the sent ones (a WIP reply never shows). RM-45's attachment pass reads the same set."""
+    if all(_is_draft(m) for m in messages):
+        return sorted(messages, key=_message_sort_key)
+    return sorted([m for m in messages if not _is_draft(m)], key=_message_sort_key)
+
+
 def to_extracted_thread(messages: list[dict[str, Any]]) -> ExtractedDoc:
     """Group N gmail messages from the same thread into one ExtractedDoc.
 
@@ -566,16 +574,7 @@ def to_extracted_thread(messages: list[dict[str, Any]]) -> ExtractedDoc:
         raise ValueError("to_extracted_thread requires at least one message")
 
     all_drafts = all(_is_draft(m) for m in messages)
-    if all_drafts:
-        # All-draft thread: assemble the full list; the wiki quarantine
-        # hides the resulting doc; brain search still surfaces it.
-        sorted_msgs = sorted(messages, key=_message_sort_key)
-    else:
-        # Mixed or fully-sent thread: drop drafts from the rendered body
-        # so a WIP unsent reply doesn't appear as the visible H2.
-        sorted_msgs = sorted(
-            [m for m in messages if not _is_draft(m)], key=_message_sort_key
-        )
+    sorted_msgs = rendered_messages(messages)
     first = sorted_msgs[0]
     latest = sorted_msgs[-1]
 
