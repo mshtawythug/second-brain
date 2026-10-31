@@ -18,7 +18,7 @@ optional migration-021 generated ``doc_date`` column is present it is used
 instead (auto-detected via ``information_schema``).
 
 **File-size ceiling (CLAUDE.md): already over at the branch base, and it grew.**
-This pointer carries no live line count on purpose — the ceiling table's entry
+This pointer carries no live line count on purpose — docs/ceiling-table.md's entry
 for this file asserted ``844 -> 844`` for a full day *after* the growth below
 had landed, so a reader auditing compliance was told there was nothing to
 audit. Re-derive with ``wc -l src/brain/timeline.py``. What does not rot is the

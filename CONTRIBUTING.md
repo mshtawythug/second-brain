@@ -104,7 +104,7 @@ jobs:
 
 | Job | What it runs |
 |-----|--------------|
-| **Lint and types (ruff + mypy)** | `ruff check`, `mypy src/`, and `python scripts/check_ceiling_table.py` (CLAUDE.md's file-size ceiling table must list exactly the `src/brain/` modules over 800 lines). No Docker, finishes in under a minute, so a formatting or typing mistake fails fast and cheap. |
+| **Lint and types (ruff + mypy)** | `ruff check`, `mypy src/`, and `python scripts/check_ceiling_table.py` (the file-size ceiling table in `docs/ceiling-table.md` must list exactly the `src/brain/` modules over 800 lines). No Docker, finishes in under a minute, so a formatting or typing mistake fails fast and cheap. |
 | **Tests (pytest, AGE Postgres)** | A bare `pytest` against the pinned AGE test instance on port 5434. |
 
 The test job runs **bare `pytest`** on purpose: `pyproject.toml` owns the marker
@@ -368,7 +368,7 @@ after every built-in command (Typer lists commands before sub-apps, so a new
 sub-app lists after every built-in sub-app). The module must not import
 `brain.cli` at module scope. Prefer a new command or sub-app to a new flag on a
 command that lives in `cli.py`: a flag there is the one change the seam cannot
-absorb, and it has to be recorded as growth in CLAUDE.md's ceiling table.
+absorb, and it has to be recorded as growth in `docs/ceiling-table.md`.
 
 **An MCP tool.** Add a module to `src/brain/mcp_tools/` (one per feature area,
 under 400 lines). It gets the server's helpers as a `ToolContext` and must not
