@@ -20,7 +20,7 @@ from brain.ingest import ExtractedDoc
 from brain.ingest import gmail_attachments as ga
 from brain.ingest.attachment_text import REDACTED_CARD
 from brain.ingest.dispatch import extract_path
-from brain.ingest.image import OCR_MISSING_HINT, OcrUnavailableError
+from brain.ingest.image import OCR_OFF_HINT, OcrUnavailableError
 from tests.gmail_attachment_fixtures import (
     MERCHANT,
     FakeGws,
@@ -506,21 +506,29 @@ def test_an_extractor_error_is_unreadable_and_carries_no_text(
     assert MERCHANT not in repr(out) and run.ocr_hint is None
 
 
-def test_ocr_unavailable_is_unreadable_and_sets_the_hint(tmp_path: Path) -> None:
+def test_ocr_unavailable_is_unreadable_and_sets_the_hint_from_the_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BRAIN_OCR", "off")
+
     def no_ocr(path: Path) -> ExtractedDoc:
-        raise OcrUnavailableError(OCR_MISSING_HINT)
+        raise OcrUnavailableError(f"{MERCHANT} text that must not be kept")
 
     out, run = _run_one(tmp_path, _pdf_part(inline=receipt_png()), extract=no_ocr)
 
     assert out.records[0].status == "unreadable"
-    assert run.ocr_hint == OCR_MISSING_HINT
+    assert run.ocr_hint == OCR_OFF_HINT
 
 
-def test_the_ocr_hint_is_kept_from_the_first_image(tmp_path: Path) -> None:
-    hints = iter(["first hint", "second hint"])
+def test_the_ocr_hint_is_kept_from_the_first_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BRAIN_OCR", "off")
+    settings = iter(["off", "auto"])
 
     def no_ocr(path: Path) -> ExtractedDoc:
-        raise OcrUnavailableError(next(hints))
+        monkeypatch.setenv("BRAIN_OCR", next(settings))
+        raise OcrUnavailableError("unused")
 
     run = ga.AttachmentRun(_limits())
     plan = _plan([_pdf_part(str(i), inline=receipt_png()) for i in (1, 2)])
@@ -528,7 +536,7 @@ def test_the_ocr_hint_is_kept_from_the_first_image(tmp_path: Path) -> None:
     ga.extract_attachments(plan.candidates, run=run, runner=FakeGws(), workdir=tmp_path,
                            extract=no_ocr)
 
-    assert run.ocr_hint == "first hint"
+    assert run.ocr_hint == OCR_OFF_HINT
     assert run.counts["unreadable"] == 2
 
 

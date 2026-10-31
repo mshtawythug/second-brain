@@ -538,10 +538,12 @@ def _one(
 
 
 def _note_ocr_hint(exc: GmailAttachmentError, run: AttachmentRun) -> None:
-    from .image import OcrUnavailableError
+    """Keep the OCR-unavailable hint once, rebuilt from the OCR setup, never from ``exc``."""
+    from .image import OcrUnavailableError, ocr_unavailable_hint
+    from .ocr import resolve_ocr
 
     if run.ocr_hint is None and isinstance(exc.__cause__, OcrUnavailableError):
-        run.ocr_hint = str(exc.__cause__)  # a fixed message: the hint, never content
+        run.ocr_hint = ocr_unavailable_hint(resolve_ocr(os.environ))
 
 
 def extract_attachments(
