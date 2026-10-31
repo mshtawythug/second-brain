@@ -223,6 +223,37 @@ def test_an_unchanged_stored_normal_thread_and_its_mirror_are_escalated(
     assert "sensitivity: confidential" in mirror.read_text(encoding="utf-8")
 
 
+def test_a_skipped_unchanged_thread_lowered_by_hand_is_escalated_again(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, test_db: psycopg.Connection
+) -> None:
+    """rev-117 #2 (D4): the fingerprint skip escalates too, not only ``after_ingest``.
+
+    The owner lowers the thread (what ``brain mark-normal`` does: the column and the
+    mirror); a flagged re-run skips it before any download and still raises it back.
+    """
+    from brain.queries import set_document_sensitivity
+    from brain.vault.sensitivity_propagate import propagate_sensitivity_to_vault
+
+    gws = _serve(monkeypatch, _thread_gws([_pdf()], **{AID: receipt_pdf()}))
+    assert _receipts().exit_code == 0
+    document_id = _row(test_db)["id"]
+    assert set_document_sensitivity(test_db, document_id=document_id, level="normal")
+    list(propagate_sensitivity_to_vault(test_db, document_id, level="normal", vault_root=vault))
+    test_db.commit()
+    (mirror,) = vault.rglob("*.md")
+    assert "sensitivity: confidential" not in mirror.read_text(encoding="utf-8")
+    calls = len(gws.attachment_calls())
+
+    result = _receipts()
+
+    assert result.exit_code == 0, result.output
+    assert f"skipped thread {TID} (unchanged)" in result.output
+    assert f"marked confidential thread {TID}" in result.output
+    assert len(gws.attachment_calls()) == calls
+    assert _row(test_db)["sensitivity"] == "confidential"
+    assert "sensitivity: confidential" in mirror.read_text(encoding="utf-8")
+
+
 def test_a_plain_run_never_lowers_a_confidential_thread(
     vault: Path, monkeypatch: pytest.MonkeyPatch, test_db: psycopg.Connection
 ) -> None:

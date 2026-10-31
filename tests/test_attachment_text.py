@@ -55,7 +55,9 @@ def test_a_sixteen_digit_order_number_that_fails_luhn_is_kept() -> None:
     assert redact_card_numbers(order) == order
 
 
-@pytest.mark.parametrize("digits", ["411111111111", "41111111111111111111"])
+@pytest.mark.parametrize(
+    "digits", ["411111111111", "41111111111111111111", "4111111111111111111100"]
+)
 def test_runs_shorter_than_thirteen_or_longer_than_nineteen_are_kept(digits: str) -> None:
     assert redact_card_numbers(digits) == digits
 
@@ -258,6 +260,11 @@ def test_a_name_cannot_carry_a_link() -> None:
         ("4111 1111 \n 1111 1111", ""),
         ("Card: 4111111111111111 exp 12/28", "exp 12/28"),
         ("Order 1234 4111 1111 1111 1111", "Order 1234"),
+        # rev-117's cases: an amount, a count or a reference printed next to the card
+        ("4111111111111111 10.00", "10.00"),
+        ("Visa 4111111111111111 1 item", "1 item"),
+        ("Qty 2 4111111111111111", "Qty 2"),
+        ("ref 4111 1111 1111 1111 000 total", "000 total"),
     ],
 )
 def test_every_card_layout_in_the_review_is_redacted(layout: str, kept: str) -> None:
