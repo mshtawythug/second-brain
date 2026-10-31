@@ -75,9 +75,10 @@ def test_an_entry_becomes_a_post() -> None:
 
 @pytest.mark.parametrize(
     "post_id",
-    ["", "12a", " 123", "123 ", "-1", "1" * 20, str(2**63), "١٢٣", "+5"],
+    ["", "12a", " 123", "123 ", "-1", "1" * 20, "1" * 5000, str(2**63), "١٢٣", "+5"],
 )
 def test_a_malformed_id_is_skipped(post_id: str) -> None:
+    """The 19-digit bound runs before ``int()``: a 4301+ digit string would raise (rev-116)."""
     assert sp.post_from_entry(fx.fields(post_id), "like", now=fx.NOW) == sp.SKIP_MALFORMED
 
 

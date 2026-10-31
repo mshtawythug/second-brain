@@ -21,6 +21,8 @@ from tests import social_archive_fixtures as fx
 MODULES = [
     Path(sa.__file__),
     Path(sa.__file__).with_name("social_posts.py"),
+    Path(sa.__file__).parents[1] / "cli_ingest_bookmarks.py",
+    Path(sa.__file__).parents[1] / "cli_sensitivity_rerun.py",
 ]
 PID = fx.post_id_at(fx.NOW - fx.DAY)
 ENTRY = fx.fields(PID)
