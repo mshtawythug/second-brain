@@ -439,3 +439,55 @@ def test_also_turns_more_signals_into_a_system_exit_and_restores_them() -> None:
 
     assert info.value.code == 128 + signal.SIGHUP
     assert (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)) == before
+
+
+# --- resource_limits (RM-45, sec-117 F3) -------------------------------------------
+
+
+def test_a_cpu_limit_stops_a_busy_child(tmp_path: Path) -> None:
+    import resource
+    import signal
+
+    tool = _script(tmp_path, "while :; do :; done")
+    started = time.monotonic()
+
+    run = _run([tool], resource_limits=[(resource.RLIMIT_CPU, 1)], timeout=30.0)
+
+    assert run.returncode in (-signal.SIGXCPU, -signal.SIGKILL)
+    assert not run.timed_out
+    assert time.monotonic() - started < 20
+
+
+def test_resource_limits_and_max_file_bytes_both_apply(tmp_path: Path) -> None:
+    import resource
+
+    out = tmp_path / "out.bin"
+    tool = _script(tmp_path, 'ulimit -t; head -c 100000 /dev/zero > "$1"')
+
+    run = _run([tool, str(out)], resource_limits=[(resource.RLIMIT_CPU, 7)],
+               max_file_bytes=1000)
+
+    assert run.stdout.strip() == b"7"
+    assert out.stat().st_size <= 1000
+
+
+def test_a_limit_the_platform_refuses_is_skipped_and_the_child_still_runs(
+    tmp_path: Path,
+) -> None:
+    """Raising a finite hard limit is refused for an unprivileged child on every platform;
+    the refusal is skipped (as macOS's refusal of ``RLIMIT_AS`` is) and the child runs."""
+    import resource
+
+    finite = [
+        which
+        for which in (resource.RLIMIT_NOFILE, resource.RLIMIT_NPROC, resource.RLIMIT_STACK)
+        if resource.getrlimit(which)[1] != resource.RLIM_INFINITY
+    ]
+    if not finite or os.geteuid() == 0:
+        pytest.skip("no finite hard limit to raise, or running as root")
+    which = finite[0]
+    tool = _script(tmp_path, "printf ok")
+
+    run = _run([tool], resource_limits=[(which, resource.getrlimit(which)[1] + 1)])
+
+    assert run == CappedRun(b"ok", 0, timed_out=False, oversized=False)

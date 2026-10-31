@@ -169,3 +169,46 @@ class FakeGws:
 
     def attachment_calls(self) -> list[list[str]]:
         return [c for c in self.calls if c[4:6] == ["attachments", "get"]]
+
+
+def bogus_filter_pdf() -> bytes:
+    """sec-117 F1: a one-page PDF whose content stream declares ``/Filter /Bogus``.
+
+    pypdf reads no text, so the pdfplumber fallback runs and raises
+    ``PdfminerException``, which no allow-list of exception types covered.
+    """
+    from pypdf import PdfWriter
+    from pypdf.generic import NameObject, StreamObject
+
+    writer = PdfWriter()
+    writer.add_blank_page(612, 792)
+    stream = StreamObject()
+    stream._data = b"xxxx"
+    stream[NameObject("/Filter")] = NameObject("/Bogus")
+    writer.pages[0][NameObject("/Contents")] = writer._add_object(stream)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+def shared_stream_pdf(pages: int = 4, operators: int = 200_000) -> bytes:
+    """sec-117 F3: ``pages`` pages that all point at one FlateDecode content stream.
+
+    The stream holds ``operators`` no-text path operators, so every page parse
+    decodes and walks it again (and the pdfplumber fallback does it once more):
+    a ~3 KB file costs seconds of pure-Python CPU.
+    """
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, NameObject
+
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(612, 792)
+    stream = DecodedStreamObject()
+    stream.set_data(b"0 0 m\n" * operators)
+    shared = writer._add_object(stream.flate_encode())
+    for page in writer.pages:
+        page[NameObject("/Contents")] = shared
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()

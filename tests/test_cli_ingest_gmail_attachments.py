@@ -114,10 +114,14 @@ def test_a_pdf_attachment_becomes_a_searchable_section(
         (TID,),
     ).fetchone()
     assert hits is not None and hits[0] >= 1
-    assert row["metadata"]["attachments"] == [{
-        "message_id": MID, "part_id": "1", "status": "extracted", "type": "pdf",
+    (record,) = row["metadata"]["attachments"]
+    assert {k: record[k] for k in ("message_id", "part_id", "size", "status", "type", "bytes",
+                                   "pages")} == {
+        "message_id": MID, "part_id": "1", "size": 4096, "status": "extracted", "type": "pdf",
         "bytes": len(receipt_pdf()), "pages": 1,
-    }]
+    }
+    assert set(record) == {"message_id", "part_id", "size", "status", "type", "bytes", "pages",
+                           "chars", "sha256"}
     assert len(gws.attachment_calls()) == 1
 
 
@@ -288,7 +292,7 @@ def test_a_retryable_status_is_fetched_again(
     result = _receipts()
 
     assert result.exit_code == 0, result.output
-    assert "attachments: 2 extracted, 0 failed" in result.output
+    assert "attachments: 1 extracted, 1 kept, 0 failed" in result.output  # sec-117 F2
     assert "Example Cafe" in _row(test_db)["content"]
 
 

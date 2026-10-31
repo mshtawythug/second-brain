@@ -6,6 +6,7 @@ local function; PDFs come from reportlab, PNGs from Pillow, all synthetic.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import stat
@@ -52,8 +53,12 @@ def _plan(parts: list[dict[str, Any]], **limits: Any) -> ga.ThreadPlan:
     return ga.plan_thread([message_with_parts(MID, TID, parts)], BODY, limits=_limits(**limits))
 
 
+class ExtractCalledError(BaseException):
+    """A BaseException, so the reader's catch-all (sec-117 F1) cannot swallow it."""
+
+
 def _never_extract(path: Path) -> ExtractedDoc:
-    raise AssertionError(f"extract must not run: {path}")
+    raise ExtractCalledError(f"extract must not run: {path}")
 
 
 def _run_one(
@@ -419,9 +424,11 @@ def test_a_png_named_pdf_goes_to_the_image_extractor(tmp_path: Path) -> None:
     out, _ = _run_one(tmp_path, _pdf_part(inline=receipt_png()), extract=fake_extract)
 
     assert [p.name for p in seen] == ["attachment.png"]
-    assert out.records[0].as_metadata() == {
-        "message_id": MID, "part_id": "1", "status": "extracted", "type": "png",
-        "bytes": len(receipt_png()), "ocr": "tesseract",
+    meta = out.records[0].as_metadata()
+    assert meta.pop("sha256") == hashlib.sha256(out.sections[0].encode()).hexdigest()
+    assert meta == {
+        "message_id": MID, "part_id": "1", "size": 2048, "status": "extracted", "type": "png",
+        "bytes": len(receipt_png()), "ocr": "tesseract", "chars": len(out.sections[0]),
     }
 
 
@@ -450,16 +457,18 @@ def test_a_text_pdf_becomes_a_redacted_section(tmp_path: Path) -> None:
     assert section.startswith("## Attachment: Receipt-0001.pdf\n\n")
     assert MERCHANT in section and REDACTED_CARD in section
     assert "4111" not in section
-    assert out.records[0].as_metadata() == {
-        "message_id": MID, "part_id": "1", "status": "extracted", "type": "pdf",
-        "bytes": len(data), "pages": 1,
+    meta = out.records[0].as_metadata()
+    assert meta.pop("sha256") == hashlib.sha256(section.encode()).hexdigest()
+    assert meta == {
+        "message_id": MID, "part_id": "1", "size": 2048, "status": "extracted", "type": "pdf",
+        "bytes": len(data), "pages": 1, "chars": len(section),
     }
     assert run.counts["extracted"] == 1 and run.processed == 1
 
 
 def test_an_encrypted_pdf_is_refused_before_extraction(tmp_path: Path) -> None:
-    out, _ = _run_one(tmp_path, _pdf_part(inline=receipt_pdf(encrypt="pw")),
-                      extract=_never_extract)
+    """The page check runs in the parse child now (sec-117 F3): the default extractor."""
+    out, _ = _run_one(tmp_path, _pdf_part(inline=receipt_pdf(encrypt="pw")), extract=None)
 
     assert out.records[0].status == "encrypted"
     assert out.sections == []
@@ -468,27 +477,13 @@ def test_an_encrypted_pdf_is_refused_before_extraction(tmp_path: Path) -> None:
 def test_a_pdf_over_the_page_cap_is_refused_before_extraction(tmp_path: Path) -> None:
     run = ga.AttachmentRun(_limits(max_pages=2))
 
-    out, _ = _run_one(tmp_path, _pdf_part(inline=receipt_pdf(pages=3)),
-                      extract=_never_extract, run=run)
+    out, _ = _run_one(tmp_path, _pdf_part(inline=receipt_pdf(pages=3)), extract=None, run=run)
 
     assert out.records[0].status == "too many pages"
 
 
 def test_a_pdf_that_pypdf_cannot_open_is_unreadable(tmp_path: Path) -> None:
-    out, _ = _run_one(tmp_path, _pdf_part(inline=b"%PDF-1.7\nbroken"), extract=_never_extract)
-
-    assert out.records[0].status == "unreadable"
-
-
-def test_a_non_pypdf_error_from_the_page_check_is_unreadable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def deep(path: str) -> Any:
-        raise RecursionError("nested object streams")
-
-    monkeypatch.setattr("pypdf.PdfReader", deep)
-
-    out, _ = _run_one(tmp_path, _pdf_part(inline=receipt_pdf()), extract=_never_extract)
+    out, _ = _run_one(tmp_path, _pdf_part(inline=b"%PDF-1.7\nbroken"), extract=None)
 
     assert out.records[0].status == "unreadable"
 
@@ -662,9 +657,9 @@ def test_the_thread_cap_truncates_then_stops_extracting(tmp_path: Path) -> None:
 def test_the_final_statuses() -> None:
     assert frozenset(
         {"extracted", "empty", "too large", "too many pages", "encrypted", "unsupported",
-         "unreadable", "malformed"}
+         "unreadable", "malformed", "truncated"}
     ) == ga.FINAL_STATUSES
-    assert ga.FINAL_STATUSES.isdisjoint({"failed", "over cap", "deadline", "no ocr", "truncated"})
+    assert ga.FINAL_STATUSES.isdisjoint({"failed", "over cap", "deadline", "no ocr"})
 
 
 # --- the work directory ------------------------------------------------------
@@ -721,3 +716,83 @@ def test_the_new_ingest_modules_have_no_network_or_process_code(module: str) -> 
             imported.add(node.module.split(".")[0])
 
     assert imported.isdisjoint(banned)
+
+
+# --- sec-117 ------------------------------------------------------------------
+
+
+def test_any_exception_from_an_extractor_is_a_final_unreadable(tmp_path: Path) -> None:
+    """F1: containment was an allow-list; pdfplumber's PdfminerException and pypdf's bare
+    Exception / NotImplementedError went straight through it."""
+    class Unlisted(Exception):
+        pass
+
+    def boom(path: Path) -> ExtractedDoc:
+        raise Unlisted(f"{MERCHANT} text")
+
+    out, _ = _run_one(tmp_path, _pdf_part(inline=receipt_png()), extract=boom)
+
+    assert out.records[0].status == "unreadable"
+    assert "unreadable" in ga.FINAL_STATUSES
+
+
+def test_a_full_disk_while_writing_an_attachment_is_unreadable_and_leaves_no_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: the temp-file write sat outside the wrapped block, so ENOSPC aborted the run."""
+    import errno
+
+    real_fdopen = os.fdopen
+
+    class FullDisk:
+        def __init__(self, fp: Any) -> None:
+            self.fp = fp
+
+        def __enter__(self) -> FullDisk:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self.fp.close()
+
+        def write(self, data: bytes) -> int:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(ga.os, "fdopen", lambda fd, mode: FullDisk(real_fdopen(fd, mode)))
+    workdir = tmp_path / "w"
+    workdir.mkdir(mode=0o700)
+    run = ga.AttachmentRun(_limits())
+    plan = _plan([_pdf_part(inline=receipt_pdf())])
+
+    out = ga.extract_attachments(plan.candidates, run=run, runner=FakeGws(), workdir=workdir,
+                                 extract=_never_extract)
+
+    assert out.records[0].status == "unreadable"
+    assert list(workdir.iterdir()) == []
+
+
+def test_the_registry_wraps_pdfplumbers_own_error(tmp_path: Path) -> None:
+    """F1 defence in depth: ``brain ingest x.pdf`` gets a one-line refusal, not a traceback."""
+    from tests.gmail_attachment_fixtures import bogus_filter_pdf
+
+    path = tmp_path / "bogus.pdf"
+    path.write_bytes(bogus_filter_pdf())
+
+    with pytest.raises(ValueError, match="malformed PDF"):
+        extract_path(path)
+
+
+def test_a_single_part_message_whose_payload_is_the_pdf_is_a_candidate() -> None:
+    """I2: the payload itself has ``partId == ""``; it was counted malformed."""
+    message = message_with_parts(MID, TID, [])
+    message["payload"] = _pdf_part("", attachment_id=AID)
+
+    plan = ga.plan_thread([message], BODY, limits=_limits())
+
+    assert [c.part_id for c in plan.candidates] == [""]
+    assert plan.malformed == 0
+
+
+def test_an_empty_part_id_below_the_root_is_still_malformed() -> None:
+    plan = _plan([_pdf_part("", attachment_id=AID)])
+
+    assert plan.candidates == [] and plan.malformed == 1
