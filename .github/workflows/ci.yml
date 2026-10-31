@@ -139,7 +139,8 @@ jobs:
   test:
     name: Tests (pytest, AGE Postgres)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 30 was too tight: master ran 24m49s, 26m48s, 29m15s; #113 28m21s; cancelled at 30m on f311a94 and #114 (BL-36).
+    timeout-minutes: 45
 
     env:
       DATABASE_URL: postgresql://brain:brain@localhost:5434/second_brain_test
