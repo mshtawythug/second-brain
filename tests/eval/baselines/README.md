@@ -392,7 +392,7 @@ both `ci.json` **and** `tests/eval/golden_corpus.yaml`; the corpus is gitignored
 so on a hosted runner this is always the skip branch. Retrieval-quality gating is
 a **local pre-merge check**. CI covers harness health only. See the header
 comment in `eval.yml` for the four preconditions a hosted runner cannot supply,
-and `CLAUDE.md` → "Eval gate (CI)".
+and `docs/eval-gate.md` (summarised in `CLAUDE.md` → "Eval gate (CI)").
 
 ## The corpus that backs `ci.json`
 

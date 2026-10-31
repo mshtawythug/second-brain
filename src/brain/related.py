@@ -31,7 +31,7 @@ Read it as authoritative only THROUGH THE LAST SHA IT NAMES; for anything after
 it use
 ``git log --oneline f8c76c0..HEAD -- src/brain/related.py``. Being under is a
 live condition, not a settled one: a commit that pushes it back over needs its
-CLAUDE.md row back. The next clean seam, if one is needed, is the lexeme/tsquery
+docs/ceiling-table.md row back. The next clean seam, if one is needed, is the lexeme/tsquery
 machinery at the tail (``_build_self_tsquery``, ``_corpus_common_lexemes``,
 ``_top_body_lexemes``, the tsquery-escaping helpers), already covered by
 ``tests/test_build_related_signal.py``.

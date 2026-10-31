@@ -1,6 +1,7 @@
-"""Fail when CLAUDE.md's file-size ceiling table and the source tree disagree.
+"""Fail when the file-size ceiling table and the source tree disagree.
 
-The ceiling table in ``CLAUDE.md`` ("File-size ceiling — 800 lines") lists every
+The ceiling table in ``docs/ceiling-table.md`` (``TABLE_DOC``; ``CLAUDE.md`` keeps
+the rule, under "File-size ceiling — 800 lines", and points there) lists every
 module under ``src/brain/`` that is over 800 lines. Its digits were made
 rot-proof long ago; its *row set* was not, because nothing noticed a file that
 crossed 800 without getting a row (``related.py`` did exactly that), or a row
@@ -14,7 +15,7 @@ anchor because it is unique in the file; a heading-text anchor would break on
 the next rewording, and a missing header exits 2 rather than passing.
 
 Exit codes: 0 the table and the tree agree; 1 they disagree (every problem is
-named, with its remedy); 2 ``CLAUDE.md``, the table header or ``src/brain/`` was
+named, with its remedy); 2 ``TABLE_DOC``, the table header or ``src/brain/`` was
 not found, or the header line appears more than once.
 
 It does NOT check what a row says (the trail, the recorded reasons) — that is a
@@ -30,6 +31,8 @@ from pathlib import Path
 
 CEILING = 800
 HEADER = "| File | Lines | Why it is not being split |"
+# The table moved out of CLAUDE.md on 2026-10-29 (docs/plans/2026-10-29-slim-claude-md.md).
+TABLE_DOC = Path("docs") / "ceiling-table.md"
 
 # Separator row under the header, e.g. `|---|---|---|` or `| :-- | --- |`.
 SEPARATOR_RE = re.compile(r"^\|(?:\s*:?-+:?\s*\|)+\s*$")
@@ -44,7 +47,7 @@ WC_RE = re.compile(r"`wc -l src/brain/(?P<path>[^`\s]+)`")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 ADD_ROW = (
-    "add a row in the CLAUDE.md trail form (re-derive command in the Lines cell, a "
+    "add a row in docs/ceiling-table.md's trail form (re-derive command in the Lines cell, a "
     "trail and the recorded reason in the Why cell), or extract until it is back "
     "under the ceiling"
 )
@@ -56,7 +59,7 @@ REMOVE_GONE_ROW = "remove the row (a deleted file has no size to record)"
 
 
 class TableNotFound(Exception):
-    """CLAUDE.md has no line equal to ``HEADER``, or more than one."""
+    """``TABLE_DOC`` has no line equal to ``HEADER``, or more than one."""
 
 
 @dataclass(frozen=True)
@@ -113,9 +116,9 @@ def over_ceiling(src_root: Path) -> dict[str, int]:
     return over
 
 
-def table_rows(claude_md: str) -> list[TableRow]:
+def table_rows(text: str) -> list[TableRow]:
     """The ceiling table's data rows, in order. Raises ``TableNotFound`` without the header."""
-    lines = claude_md.splitlines()
+    lines = text.splitlines()
     anchors = [i for i, line in enumerate(lines) if line.rstrip() == HEADER]
     if len(anchors) != 1:
         # Two tables under one header would make "which row set?" a guess.
@@ -212,7 +215,7 @@ def format_report(report: CeilingReport, src_root: Path) -> list[str]:
     for missing in report.missing_rows:
         messages.append(
             f"src/brain/{missing.path}: {missing.lines} lines (> {CEILING}) and no row in "
-            f"CLAUDE.md's ceiling table. Remedy: {ADD_ROW}."
+            f"{TABLE_DOC.as_posix()}. Remedy: {ADD_ROW}."
         )
     for path in report.stale_rows:
         target = src_root / path
@@ -236,23 +239,27 @@ def main(argv: list[str] | None = None) -> int:
         "--repo-root",
         type=Path,
         default=REPO_ROOT,
-        help="repository root holding CLAUDE.md and src/brain/ (default: this checkout)",
+        help="repository root holding docs/ceiling-table.md and src/brain/ (default: here)",
     )
     args = parser.parse_args(argv)
-    claude_md = args.repo_root / "CLAUDE.md"
+    table_doc = args.repo_root / TABLE_DOC
     src_root = args.repo_root / "src" / "brain"
 
-    if not claude_md.is_file():
-        print(f"check_ceiling_table: no CLAUDE.md at {claude_md}", file=sys.stderr)
+    if not table_doc.is_file():
+        print(
+            f"check_ceiling_table: no {TABLE_DOC.as_posix()} at {table_doc}",
+            file=sys.stderr,
+        )
         return 2
     if not src_root.is_dir():
         print(f"check_ceiling_table: no src/brain directory at {src_root}", file=sys.stderr)
         return 2
     try:
-        rows = table_rows(claude_md.read_text(encoding="utf-8"))
+        rows = table_rows(table_doc.read_text(encoding="utf-8"))
     except TableNotFound as exc:
         print(
-            f"check_ceiling_table: cannot find CLAUDE.md's ceiling table ({exc}). The check "
+            f"check_ceiling_table: cannot find the ceiling table in {TABLE_DOC.as_posix()} "
+            f"({exc}). The check "
             f"anchors on exactly one line that is:\n  {HEADER}\nIf the header was reworded, "
             "update HEADER in scripts/check_ceiling_table.py in the same change.",
             file=sys.stderr,
@@ -262,7 +269,8 @@ def main(argv: list[str] | None = None) -> int:
     report = compare(over_ceiling(src_root), rows)
     if has_problems(report):
         print(
-            f"check_ceiling_table: CLAUDE.md's ceiling table and src/brain/ disagree "
+            f"check_ceiling_table: the ceiling table ({TABLE_DOC.as_posix()}) and src/brain/ "
+            f"disagree "
             f"({report.over} files over {CEILING} lines, {report.rows} rows):",
             file=sys.stderr,
         )

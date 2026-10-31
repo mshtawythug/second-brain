@@ -350,7 +350,7 @@ def diff_reports(baseline: EvalReport, current: EvalReport) -> BaselineDiff:
 # constructible: a delta of exactly ``-0.0001`` is NOT a regression (it equals
 # the threshold), whereas ``-0.0002`` is. A raw-float compare would be
 # IEEE-754-fragile right at that boundary. Uniform across all three metrics
-# (nDCG@5 / MRR / Recall@20) — no per-metric overrides (CLAUDE.md decision).
+# (nDCG@5 / MRR / Recall@20) — no per-metric overrides (docs/eval-gate.md decision).
 _FAIL_BELOW_THRESHOLD: float = -1e-4
 
 

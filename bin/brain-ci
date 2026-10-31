@@ -522,7 +522,7 @@ if (( RUN_LINT )); then
   MYPY_STATUS=$?
   (( MYPY_STATUS == 0 )) && ok "mypy src/ passed"
 
-  # RM-04: CLAUDE.md's ceiling table must list exactly the src/brain/ modules
+  # RM-04: docs/ceiling-table.md's table must list exactly the src/brain/ modules
   # over 800 lines. tests/test_bin_brain_ci.py fails if this step exists here
   # and not in ci.yml's lint job, or the reverse.
   step "ci.yml job 'lint' — python scripts/check_ceiling_table.py"
