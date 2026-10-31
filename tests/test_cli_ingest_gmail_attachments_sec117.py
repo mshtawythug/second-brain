@@ -155,7 +155,10 @@ def test_thread_truncation_is_final_and_its_text_is_stored(
 
     result = _receipts()
 
+    # Skipped before any planning, not rebuilt and found unchanged: nothing is kept,
+    # carried or counted (a non-final 'truncated' would re-plan the thread every run).
     assert f"skipped thread {HOSTILE_TID} (unchanged)" in result.output
+    assert "attachments: 0 extracted, 0 failed" in result.output
     assert len(gws.attachment_calls()) == calls
 
 
