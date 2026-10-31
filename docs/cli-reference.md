@@ -709,6 +709,10 @@ brain ingest-gmail --query 'has:attachment subject:receipt' --since 2026/01/01 -
   characters per attachment and 200,000 per thread, and 15 minutes of
   attachment work per run. Each download is one `gws gmail users messages
   attachments get` call with a 60 s timeout and a stdout cap.
+- **Isolation.** Each attachment is parsed in a child process with a 60 s CPU
+  limit, a 1 GiB memory bound, a 180 s wall clock and its own process group;
+  hitting any of them, or any parser error, makes it `unreadable` and the run
+  goes on.
 - **What is read.** The file's magic bytes decide its type, whatever the email
   says. A PDF's text layer is used, or OCR (RM-32) for a scanned page; an image
   is OCR'd (RM-33), so it needs `tesseract` and `BRAIN_OCR` not `off`. An
@@ -722,10 +726,15 @@ brain ingest-gmail --query 'has:attachment subject:receipt' --since 2026/01/01 -
   thread's `metadata.attachments` lists each attachment's message and part ids,
   type, size, page count and status, never its name.
 - **Re-runs.** A re-run with the flag skips an unchanged thread without
-  downloading anything; an attachment that failed, hit a cap or ran out of
-  time is tried again, and so is an image read while OCR was off or
-  `tesseract` missing (`no ocr`). A file its parser refused (`unreadable`) is
-  not. A run **without** the flag skips a thread that holds
+  downloading anything. Otherwise only attachments without a final outcome are
+  fetched: one that failed, hit the run cap or ran out of time, and an image
+  read while OCR was off or `tesseract` missing (`no ocr`). The others are
+  `kept` with their stored text, so a thread with more than 50 attachments
+  finishes over several runs. A file its parser refused (`unreadable`) and one
+  past the thread's text budget (`truncated`) are not tried again. If stored
+  text cannot be rebuilt this run, the stored thread is kept as it is
+  ("kept thread <id> …"). At most 100 attachments per thread are recorded
+  (`too many`). A run **without** the flag skips a thread that holds
   attachment text, with "skipped thread <id> (has attachments: re-run with
   --with-attachments)", so the receipt text is never dropped.
 - **Output.** A line per attachment that was not extracted (`attachment 2 of

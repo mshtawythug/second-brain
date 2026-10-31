@@ -45,6 +45,20 @@ git tag scheme:
 - `ingest-gmail` now prints the hosted-embedder egress notice. New:
   `brain/ingest/gmail_attachments.py`, `brain/ingest/attachment_text.py`,
   `brain/cli_gmail_attachments.py`; `ingest/gmail.py` exposes `rendered_messages`.
+- Security round (sec-117): each attachment is parsed in a child process
+  (`brain/ingest/attachment_worker.py`, `attachment_isolation.py`) under a CPU limit, a memory
+  bound (`RLIMIT_AS` where enforced, an RSS watchdog everywhere), a wall-clock timeout and its own
+  process group, with stdin `/dev/null` and stderr discarded; any limit hit, and any exception
+  from a hostile file (including a full disk on the temp write), is a final `unreadable`, so one
+  PDF can no longer stop the run. Re-runs carry every final outcome and its stored section
+  (`attachment_carry.py`, hash-checked), so a thread over the 50-per-run cap makes progress and
+  later threads are reached; `truncated` is final; a stored section is never dropped. Card
+  redaction normalizes first (soft hyphens, zero-width and no-break spaces) and finds a card
+  printed before an expiry or more digits. U+2028/U+2029 become newlines before escaping.
+  SIGTERM/SIGHUP remove the private directory. At most 100 attachments per thread are recorded.
+  `capped_process.run_capped` gains an opt-in `resource_limits`; `real_gws_runner`'s capped read
+  (calendar too) now kills its process group, gives `gws` no stdin and keeps no stderr; the PDF
+  extractor also wraps pdfplumber's `PdfminerException`.
 
 ### Added — social bookmarks from your own data archive (RM-44, PR #116)
 
