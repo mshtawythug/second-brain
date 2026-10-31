@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 from tests.secret_fixtures import SYNTHETIC_AWS_KEY
@@ -117,7 +118,7 @@ def write(repo: Path, rel: str, body: str | bytes) -> None:
         path.write_text(body, encoding="utf-8")
 
 
-def commit(repo: Path, files: dict[str, str | bytes], *, home: Path,
+def commit(repo: Path, files: Mapping[str, str | bytes], *, home: Path,
            author: tuple[str, str], date: str = NEW_DATE, force: bool = False) -> None:
     for rel, body in files.items():
         write(repo, rel, body)

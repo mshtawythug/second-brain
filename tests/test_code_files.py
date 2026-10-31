@@ -241,6 +241,21 @@ def test_a_directory_symlink_out_of_the_tree_is_refused(tmp_path: Path) -> None:
     assert cf.read_code_file(root, "escape/secret.py") == cf.SKIP_OUTSIDE
 
 
+def test_a_file_outside_the_named_directory_is_outside_even_inside_the_root(
+    tmp_path: Path,
+) -> None:
+    """sec-113: reads stay inside the directory the owner named, whatever git reported."""
+    root = _root(tmp_path)
+    _put(root, "named/kept.py", b"x = 1\n")
+    _put(root, "sibling/other.py", b"y = 2\n")
+    named = (root / "named").resolve()
+
+    assert cf.read_code_file(root, "named/kept.py", within=named) == CodeFile(
+        path="named/kept.py", text="x = 1\n"
+    )
+    assert cf.read_code_file(root, "sibling/other.py", within=named) == cf.SKIP_OUTSIDE
+
+
 def test_a_fifo_swapped_in_is_not_read(tmp_path: Path) -> None:
     """``O_NONBLOCK`` plus the post-open ``fstat``: a FIFO never blocks the run."""
     root = _root(tmp_path)

@@ -190,7 +190,7 @@ def _ingest_all(tree: cr.WorkTree, candidates: list[str], run: _Run) -> None:
         conn.autocommit = True
         try:
             for path in candidates:
-                read = cf.read_code_file(tree.root, path)
+                read = cf.read_code_file(tree.root, path, within=tree.scope)
                 if isinstance(read, str):
                     run.counts[read] += 1
                     continue

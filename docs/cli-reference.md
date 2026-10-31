@@ -893,9 +893,19 @@ brain ingest-code ~/src/side-project --author-email you@example.com --since 2025
   prints how many still need writing, and re-running continues, since unchanged files are free.
   Summaries are off unless `--enrich`, and `code` skips concept extraction in the graph, so a
   capped run costs only embeddings.
+- **An untrusted repository.** The repository's own `.git/config` cannot make `git` run a
+  command here: transports and lazy fetches are off, and the hooks, fsmonitor, pager,
+  external-diff, textconv and signature commands are forced off or never reached. Your global
+  git config is not read either; only the default global ignore file
+  (`~/.config/git/ignore`) still applies. A **partial clone** (one with a promisor remote) is
+  refused, since reading its history would fetch. So is a repository whose `core.worktree`
+  points outside the directory you named. Only files that resolve inside that directory are
+  read.
 - **Exit codes.** 0 when the run completes, including refused or failed files, which are
   counted; 1 when `git` is missing (with an install hint; `brain doctor`'s `git` row warns), the
-  directory is not in a git work tree, or the database is unreachable; 2 for usage.
+  directory is not in a git work tree, the repository is refused (a partial clone, or a work
+  tree configured elsewhere), `--sensitivity` is not a level, or the database is unreachable;
+  2 for the other usage errors.
 - **Not done:** a file deleted from the repository keeps its document (remove it with
   `brain rm`). The vault mirror of a code document is a Markdown file whose body is code;
   `brain vault sync` reads no wiki links from it, so a `[[Name]]` in a comment never links the

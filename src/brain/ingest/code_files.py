@@ -123,17 +123,20 @@ def select_candidates(
     return keep, skipped
 
 
-def read_code_file(root: Path, path: str) -> CodeFile | str:
+def read_code_file(root: Path, path: str, *, within: Path | None = None) -> CodeFile | str:
     """Read ``root / path`` as code, or return the skip reason.
 
-    ``root`` is the work tree's resolved top level.
+    ``root`` is the work tree's resolved top level. ``within`` (default ``root``)
+    is the resolved directory the owner named; a file that does not resolve
+    inside it is :data:`SKIP_OUTSIDE`, whatever git reported (sec-113).
     """
     target = root / path
+    bound = root if within is None else within
     try:
         if not stat.S_ISREG(target.lstat().st_mode):
             return SKIP_NOT_REGULAR
-        if not target.resolve(strict=True).is_relative_to(root):
-            return SKIP_OUTSIDE  # a directory component is a symlink out of the tree
+        if not target.resolve(strict=True).is_relative_to(bound):
+            return SKIP_OUTSIDE  # a symlinked directory, or a path outside the named one
         data = _read_capped(target)
     except OSError:  # gone, a dangling or looping link, or swapped for a symlink
         return SKIP_NOT_REGULAR

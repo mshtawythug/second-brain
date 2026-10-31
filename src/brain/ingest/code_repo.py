@@ -7,11 +7,40 @@ goes through an injectable :data:`GitRunner`; the production one,
 :func:`brain.ingest.capped_process.run_capped` (a timeout, a stdout cap, no
 stdin, stderr discarded unread, the process group killed on the way out).
 
-**Hardening.** The environment is minimal (:func:`git_env`): ``HOME`` is the
-only variable inherited, so the owner's global excludes still apply and nothing
-else leaks in. A repository's own config can name commands git would run, so
-``core.fsmonitor`` is forced off and signature display (which starts ``gpg``)
-too. Paths are read NUL-separated with ``core.quotePath`` off, so any byte in a
+**Hardening (sec-113).** The scanned repository is untrusted: its
+``.git/config`` (and every file it includes) is honoured by every call, and
+it can name commands for git to run. What is defended, and how:
+
+- *Config sources.* System config is off (``GIT_CONFIG_NOSYSTEM``) and global
+  config is off (``GIT_CONFIG_GLOBAL=/dev/null``, which also covers
+  ``$XDG_CONFIG_HOME/git/config`` and ``~/.config/git/config``). ``HOME`` is
+  inherited only so the default global ignore file, ``~/.config/git/ignore``,
+  still applies; a custom ``core.excludesFile`` in the owner's global config
+  does not. Repository config is the only file source left, and every
+  ``-c`` in :data:`_SAFE_CONFIG` outranks it, includes included.
+- *Transports* (``remote.*.uploadpack``, ``core.sshCommand``, ``remote.*.vcs``,
+  ``credential.helper``, ``core.askPass``, ``core.gitProxy``): reached only by a
+  fetch, and the one fetch our reads could start is a partial clone's lazy
+  fetch of a missing object. A partial clone is refused outright
+  (:func:`find_work_tree`), lazy fetch is off (``GIT_NO_LAZY_FETCH``), and
+  every transport is off (``protocol.allow=never``); ``credential.helper`` is
+  cleared as well.
+- *Forced off per call:* ``core.fsmonitor`` (``ls-files`` would run it),
+  ``core.hooksPath`` (none of our commands runs a hook; set anyway),
+  signature display (``gpg.program``), the pager (``--no-pager``), and, on
+  ``log``, external diff and textconv (``--no-ext-diff``, ``--no-textconv``;
+  ``--name-only`` produces no patch, so neither would be reached).
+- *Not reachable from our commands:* filter drivers (``rev-parse``,
+  ``ls-files --cached`` and ``log`` never read the work tree through
+  ``.gitattributes``), ``core.editor``, aliases (a built-in cannot be aliased),
+  submodules (no recursion), and ``trace2.*`` (read only from system and global
+  config, both off).
+- *Where the files are.* ``core.worktree`` can point the reported top level at
+  any directory, so the directory the owner named must lie inside it
+  (:func:`find_work_tree`), and :mod:`.code_files` reads only files that resolve
+  inside that directory.
+
+Paths are read NUL-separated with ``core.quotePath`` off, so any byte in a
 name survives. No :class:`CodeRepoError` message quotes git's output; each
 names only the subcommand and an exit code, a timeout or an exception class.
 
@@ -46,12 +75,19 @@ GIT_TIMEOUT_SECONDS = 120
 #: The largest answer read; ``git`` is killed past it.
 GIT_MAX_STDOUT_BYTES = 64 * 1024 * 1024
 
-#: Forced on every call (module docstring).
+#: Forced on every call; command-line config outranks every file (module docstring).
 _SAFE_CONFIG = (
     "-c", "core.fsmonitor=false",
+    "-c", "core.hooksPath=/dev/null",
     "-c", "core.quotePath=false",
     "-c", "log.showSignature=false",
+    "-c", "protocol.allow=never",
+    "-c", "credential.helper=",
 )
+#: Config names that make a repository a partial clone, matched casefolded:
+#: ``extensions.partialclone``, or a ``remote.<name>.`` key named here.
+_PARTIAL_CLONE_KEY = "extensions.partialclone"
+_PROMISOR_REMOTE_KEYS = frozenset({"promisor", "partialclonefilter"})
 _INSTALL_HINT = "git not found on PATH: install it (xcode-select --install, or brew install git)"
 _EMAIL = re.compile(r"[^\s<>@]+@[^\s<>@]+")
 
@@ -66,11 +102,13 @@ class GitNotFoundError(CodeRepoError):
 
 @dataclass(frozen=True)
 class WorkTree:
-    """A work tree's resolved top level, and ``prefix``: the POSIX path of the scanned
-    directory under it (``""`` at the top, else ending in ``/``)."""
+    """A work tree's resolved top level; ``prefix``, the POSIX path of the scanned
+    directory under it (``""`` at the top, else ending in ``/``); and ``scope``,
+    that directory resolved, the bound every file read must stay inside."""
 
     root: Path
     prefix: str
+    scope: Path
 
     @property
     def name(self) -> str:
@@ -91,6 +129,8 @@ def git_env(base_env: Mapping[str, str]) -> dict[str, str]:
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_NO_LAZY_FETCH": "1",
     }
     if base_env.get("HOME"):
         env["HOME"] = base_env["HOME"]
@@ -142,7 +182,9 @@ def find_work_tree(directory: Path, *, runner: GitRunner) -> WorkTree:
 
     A directory outside any repository, inside ``.git``, or in a bare repository
     is refused: ``rev-parse --show-toplevel`` fails there. A missing ``git``
-    keeps its :class:`GitNotFoundError` and install hint.
+    keeps its :class:`GitNotFoundError` and install hint. So is a top level that
+    does not contain ``directory`` (a ``core.worktree`` pointing elsewhere), and
+    a partial clone (:func:`refuse_partial_clone`), both before any file is listed.
     """
     if not directory.is_dir():
         raise CodeRepoError(f"{directory.name or directory}: not a directory")
@@ -155,7 +197,33 @@ def find_work_tree(directory: Path, *, runner: GitRunner) -> WorkTree:
     lines = os.fsdecode(out).split("\n")
     if len(lines) < 2 or not lines[0]:
         raise CodeRepoError("git rev-parse answered something unusable")
-    return WorkTree(root=Path(lines[0]).resolve(), prefix=lines[1])
+    root = Path(lines[0]).resolve()
+    scope = directory.resolve()
+    if not scope.is_relative_to(root):
+        raise CodeRepoError(
+            "the repository's work tree is configured outside this directory "
+            "(core.worktree); refusing to read it"
+        )
+    refuse_partial_clone(runner)
+    return WorkTree(root=root, prefix=lines[1], scope=scope)
+
+
+def refuse_partial_clone(runner: GitRunner) -> None:
+    """Refuse a partial clone: reading its history could fetch, and run a command, to get it.
+
+    Reads the effective config's names only (``config --list --name-only``), so
+    no value, and nothing git would run, is touched.
+    """
+    for raw in runner(["config", "--list", "--name-only", "-z"]).split(b"\0"):
+        name = os.fsdecode(raw).casefold()
+        section, _, key = name.rpartition(".")
+        if name == _PARTIAL_CLONE_KEY or (
+            section.startswith("remote.") and key in _PROMISOR_REMOTE_KEYS
+        ):
+            raise CodeRepoError(
+                "a partial clone (it has a promisor remote) is not supported; "
+                "use a full clone"
+            )
 
 
 def _paths(out: bytes) -> set[str]:
@@ -180,6 +248,7 @@ def owner_touched_files(runner: GitRunner, *, emails: Iterable[str], since: date
         runner(
             [
                 "log", "-z", "--name-only", "--format=", "--no-renames",
+                "--no-ext-diff", "--no-textconv",
                 "--regexp-ignore-case", "--fixed-strings", *authors,
                 f"--since={since.isoformat()} 00:00:00", "HEAD", "--",
             ]

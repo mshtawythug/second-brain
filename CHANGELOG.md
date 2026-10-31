@@ -39,9 +39,13 @@ git tag scheme:
 - `confidential` by default (`--sensitivity normal` for a personal repository). Summaries are off
   unless `--enrich`. `--max-files` (default 2,000) caps the files written a run; unchanged files
   are free, and a re-run updates changed files in place.
-- `git` runs by its absolute path with a minimal environment, a timeout and an output cap, with
-  `core.fsmonitor` and signature display forced off. `brain doctor` gains a `git` row (a WARN
-  when `git` is not on `PATH`).
+- `git` runs by its absolute path with a minimal environment, a timeout and an output cap. The
+  scanned repository is treated as untrusted (security review sec-113). Its config cannot make
+  `git` run a command: lazy fetch and every transport are off, and hooks, fsmonitor and
+  signature display are forced off. Global config is not read (`GIT_CONFIG_GLOBAL=/dev/null`). A
+  partial clone, or a `core.worktree` outside the named directory, is refused (exit 1), and
+  only files that resolve inside that directory are read. `brain doctor` gains a `git` row (a
+  WARN when `git` is not on `PATH`).
 - **Concept-skip policy `v2` → `v3`:** `code` joins `CONCEPT_SKIP_CONTENT_TYPES`. As with any
   change to the set, the next `brain graphrag build --backfill` re-reconciles every existing
   `calendar_event` and `screenshot` document once, with an empty extraction and no model call.

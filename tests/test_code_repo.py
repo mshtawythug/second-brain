@@ -47,8 +47,9 @@ def test_the_runner_hardens_argv_and_passes_a_minimal_env(tmp_path: Path) -> Non
 
     assert argv_text.splitlines() == [
         "--no-pager", "-C", str(tmp_path / "r"),
-        "-c", "core.fsmonitor=false", "-c", "core.quotePath=false",
-        "-c", "log.showSignature=false", "ls-files",
+        "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+        "-c", "core.quotePath=false", "-c", "log.showSignature=false",
+        "-c", "protocol.allow=never", "-c", "credential.helper=", "ls-files",
     ]
     env = dict(line.split("=", 1) for line in env_text.splitlines() if "=" in line)
     assert env["HOME"] == "/synthetic/home"
@@ -57,6 +58,8 @@ def test_the_runner_hardens_argv_and_passes_a_minimal_env(tmp_path: Path) -> Non
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     assert env["GIT_OPTIONAL_LOCKS"] == "0"
     assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert env["GIT_NO_LAZY_FETCH"] == "1"
     assert "SENTINEL_VAR" not in env
 
 
@@ -152,7 +155,7 @@ def test_the_top_level_has_an_empty_prefix(tmp_path: Path) -> None:
 
     tree = cr.find_work_tree(repo, runner=_runner(repo, fx.home_of(tmp_path)))
 
-    assert tree == cr.WorkTree(root=repo.resolve(), prefix="")
+    assert tree == cr.WorkTree(root=repo.resolve(), prefix="", scope=repo.resolve())
     assert tree.name == "sample-repo"
 
 
@@ -161,7 +164,7 @@ def test_a_subdirectory_gives_its_prefix(tmp_path: Path) -> None:
 
     tree = cr.find_work_tree(repo / "src", runner=_runner(repo / "src", fx.home_of(tmp_path)))
 
-    assert tree == cr.WorkTree(root=repo.resolve(), prefix="src/")
+    assert tree == cr.WorkTree(root=repo.resolve(), prefix="src/", scope=(repo / "src").resolve())
 
 
 def test_a_missing_git_keeps_its_install_hint_through_the_work_tree_check(
@@ -298,10 +301,10 @@ def test_owned_files_is_the_sorted_intersection_under_the_prefix(tmp_path: Path)
     runner = _runner(repo, fx.home_of(tmp_path))
     since = date.fromisoformat(fx.SINCE)
 
-    whole = cr.owned_files(cr.WorkTree(repo, ""), runner=runner, emails=[fx.OWNER_EMAIL],
+    whole = cr.owned_files(cr.WorkTree(repo, "", repo), runner=runner, emails=[fx.OWNER_EMAIL],
                            since=since)
-    src = cr.owned_files(cr.WorkTree(repo, "src/"), runner=runner, emails=[fx.OWNER_EMAIL],
-                         since=since)
+    src = cr.owned_files(cr.WorkTree(repo, "src/", repo / "src"), runner=runner,
+                         emails=[fx.OWNER_EMAIL], since=since)
 
     assert whole == sorted(whole)
     assert set(fx.OWNER_KEPT) | {fx.SECRET_PATH, fx.SYMLINK} <= set(whole)
@@ -316,7 +319,7 @@ def test_an_empty_repository_has_no_owned_files_and_reads_no_log(tmp_path: Path)
     repo.mkdir()
     fx.git(repo, "init", "-q", home=home)
 
-    owned = cr.owned_files(cr.WorkTree(repo, ""), runner=_runner(repo, home),
+    owned = cr.owned_files(cr.WorkTree(repo, "", repo), runner=_runner(repo, home),
                            emails=[fx.OWNER_EMAIL], since=date(2026, 1, 1))
 
     assert owned == []

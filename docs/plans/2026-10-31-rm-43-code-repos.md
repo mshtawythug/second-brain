@@ -229,6 +229,33 @@ the 5434 DB and a `tmp` vault, then `brain search` for a symbol. The transcript 
   `ingest-dir` uses (`_validate_sensitivity_or_exit`), which exits 1 before anything is read.
   The module docstring says so; the other usage errors exit 2.
 
+## Security round (sec-113, on `f37798d`)
+
+The scanned repository is untrusted, and its `.git/config` is honoured by every `git` call.
+
+- **CRITICAL, fixed.** A partial clone whose promisor remote's `uploadpack` names a command ran
+  that command during `git log --name-only` (a lazy fetch of a missing tree). Reproduced with a
+  local `--filter=tree:0` clone over `file://`. Three layers now: `find_work_tree` refuses any
+  config with `extensions.partialclone`, `remote.*.promisor` or `remote.*.partialclonefilter`;
+  `GIT_NO_LAZY_FETCH=1`; and `-c protocol.allow=never`. Each layer alone stopped the payload.
+- **Exec-bearing keys, enumerated** (the `code_repo` module docstring lists each and how it is
+  closed). Transport keys (`uploadpack`, `core.sshCommand`, `remote.*.vcs`, `credential.helper`,
+  `core.askPass`, `core.gitProxy`) are behind the three layers above, and `credential.helper`
+  is also cleared. Forced off per call: `core.fsmonitor`, `core.hooksPath`, signature display,
+  the pager, and `--no-ext-diff --no-textconv` on `log`. Not reachable from `rev-parse`,
+  `ls-files --cached`, `config --list` or `log --name-only`: filter drivers, `core.editor`,
+  aliases, submodules, and `trace2.*` (system and global only). Includes only add config, and
+  `-c` outranks every file. `tests/test_code_repo_hostile.py` sets every one of these in a
+  repository's config, directly and through `include.path`, and finds no marker.
+- **HIGH, fixed.** `core.worktree` pointed the reported top level at any directory. The named
+  directory must now lie inside the top level (else exit 1), and `read_code_file` reads only
+  files that resolve inside the named directory (`WorkTree.scope`, `within=`).
+- **MEDIUM, fixed.** Global and XDG config are off (`GIT_CONFIG_GLOBAL=/dev/null`). `HOME` is
+  kept only for the default `~/.config/git/ignore`. A custom `core.excludesFile` in the owner's
+  global config no longer applies. The docstring states what is and is not defended.
+- **LOW, accepted** as written (`kill_group` suppressing `PermissionError`).
+- Every fix was proven RED against `f37798d` in a `git archive` copy, then GREEN.
+
 ## Residuals (out of scope, named)
 
 - No prune: a file deleted from the repository, or no longer touched in the window, keeps its
