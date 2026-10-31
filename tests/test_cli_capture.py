@@ -1227,3 +1227,70 @@ def test_capture_json_error_path_is_not_json(
     assert "capture content is empty" in result.output
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.output)
+
+
+# ---------------------------------------------------------------------------
+# Branches the RM-39 coverage pass found untested in this module.
+# ---------------------------------------------------------------------------
+
+
+class _FailingEnricher:
+    """An enricher whose Ollama is down."""
+
+    def propose_tags(self, **kwargs: object) -> TagProposal:
+        from brain.errors import OllamaUnavailable
+
+        raise OllamaUnavailable("ollama down")
+
+
+def test_review_auto_leaves_an_item_whose_enrichment_fails(
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    patch_embedder(fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    _capture("a thought the enricher cannot route", tmp_path)
+    doc_id = _single_doc_id(test_db)
+    test_db.execute(
+        "UPDATE documents SET summary = %s, summary_model = 'fake', "
+        "summary_at = NOW() WHERE id = %s",
+        ("a synthetic summary", doc_id),
+    )
+    monkeypatch.setattr("brain.cli._build_enricher", lambda cfg: _FailingEnricher())
+
+    result = CliRunner().invoke(app, ["capture", "review", "--auto"])
+
+    assert result.exit_code == 0, result.output
+    assert "left in inbox (enrichment failed: OllamaUnavailable)" in result.output
+    assert _tags_of(test_db, doc_id) == ["inbox"]
+
+
+def test_review_prints_a_summary_when_there_is_one(
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    patch_embedder(fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    _capture("a summarized thought", tmp_path)
+    test_db.execute(
+        "UPDATE documents SET summary = 'a synthetic summary', summary_model = 'fake', "
+        "summary_at = NOW() WHERE id = %s",
+        (_single_doc_id(test_db),),
+    )
+
+    result = CliRunner().invoke(app, ["capture", "review"], input="s\n")
+
+    assert result.exit_code == 0, result.output
+    assert "    summary: a synthetic summary" in result.output
+
+
+def test_fetch_summaries_of_no_ids_is_empty(test_db: psycopg.Connection) -> None:
+    from brain._capture_command import _fetch_summaries
+
+    assert _fetch_summaries(test_db, []) == {}

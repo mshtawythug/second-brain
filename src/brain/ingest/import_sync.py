@@ -210,6 +210,16 @@ def is_under(
     return _has_prefix(path.parts, root, samefile=samefile, allow_equal=False)
 
 
+def is_within(path: Path, root: Path, *, samefile: SamefileFn = os.path.samefile) -> bool:
+    """Whether ``path`` is ``root`` or lies under it, both resolved, by components (R2).
+
+    Case and Unicode spelling are folded and confirmed with ``samefile``, so a
+    differently spelled path to the same directory is caught. Also the capture-folder
+    rule (RM-39): :mod:`brain.capture_import` refuses a folder overlapping the vault.
+    """
+    return _has_prefix(path.resolve().parts, root.resolve(), samefile=samefile, allow_equal=True)
+
+
 def resolve_sync_root(directory: Path, *, vault_root: Path) -> Path:
     """The resolved root to prune under, or :class:`ImportSyncRefused` (R1a, R2)."""
     try:
@@ -220,8 +230,7 @@ def resolve_sync_root(directory: Path, *, vault_root: Path) -> Path:
         ) from None
     if not root.is_dir():
         raise ImportSyncRefused(f"{directory} is not a directory")
-    vault = vault_root.resolve()
-    if _has_prefix(root.parts, vault, samefile=os.path.samefile, allow_equal=True):
+    if is_within(root, vault_root):
         raise ImportSyncRefused(
             f"{directory} is inside the brain vault ({vault_root}); "
             "the vault watcher owns that tree"

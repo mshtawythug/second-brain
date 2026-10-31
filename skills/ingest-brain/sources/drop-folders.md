@@ -13,6 +13,11 @@ transcript enters the brain. They need `BRAIN_WHISPER_MODEL` (a model file the u
 themselves; never download one for them) and `whisper-cli`. It **refuses without `--dir PATH` or
 `--configured`, and `--since Nd`** (1d to 365d).
 
+A folder with `mode = "capture"` (RM-39, the phone's "Save to Brain" share sheet) makes each
+`.md`/`.txt` file a capture-inbox note and then **deletes** the file; that is the
+`brain-capture` skill's `brain capture import`, and
+`--configured` runs it too.
+
 The command moves the user's files, so:
 
 - Run `--dry-run` first and show the user the list before the real run.
@@ -33,7 +38,7 @@ brain ingest-folder --dir ~/Pictures/Screenshots --since 7d
 brain ingest-folder --configured --since 2d
 ```
 
-Per-file verbs: `ingested`, `updated`, `unchanged`, `empty` (no text was read: the file stays
+Per-file verbs: `ingested`, `updated`, `empty` (no text was read: the file stays
 in `imported/`), `duplicate` (the same file was imported before: the drop copy is deleted and the import
 re-checked, adding nothing),
 `vanished`, `rejected` (a failure every run would repeat, such as an unreadable image, an

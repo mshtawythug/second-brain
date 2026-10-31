@@ -33,6 +33,7 @@ read "Safety rules" before running it.
 | The content is… | Use | Why |
 |---|---|---|
 | A thought the user just had, no home yet | `brain capture` | Tagged `inbox`, triaged later |
+| Shares the user sent from their phone ("Save to Brain") | `brain capture import --dir PATH --since 7d` | Each file in the capture folder becomes an inbox note, then is **deleted**; `--dry-run` first. Guide: `docs/guides/mobile-capture.md` |
 | A file / email / transcript that already exists | `ingest-brain` | Extraction, dedup, source tracking |
 | A deliberate note with a title and a place | `brain-authoring` (`brain note new`) | Templates, folders, frontmatter |
 
@@ -67,6 +68,21 @@ Capture the user's words, not your paraphrase. The value of an inbox item is
 that it preserves the original thought; a summary of it is a different, lesser
 artifact. If the thought is long enough to need structure, it is a note — hand
 off to `brain-authoring`.
+
+## Importing phone shares
+
+The user's "Save to Brain" iOS Shortcut writes each share into an iCloud Drive folder
+configured with `mode = "capture"` (`docs/guides/mobile-capture.md`).
+
+```bash
+brain capture import --dir PATH --since 7d --dry-run   # show the user the list first
+brain capture import --dir PATH --since 7d
+```
+
+It **deletes** each file once its note exists, and refuses without `--dir PATH` and
+`--since Nd`. Only use a folder the user named or one already configured as a capture
+folder; never edit `drop-folders.toml` unless asked. A `rejected` file (over 1 MiB, or
+not UTF-8 text) stays in the folder's `imported/`.
 
 ## Reading the inbox
 

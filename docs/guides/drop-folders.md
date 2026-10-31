@@ -207,3 +207,12 @@ folder. brain never reads the Voice Memos app's own store.
   rejected memo, check `brain doctor`, then try `brain ingest` on it by hand.
 - With voice memos off (no `BRAIN_WHISPER_MODEL`), no model file, or no `whisper-cli`, voice
   folders are skipped with the fix printed, and their files are not moved.
+
+## Capture folders (RM-39)
+
+A folder with `mode = "capture"` turns each shared text file (`.md`, `.txt`) into a
+capture-inbox note instead of a document, and **deletes** the file once the note exists. It is
+built for the "Save to Brain" iOS Shortcut, which writes into an iCloud Drive folder:
+[guides/mobile-capture.md](mobile-capture.md) walks through it, including what passes through
+iCloud. `brain capture import --dir PATH --since 7d` runs one such folder;
+`brain ingest-folder --configured` runs it with the others, through the same code.
