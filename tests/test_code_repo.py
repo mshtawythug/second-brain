@@ -253,6 +253,24 @@ def test_several_addresses_are_ored(tmp_path: Path) -> None:
     assert {fx.OTHER_PATH, *fx.OWNER_KEPT} <= touched
 
 
+def test_an_address_is_matched_literally_not_as_a_pattern(tmp_path: Path) -> None:
+    """``--fixed-strings``: the ``.`` in ``a.b@`` matches only a dot, never ``axb@``."""
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = tmp_path / "r"
+    repo.mkdir()
+    fx.git(repo, "init", "-q", home=home)
+    fx.commit(repo, {"mine.py": "x = 1\n"}, home=home, author=("Dot Owner", "a.b@example.test"))
+    fx.commit(repo, {"theirs.py": "y = 2\n"}, home=home,
+              author=("Other Person", "axb@example.test"))
+
+    touched = cr.owner_touched_files(
+        _runner(repo, home), emails=["a.b@example.test"], since=date.fromisoformat(fx.SINCE)
+    )
+
+    assert touched == {"mine.py"}
+
+
 def test_since_is_local_midnight_not_the_current_time_of_day(tmp_path: Path) -> None:
     """A commit early on the --since day is inside the window, whatever time it is now."""
     home = tmp_path / "home"
