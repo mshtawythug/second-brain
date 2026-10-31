@@ -1,13 +1,11 @@
-"""Pins TODAY's behaviour: vault sync re-chunks an edited ``code`` mirror as prose (RM-42 F1).
+"""Vault sync re-chunks an edited ``code`` mirror with the code chunker (RM-42 F1, BL-35).
 
-``vault/sync.py`` ``_embed_and_insert_chunks`` still calls ``chunk_text``
-directly, so when an ``_ingested/`` mirror of a ``content_type: code`` document
-is edited, sync replaces its definition-level chunks with prose chunks. RM-42
-left that alone on purpose: ``sync.py`` is over the size ceiling and nothing
-produces ``code`` until RM-43. RM-43 must route that call through
-``chunk_dispatch.chunk_for`` (or keep code documents out of mirror re-chunking),
-and then flip the final assertion here. See
-``docs/plans/2026-10-30-rm-42-code-chunker.md``, "Carry-forward to RM-43".
+``vault/sync.py`` ``_embed_and_insert_chunks`` used to call ``chunk_text``
+directly, so editing an ``_ingested/`` mirror of a ``content_type: code``
+document replaced its definition-level chunks with prose chunks. RM-43 routes
+that call through ``chunk_dispatch.chunk_for``, passing the row's
+``content_type`` and metadata (whose ``path`` heads every chunk), and this test
+was flipped from pinning the prose behaviour to pinning the code behaviour.
 """
 from pathlib import Path
 from typing import Any
@@ -30,7 +28,7 @@ def _chunk_heads(conn: psycopg.Connection[Any], document_id: str) -> list[str]:
     return [str(r[0]).split("\n", 1)[0] for r in rows]
 
 
-def test_vault_sync_rechunks_an_edited_code_mirror_with_the_prose_chunker(
+def test_vault_sync_rechunks_an_edited_code_mirror_with_the_code_chunker(
     test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path
 ) -> None:
     result = ingest_document(
@@ -65,8 +63,109 @@ def test_vault_sync_rechunks_an_edited_code_mirror_with_the_prose_chunker(
     mirror.write_text(dump_frontmatter(frontmatter, body + "\n\ndef second():\n    return 2\n"))
     sync_vault(test_db, embedder=fake_embedder, vault_path=vault)
 
-    # Today: prose chunks, no ``path:start-end symbol`` header. RM-43 flips this.
-    heads = _chunk_heads(test_db, document_id)
-    assert heads
-    assert not any(head.startswith("pkg/mod.py:") for head in heads)
-    assert heads[0] == "import os"
+    # BL-35: definition-level chunks, each headed by the metadata path.
+    assert _chunk_heads(test_db, document_id) == [
+        "pkg/mod.py:1-1 <module>",
+        "pkg/mod.py:4-5 first",
+        "pkg/mod.py:8-9 second",
+    ]
+
+
+# --- RM-43: a code body materializes no wiki links ---------------------------------------
+
+NOTE_TITLE = "Gadget Notes"
+LINKING_CODE = f"def gadget():\n    # see [[{NOTE_TITLE}]]\n    return 1\n"
+LINKING_PROSE = f"A synthetic note that points at [[{NOTE_TITLE}]].\n"
+
+
+def _ingest(conn: psycopg.Connection[Any], embedder: Any, *, content: str,
+            content_type: str, path: str) -> str:
+    result = ingest_document(
+        conn,
+        embedder=embedder,
+        doc=ExtractedDoc(
+            title=path, content=content, content_type=content_type, source_path=None,
+            metadata={"path": path},
+        ),
+        source_kind="manual",
+        source_external_id=path,
+    )
+    assert result.document_id is not None
+    return result.document_id
+
+
+def _vault_with_note(conn: psycopg.Connection[Any], tmp_path: Path) -> tuple[Path, str]:
+    """Export the mirrors, add a vault note titled :data:`NOTE_TITLE`, return its id."""
+    vault = tmp_path / "vault"
+    export_vault(conn, vault_path=vault)
+    (vault / "gadget-notes.md").write_text(
+        dump_frontmatter({"title": NOTE_TITLE}, "A synthetic target note.\n")
+    )
+    return vault, NOTE_TITLE
+
+
+def _link_rows(conn: psycopg.Connection[Any], document_id: str) -> tuple[int, int]:
+    resolved = conn.execute(
+        "SELECT count(*) FROM links WHERE src_document_id = %s", (document_id,)
+    ).fetchone()
+    unresolved = conn.execute(
+        "SELECT count(*) FROM unresolved_links WHERE src_document_id = %s", (document_id,)
+    ).fetchone()
+    assert resolved is not None and unresolved is not None
+    return int(resolved[0]), int(unresolved[0])
+
+
+def test_a_wiki_link_in_a_code_mirror_creates_no_link_even_to_an_existing_note(
+    test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path
+) -> None:
+    code_id = _ingest(test_db, fake_embedder, content=LINKING_CODE, content_type="code",
+                      path="pkg/gadget.py")
+    vault, _ = _vault_with_note(test_db, tmp_path)
+
+    report = sync_vault(test_db, embedder=fake_embedder, vault_path=vault)
+    dry = sync_vault(test_db, embedder=fake_embedder, vault_path=vault, dry_run=True)
+
+    assert _link_rows(test_db, code_id) == (0, 0)
+    assert (report.links_resolved, report.links_unresolved) == (0, 0)
+    assert (dry.links_resolved, dry.links_unresolved) == (0, 0)
+
+
+def test_a_prose_mirror_still_materializes_the_same_link(
+    test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path
+) -> None:
+    """The control: the skip is keyed on ``code``, not on mirrors in general."""
+    prose_id = _ingest(test_db, fake_embedder, content=LINKING_PROSE, content_type="txt",
+                       path="notes/pointer.txt")
+    vault, _ = _vault_with_note(test_db, tmp_path)
+
+    report = sync_vault(test_db, embedder=fake_embedder, vault_path=vault)
+    dry = sync_vault(test_db, embedder=fake_embedder, vault_path=vault, dry_run=True)
+
+    assert _link_rows(test_db, prose_id) == (1, 0)
+    assert report.links_resolved == 1
+    assert dry.links_resolved == 1
+
+
+def test_a_resync_clears_link_rows_a_code_document_already_had(
+    test_db: psycopg.Connection[Any], fake_embedder: Any, tmp_path: Path
+) -> None:
+    code_id = _ingest(test_db, fake_embedder, content=LINKING_CODE, content_type="code",
+                      path="pkg/gadget.py")
+    vault, _ = _vault_with_note(test_db, tmp_path)
+    sync_vault(test_db, embedder=fake_embedder, vault_path=vault)
+    note = test_db.execute("SELECT id FROM documents WHERE title = %s", (NOTE_TITLE,)).fetchone()
+    assert note is not None
+    test_db.execute(
+        "INSERT INTO links (src_document_id, dst_document_id, link_text, link_kind) "
+        "VALUES (%s, %s, %s, 'wiki')",
+        (code_id, note[0], NOTE_TITLE),
+    )
+    test_db.execute(
+        "INSERT INTO unresolved_links (src_document_id, link_text, link_kind) "
+        "VALUES (%s, 'Nowhere', 'wiki')",
+        (code_id,),
+    )
+
+    sync_vault(test_db, embedder=fake_embedder, vault_path=vault)
+
+    assert _link_rows(test_db, code_id) == (0, 0)

@@ -851,6 +851,56 @@ brain ingest-notion ~/Downloads/Export-abc123.zip --max 50 --tag notion
   refuses prints `refused <page id>: N finding(s)`, and its warn and redact notices are labelled
   with the page id.
 
+## Code repositories
+
+`brain ingest-code` (RM-43) stores the files you committed in one local git work tree, so your
+own code is searchable. It reads a local clone with `git`; it calls no code host and needs no
+token. `--author-email` (repeat it for each address you commit with) and `--since YYYY-MM-DD`
+are **required**: without either it exits 2 with "ingest-code: --author-email and --since are
+required".
+
+```bash
+brain ingest-code ~/src/my-tool --author-email you@example.com --since 2026-01-01
+brain ingest-code ~/src/monorepo/services/api --author-email you@example.com \
+    --author-email you@work.example --since 2026-06-01 --ext py --ext ts
+brain ingest-code ~/src/side-project --author-email you@example.com --since 2025-01-01 \
+    --sensitivity normal --max-files 500
+```
+
+- **Which files.** The tracked files a commit on `HEAD` by one of your addresses touched since
+  local midnight of `--since`. Each address matches the whole address, case-insensitively
+  (`ann@example.com` never matches `joann@example.com`). A directory below the top level narrows
+  the run to the files under it, and `--ext` (repeatable; `py` or `.py`) narrows it to those
+  extensions. Other authors' files, untracked files and history are not read.
+- **Always skipped, and counted:** anything git ignores (including a force-added file that
+  `.gitignore` matches); files under `node_modules`, `.venv`, `vendor`, `dist`, `build` or
+  `third_party`; lockfiles (`package-lock.json`, `yarn.lock`, `poetry.lock`, `go.sum`, `*.lock`
+  and the like); minified files (`*.min.*`, `*.map`, or a longest line over 1,000 characters
+  with a mean over 200); files over 200 KB; binary or non-UTF-8 files; empty files; and anything
+  that is not a regular file inside the work tree (a symlink, a submodule).
+- **One document per file** (source `code`, content type `code`), titled
+  `<repo directory>/<path>` and keyed by the file's absolute path, so a re-run updates a changed
+  file in place and leaves an unchanged one alone. Each file is chunked one definition per chunk,
+  headed `path:start-end symbol` (the code chunker, RM-42).
+- **Secrets.** The secret guard always runs in `reject` mode for this command, whatever
+  `BRAIN_SECRET_GUARD` says, and there is no `--allow-secrets`. A file holding a
+  credential-shaped string is not ingested. It is printed as `refused <path>: <kind> at line N`,
+  without the match, and the run ends with a line counting the refused files. Remove the
+  credential (and rotate it if it is real), then run again.
+- **Sensitivity** is `confidential` by default (an employer's code stays inside the confidential
+  boundary). Pass `--sensitivity normal` for a personal repository.
+- **Cap and cost.** `--max-files` (default 2,000) caps the files written a run. When it stops, it
+  prints how many still need writing, and re-running continues, since unchanged files are free.
+  Summaries are off unless `--enrich`, and `code` skips concept extraction in the graph, so a
+  capped run costs only embeddings.
+- **Exit codes.** 0 when the run completes, including refused or failed files, which are
+  counted; 1 when `git` is missing (with an install hint; `brain doctor`'s `git` row warns), the
+  directory is not in a git work tree, or the database is unreachable; 2 for usage.
+- **Not done:** a file deleted from the repository keeps its document (remove it with
+  `brain rm`). The vault mirror of a code document is a Markdown file whose body is code;
+  `brain vault sync` reads no wiki links from it, so a `[[Name]]` in a comment never links the
+  file to a note.
+
 ## Drop folders (screenshots, voice memos)
 
 `brain ingest-folder` (RM-33) ingests the files saved into a drop folder: a

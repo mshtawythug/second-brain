@@ -110,6 +110,46 @@ def test_killing_a_group_that_is_already_gone_is_quiet() -> None:
     kill_group(proc)  # no ProcessLookupError escapes
 
 
+def _until_exited(proc: subprocess.Popen[bytes]) -> None:
+    """Wait until ``proc`` has exited, without reaping it (``ps`` shows it as a zombie)."""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        state = subprocess.run(
+            ["/bin/ps", "-o", "stat=", "-p", str(proc.pid)], capture_output=True, text=True
+        ).stdout.strip()
+        if state.startswith("Z"):
+            return
+        time.sleep(0.02)
+    raise AssertionError("the child never exited")
+
+
+def test_killing_a_group_of_unreaped_children_is_quiet() -> None:
+    """RM-43 regression: macOS answers ``killpg`` on a zombie-only group with ``EPERM``."""
+    proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
+    _until_exited(proc)
+
+    try:
+        kill_group(proc)  # no PermissionError escapes
+    finally:
+        proc.wait()
+
+
+def test_an_oversized_answer_from_a_child_that_already_exited_is_oversized(
+    tmp_path: Path,
+) -> None:
+    """RM-43 regression: the cap's kill found only a zombie and raised ``PermissionError``."""
+    tool = _script(tmp_path, "head -c 4096 /dev/zero")
+
+    def exited_popen(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        proc: subprocess.Popen[bytes] = subprocess.Popen(*args, **kwargs)
+        _until_exited(proc)
+        return proc
+
+    run = _run([tool], max_stdout_bytes=16, popen=exited_popen)
+
+    assert run.oversized and run.stdout == b""
+
+
 # --- review round 1 (PR #107): an exception kills the group; file-size limit; fds ----------
 
 

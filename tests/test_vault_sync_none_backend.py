@@ -90,6 +90,8 @@ def test_null_backend_stores_chunks_with_null_embeddings(
         content="A synthetic captured thought about quarterly planning.",
         title="Synthetic capture",
         tags=["inbox"],
+        content_type="note",
+        metadata={},
     )
 
     # Assert
@@ -117,6 +119,8 @@ def test_null_backend_still_populates_the_fts_columns(
         content="Quarterly planning notes for the synthetic project.",
         title="Synthetic capture",
         tags=["inbox", "planning"],
+        content_type="note",
+        metadata={},
     )
 
     # Assert
@@ -143,6 +147,8 @@ def test_a_real_backend_is_unaffected(test_db: psycopg.Connection) -> None:
         content="Quarterly planning notes for the synthetic project.",
         title="Synthetic capture",
         tags=["inbox"],
+        content_type="note",
+        metadata={},
     )
 
     # Assert
@@ -169,6 +175,8 @@ def test_empty_content_writes_no_chunks_under_either_backend(
         content="   \n  ",
         title="Synthetic capture",
         tags=[],
+        content_type="note",
+        metadata={},
     )
 
     # Assert

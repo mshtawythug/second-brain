@@ -6,6 +6,9 @@ the graph lane for days while adding little: an event is about its people, and
 the people aspect still runs. The types listed here skip the extractor.
 ``screenshot`` (RM-33, policy ``v2``) joined for the same reason: OCR text from a
 screen grab is short and noisy, and a drop folder can deliver many a day.
+``code`` (RM-43, policy ``v3``) joined because a code file's value is its
+definition-level chunks, a repository delivers up to ``--max-files`` documents a
+run, and a concept list adds little to a function.
 
 A skip must still count as done, or ``graph_rag.build``'s backfill would re-plan
 the document as stale forever. So :func:`skip_watermark` is the ONE place that
@@ -34,12 +37,16 @@ __all__ = [
 ]
 
 #: ``documents.content_type`` values whose concept aspect is never extracted.
-CONCEPT_SKIP_CONTENT_TYPES: frozenset[str] = frozenset({"calendar_event", "screenshot"})
+CONCEPT_SKIP_CONTENT_TYPES: frozenset[str] = frozenset(
+    {"calendar_event", "screenshot", "code"}
+)
 
 #: Bumped whenever :data:`CONCEPT_SKIP_CONTENT_TYPES` changes (module docstring).
 #: ``v2`` (RM-33): ``screenshot`` added; every ``calendar_event`` is re-reconciled
 #: once, with an empty extraction and no model call.
-CONCEPT_SKIP_POLICY_VERSION = "v2"
+#: ``v3`` (RM-43): ``code`` added; every ``calendar_event`` and ``screenshot`` is
+#: re-reconciled once the same way.
+CONCEPT_SKIP_POLICY_VERSION = "v3"
 
 #: The ``extractor_ver`` a skipped document's concept watermark stores.
 SKIP_EXTRACTOR_VER = "skipped-by-policy"
