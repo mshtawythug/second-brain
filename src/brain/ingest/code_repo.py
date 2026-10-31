@@ -21,10 +21,13 @@ it can name commands for git to run. What is defended, and how:
 - *Transports* (``remote.*.uploadpack``, ``core.sshCommand``, ``remote.*.vcs``,
   ``credential.helper``, ``core.askPass``, ``core.gitProxy``): reached only by a
   fetch, and the one fetch our reads could start is a partial clone's lazy
-  fetch of a missing object. A partial clone is refused outright
-  (:func:`find_work_tree`), lazy fetch is off (``GIT_NO_LAZY_FETCH``), and
-  every transport is off (``protocol.allow=never``); ``credential.helper`` is
-  cleared as well.
+  fetch of a missing object. Two layers each stop it alone: lazy fetch is off
+  (``GIT_NO_LAZY_FETCH``, git 2.45+), and every transport is off
+  (``GIT_ALLOW_PROTOCOL`` empty, which overrides all protocol config). A
+  partial clone is also refused outright (:func:`find_work_tree`).
+  ``-c protocol.allow=never`` is kept but is NOT a layer: it sets only the
+  default, and a repository's own ``protocol.<name>.allow`` outranks it
+  (rev-113). ``credential.helper`` is cleared as well.
 - *Forced off per call:* ``core.fsmonitor`` (``ls-files`` would run it),
   ``core.hooksPath`` (none of our commands runs a hook; set anyway),
   signature display (``gpg.program``), the pager (``--no-pager``), and, on
@@ -100,6 +103,14 @@ class GitNotFoundError(CodeRepoError):
     """``git`` is not on ``PATH``; the message is the install hint."""
 
 
+class GitExitError(CodeRepoError):
+    """``git`` ran and exited non-zero; ``returncode`` is its exit status."""
+
+    def __init__(self, message: str, *, returncode: int) -> None:
+        super().__init__(message)
+        self.returncode = returncode
+
+
 @dataclass(frozen=True)
 class WorkTree:
     """A work tree's resolved top level; ``prefix``, the POSIX path of the scanned
@@ -131,6 +142,8 @@ def git_env(base_env: Mapping[str, str]) -> dict[str, str]:
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_NO_LAZY_FETCH": "1",
+        # Empty: no protocol is allowed, overriding any protocol.*.allow config.
+        "GIT_ALLOW_PROTOCOL": "",
     }
     if base_env.get("HOME"):
         env["HOME"] = base_env["HOME"]
@@ -173,7 +186,7 @@ def git_runner(
     if run.timed_out:
         raise CodeRepoError(f"{label} timed out after {timeout:g}s")
     if run.returncode != 0:
-        raise CodeRepoError(f"{label} failed (exit {run.returncode})")
+        raise GitExitError(f"{label} failed (exit {run.returncode})", returncode=run.returncode)
     return run.stdout
 
 
@@ -256,16 +269,28 @@ def owner_touched_files(runner: GitRunner, *, emails: Iterable[str], since: date
     )
 
 
+def has_head(runner: GitRunner) -> bool:
+    """Whether ``HEAD`` names a commit; ``False`` before the first commit (exit 1)."""
+    try:
+        runner(["rev-parse", "--verify", "-q", "HEAD"])
+    except GitExitError as exc:
+        if exc.returncode == 1:
+            return False
+        raise
+    return True
+
+
 def owned_files(
     tree: WorkTree, *, runner: GitRunner, emails: Iterable[str], since: date
 ) -> list[str]:
     """The tracked, not-ignored files under ``tree.prefix`` the owner touched, sorted.
 
-    ``runner`` is bound to ``tree.root``. A repository with nothing tracked
-    returns ``[]`` without reading the log, which an empty repository cannot answer.
+    ``runner`` is bound to ``tree.root``. A repository with nothing tracked, or
+    with no commit yet (files staged, no ``HEAD``), returns ``[]`` without
+    reading the log, which cannot answer without a ``HEAD`` (rev-113).
     """
     tracked = {p for p in tracked_files(runner) if p.startswith(tree.prefix)}
-    if not tracked:
+    if not tracked or not has_head(runner):
         return []
     touched = owner_touched_files(runner, emails=emails, since=since)
     return sorted(tracked & touched)

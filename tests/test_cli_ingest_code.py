@@ -19,6 +19,7 @@ from brain.cli import app
 from brain.ingest import code_files as cf
 from tests import code_repo_fixtures as fx
 from tests.conftest import CountingEmbedder
+from tests.secret_fixtures import SYNTHETIC_AWS_KEY
 
 
 @pytest.fixture
@@ -159,6 +160,26 @@ def test_an_unreachable_database_exits_1_by_class(
     assert "ingest-code: database unavailable (OperationalError)" in result.output
 
 
+def test_a_repository_with_no_commit_yet_reports_zero_files(
+    tmp_path: Path, embedder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rev-113: it used to exit 1 with "`git log` failed (exit 128)"."""
+    home = tmp_path / "home"
+    home.mkdir()
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    fx.git(fresh, "init", "-q", home=home)
+    fx.write(fresh, "a.py", "x = 1\n")
+    fx.git(fresh, "add", "a.py", home=home)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+
+    result = _run(fresh)
+
+    assert result.exit_code == 0, result.output
+    assert f"found 0 file(s) you committed since {fx.SINCE}" in result.output
+
+
 # --- AC1–AC4 -----------------------------------------------------------------------------
 
 
@@ -206,7 +227,7 @@ def test_the_planted_key_is_refused_even_when_the_guard_is_set_to_warn(
     assert fx.SECRET_PATH not in _docs(test_db)
     assert f"refused {fx.SECRET_PATH}: aws_access_key_id at line 1" in result.output
     assert "1 file(s) NOT ingested: each holds a credential-shaped string" in result.output
-    assert fx.SYNTHETIC_AWS_KEY not in result.output
+    assert SYNTHETIC_AWS_KEY not in result.output
     assert test_db.execute(
         "SELECT count(*) FROM documents WHERE source_path LIKE %s", (f"%{fx.SECRET_PATH}",)
     ).fetchone() == (0,)
@@ -311,16 +332,14 @@ def test_enrich_opts_in_to_the_summary(
 def test_a_per_file_failure_is_counted_by_class_and_the_run_goes_on(
     repo: Path, embedder: Any, test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from brain import cli_ingest_code
-
-    real = cli_ingest_code.ingest_document
+    from brain.ingest import ingest_document as real
 
     def flaky(conn: Any, **kwargs: Any) -> Any:
         if kwargs["doc"].metadata["path"] == "README.md":
             raise ValueError("synthetic failure text")
         return real(conn, **kwargs)
 
-    monkeypatch.setattr(cli_ingest_code, "ingest_document", flaky)
+    monkeypatch.setattr("brain.cli_ingest_code.ingest_document", flaky)
 
     result = _run(repo)
 

@@ -9,6 +9,7 @@ proves a command did NOT run by finding no marker.
 from __future__ import annotations
 
 import functools
+import subprocess
 from datetime import date
 from pathlib import Path
 
@@ -88,6 +89,52 @@ def test_the_lazy_fetch_is_off_even_when_the_refusal_is_not_reached(tmp_path: Pa
     home = _home(tmp_path)
     payload, fired = _payload(tmp_path)
     clone = _partial_clone(tmp_path, home, payload)
+
+    with pytest.raises(cr.CodeRepoError, match="`git log` failed"):
+        cr.owner_touched_files(_runner(clone, home), emails=[fx.OWNER_EMAIL], since=SINCE)
+
+    assert list(fired.iterdir()) == []
+
+
+def _without(pairs: tuple[str, ...], value: str) -> list[str]:
+    """``_SAFE_CONFIG`` with the ``-c value`` pair dropped."""
+    out: list[str] = []
+    for flag, item in zip(pairs[::2], pairs[1::2], strict=True):
+        if item != value:
+            out += [flag, item]
+    return out
+
+
+@pytest.mark.parametrize(
+    "layer", ["GIT_NO_LAZY_FETCH", "GIT_ALLOW_PROTOCOL"], ids=["no-lazy-fetch", "no-protocol"]
+)
+def test_each_transport_layer_alone_stops_the_lazy_fetch(tmp_path: Path, layer: str) -> None:
+    """rev-113: each env layer alone, with the other removed and the repository allowing
+    ``file`` itself (``protocol.file.allow=always`` outranks ``-c protocol.allow=never``)."""
+    home = _home(tmp_path)
+    payload, fired = _payload(tmp_path)
+    clone = _partial_clone(tmp_path, home, payload)
+    fx.git(clone, "config", "protocol.allow", "always", home=home)
+    fx.git(clone, "config", "protocol.file.allow", "always", home=home)
+    env = cr.git_env({"HOME": str(home)})
+    other = {"GIT_NO_LAZY_FETCH", "GIT_ALLOW_PROTOCOL"} - {layer}
+    for name in other:
+        del env[name]
+    argv = [fx.git_bin(), "--no-pager", "-C", str(clone),
+            *_without(cr._SAFE_CONFIG, "protocol.allow=never"),
+            "log", "-z", "--name-only", "--format=", "HEAD", "--"]
+
+    subprocess.run(argv, env=env, capture_output=True, timeout=60, check=False)
+
+    assert list(fired.iterdir()) == []
+
+
+def test_the_repository_cannot_allow_its_own_protocol(tmp_path: Path) -> None:
+    """The runner as shipped, past the refusal, with ``protocol.file.allow=always`` set."""
+    home = _home(tmp_path)
+    payload, fired = _payload(tmp_path)
+    clone = _partial_clone(tmp_path, home, payload)
+    fx.git(clone, "config", "protocol.file.allow", "always", home=home)
 
     with pytest.raises(cr.CodeRepoError, match="`git log` failed"):
         cr.owner_touched_files(_runner(clone, home), emails=[fx.OWNER_EMAIL], since=SINCE)

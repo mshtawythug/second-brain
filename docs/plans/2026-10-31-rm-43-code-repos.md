@@ -237,7 +237,12 @@ The scanned repository is untrusted, and its `.git/config` is honoured by every 
   that command during `git log --name-only` (a lazy fetch of a missing tree). Reproduced with a
   local `--filter=tree:0` clone over `file://`. Three layers now: `find_work_tree` refuses any
   config with `extensions.partialclone`, `remote.*.promisor` or `remote.*.partialclonefilter`;
-  `GIT_NO_LAZY_FETCH=1`; and `-c protocol.allow=never`. Each layer alone stopped the payload.
+  `GIT_NO_LAZY_FETCH=1`; and `GIT_ALLOW_PROTOCOL` set empty. Each layer alone stops the payload
+  (`test_each_transport_layer_alone_stops_the_lazy_fetch`). **Corrected (rev-113, on
+  `423e477`):** the third layer was first `-c protocol.allow=never`, and this line said it
+  stopped the payload alone. It does not: it sets only the default, and the repository's own
+  `protocol.file.allow=always` outranks it. `GIT_ALLOW_PROTOCOL` overrides all protocol config,
+  so it replaced the `-c` as the layer. The `-c` stays, as a default that is harmless.
 - **Exec-bearing keys, enumerated** (the `code_repo` module docstring lists each and how it is
   closed). Transport keys (`uploadpack`, `core.sshCommand`, `remote.*.vcs`, `credential.helper`,
   `core.askPass`, `core.gitProxy`) are behind the three layers above, and `credential.helper`
@@ -253,6 +258,10 @@ The scanned repository is untrusted, and its `.git/config` is honoured by every 
 - **MEDIUM, fixed.** Global and XDG config are off (`GIT_CONFIG_GLOBAL=/dev/null`). `HOME` is
   kept only for the default `~/.config/git/ignore`. A custom `core.excludesFile` in the owner's
   global config no longer applies. The docstring states what is and is not defended.
+- **LOW (rev-113), fixed.** A repository with files staged but no commit yet failed with
+  "`git log` failed (exit 128)". `owned_files` now checks `HEAD` first (`has_head`, with
+  `rev-parse --verify -q HEAD`, which exits 1 when there is none) and returns `[]`, so the run
+  reports "found 0 file(s)".
 - **LOW, accepted** as written (`kill_group` suppressing `PermissionError`).
 - Every fix was proven RED against `f37798d` in a `git archive` copy, then GREEN.
 

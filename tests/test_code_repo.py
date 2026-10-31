@@ -60,6 +60,7 @@ def test_the_runner_hardens_argv_and_passes_a_minimal_env(tmp_path: Path) -> Non
     assert env["GIT_CONFIG_NOSYSTEM"] == "1"
     assert env["GIT_CONFIG_GLOBAL"] == os.devnull
     assert env["GIT_NO_LAZY_FETCH"] == "1"
+    assert env["GIT_ALLOW_PROTOCOL"] == ""
     assert "SENTINEL_VAR" not in env
 
 
@@ -289,6 +290,36 @@ def test_since_is_local_midnight_not_the_current_time_of_day(tmp_path: Path) -> 
     )
 
     assert touched == {"early.py"}
+
+
+def test_a_repository_with_no_commit_yet_owns_nothing(tmp_path: Path) -> None:
+    """rev-113: files staged, no ``HEAD``; the log cannot answer, so the answer is ``[]``."""
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = tmp_path / "r"
+    repo.mkdir()
+    fx.git(repo, "init", "-q", home=home)
+    fx.write(repo, "a.py", "x = 1\n")
+    fx.git(repo, "add", "a.py", home=home)
+    runner = _runner(repo, home)
+
+    assert not cr.has_head(runner)
+    assert cr.owned_files(cr.WorkTree(repo, "", repo), runner=runner,
+                          emails=[fx.OWNER_EMAIL], since=date.fromisoformat(fx.SINCE)) == []
+
+
+def test_has_head_is_true_once_there_is_a_commit(tmp_path: Path) -> None:
+    repo = fx.build_repo(tmp_path)
+
+    assert cr.has_head(_runner(repo, fx.home_of(tmp_path)))
+
+
+def test_has_head_raises_any_other_failure() -> None:
+    def broken(_args: list[str]) -> bytes:
+        raise cr.GitExitError("`git rev-parse` failed (exit 128)", returncode=128)
+
+    with pytest.raises(cr.GitExitError, match="exit 128"):
+        cr.has_head(broken)
 
 
 def test_an_address_list_is_required() -> None:
