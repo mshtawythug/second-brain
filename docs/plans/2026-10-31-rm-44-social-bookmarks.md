@@ -314,3 +314,26 @@ D1–D13 accepted as recommended. Three conditions:
 - **C3, D7 regression proof.** `brain ingest-web`'s behaviour does not change. Its existing
   sensitivity tests in `tests/test_cli_ingest_web.py` run unchanged against the extracted helper
   (`git diff` of that file is empty), and the PR says so.
+
+## Decisions taken during implementation
+
+- **The D7 helper lives in `src/brain/cli_sensitivity_rerun.py`**, not `ingest/sensitivity_rerun.py`:
+  it prints, and no `ingest/` module imports `typer`. The mirror propagation is a keyword
+  argument, and `cli_ingest_web.py` passes its own module-level `propagate_sensitivity_to_vault`,
+  so `tests/test_cli_ingest_web.py`'s monkeypatched mirror-failure test runs **unchanged** (C3:
+  `git diff` of that file is empty; all its sensitivity tests pass).
+- **A stored post's body is never rebuilt** (no `--refresh`): a re-run patches `collections` and
+  applies the escalate-only sensitivity rule, nothing else. A handle that first appears in a
+  later archive is therefore not added to an existing post.
+- **The secret-guard notice quotes the title**, which for a post is the start of its text, as it
+  does for every source (`ingest/guard.py`, shared); the finding itself is masked. It reaches only
+  the owner's terminal, never a log. Pinned the same way `ingest-web`'s tests pin it.
+- **`--since` is local midnight converted to UTC**, as `ingest-web` does.
+- **Mutation proofs as run (13, all killed)**: the trailing-content check; `O_NOFOLLOW` on
+  `data/`; `S_ISREG`; `st_nlink`; the size cap; the `RecursionError` catch; the entry cap; the
+  platform-host check; the id-in-path match; the future-id refusal; the `collections` union;
+  stored posts routed through `ingest_document`; the escalate-only guard. "Copy `expandedUrl`
+  instead of constructing the URL" became the two `handle_from_url` checks (host, id in path),
+  since the URL is constructed from the id and handle and no code path carries `expandedUrl`.
+- **The test DB** `second_brain_test_rm44` did not exist on 5434; it was created with
+  `CREATE DATABASE` (additive), and the conftest migrated it.
