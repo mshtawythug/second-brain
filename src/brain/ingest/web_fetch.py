@@ -11,8 +11,9 @@ redirect):
    through the injected :data:`Resolver`, and the hop is refused when ANY address
    fails the injected :data:`AddressPolicy`. The default, :func:`public_only`, is
    an explicit deny list that does not depend on the interpreter's ``ipaddress``
-   tables, and it checks the IPv4 address embedded in v4-mapped, NAT64, 6to4 and
-   Teredo addresses.
+   tables. It checks the IPv4 address embedded in v4-mapped and NAT64 addresses,
+   and refuses the deprecated 6to4 (``2002::/16``) and Teredo (``2001::/32``)
+   tunnels outright, whatever they embed (team-lead ruling on sec-114 F9).
 4. **Connect to what was validated.** The request goes to the IP literal; the
    name travels in the ``Host`` header and in httpcore's ``sni_hostname``
    request extension, which sets the TLS server name and so the certificate
@@ -56,6 +57,7 @@ import codecs
 import ipaddress
 import re
 import socket
+import ssl
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -135,18 +137,18 @@ _GLOBAL_V6 = ipaddress.IPv6Network("2000::/3")
 _DENIED_V6 = tuple(
     ipaddress.IPv6Network(net)
     for net in (
+        "2001::/32",  # Teredo (deprecated tunnel): refused whatever it embeds
         "2001:2::/48",  # benchmarking
         "2001:10::/28",  # ORCHID (deprecated)
         "2001:20::/28",  # ORCHIDv2
         "2001:db8::/32",  # documentation
+        "2002::/16",  # 6to4 (deprecated tunnel): refused whatever it embeds
         "3fff::/20",  # documentation (RFC 9637)
     )
 )
 _V4_MAPPED = ipaddress.IPv6Network("::ffff:0:0/96")
 _NAT64 = ipaddress.IPv6Network("64:ff9b::/96")
 _NAT64_LOCAL = ipaddress.IPv6Network("64:ff9b:1::/48")
-_TEREDO = ipaddress.IPv6Network("2001::/32")
-_SIX_TO_FOUR = ipaddress.IPv6Network("2002::/16")
 
 #: The charsets a server may name (after ``codecs.lookup`` normalization).
 _TEXT_CODECS = frozenset(
@@ -178,7 +180,7 @@ def public_only(address: IPAddress) -> bool:
 
 
 def _embedded_v4(address: ipaddress.IPv6Address) -> tuple[ipaddress.IPv4Address, ...] | None:
-    """The IPv4 addresses a v4-mapped, NAT64, 6to4 or Teredo address carries, else ``None``."""
+    """The IPv4 address a v4-mapped or NAT64 address carries, else ``None``."""
     value = int(address)
     if address in _V4_MAPPED or address in _NAT64:
         return (ipaddress.IPv4Address(value & 0xFFFFFFFF),)
@@ -186,12 +188,6 @@ def _embedded_v4(address: ipaddress.IPv6Address) -> tuple[ipaddress.IPv4Address,
         # RFC 6052 /48: octets a.b in bits 48-63, the zero u-octet in 64-71, c.d in 72-87.
         high, low = (value >> 64) & 0xFFFF, (value >> 40) & 0xFFFF
         return (ipaddress.IPv4Address((high << 16) | low),)
-    if address in _SIX_TO_FOUR:
-        return (ipaddress.IPv4Address((value >> 80) & 0xFFFFFFFF),)
-    if address in _TEREDO:
-        server = ipaddress.IPv4Address((value >> 64) & 0xFFFFFFFF)
-        client = ipaddress.IPv4Address(~value & 0xFFFFFFFF)
-        return server, client
     return None
 
 
@@ -209,9 +205,17 @@ def system_resolver(host: str, port: int) -> list[str]:
     return addresses
 
 
-def make_client(transport: httpx.BaseTransport | None = None) -> httpx.Client:
-    """A client for one fetch (module docstring); ``transport`` is the tests' seam."""
+def make_client(
+    transport: httpx.BaseTransport | None = None, *, verify: ssl.SSLContext | bool = True
+) -> httpx.Client:
+    """A client for one fetch (module docstring).
+
+    ``transport`` and ``verify`` are test seams: a MockTransport, or a context that
+    trusts a synthetic test CA. Production passes neither, so certificates are
+    checked against the system's trust store.
+    """
     return httpx.Client(
+        verify=verify,
         follow_redirects=False,
         trust_env=False,
         timeout=httpx.Timeout(TIMEOUT_SECONDS),

@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import gzip
 import ipaddress
+import ssl
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,6 +24,7 @@ import pytest
 from brain.ingest import web_fetch as wf
 from brain.ingest.web_fetch import WebFetchError, fetch_page, make_client, public_only
 from brain.settings.web_allowlist import WebAllowlist
+from tests.tls_fixtures import KeepAliveServer, make_ca_and_server_cert
 
 ALLOW = WebAllowlist(exact=frozenset({"example.com", "docs.example.com"}),
                      suffixes=frozenset({"example.org"}))
@@ -612,12 +615,13 @@ def _teredo(server: str, client: str) -> str:
         ("64:ff9b::5db8:d70e", True),
         ("64:ff9b:1:7f00:0:100::", False),  # RFC 6052 /48: 127.0.0.1
         ("64:ff9b:1:5db8:d7:e00::", True),  # RFC 6052 /48: 93.184.215.14
+        # 6to4 and Teredo are refused outright, whatever they embed (team-lead ruling).
         ("2002:7f00:1::1", False),  # 6to4 of 127.0.0.1
         ("2002:a9fe:a9fe::", False),  # 6to4 of 169.254.169.254
-        ("2002:5db8:d70e::1", True),  # 6to4 of a public address
+        ("2002:5db8:d70e::1", False),  # 6to4 of a public address
         (_teredo("93.184.215.14", "127.0.0.1"), False),
         (_teredo("10.0.0.1", "93.184.215.14"), False),
-        (_teredo("93.184.215.14", "93.184.215.15"), True),
+        (_teredo("93.184.215.14", "93.184.215.15"), False),
     ],
 )
 def test_public_only_pins_every_form(address: str, allowed: bool) -> None:
@@ -643,3 +647,107 @@ def test_no_connection_is_kept_alive_and_each_fetch_gets_a_fresh_client() -> Non
     with make_client() as client:
         pool = client._transport._pool  # type: ignore[attr-defined]
         assert pool._max_keepalive_connections == 0
+
+
+
+# --- rev-114 #1 / sec-114 F13: a second host on the same IP gets its own certificate check ----
+
+
+@pytest.fixture
+def tls_server(tmp_path: Path) -> Iterator[tuple[KeepAliveServer, ssl.SSLContext]]:
+    """A keep-alive HTTPS server on 127.0.0.1 holding a certificate for a.example ONLY."""
+    ca, cert, key = make_ca_and_server_cert(tmp_path)
+    server = KeepAliveServer(cert=cert, key=key, routes={})
+    port = server.port
+    server.routes.update({
+        "a.example/ok": (200, {"Content-Type": "text/plain"}, b"A ok"),
+        "a.example/start": (302, {"Location": f"https://b.example:{port}/final"}, b""),
+        "b.example/final": (200, {"Content-Type": "text/plain"}, b"B served"),
+    })
+    trust = ssl.create_default_context(cafile=str(ca))
+    try:
+        yield server, trust
+    finally:
+        server.close()
+
+
+TLS_ALLOW = WebAllowlist(exact=frozenset({"a.example", "b.example"}), suffixes=frozenset())
+
+
+def _loopback(host: str, port: int) -> Sequence[str]:
+    return ["127.0.0.1"]
+
+
+def _fetch_tls(url: str, trust: ssl.SSLContext) -> str:
+    return fetch_page(
+        url, TLS_ALLOW,
+        client_factory=lambda: make_client(verify=trust),
+        resolver=_loopback,
+        policy=lambda address: True,  # loopback is refused by default; this test needs it
+    )
+
+
+def test_the_name_on_the_certificate_is_checked(
+    tls_server: tuple[KeepAliveServer, ssl.SSLContext],
+) -> None:
+    server, trust = tls_server
+
+    assert _fetch_tls(f"https://a.example:{server.port}/ok", trust) == "A ok"
+
+
+class _Shared:
+    """Hands the same client to every fetch and never closes it: a client pooled across pages."""
+
+    def __init__(self, client: httpx.Client) -> None:
+        self.client = client
+
+    def __enter__(self) -> httpx.Client:
+        return self.client
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def test_a_second_host_on_the_same_address_gets_its_own_certificate_check(
+    tls_server: tuple[KeepAliveServer, ssl.SSLContext],
+) -> None:
+    """rev-114 #1 / sec-114 F13. Fetch a.example, then b.example, on ONE client.
+
+    Both names resolve to 127.0.0.1 and the certificate names a.example only. httpcore
+    pools connections by origin, here the IP literal, and reads ``sni_hostname`` only
+    on a new connection, so with keep-alive the second fetch rode a.example's verified
+    session and b.example was served unchecked (proved on 3484fc4: one connection,
+    "B served"). With no keep-alive (``CONNECTION_LIMITS``) the second fetch opens its
+    own connection with SNI b.example, and the certificate check refuses it.
+    """
+    server, trust = tls_server
+    shared = make_client(verify=trust)
+    try:
+        def fetch(host: str, path: str) -> str:
+            return fetch_page(
+                f"https://{host}:{server.port}/{path}", TLS_ALLOW,
+                client_factory=lambda: _Shared(shared),  # type: ignore[arg-type,return-value]
+                resolver=_loopback,
+                policy=lambda address: True,
+            )
+
+        assert fetch("a.example", "ok") == "A ok"
+        with pytest.raises(WebFetchError, match=r"^fetch failed \(ConnectError\b"):
+            fetch("b.example", "final")
+    finally:
+        shared.close()
+
+    assert server.served == ["a.example/ok"]
+    assert server.connections == 2
+
+
+def test_a_redirect_to_another_host_on_the_same_address_is_checked_too(
+    tls_server: tuple[KeepAliveServer, ssl.SSLContext],
+) -> None:
+    """The same rule inside one fetch: a.example redirects to b.example on the same IP."""
+    server, trust = tls_server
+
+    with pytest.raises(WebFetchError, match=r"^fetch failed \(ConnectError\b"):
+        _fetch_tls(f"https://a.example:{server.port}/start", trust)
+
+    assert server.served == ["a.example/start"]

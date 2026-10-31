@@ -188,7 +188,7 @@ capped run is 500 short embeds and no graph-lane time. With `--fetch`, the fetch
 | T4 | A hostile SQLite file (`--profile` is user-supplied) | Fixed SELECTs, `trusted_schema=OFF`, no extension loading. Every object read must be a real table in `sqlite_master` (no views). A progress-handler deadline (60 s) on every query. Only regular files: `lstat`, `O_NOFOLLOW` open, `fstat` the same inode, then a byte-counted copy (1 GiB). Any `OSError` → one line by class and errno. A row cap; `sqlite3.DatabaseError` → exit 1 (sec-114 F5, F6) | Garbage-file and missing-column tests |
 | T5 | A hostile bookmarks JSON or plist | A size cap; an iterative walk with a depth cap, a visited set (shared references and cycles are walked once) and a 100,000-node cap; a non-string field is skipped and counted (sec-114 F2) | Deep-nesting and wrong-type fixtures |
 | T6 | Terminal injection via titles | `one_line` on every title and host printed | ESC-in-title fixture |
-| T7 | `--fetch` egress and SSRF | https only. Every redirect hop must be allowlisted; at most 3 hops. Every resolved address must pass `public_only`, an explicit, version-independent deny list (loopback, RFC 1918, CGNAT, link-local, ULA, `fec0::/10`, multicast, unspecified, reserved, benchmarking, documentation), with the IPv4 inside v4-mapped, NAT64, 6to4 and Teredo addresses checked too. **A name that resolves to a private address is refused** (A1). The connection is pinned to the validated IP (`Host` + `sni_hostname`), with a fresh client and no keep-alive per fetch (F13). One 10 s wall-clock deadline over every hop, enforced by a joined worker thread (F4). A raw-byte 1 MiB cap and any `Content-Encoding` but identity refused (F1). Only allowlisted text codecs (F7). `trust_env=False`, no cookies. Allowlist entries: ASCII only, no address in any form, no localhost, no single label (F8); public suffixes are a documented residual | AC5; MockTransport and fake-resolver tests for each rule; mutation proofs |
+| T7 | `--fetch` egress and SSRF | https only. Every redirect hop must be allowlisted; at most 3 hops. Every resolved address must pass `public_only`, an explicit, version-independent deny list (loopback, RFC 1918, CGNAT, link-local, ULA, `fec0::/10`, multicast, unspecified, reserved, benchmarking, documentation), with the IPv4 inside v4-mapped and NAT64 addresses checked too; 6to4 and Teredo are refused outright. **A name that resolves to a private address is refused** (A1). The connection is pinned to the validated IP (`Host` + `sni_hostname`), with a fresh client and no keep-alive per fetch (F13). One 10 s wall-clock deadline over every hop, enforced by a joined worker thread (F4). A raw-byte 1 MiB cap and any `Content-Encoding` but identity refused (F1). Only allowlisted text codecs (F7). `trust_env=False`, no cookies. Allowlist entries: ASCII only, no address in any form, no localhost, no single label (F8); public suffixes are a documented residual | AC5; MockTransport and fake-resolver tests for each rule; mutation proofs |
 | T8 | Hosted-embedder egress | `normal` rows can reach Voyage when that backend is active; the existing egress notice prints, as with every ingester | Covered by the existing notice |
 | T9 | Leaks through logs | Class-only errors; URLs never logged | `test_log_privacy_rules.py`, `test_log_privacy.py` |
 
@@ -363,9 +363,26 @@ All sixteen decisions were approved as recommended (team-lead, 2026-10-31).
 | F6 | `sqlite_master` must list each object as `type='table'`. A progress-handler deadline (`QUERY_TIMEOUT_SECONDS`) aborts the query; that abort is not retried. | `browser_store._require_tables`, `_query` |
 | F7 | Only allowlisted text codecs; anything else decodes as UTF-8 with replacement. | `web_fetch._text_codec` |
 | F8 | Entries must be ASCII (a punycode hint is given). No address in any form (WHATWG "ends in a number"), no `localhost`, no single label. `allows()` refuses an address host. The public-suffix residual is in the guide. | `settings/web_allowlist.py`, `web_url.is_numeric_host` |
-| F9 | `public_only` is an explicit deny list. Embedded IPv4 in v4-mapped, NAT64 (`/96` and `/48`), 6to4 and Teredo is decoded and checked. Note: an embedded *public* address is allowed, which is looser than the 3.11.17 `ipaddress` tables. | `web_fetch.public_only` |
+| F9 | `public_only` is an explicit deny list. Embedded IPv4 in v4-mapped and NAT64 (`/96` and `/48`) is decoded and checked. **6to4 (`2002::/16`) and Teredo (`2001::/32`) are refused outright, whatever they embed** (team-lead ruling: deprecated tunnels). | `web_fetch.public_only` |
 | F10 | `capped_process.sigterm_as_system_exit(also=(SIGHUP,))` wraps the read. The stale-snapshot sweep (3 h) runs at startup through the shared leaf `ingest/stale_tempdirs.py`, which `voice.py` now uses too. | `cli_ingest_web`, `browser_store.sweep_stale_snapshots` |
-| F11 | An explicit `--sensitivity confidential` raises stored pages (`set_document_sensitivity` + `propagate_sensitivity_to_vault`). Without the flag nothing changes. **Escalate only:** an explicit `normal` never lowers a confidential page; it prints a `brain mark-normal` hint (the repo-wide rule, flagged to team-lead). | `cli_ingest_web._apply_explicit_sensitivity` |
+| F11 | An explicit `--sensitivity confidential` raises stored pages (`set_document_sensitivity` + `propagate_sensitivity_to_vault`). Without the flag nothing changes. **Escalate only:** an explicit `normal` never lowers a confidential page; it prints a `brain mark-normal` hint (the repo-wide rule; accepted by team-lead). | `cli_ingest_web._apply_explicit_sensitivity` |
 | F12 | No change (ruling). | — |
 | F13 | `CONNECTION_LIMITS` (no keep-alive) and a fresh client per fetch. | `web_fetch.make_client`, `fetch_page` |
 | F14 | This table, T2/T4/T5/T7 above, the guide, and the module docstrings. | — |
+
+## Review round (rev-114, folded into the sec-114 round)
+
+- **rev 1, MEDIUM (= sec F13): pooled keep-alive skipped the second host's certificate check.**
+  Proved on 3484fc4 against a loopback TLS server with a synthetic CA and a certificate for
+  `a.example` only. Both names resolved to 127.0.0.1. Fetching `a.example` and then
+  `b.example` on one client served `B` over one connection, so `b.example`'s certificate was
+  never checked. Fixed by `CONNECTION_LIMITS` (no keep-alive) and a client per fetch. The
+  regression test (`tests/tls_fixtures.py`) shares one client across both fetches, so
+  `CONNECTION_LIMITS` is the only guard left, and asserts that `b.example` is refused with two
+  connections. A mutant that drops the limits is killed. `make_client` gains a `verify` test
+  seam (production passes none).
+- **rev 2 (= F4):** the deadline is checked at the top of every hop
+  (`test_the_deadline_is_checked_before_every_hop`).
+- **rev 3 (= F9):** `fec0::/10` is refused (outside `2000::/3`).
+- **rev 4 (= F14):** the T7 row above.
+- **rev 5:** a blank line before the RM-43 CHANGELOG heading.

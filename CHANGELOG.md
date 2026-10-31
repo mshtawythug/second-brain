@@ -43,7 +43,8 @@ git tag scheme:
   cookies, no proxy settings and no `.netrc`.
 - Security round (sec-114): the fetch refuses compressed responses and counts raw bytes. The
   deadline is wall-clock over every hop. `public_only` is an explicit deny list that decodes
-  embedded IPv4. There is no connection reuse across hosts, and only text codecs are honoured.
+  the IPv4 inside v4-mapped and NAT64 addresses and refuses 6to4 and Teredo outright. There
+  is no connection reuse across hosts, and only text codecs are honoured.
   `;` path parameters are dropped. Allowlist entries must be ASCII names (no addresses in any
   form, no localhost). The store copy reads only regular files and is byte-counted; views and
   long queries are refused. Bookmarks are walked once per node with a node cap. SIGHUP and
@@ -52,6 +53,7 @@ git tag scheme:
 - `web_page` joins the concept-skip policy (version `v4`). New: `brain/ingest/browser.py`,
   `browser_store.py`, `web_url.py`, `web_fetch.py`, `brain/settings/web_allowlist.py`,
   `brain/cli_ingest_web.py`, and `docs/guides/browser-history.md`.
+
 ### Added — `brain ingest-code`: your own files from a local git repository (RM-43, PR #113)
 
 - `brain ingest-code <repo-dir> --author-email E [--author-email E2 …] --since YYYY-MM-DD`

@@ -98,7 +98,8 @@ Every request, and every redirect, must:
 - go to an allowlisted host (a redirect off the list is refused);
 - resolve only to **public** addresses. A host that resolves to anything on your local
   network, loopback, a cloud metadata address, or a documentation or benchmarking range is
-  refused. So is an IPv6 address that wraps one of those (v4-mapped, NAT64, 6to4, Teredo). The
+  refused. So is an IPv6 address that wraps one of those (v4-mapped, NAT64). The deprecated 6to4
+  and Teredo tunnel addresses are refused whatever they wrap. The
   connection goes to the address that was checked, with a fresh connection, and a fresh
   certificate check, for every host.
 
