@@ -30,8 +30,7 @@ TEST_PAN = "4111111111111111"
 
 
 @pytest.mark.parametrize(
-    "spelled",
-    [TEST_PAN, "4111 1111 1111 1111", "4111-1111-1111-1111", "4111 1111-1111 1111"],
+    "spelled", [TEST_PAN, "4111 1111 1111 1111", "4111-1111-1111-1111", "4111.1111.1111.1111"]
 )
 def test_a_luhn_valid_card_number_is_redacted_however_it_is_spaced(spelled: str) -> None:
     out = redact_card_numbers(f"Card {spelled} charged")
@@ -328,3 +327,70 @@ def test_a_line_separator_cannot_plant_a_see_also_heading(tmp_path: Path) -> Non
     assert [line for line in text.splitlines() if line.strip() == "## See Also"] == [
         "## See Also"
     ]
+
+
+
+# --- rev-117 round 2: strict layouts (team-lead's ruling) ---------------------------
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "3782 822463 10005",  # Amex 4-6-5
+        "3782-822463-10005",
+        "3056 930902 5904",  # Diners 4-6-4
+        "4111 1111 1111 1111 110",  # 4-4-4-4-3, 19 digits
+        "4111\u20131111\u20131111\u20131111",  # en dash
+        "4111\u20141111\u20141111\u20141111",  # em dash
+        "4111\u22121111\u22121111\u22121111",  # minus sign
+        "4111/1111/1111/1111",
+        "4111\t1111\t1111\t1111",
+        " ".join(["\u0664" + "\u0661" * 3] + ["\u0661" * 4] * 3),  # Arabic-Indic digits
+        " ".join(["\uff14" + "\uff11" * 3] + ["\uff11" * 4] * 3),  # fullwidth digits
+        "5555 5555 5555 4444 05/29",
+    ],
+)
+def test_every_strict_card_layout_is_redacted(layout: str) -> None:
+    out = render_section("statement.pdf", f"Card {layout} paid", max_chars=1000)
+
+    assert out is not None
+    assert "REDACTED:card-number" in out
+    assert layout.split()[0] not in out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Qty Price Amount\n2 4.99 9.98\n1 12.50 12.50\n3 1.00 3.00\n",
+        "1 1299 12.99\n2 450 9.00\n3 1250 10.00",
+        "Tel 555 0100 1234 567",
+        "4111 1111-1111 1111",  # mixed separators: not one consistent layout
+        "3782 822463\n10005",  # a wrap outside two 4-digit groups
+        "4111\n1111\n1111\n1111",  # a column of 4-digit numbers: more than one wrap
+        "Order 1234 Ref 5678 Store 9012 Till 3456",
+        "Total 1,234.56 Paid 1,234.56",
+    ],
+)
+def test_amounts_phones_and_mixed_layouts_are_not_redacted(text: str) -> None:
+    out = render_section("receipt.pdf", text, max_chars=1000)
+
+    assert out is not None
+    assert "REDACTED" not in out
+
+
+def test_no_random_amount_table_loses_text() -> None:
+    """rev-117: on 2,000 random four-row tables the windowed rule redacted 1,968."""
+    import random
+
+    rng = random.Random(117)
+    for _ in range(2000):
+        rows = [
+            f"{rng.randint(1, 99)} {rng.randint(0, 99)}.{rng.randint(0, 99):02d} "
+            f"{rng.randint(0, 999)}.{rng.randint(0, 99):02d}"
+            for _ in range(4)
+        ]
+        table = "\n".join(rows)
+
+        out = render_section("receipt.pdf", table, max_chars=1000)
+
+        assert out is not None and "REDACTED" not in out, table

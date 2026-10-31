@@ -94,7 +94,8 @@ def test_a_pdf_past_the_worker_cpu_limit_is_unreadable_and_the_run_goes_on(
 ) -> None:
     from brain.ingest.attachment_isolation import WorkerLimits
 
-    monkeypatch.setattr(cga, "WORKER_LIMITS", WorkerLimits(timeout_s=30.0, cpu_s=1))
+    monkeypatch.setattr("brain.ingest.attachment_isolation.WORKER_LIMITS",
+                        WorkerLimits(timeout_s=30.0, cpu_s=1))
     _serve(monkeypatch, _two_threads(
         [_pdf("1", attachment_id="shared")], {"shared": shared_stream_pdf()}, receipt_pdf()
     ))

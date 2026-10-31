@@ -113,13 +113,28 @@ def test_the_child_is_stopped_at_its_memory_limit(tmp_path: Path) -> None:
         _child(max_rss_bytes=1)(_write(tmp_path, "attachment.pdf", receipt_pdf()))
 
 
-def test_the_child_cuts_its_text_one_past_the_cap(tmp_path: Path) -> None:
+def test_the_child_cuts_its_text_past_the_cap_plus_the_slack(tmp_path: Path) -> None:
     lines = [f"Example line {n}" for n in range(40)]
     extractor = ChildExtractor(max_pages=5, max_chars=50)
 
     doc = extractor(_write(tmp_path, "attachment.pdf", receipt_pdf(lines)))
 
-    assert len(doc.content) == 51
+    assert len(doc.content) == 50 + 1 + worker.TEXT_SLACK_CHARS
+
+
+def test_the_one_factory_uses_the_one_worker_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rev-117 nit: the reader's default and the CLI session build the same extractor."""
+    from brain.ingest import attachment_isolation
+    from brain.ingest.gmail_attachments import AttachmentLimits, child_extractor
+
+    limits = WorkerLimits(timeout_s=7.0)
+    monkeypatch.setattr(attachment_isolation, "WORKER_LIMITS", limits)
+
+    extractor = child_extractor(AttachmentLimits(max_pages=3, max_section_chars=9))
+
+    assert isinstance(extractor, ChildExtractor)
+    assert extractor.argv(Path("a.pdf"))[-3:] == ["3", "9", str(limits.max_rss_bytes)]
+    assert extractor._limits is limits
 
 
 # --- the client, with a fake runner ------------------------------------------------
@@ -424,3 +439,96 @@ def test_the_peak_rss_reading_is_in_bytes() -> None:
     peak = worker._peak_rss_bytes()
 
     assert 1 << 20 < peak < 1 << 40
+
+
+# --- rev-117 round 2: the cut comes after the redaction ---------------------------
+
+
+def test_a_card_straddling_the_cap_leaves_no_digits_behind(tmp_path: Path) -> None:
+    """The child cut its text to max_chars + 1 before the parent redacted it, so a card
+    across the cap reached the parent as its first digits."""
+    from brain.ingest.attachment_text import render_section
+
+    line = "x" * 95 + " 4111111111111111 ok"
+    doc = ChildExtractor(max_pages=5, max_chars=100)(
+        _write(tmp_path, "attachment.pdf", receipt_pdf([line]))
+    )
+
+    section = render_section("r.pdf", doc.content, max_chars=100)
+
+    assert section is not None
+    assert "4111" not in section and "411" not in section.replace("x", "")
+
+
+def test_the_worker_returns_slack_past_the_cap(tmp_path: Path) -> None:
+    lines = [f"Example line {n}" for n in range(40)]
+
+    result = worker.run(_write(tmp_path, "attachment.pdf", receipt_pdf(lines)), max_pages=5,
+                        max_chars=50)
+
+    assert len(result["content"]) == 50 + 1 + worker.TEXT_SLACK_CHARS
+
+
+# --- sec-117 round 2 R1: pypdf's own stream limits, lowered in the worker -------------
+
+
+@pytest.mark.timeout(120)
+def test_a_content_stream_over_the_pdf_limit_is_unreadable(tmp_path: Path) -> None:
+    """About 18 MB decoded from a 27 KB file: refused before any page is parsed."""
+    pdf = _write(tmp_path, "attachment.pdf", shared_stream_pdf(pages=1, operators=3_000_000))
+    started = time.monotonic()
+
+    assert worker.run(pdf, max_pages=5, max_chars=10) == {"error": "unreadable"}
+
+    assert time.monotonic() - started < 10
+
+
+@pytest.mark.timeout(120)
+def test_a_stream_shared_by_many_pages_counts_once_per_page(tmp_path: Path) -> None:
+    """Each page re-parses a shared stream, so the budget counts every page reference."""
+    pdf = _write(tmp_path, "attachment.pdf", shared_stream_pdf(pages=20, operators=200_000))
+    started = time.monotonic()
+
+    assert worker.run(pdf, max_pages=50, max_chars=10) == {"error": "unreadable"}
+
+    assert time.monotonic() - started < 10
+
+
+def test_the_pdf_limits_are_scoped_to_the_parse(tmp_path: Path) -> None:
+    import pypdf
+
+    before = pypdf.get_configuration().zlib_maximum_output_length
+
+    worker.run(_write(tmp_path, "attachment.pdf", receipt_pdf()), max_pages=5, max_chars=10)
+
+    assert pypdf.get_configuration().zlib_maximum_output_length == before
+
+
+def test_a_receipt_under_the_limits_still_extracts(tmp_path: Path) -> None:
+    result = worker.run(_write(tmp_path, "attachment.pdf", receipt_pdf(pages=3)), max_pages=5,
+                        max_chars=1000)
+
+    assert MERCHANT in result["content"]
+
+
+
+def test_the_lowered_limits_are_in_force_while_the_registry_extracts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stream past 16 MB that the per-page budget would not see (a font's ToUnicode CMap)
+    is bounded by pypdf itself, so the limits must hold during the extraction too."""
+    import pypdf
+
+    from brain.ingest import dispatch
+
+    seen: list[int] = []
+
+    def spy(path: Path) -> ExtractedDoc:
+        seen.append(pypdf.get_configuration().zlib_maximum_output_length)
+        return ExtractedDoc("x", "text", "pdf", None, {})
+
+    monkeypatch.setattr(dispatch, "extract_path", spy)
+
+    worker.extract_in_process(_write(tmp_path, "attachment.pdf", receipt_pdf()), max_pages=5)
+
+    assert seen == [worker.PDF_STREAM_LIMIT_BYTES]

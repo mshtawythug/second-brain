@@ -47,7 +47,6 @@ import typer
 from .cli_sensitivity_rerun import escalate_stored_sensitivity
 from .ingest import ExtractedDoc, IngestResult
 from .ingest.attachment_carry import carried_parts, stored_records
-from .ingest.attachment_isolation import ChildExtractor, WorkerLimits
 from .ingest.attachment_text import with_sections
 from .ingest.capped_process import sigterm_as_system_exit
 from .ingest.gmail import rendered_messages, to_extracted_thread
@@ -56,7 +55,9 @@ from .ingest.gmail_attachments import (
     AttachmentLimits,
     AttachmentRecord,
     AttachmentRun,
+    Extract,
     attachment_workdir,
+    child_extractor,
     extract_attachments,
     gws_stdout_cap,
     plan_thread,
@@ -86,8 +87,7 @@ DRY_RUN_NOTE = "--with-attachments: --dry-run fetches no attachments"
 #: One ``attachments get`` call's time limit; its process group is killed past it
 #: (``real_gws_runner``'s capped read runs through ``capped_process.run_capped``).
 GWS_TIMEOUT_SECONDS = 60.0
-#: The limits on each attachment's parse child (read at session start; tests replace it).
-WORKER_LIMITS = WorkerLimits()
+
 #: The report's order; ``extracted`` leads and ``failed`` ends it, both always shown.
 _REPORT_ORDER = (
     "kept", "empty", "too large", "too many pages", "encrypted", "unsupported", "unreadable",
@@ -150,7 +150,7 @@ class AttachmentPass:
         self._vault_root = vault_root
         self._run = AttachmentRun(limits or AttachmentLimits(), clock=clock)
         self._workdir: Path | None = None
-        self._extract: ChildExtractor | None = None
+        self._extract: Extract | None = None
         #: The last augmented thread: its id, its stored row (or ``None``) and the
         #: attachment metadata, for :meth:`after_ingest` when the body did not change.
         self._pending: tuple[str, tuple[str, Mapping[str, Any]] | None, dict[str, Any]] | None = (
@@ -171,10 +171,7 @@ class AttachmentPass:
         limits = self._run.limits
         with sigterm_as_system_exit(also=(signal.SIGHUP,)), attachment_workdir() as workdir:
             self._workdir = workdir
-            self._extract = ChildExtractor(
-                max_pages=limits.max_pages, max_chars=limits.max_section_chars,
-                limits=WORKER_LIMITS,
-            )
+            self._extract = child_extractor(limits)
             try:
                 yield
             finally:

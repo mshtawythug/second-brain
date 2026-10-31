@@ -36,7 +36,15 @@ from . import ExtractedDoc
 from .attachment_errors import UnreadableAttachmentError, error_for_status
 from .capped_process import CappedRun, run_capped
 
-__all__ = ["WORKER_MODULE", "ChildExtractor", "WorkerLimits", "stdout_cap", "worker_env"]
+__all__ = [
+    "WORKER_LIMITS",
+    "WORKER_MODULE",
+    "ChildExtractor",
+    "WorkerLimits",
+    "child_extractor",
+    "stdout_cap",
+    "worker_env",
+]
 
 WORKER_MODULE = "brain.ingest.attachment_worker"
 #: Exact names passed to the worker, plus every ``BRAIN_OCR*`` knob.
@@ -46,6 +54,9 @@ _ENV_NAMES = (
 _ENV_PREFIX = "BRAIN_OCR"
 #: The JSON around the text, generously.
 _STDOUT_SLACK_BYTES = 4096
+#: The text past ``max_chars`` the worker returns (``attachment_worker.TEXT_SLACK_CHARS``;
+#: not imported, so the parent never loads the worker's parsers).
+_TEXT_SLACK_CHARS = 64
 #: The most bytes one character of ``ensure_ascii=False`` JSON can take (``\\u00XX``).
 _MAX_BYTES_PER_CHAR = 6
 
@@ -62,6 +73,11 @@ class WorkerLimits:
     max_rss_bytes: int = 1024**3
 
 
+#: The one set of worker limits production uses (read at each call of
+#: :func:`child_extractor`, so a test can replace it here).
+WORKER_LIMITS = WorkerLimits()
+
+
 def worker_env(environ: Mapping[str, str]) -> dict[str, str]:
     """The worker's environment: the names in ``_ENV_NAMES`` and the OCR knobs only."""
     return {
@@ -72,8 +88,8 @@ def worker_env(environ: Mapping[str, str]) -> dict[str, str]:
 
 
 def stdout_cap(max_chars: int) -> int:
-    """The most stdout a worker returning ``max_chars`` + 1 characters can need."""
-    return _MAX_BYTES_PER_CHAR * (max_chars + 1) + _STDOUT_SLACK_BYTES
+    """The most stdout a worker returning ``max_chars`` + 1 + slack characters can need."""
+    return _MAX_BYTES_PER_CHAR * (max_chars + 1 + _TEXT_SLACK_CHARS) + _STDOUT_SLACK_BYTES
 
 
 def _parse(stdout: bytes) -> dict[str, Any]:
@@ -143,3 +159,8 @@ class ChildExtractor:
         return ExtractedDoc(
             title="", content=content, content_type="", source_path=None, metadata=metadata
         )
+
+
+def child_extractor(*, max_pages: int, max_chars: int) -> ChildExtractor:
+    """The one factory for the production extractor, with :data:`WORKER_LIMITS`."""
+    return ChildExtractor(max_pages=max_pages, max_chars=max_chars, limits=WORKER_LIMITS)

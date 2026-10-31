@@ -67,7 +67,7 @@ from typing import Any, Literal
 
 from brain.errors import DirectoryRefreshError
 
-from . import ExtractedDoc
+from . import ExtractedDoc, attachment_isolation
 from .attachment_errors import (
     AttachmentFetchError,
     AttachmentTooLargeError,
@@ -76,7 +76,6 @@ from .attachment_errors import (
     NoOcrError,
     UnreadableAttachmentError,
 )
-from .attachment_isolation import ChildExtractor
 from .attachment_text import render_section
 from .stale_tempdirs import sweep_stale_tempdirs
 
@@ -587,8 +586,14 @@ def _note_ocr_hint(exc: GmailAttachmentError, run: AttachmentRun) -> None:
 
 
 def child_extractor(limits: AttachmentLimits) -> Extract:
-    """The production extractor: each attachment parsed in a limited child process."""
-    return ChildExtractor(max_pages=limits.max_pages, max_chars=limits.max_section_chars)
+    """The production extractor: each attachment parsed in a limited child process.
+
+    The one factory (rev-117): :func:`brain.ingest.attachment_isolation.child_extractor`
+    with its single ``WORKER_LIMITS``.
+    """
+    return attachment_isolation.child_extractor(
+        max_pages=limits.max_pages, max_chars=limits.max_section_chars
+    )
 
 
 def extract_attachments(
