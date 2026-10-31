@@ -659,11 +659,12 @@ def test_the_thread_cap_truncates_then_stops_extracting(tmp_path: Path) -> None:
     assert sum(len(s) for s in out.sections) <= 300 + 200
 
 
-def test_retryable_statuses() -> None:
-    expected = frozenset({"failed", "over cap", "deadline", "no ocr", "truncated"})
-
-    assert expected == ga.RETRYABLE_STATUSES
-    assert expected.isdisjoint(ga.FINAL_STATUSES)
+def test_the_final_statuses() -> None:
+    assert frozenset(
+        {"extracted", "empty", "too large", "too many pages", "encrypted", "unsupported",
+         "unreadable", "malformed"}
+    ) == ga.FINAL_STATUSES
+    assert ga.FINAL_STATUSES.isdisjoint({"failed", "over cap", "deadline", "no ocr", "truncated"})
 
 
 # --- the work directory ------------------------------------------------------

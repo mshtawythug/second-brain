@@ -68,7 +68,6 @@ from .stale_tempdirs import sweep_stale_tempdirs
 __all__ = [
     "ATTACHMENT_POLICY_VERSION",
     "FINAL_STATUSES",
-    "RETRYABLE_STATUSES",
     "WORKDIR_PREFIX",
     "AttachmentLimits",
     "AttachmentRecord",
@@ -89,10 +88,11 @@ __all__ = [
 ATTACHMENT_POLICY_VERSION = "v1"
 #: The private work directory's name prefix (also what the stale sweep matches).
 WORKDIR_PREFIX = "brain-gmail-att-"
-#: Statuses a re-run tries again; every other status is final for unchanged mail. ``no ocr``
-#: (an image while OCR is off or ``tesseract`` missing) is retried, so turning OCR on reads
-#: it; ``unreadable`` (a file its parser refused) is not, so a broken PDF is not re-fetched.
-RETRYABLE_STATUSES = frozenset({"failed", "over cap", "deadline", "no ocr", "truncated"})
+#: The statuses a re-run of unchanged mail does not try again: the one set that decides a
+#: skip. Any other status (``failed``, ``over cap``, ``deadline``, ``truncated``, ``no ocr``,
+#: or one this version does not know) is retried. ``no ocr`` (an image while OCR is off or
+#: ``tesseract`` missing) is retried so turning OCR on reads it; ``unreadable`` (a file its
+#: parser refused) is final, so a broken PDF is not re-fetched every run.
 FINAL_STATUSES = frozenset(
     {"extracted", "empty", "too large", "too many pages", "encrypted", "unsupported",
      "unreadable", "malformed"}
