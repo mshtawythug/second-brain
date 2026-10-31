@@ -22,7 +22,7 @@ git tag scheme:
 
 ## [Unreleased]
 
-### Added — browser history and bookmarks, allowlist only (RM-41)
+### Added — browser history and bookmarks, allowlist only (RM-41, PR #114)
 
 - `brain ingest-web --browser chrome|safari --since YYYY-MM-DD` stores pages you bookmarked, or
   visited at least `--min-visits` (3) times, on the hosts listed in
