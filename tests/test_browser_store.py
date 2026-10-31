@@ -894,3 +894,40 @@ def test_defensive_mode_is_skipped_where_python_lacks_it(monkeypatch: pytest.Mon
 
     assert bs._defensive(object()) is False
     assert bs._defensive(sqlite3.connect(":memory:")) is False
+
+
+def test_the_query_connection_is_made_defensive_before_anything_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rev-114: ``_query`` must call ``_defensive`` on the snapshot connection, once, first.
+
+    On 3.11 the real ``setconfig`` does not exist, so only this wiring test can tell a
+    deleted call from a present one.
+    """
+    profile = _chrome(tmp_path, pages=[fx.Page(A, "A", IN_WINDOW)])
+    events: list[str] = []
+    seen: list[tuple[str, int, int]] = []
+    real_query = bs._query_chrome
+
+    def recording_defensive(conn: sqlite3.Connection) -> bool:
+        (path,) = [row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"]
+        trusted = conn.execute("PRAGMA trusted_schema").fetchone()[0]
+        query_only = conn.execute("PRAGMA query_only").fetchone()[0]
+        seen.append((Path(path).parent.name, trusted, query_only))
+        events.append("defensive")
+        return False
+
+    def recording_query(conn: sqlite3.Connection, since: datetime) -> Any:
+        events.append("query")
+        return real_query(conn, since)
+
+    monkeypatch.setattr(bs, "_defensive", recording_defensive)
+    monkeypatch.setattr(bs, "_query_chrome", recording_query)
+
+    rows = read_browser("chrome", profile, fx.SINCE)
+
+    assert [row.url for row in rows.history] == [A]
+    assert events == ["defensive", "query"]
+    ((directory, trusted, query_only),) = seen
+    assert directory.startswith(bs.TEMP_PREFIX)
+    assert (trusted, query_only) == (0, 1)
