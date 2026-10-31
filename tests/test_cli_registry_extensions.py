@@ -98,8 +98,8 @@ def test_extension_command_lists_after_every_builtin_command(
 def test_shipped_extension_tuple_registers_exactly_the_shipped_sub_apps() -> None:
     """The shipped tuple: RM-15's ``watch``, RM-19's ``dedup``, RM-21's ``tags``, RM-30's
     ``ingest-calendar``, RM-31's ``ingest-github``, RM-36's ``ingest-apple-notes``, RM-35's
-    ``ingest-notion``, RM-33's ``ingest-folder``, RM-43's ``ingest-code`` and RM-41's
-    ``ingest-web``.
+    ``ingest-notion``, RM-33's ``ingest-folder``, RM-43's ``ingest-code``, RM-41's
+    ``ingest-web`` and RM-44's ``ingest-bookmarks``.
 
     RM-06 shipped the tuple empty and this test pinned that; RM-15 is the first module behind
     the seam, RM-19 the second, RM-21 the third, RM-30 the fourth, RM-31 the fifth, RM-36 the
@@ -126,6 +126,7 @@ def test_shipped_extension_tuple_registers_exactly_the_shipped_sub_apps() -> Non
         "ingest-folder",
         "ingest-code",
         "ingest-web",
+        "ingest-bookmarks",
     ]
     assert before == ["mmm-first", "ooo-last", "nnn-group"]
     assert _help_command_names(app) == [
@@ -138,6 +139,7 @@ def test_shipped_extension_tuple_registers_exactly_the_shipped_sub_apps() -> Non
         "ingest-folder",
         "ingest-code",
         "ingest-web",
+        "ingest-bookmarks",
         "nnn-group",
         "watch",
         "dedup",

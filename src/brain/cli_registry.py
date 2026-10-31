@@ -40,6 +40,7 @@ from .cli_dedup import register as register_dedup
 from .cli_docs import register_lifecycle, register_list
 from .cli_ingest import register as register_ingest
 from .cli_ingest_apple_notes import register as register_ingest_apple_notes
+from .cli_ingest_bookmarks import register as register_ingest_bookmarks
 from .cli_ingest_calendar import register as register_ingest_calendar
 from .cli_ingest_code import register as register_ingest_code
 from .cli_ingest_folder import register as register_ingest_folder
@@ -98,6 +99,7 @@ EXTENSION_REGISTRARS: tuple[tuple[str, Registrar], ...] = (
     ("ingest-folder", register_ingest_folder),  # RM-33, drop folders (screenshots)
     ("ingest-code", register_ingest_code),  # RM-43, the owner's files in a git work tree
     ("ingest-web", register_ingest_web),  # RM-41, allowlisted browser history and bookmarks
+    ("ingest-bookmarks", register_ingest_bookmarks),  # RM-44, liked/bookmarked posts (archive)
 )
 
 #: Registrars that attach to a SUB-APP rather than the root ``app``, and so

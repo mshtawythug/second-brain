@@ -1,0 +1,623 @@
+"""The X archive reader (RM-44): fixed names, no links, bounded, and the payload never executed.
+
+Every archive is a synthetic tree under ``tmp_path`` (``tests/social_archive_fixtures.py``).
+"""
+from __future__ import annotations
+
+import ast
+import errno
+import gc
+import json
+import os
+import tracemalloc
+from pathlib import Path
+
+import pytest
+
+from brain.ingest import social_archive as sa
+from brain.ingest.social_archive import ArchiveLimits, SocialArchiveError, parse_payload
+from tests import social_archive_fixtures as fx
+
+MODULES = [
+    Path(sa.__file__),
+    Path(sa.__file__).with_name("social_posts.py"),
+    Path(sa.__file__).parents[1] / "cli_ingest_bookmarks.py",
+    Path(sa.__file__).parents[1] / "cli_sensitivity_rerun.py",
+]
+PID = fx.post_id_at(fx.NOW - fx.DAY)
+ENTRY = fx.fields(PID)
+
+
+def _likes(root: Path, text: str, name: str = "like.js") -> Path:
+    data = root / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / name).write_text(text, encoding="utf-8")
+    return root
+
+
+def _parse(text: str, collection: str = "like", part: int = 0) -> list[dict]:
+    return list(parse_payload(text, collection=collection, part=part))
+
+
+# --- the payload is parsed as JSON, never executed (AC1) -----------------------------------------
+
+
+def test_the_prefix_is_stripped_and_the_entries_unwrapped() -> None:
+    assert _parse(fx.payload("like", 0, [ENTRY, fx.fields("7")])) == [ENTRY, fx.fields("7")]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "window.YTD.like.part0 = []",
+        "window.YTD.like.part0=[]",
+        "﻿  window.YTD.like.part0 =\n[\n]\n",
+        "window.YTD.like.part0 = [];",
+        "window.YTD.like.part0 = [] ;\n\n",
+    ],
+)
+def test_accepted_prefix_and_tail_forms(text: str) -> None:
+    assert _parse(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "window.YTD.like.part0 = []; require('child_process')",
+        "window.YTD.like.part0 = [] ;;",
+        "window.YTD.like.part0 = [], alert(1)",
+        "window.YTD.like.part0 = (function(){ return [] })()",
+        "window.YTD.like.part0 = eval('[]')",
+        "window.YTD.like.part0 = `[]`",
+        "var x = 1; window.YTD.like.part0 = []",
+        "window.YTD.like.part0 = [] // trailing comment",
+        "window.YTD.like.part0 = {}",
+        "window.YTD.like.part0 = ",
+        "window.YTD.like.part0 = [",
+        "window.YTD.like.part0 = [{\"like\": {}},]",
+        "window.YTD.like.part0 = [,]",
+        "window.YTD.like.part0 = [{\"like\": {}} {\"like\": {}}]",
+        "[]",
+        "",
+        "window['YTD'].like.part0 = []",
+        "window.YTD.like.part0 = [NaN]",
+        "window.YTD.like.part0 = [{\"like\": {\"tweetId\": Infinity}}]",
+    ],
+)
+def test_anything_but_the_prefix_and_one_array_refuses_the_file(text: str) -> None:
+    with pytest.raises(SocialArchiveError):
+        _parse(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "collection", "part"),
+    [
+        ("window.YTD.bookmark.part0 = []", "like", 0),
+        ("window.YTD.like.part1 = []", "like", 0),
+        ("window.YTD.like.part0 = []", "like", 2),
+        ("window.YTD.tweets.part0 = []", "like", 0),
+    ],
+)
+def test_the_prefix_must_name_the_expected_file(text: str, collection: str, part: int) -> None:
+    with pytest.raises(SocialArchiveError, match="prefix"):
+        _parse(text, collection, part)
+
+
+@pytest.mark.parametrize(
+    "element",
+    [
+        {"bookmark": {"tweetId": "1"}},
+        {"like": {"tweetId": "1"}, "extra": {}},
+        {},
+        {"like": ["1"]},
+        {"like": "1"},
+        ["like"],
+        "like",
+        7,
+        None,
+    ],
+)
+def test_an_unknown_entry_shape_refuses_the_file(element: object) -> None:
+    text = f"window.YTD.like.part0 = {json.dumps([element])}"
+
+    with pytest.raises(SocialArchiveError, match="unknown shape"):
+        _parse(text)
+
+
+def test_deep_nesting_refuses_the_file() -> None:
+    nested = "[" * 200_000 + "]" * 200_000
+    text = f'window.YTD.like.part0 = [{{"like": {{"tweetId": "1", "x": {nested}}}}}]'
+
+    with pytest.raises(SocialArchiveError, match="not valid JSON"):
+        _parse(text)
+
+
+def test_an_over_long_number_refuses_the_file() -> None:
+    text = 'window.YTD.like.part0 = [{"like": {"tweetId": "1", "n": ' + "9" * 5000 + "}}]"
+
+    with pytest.raises(SocialArchiveError, match="not valid JSON"):
+        _parse(text)
+
+
+def test_the_entry_cap_refuses_the_file() -> None:
+    text = fx.payload("like", 0, [ENTRY] * 4)
+
+    assert len(list(parse_payload(text, collection="like", part=0, max_entries=4))) == 4
+    with pytest.raises(SocialArchiveError, match="more entries"):
+        list(parse_payload(text, collection="like", part=0, max_entries=3))
+
+
+def test_the_new_modules_never_execute_or_reach_the_network() -> None:
+    banned_calls = {"eval", "exec", "compile", "__import__"}
+    banned_modules = {"subprocess", "socket", "httpx", "urllib.request", "http", "ctypes",
+                      "pickle", "marshal", "shelve", "runpy", "importlib"}
+    for module in MODULES:
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                assert node.func.id not in banned_calls, (module.name, node.func.id)
+            if isinstance(node, ast.Import):
+                assert not {a.name for a in node.names} & banned_modules, module.name
+            if isinstance(node, ast.ImportFrom) and node.level == 0:
+                assert node.module not in banned_modules, module.name
+
+
+# --- reading the archive tree --------------------------------------------------------------------
+
+
+def test_likes_and_bookmarks_are_read(tmp_path: Path) -> None:
+    other = fx.fields("99")
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]], bookmarks=[[other]])
+
+    read = sa.read_archive(root)
+
+    assert read.likes == (ENTRY,)
+    assert read.bookmarks == (other,)
+    assert read.bookmarks_present is True
+
+
+def test_a_missing_bookmarks_file_is_not_an_error(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]], bookmarks=None)
+
+    read = sa.read_archive(root)
+
+    assert read.bookmarks == ()
+    assert read.bookmarks_present is False
+
+
+def test_parts_are_read_in_order_until_the_first_gap(tmp_path: Path) -> None:
+    parts = [[fx.fields("1")], [fx.fields("2")], [fx.fields("3")]]
+    root = fx.write_archive(tmp_path / "a", likes=parts)
+    (root / "data" / "like-part5.js").write_text(
+        fx.payload("like", 5, [fx.fields("5")]), encoding="utf-8"
+    )
+
+    read = sa.read_archive(root)
+
+    assert [entry["tweetId"] for entry in read.likes] == ["1", "2", "3"]
+
+
+def test_a_part_whose_prefix_names_another_part_is_refused(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+    (root / "data" / "like-part1.js").write_text(fx.payload("like", 2, []), encoding="utf-8")
+
+    with pytest.raises(SocialArchiveError, match=r"data/like-part1\.js"):
+        sa.read_archive(root)
+
+
+def test_too_many_parts_are_refused(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[], [], []])
+
+    assert sa.read_archive(root, limits=ArchiveLimits(max_parts=3)).likes == ()
+    with pytest.raises(SocialArchiveError, match="more than 2 parts"):
+        sa.read_archive(root, limits=ArchiveLimits(max_parts=2))
+
+
+def test_a_folder_without_data_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+
+    with pytest.raises(SocialArchiveError, match="no data/ folder"):
+        sa.read_archive(tmp_path / "a")
+
+
+def test_a_data_folder_without_likes_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "a" / "data").mkdir(parents=True)
+
+    with pytest.raises(SocialArchiveError, match="no likes file"):
+        sa.read_archive(tmp_path / "a")
+
+
+@pytest.mark.parametrize("make", ["missing", "file"])
+def test_a_root_that_is_not_a_folder_is_refused(tmp_path: Path, make: str) -> None:
+    root = tmp_path / "a"
+    if make == "file":
+        root.write_text("x", encoding="utf-8")
+
+    with pytest.raises(SocialArchiveError, match="not a folder"):
+        sa.read_archive(root)
+
+
+def test_an_unreadable_root_is_refused(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+    root.chmod(0)
+    try:
+        with pytest.raises(SocialArchiveError, match="could not be opened"):
+            sa.read_archive(root)
+    finally:
+        root.chmod(0o700)
+
+
+def test_a_symlinked_root_is_the_owners_choice_and_is_followed(tmp_path: Path) -> None:
+    real = fx.write_archive(tmp_path / "real", likes=[[ENTRY]])
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+
+    assert sa.read_archive(link).likes == (ENTRY,)
+
+
+def test_a_symlinked_data_folder_is_refused(tmp_path: Path) -> None:
+    elsewhere = fx.write_archive(tmp_path / "elsewhere", likes=[[ENTRY]])
+    root = tmp_path / "a"
+    root.mkdir()
+    (root / "data").symlink_to(elsewhere / "data", target_is_directory=True)
+
+    with pytest.raises(SocialArchiveError, match="data/ is not a plain folder"):
+        sa.read_archive(root)
+
+
+def test_a_data_entry_that_is_a_file_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "a"
+    root.mkdir()
+    (root / "data").write_text("x", encoding="utf-8")
+
+    with pytest.raises(SocialArchiveError, match="data/ is not a plain folder"):
+        sa.read_archive(root)
+
+
+@pytest.mark.parametrize("name", ["like.js", "bookmark.js", "like-part1.js"])
+def test_a_symlinked_archive_file_is_refused(tmp_path: Path, name: str) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+    target = tmp_path / "target.js"
+    collection = name.split(".")[0].split("-")[0]
+    part = 1 if "part1" in name else 0
+    target.write_text(fx.payload(collection, part, [ENTRY]), encoding="utf-8")
+    path = root / "data" / name
+    path.unlink(missing_ok=True)
+    path.symlink_to(target)
+
+    with pytest.raises(SocialArchiveError, match=rf"data/{name} is not a plain file"):
+        sa.read_archive(root)
+
+
+def test_a_fifo_is_refused_without_blocking(tmp_path: Path) -> None:
+    root = tmp_path / "a"
+    (root / "data").mkdir(parents=True)
+    os.mkfifo(root / "data" / "like.js")
+
+    with pytest.raises(SocialArchiveError, match=r"data/like\.js is not a plain file"):
+        sa.read_archive(root)
+
+
+def test_a_folder_named_like_a_file_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "a"
+    (root / "data" / "like.js").mkdir(parents=True)
+
+    with pytest.raises(SocialArchiveError, match=r"data/like\.js is not a plain file"):
+        sa.read_archive(root)
+
+
+def test_a_hard_linked_file_is_refused(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+    os.link(root / "data" / "like.js", tmp_path / "second-name.js")
+
+    with pytest.raises(SocialArchiveError, match=r"data/like\.js has more than one link"):
+        sa.read_archive(root)
+
+
+def test_a_file_over_the_size_cap_is_refused(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+    size = (root / "data" / "like.js").stat().st_size
+
+    assert sa.read_archive(root, limits=ArchiveLimits(max_file_bytes=size)).likes == (ENTRY,)
+    with pytest.raises(SocialArchiveError, match=r"data/like\.js is larger than"):
+        sa.read_archive(root, limits=ArchiveLimits(max_file_bytes=size - 1))
+
+
+def test_a_file_that_grows_after_its_size_is_read_is_refused(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+    size = (root / "data" / "like.js").stat().st_size
+    grown = {"done": False}
+
+    def growing_read(fd: int, count: int) -> bytes:
+        chunk = os.read(fd, count)
+        if chunk or grown["done"]:
+            return chunk
+        grown["done"] = True
+        return b" " * 10
+
+    with pytest.raises(SocialArchiveError, match=r"data/like\.js grew"):
+        sa.read_archive(root, limits=ArchiveLimits(max_file_bytes=size + 5), read=growing_read)
+
+
+def test_the_run_wide_read_cap_spans_files(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]], bookmarks=[[ENTRY]])
+    total = sum(p.stat().st_size for p in (root / "data").iterdir())
+
+    assert sa.read_archive(root, limits=ArchiveLimits(max_read_bytes=total)).bookmarks
+    with pytest.raises(SocialArchiveError, match="more than the read cap"):
+        sa.read_archive(root, limits=ArchiveLimits(max_read_bytes=total - 1))
+
+
+def test_the_entry_cap_spans_files(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY, ENTRY]], bookmarks=[[ENTRY]])
+
+    assert len(sa.read_archive(root, limits=ArchiveLimits(max_entries=3)).bookmarks) == 1
+    with pytest.raises(SocialArchiveError, match="more entries"):
+        sa.read_archive(root, limits=ArchiveLimits(max_entries=2))
+
+
+def test_invalid_utf8_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "a"
+    (root / "data").mkdir(parents=True)
+    (root / "data" / "like.js").write_bytes(b"window.YTD.like.part0 = [\"\xff\"]")
+
+    with pytest.raises(SocialArchiveError, match=r"data/like\.js is not UTF-8"):
+        sa.read_archive(root)
+
+
+def test_a_malformed_bookmarks_file_refuses_the_run(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+    (root / "data" / "bookmark.js").write_text("window.YTD.bookmark.part0 = [1]", "utf-8")
+
+    with pytest.raises(SocialArchiveError, match=r"data/bookmark\.js .*unknown shape"):
+        sa.read_archive(root)
+
+
+def test_the_error_names_no_content(tmp_path: Path) -> None:
+    secret = "SyntheticPrivateText"
+    root = _likes(tmp_path / "a", f'window.YTD.like.part0 = [{{"{secret}": 1}}]')
+
+    with pytest.raises(SocialArchiveError) as caught:
+        sa.read_archive(root)
+
+    assert secret not in str(caught.value)
+
+
+def test_an_unreadable_file_is_refused(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+    (root / "data" / "like.js").chmod(0)
+    try:
+        with pytest.raises(SocialArchiveError, match=r"data/like\.js could not be read"):
+            sa.read_archive(root)
+    finally:
+        (root / "data" / "like.js").chmod(0o600)
+
+
+def test_an_unreadable_data_folder_is_refused(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+    (root / "data").chmod(0)
+    try:
+        with pytest.raises(SocialArchiveError, match="data/ could not be opened"):
+            sa.read_archive(root)
+    finally:
+        (root / "data").chmod(0o700)
+
+
+def test_a_read_that_fails_midway_is_refused(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+
+    def failing_read(fd: int, count: int) -> bytes:
+        raise OSError(errno.EIO, "synthetic I/O error")
+
+    with pytest.raises(SocialArchiveError, match=r"data/like\.js could not be read"):
+        sa.read_archive(root, read=failing_read)
+
+
+# --- sec-116 F2: memory is bounded by the kept text, not the JSON structure -----------------------
+
+
+def test_only_the_three_string_fields_are_kept() -> None:
+    entry = {"tweetId": "7", "fullText": "t", "expandedUrl": "https://x.com/a/status/7",
+             "junk": ["x"] * 50, "nested": {"deep": [1, 2]}}
+    odd = {"tweetId": 7, "fullText": ["t"], "expandedUrl": None}
+
+    entries = _parse(fx.payload("like", 0, [entry, odd]))
+
+    assert entries == [{"tweetId": "7", "fullText": "t", "expandedUrl": "https://x.com/a/status/7"},
+                       {}]
+
+
+def test_a_container_bomb_under_the_byte_caps_is_refused(tmp_path: Path) -> None:
+    """sec-116's PoC: 16 MiB of empty arrays in one entry, well under every byte cap."""
+    bomb = ",".join(["[]"] * (16 * 1024 * 1024 // 3))
+    root = _likes(tmp_path / "a", f'window.YTD.like.part0 = [{{"like": {{"x": [{bomb}]}}}}]')
+    assert (root / "data" / "like.js").stat().st_size < sa.MAX_FILE_BYTES
+
+    with pytest.raises(SocialArchiveError, match="too many JSON objects and arrays"):
+        sa.read_archive(root)
+
+
+def test_the_container_cap_counts_braces_and_brackets() -> None:
+    text = fx.payload("like", 0, [ENTRY, ENTRY])  # 1 array + 2 x 2 objects
+    containers = text.count("{") + text.count("[")
+
+    assert len(list(parse_payload(text, collection="like", part=0,
+                                  max_containers=containers))) == 2
+    with pytest.raises(SocialArchiveError, match="too many JSON objects and arrays"):
+        list(parse_payload(text, collection="like", part=0, max_containers=containers - 1))
+
+
+def test_the_reader_passes_its_container_cap(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+
+    with pytest.raises(SocialArchiveError, match="too many JSON objects and arrays"):
+        sa.read_archive(root, limits=ArchiveLimits(max_containers=2))
+
+
+def test_retained_memory_is_bounded_by_the_kept_text(tmp_path: Path) -> None:
+    """Junk fields are dropped as each entry is parsed, so a large archive keeps only its text."""
+    junk = "j" * 10_000
+    entries = [fx.fields(str(1000 + i), text="t" * 100, junk=junk, more=[junk]) for i in range(500)]
+    root = fx.write_archive(tmp_path / "a", likes=[entries])
+    file_size = (root / "data" / "like.js").stat().st_size
+    assert file_size > 10_000_000
+
+    tracemalloc.start()
+    try:
+        read = sa.read_archive(root)
+        gc.collect()
+        retained, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert len(read.likes) == 500
+    assert retained < 1_000_000, retained
+    assert peak < 4 * file_size, peak
+
+
+# --- sec-116 F4 and F5 ----------------------------------------------------------------------------
+
+
+def test_a_file_that_grows_by_a_few_bytes_during_the_read_is_refused(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+    grown = {"done": False}
+
+    def growing_read(fd: int, count: int) -> bytes:
+        chunk = os.read(fd, count)
+        if chunk or grown["done"]:
+            return chunk
+        grown["done"] = True
+        return b" "
+
+    with pytest.raises(SocialArchiveError, match=r"data/like\.js grew"):
+        sa.read_archive(root, read=growing_read)
+
+
+def test_archive_files_are_opened_without_acquiring_a_terminal() -> None:
+    assert sa._FILE_FLAGS & os.O_NOCTTY
+    assert sa._FILE_FLAGS & os.O_NOFOLLOW
+    assert sa._FILE_FLAGS & os.O_NONBLOCK
+
+
+# --- sec-116 R1: no one string field is held past the cap -----------------------------------------
+
+
+def test_an_entry_with_an_oversized_field_is_dropped_as_it_is_read() -> None:
+    huge = "a" * (sa.MAX_FIELD_CHARS + 1)
+    exact = "b" * sa.MAX_FIELD_CHARS
+    entries = [fx.fields("7", text=huge), fx.fields("8", text="t", expanded_url=huge),
+               fx.fields("9", text=exact)]
+
+    parsed = _parse(fx.payload("like", 0, entries))
+
+    assert parsed == [{}, {}, {"tweetId": "9", "fullText": exact}]
+
+
+def test_an_oversized_post_is_counted_as_malformed(tmp_path: Path) -> None:
+    from brain.ingest import social_posts
+
+    huge = fx.fields(PID, text="a" * (sa.MAX_FIELD_CHARS + 1))
+    root = fx.write_archive(tmp_path / "a", likes=[[huge, fx.fields("99")]])
+
+    read = sa.read_archive(root)
+    collected = social_posts.collect_posts(read.likes, read.bookmarks, now=fx.NOW)
+
+    assert collected.malformed == 1
+    assert [post.post_id for post in collected.posts] == ["99"]
+
+
+def test_oversized_text_is_not_retained(tmp_path: Path) -> None:
+    """sec-116 R1: a long ``fullText`` was held until the whole archive had been read."""
+    entries = [fx.fields(str(1000 + i), text="t" * (sa.MAX_FIELD_CHARS * 2)) for i in range(100)]
+    root = fx.write_archive(tmp_path / "a", likes=[entries])
+    file_size = (root / "data" / "like.js").stat().st_size
+    assert file_size > 10_000_000
+
+    tracemalloc.start()
+    try:
+        read = sa.read_archive(root)
+        gc.collect()
+        retained, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert read.likes == ({},) * 100
+    assert retained < 1_000_000, retained
+    assert peak < 4 * file_size, peak
+
+
+# --- rev-116 round 2: one element's decode is bounded, scalars included ---------------------------
+
+
+def _wide_scalar_file(root: Path, item: str, mib: int) -> Path:
+    """rev-116's probe shape: one entry carrying a flat array of short scalars, no containers."""
+    count = mib * 1024 * 1024 // (len(item) + 1)
+    junk = ",".join([item] * count)
+    return _likes(root, 'window.YTD.like.part0 = [{"like": {"tweetId": "1", "fullText": "x", '
+                        f'"junk": [{junk}]}}}}]')
+
+
+@pytest.mark.parametrize("item", ['"ab"', "1.5", "123456"])
+def test_a_wide_scalar_array_entry_is_refused(tmp_path: Path, item: str) -> None:
+    root = _wide_scalar_file(tmp_path / "a", item, 2)
+
+    with pytest.raises(SocialArchiveError, match="longer than"):
+        sa.read_archive(root)
+
+
+def test_a_16_mib_scalar_bomb_peaks_within_a_bound(tmp_path: Path) -> None:
+    """Before the element cap this decoded the whole element: ~17x the file (rev-116)."""
+    root = _wide_scalar_file(tmp_path / "a", '"ab"', 16)
+    file_size = (root / "data" / "like.js").stat().st_size
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(SocialArchiveError):
+            sa.read_archive(root)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 4 * file_size, peak
+
+
+def test_an_entry_at_the_element_cap_is_read() -> None:
+    entry = fx.fields("7", text="t")
+    element = json.dumps({"like": entry})
+    pad = sa.MAX_ELEMENT_CHARS - len(element)
+    padded = element[:-2] + " " * pad + element[-2:]
+    assert len(padded) == sa.MAX_ELEMENT_CHARS
+
+    assert _parse(f"window.YTD.like.part0 = [{padded}]") == [entry]
+    with pytest.raises(SocialArchiveError, match="longer than"):
+        _parse(f"window.YTD.like.part0 = [{padded[:-2]} {padded[-2:]}]")
+
+
+def test_many_real_entries_still_parse(tmp_path: Path) -> None:
+    entries = [fx.fields(str(1000 + i), text=f"post {i}, with a comma [and brackets]")
+               for i in range(2000)]
+    root = fx.write_archive(tmp_path / "a", likes=[entries])
+
+    assert len(sa.read_archive(root).likes) == 2000
+
+
+# --- rev-116 round 2: a non-string text is malformed, not missing ---------------------------------
+
+
+def test_a_non_string_text_or_id_is_counted_malformed_end_to_end(tmp_path: Path) -> None:
+    from brain.ingest import social_posts
+
+    entries = [
+        {"tweetId": "160000000000000000", "fullText": 5},
+        {"tweetId": 160000000000000001, "fullText": "t"},
+        {"tweetId": "160000000000000002", "fullText": None},
+        {"tweetId": "160000000000000003"},
+        {"tweetId": "160000000000000004", "fullText": "kept", "expandedUrl": 7},
+    ]
+    root = fx.write_archive(tmp_path / "a", likes=[entries])
+
+    read = sa.read_archive(root)
+    collected = social_posts.collect_posts(read.likes, read.bookmarks, now=fx.NOW)
+
+    assert (collected.malformed, collected.no_text) == (2, 2)
+    assert [post.post_id for post in collected.posts] == ["160000000000000004"]

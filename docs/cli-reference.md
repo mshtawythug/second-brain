@@ -1087,6 +1087,53 @@ brain ingest-web --browser chrome --since 2026-10-01 --fetch --max 50
   (`unsupported … history schema`).
 - **Cost.** `web_page` skips concept extraction; no summary without `--fetch`.
 
+## brain ingest-bookmarks
+
+`brain ingest-bookmarks` (RM-44) stores the posts you liked or bookmarked on X,
+read from **your own data-archive export**. Request the archive from the
+platform, **unzip it first**, and pass its top folder (the one holding
+`data/`). A `.zip` path exits 2 with `unzip the archive first`. Nothing is
+fetched and nothing logs in: the command reads two files and makes no network
+call. It requires `--format x-archive` and the folder; otherwise it exits 2
+with `ingest-bookmarks requires --format x-archive and the archive's top folder
+(the one holding data/)`.
+
+```bash
+brain ingest-bookmarks --format x-archive ~/path/to/archive --dry-run
+brain ingest-bookmarks --format x-archive ~/path/to/archive --since 2026-01-01
+```
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--format` | (required) | `x-archive`, the only format. |
+| `--since` | — | Only posts **written** on or after this day (local time). An archive records no date for a like, so the date is the post's own, decoded from its id. Undated (pre-2010) posts are left out. |
+| `--max N` | 2000 | Posts written per run, newest first; the rest are counted. |
+| `--sensitivity` | `normal` | Or `confidential`, which also raises posts already stored. A run never lowers a stored post (use `brain mark-normal`). |
+| `--tag` / `-t` | — | Tags for every post. |
+| `--dry-run` | off | List `date  title` for each post; write nothing. |
+| `--allow-secrets` | off | Store a post the secret guard would refuse. |
+
+- **What is read.** Only `data/like.js` (and `like-part1.js`, `like-part2.js`,
+  …) and, when present, `data/bookmark.js` and its parts. A missing bookmarks
+  file is not an error. Each file is `window.YTD.<name>.partN = [ … ]`; the part
+  after `=` is **parsed as JSON, never run**. Anything else in the archive (your
+  own posts, messages, account data) is never opened.
+- **What is stored.** One document per post (source `social`, content type
+  `social_post`), keyed `x-<post id>`. The body is the author's handle when the
+  archive names it, the post text, and a link **built from the id**
+  (`https://x.com/<handle>/status/<id>`, or `…/i/web/status/<id>`), so no query
+  string or tracking parameter is ever kept. Nothing else about the author is
+  stored. A post with no text (deleted or private) is skipped and counted.
+- **Re-runs.** A stored post gets only its `collections` (`like`, `bookmark`)
+  updated, never removed: no re-chunk, no embed. Running the same archive again
+  changes nothing.
+- **Hostile files.** `data/` and each file must be plain (no links, devices or
+  hard links); a file over 64 MiB, more than 256 MiB in total, more than 64
+  parts or 500,000 entries, invalid UTF-8, or an unknown shape refuses the whole
+  run (exit 1) before anything is written.
+- **Cost.** `social_post` skips concept extraction, and posts are never
+  summarized.
+
 ## Status and health
 
 ```bash

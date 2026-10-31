@@ -58,6 +58,7 @@ const SOURCE_ICONS = {
   voice: "🎙️",
   code: "💻",
   web: "🌐",
+  social: "🔖",
 };
 const sourceIconFor = (kind) => SOURCE_ICONS[kind] || SOURCE_ICONS.vault;
 

@@ -24,6 +24,7 @@ const SOURCE_ICONS = {
   voice: "🎙️",
   code: "💻",
   web: "🌐",
+  social: "🔖",
 };
 
 /* `vault` is the fallback, matching `sourceIconFor`. It is a real glyph rather
