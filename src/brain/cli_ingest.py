@@ -32,6 +32,10 @@ the documents of files gone from the imported tree. The rules are in
 :mod:`brain.ingest.import_sync` and the output in :mod:`brain.cli_import_sync`; only the options
 and the wiring are here (reasoned inline at the ``DirSync`` start).
 
+**RM-45 grew it:** ``ingest_gmail`` takes ``--with-attachments`` (receipt text appended to each
+thread); the rules are in :mod:`brain.cli_gmail_attachments`, and only the option and the
+calls are here (reasoned inline at the option).
+
 That this module cannot import from ``cli`` -- the cycle described above -- is
 exactly why the kind set now lives in :mod:`brain.source_kinds` rather than in
 either file.
@@ -47,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 import typer
 
+from . import cli_gmail_attachments as gmail_attachments
 from . import cli_import_sync as dir_sync
 from .agent import resolve_agent_id
 from .cli_extract import extract_or_exit
@@ -550,6 +555,11 @@ def ingest_gmail(
     allow_secrets: bool = typer.Option(
         False, "--allow-secrets", help=_ALLOW_SECRETS_HELP + " Applies to EVERY thread in the pull."
     ),
+    # RM-45 GROWTH (over the ceiling; module docstring): the flag belongs to this command, so
+    # it and the AttachmentPass calls are here; every rule is in cli_gmail_attachments.
+    with_attachments: bool = typer.Option(
+        False, "--with-attachments", help=gmail_attachments.WITH_ATTACHMENTS_HELP
+    ),
 ) -> None:
     """Ingest Gmail messages via the `gws` CLI, batched per thread.
 
@@ -569,8 +579,10 @@ def ingest_gmail(
             err=True,
         )
         raise typer.Exit(code=2)
+    gmail_attachments.refuse_unless_scoped(with_attachments, label=label, query=query)
 
     cfg = Config.load()
+    attachments = gmail_attachments.AttachmentPass(with_attachments, vault_root=cfg.vault_path)
     stubs = gmail_ingest.list_messages(
         query=query,
         label=label,
@@ -599,6 +611,7 @@ def ingest_gmail(
     total_messages = sum(len(t) for t in threads.values())
 
     if dry_run:
+        attachments.dry_run_note()
         typer.echo(f"would ingest {len(threads)} thread(s):")
         for tid, ts in threads.items():
             subject = _gmail_thread_subject_for_dry_run(ts, owner=cfg.user_email)
@@ -618,14 +631,17 @@ def ingest_gmail(
     ingested_draft = 0
     skipped = 0
     failed = 0
-    with connect(cfg.database_url) as conn:
+    with connect(cfg.database_url) as conn, attachments.session():
         conn.autocommit = True
         for tid, ts in threads.items():
             try:
                 messages = read_thread_messages(ts, owner=cfg.user_email)
                 if not messages:  # RM-16: only the owner's own delivered briefs; never ingested
                     continue
-                doc = gmail_ingest.to_extracted_thread(messages)
+                doc = attachments.augment(conn, tid, messages)
+                if doc is None:  # RM-45: unchanged attachments, or receipt text a plain run keeps
+                    skipped += 1
+                    continue
                 result = ingest_document(
                     conn,
                     embedder=embedder,
@@ -646,8 +662,11 @@ def ingest_gmail(
                     graph_syncer=graph_syncer,
                     secret_guard=cfg.secret_guard,
                     allow_secrets=allow_secrets,
+                    sensitivity=attachments.sensitivity,
                 )
                 _emit_secret_notice(result.secret_notice)
+                _emit_egress_notice(result.egress_notice)
+                attachments.after_ingest(conn, tid, result)
                 # P2.2 thread upsert: ``created`` is True only on first
                 # insert; ``body_changed`` is True when an existing thread
                 # was rewritten in place (new message appended). Either
@@ -689,6 +708,7 @@ def ingest_gmail(
         f"{ingested} ingested{draft_note}, {skipped} skipped (unchanged), "
         f"{failed} failed"
     )
+    attachments.report()
 
 
 def _gmail_thread_subject_for_dry_run(stubs: list[dict[str, Any]], *, owner: str | None) -> str:

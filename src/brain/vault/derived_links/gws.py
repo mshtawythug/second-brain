@@ -13,13 +13,14 @@ stay readable when ``gws`` chatters on stderr.
 
 A caller whose read is large (``brain ingest-calendar``'s ``--page-all`` over up
 to 92 days, RM-30) passes its own ``timeout`` and a ``max_stdout_bytes`` cap.
-With a cap, stdout is read in chunks and the process is killed as soon as the
-cap is passed, so an oversized answer is refused instead of held in memory.
+With a cap, the read goes through ``capped_process.run_capped`` (sec-117 F6): stdout is
+read in chunks and the process group is killed as soon as the cap is passed, at the
+timeout, or on an interrupt, so an oversized answer is refused instead of held in
+memory; stdin is ``/dev/null`` and stderr is discarded.
 """
+import os
 import shutil
 import subprocess
-import tempfile
-import threading
 
 from brain.errors import DirectoryRefreshError
 
@@ -30,8 +31,6 @@ _STDERR_SNIPPET_LIMIT = 200
 # Default subprocess timeout. ``gws`` calendar / people calls are I/O bound
 # against Google APIs; 30s is generous for a single page.
 _DEFAULT_TIMEOUT_SECONDS = 30
-
-_READ_CHUNK_BYTES = 65536
 
 
 def real_gws_runner(
@@ -90,52 +89,49 @@ def real_gws_runner(
 def _run_capped(args: list[str], *, timeout: float, max_stdout_bytes: int) -> str:
     """:func:`real_gws_runner` with stdout read in chunks and refused past the cap.
 
-    A timer kills the process at ``timeout``; stderr goes to a temporary file so
-    a chatty ``gws`` cannot fill its pipe and stall the stdout read.
+    Runs through :func:`brain.ingest.capped_process.run_capped` (sec-117 F6): ``gws`` gets
+    its own process group, which is killed at ``timeout``, when the cap is passed and on
+    any exception in this process (Ctrl-C, or SIGTERM under ``sigterm_as_system_exit``),
+    so a helper ``gws`` started cannot keep the read open past the timeout. stdin is
+    ``/dev/null`` (an auth prompt cannot wait for input) and stderr is discarded unread,
+    so no account text it might quote is ever kept.
     """
-    timed_out = threading.Event()
-    try:
-        with (
-            tempfile.TemporaryFile() as stderr,
-            subprocess.Popen(args, stdout=subprocess.PIPE, stderr=stderr) as proc,
-        ):
-            def _kill() -> None:
-                timed_out.set()
-                proc.kill()
+    # Imported here, not at module level: ``brain.ingest/__init__`` imports
+    # ``brain.vault.export``, and this module loads during ``brain.vault``'s own
+    # initialization (vault -> link_rewrite -> frontmatter -> derived_links), so a
+    # module-level import made a cold ``import brain.vault`` circular (rev-117, CI).
+    from brain.ingest.capped_process import run_capped
 
-            timer = threading.Timer(timeout, _kill)
-            timer.start()
-            try:
-                chunks: list[bytes] = []
-                size = 0
-                assert proc.stdout is not None  # stdout=PIPE
-                while chunk := proc.stdout.read(_READ_CHUNK_BYTES):
-                    size += len(chunk)
-                    if size > max_stdout_bytes:
-                        proc.kill()
-                        raise DirectoryRefreshError(
-                            f"gws output exceeded {max_stdout_bytes} bytes; "
-                            "narrow the --since/--until window",
-                            log_detail=f"stdout over {max_stdout_bytes} bytes",
-                        )
-                    chunks.append(chunk)
-                returncode = proc.wait()
-            finally:
-                timer.cancel()
-            stderr.seek(0)
-            stderr_snippet = stderr.read(_STDERR_SNIPPET_LIMIT).decode(errors="replace")
+    binary = shutil.which(args[0])
+    if binary is None:  # pragma: no cover - real_gws_runner checked it just before
+        raise DirectoryRefreshError(
+            f"`{args[0]}` CLI not found on PATH", log_detail="gws CLI not found on PATH"
+        )
+    try:
+        run = run_capped(
+            [binary, *args[1:]],
+            timeout=timeout,
+            max_stdout_bytes=max_stdout_bytes,
+            env=os.environ,
+        )
     except OSError as exc:
         raise DirectoryRefreshError(
             f"gws command failed: {exc}", log_detail="could not run gws"
         ) from exc
-    if timed_out.is_set():
+    if run.timed_out:
         raise DirectoryRefreshError(
             f"gws command timed out after {timeout:g}s: {' '.join(args)}",
             log_detail=f"timed out after {timeout:g}s",
         )
-    if returncode != 0:
+    if run.oversized:
         raise DirectoryRefreshError(
-            f"gws command failed (exit {returncode}): {stderr_snippet.strip()}",
-            log_detail=f"exit {returncode}",
+            f"gws output exceeded {max_stdout_bytes} bytes; "
+            "narrow the --since/--until window",
+            log_detail=f"stdout over {max_stdout_bytes} bytes",
         )
-    return b"".join(chunks).decode("utf-8", errors="replace")
+    if run.returncode != 0:
+        raise DirectoryRefreshError(
+            f"gws command failed (exit {run.returncode})",
+            log_detail=f"exit {run.returncode}",
+        )
+    return run.stdout.decode("utf-8", errors="replace")

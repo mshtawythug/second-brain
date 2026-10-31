@@ -162,9 +162,12 @@ def _load_pdf() -> ExtractorFn:
 
 
 def _pdf_errors() -> tuple[type[Exception], ...]:
+    # pdfplumber, the fallback when pypdf reads no text, wraps every pdfminer failure in
+    # its own PdfminerException (sec-117 F1): a hostile PDF raised it past this registry.
+    from pdfplumber.utils.exceptions import PdfminerException
     from pypdf.errors import PyPdfError
 
-    return (PyPdfError,)
+    return (PyPdfError, PdfminerException)
 
 
 def _load_docx() -> ExtractorFn:

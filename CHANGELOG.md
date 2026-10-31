@@ -22,6 +22,50 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — receipts: Gmail PDF and image attachments (RM-45, PR #117)
+
+- `brain ingest-gmail --with-attachments` appends the text of each thread's PDF, PNG and JPEG
+  attachments to the thread document as `## Attachment: <name>` sections, so a receipt is
+  found by its contents. Source `gmail` and content type `email_thread`, unchanged; no new
+  document per attachment. The flag needs `--label` or `--query` (exit 2 otherwise).
+- Caps: 10 MiB per attachment (skipped unfetched past it), 50 per run, 50 pages per PDF,
+  50,000 characters per attachment and 200,000 per thread, a 15-minute run deadline, and a
+  60 s timeout and stdout cap on each `gws ... attachments get` call. The MIME walk is
+  iterative and depth- and width-capped; base64url is checked before and after decoding;
+  magic bytes decide the type; files are written to a private directory under fixed names
+  (`O_EXCL | O_NOFOLLOW`, mode 0600); encrypted PDFs are skipped. Extraction goes through the
+  extractor registry, so RM-32's PDF and RM-33's image bounds apply.
+- Every thread such a run writes is `confidential`; a stored `normal` one is escalated and its
+  mirror re-fenced. Luhn-valid card numbers standing as their own word become
+  `[REDACTED:card-number]`; attachment text is HTML-escaped and its markdown neutralized, so
+  it cannot pose as thread structure or pull in links, images or wikilinks. Filenames appear
+  only in the section heading, never in metadata or terminal output.
+- An unchanged thread is skipped on a re-run without downloading anything; a run without the
+  flag skips a thread that holds attachment text instead of dropping it.
+- `ingest-gmail` now prints the hosted-embedder egress notice. New:
+  `brain/ingest/gmail_attachments.py`, `brain/ingest/attachment_text.py`,
+  `brain/cli_gmail_attachments.py`; `ingest/gmail.py` exposes `rendered_messages`.
+- Security round (sec-117): each attachment is parsed in a child process
+  (`brain/ingest/attachment_worker.py`, `attachment_isolation.py`) under a CPU limit, a memory
+  bound (`RLIMIT_AS` where enforced, an RSS watchdog everywhere), a wall-clock timeout and its own
+  process group, with stdin `/dev/null` and stderr discarded; any limit hit, and any exception
+  from a hostile file (including a full disk on the temp write), is a final `unreadable`, so one
+  PDF can no longer stop the run. Re-runs carry every final outcome and its stored section
+  (`attachment_carry.py`, hash-checked), so a thread over the 50-per-run cap makes progress and
+  later threads are reached; `truncated` is final; a stored section is never dropped. Card
+  redaction normalizes first (soft hyphens, zero-width and no-break spaces) and finds a card
+  printed before an expiry or more digits. U+2028/U+2029 become newlines before escaping.
+  SIGTERM/SIGHUP remove the private directory. At most 100 attachments per thread are recorded.
+  `capped_process.run_capped` gains an opt-in `resource_limits`; `real_gws_runner`'s capped read
+  (calendar too) now kills its process group, gives `gws` no stdin and keeps no stderr; the PDF
+  extractor also wraps pdfplumber's `PdfminerException`.
+- Review round 2 (rev-117, sec-117): card redaction uses strict layouts only (an unseparated
+  13–19-digit run; 4-digit groups joined by one consistent separator, with at most one wrap;
+  Amex 4-6-5, Diners 4-6-4; always Luhn), so itemized amounts and phone numbers are kept, and
+  Unicode digits and dash/slash separators are handled. The parse child returns text past the
+  cap so redaction happens before the cut, and parses PDFs under pypdf limits lowered to 16 MiB
+  (scoped) with a per-page-reference content budget. BL-41 records the parent-side memory poll.
+
 ### Added — social bookmarks from your own data archive (RM-44, PR #116)
 
 - `brain ingest-bookmarks --format x-archive <archive-dir>` stores the posts you liked or

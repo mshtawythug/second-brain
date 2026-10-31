@@ -20,3 +20,20 @@ hidden from `brain ui`'s browseable views but visible to `brain search` / `brain
 `brain show`.
 
 The summary line is `N ingested (M draft)` when drafts are present.
+
+## Receipts (PDF and image attachments)
+
+To make receipts searchable by their contents, add `--with-attachments` to a
+**label or query** scope (the flag refuses `--since` / `--from` alone):
+
+```bash
+brain ingest-gmail --label <receipts-label> --with-attachments --dry-run   # which threads (no attachment is downloaded)
+brain ingest-gmail --label <receipts-label> --with-attachments
+```
+
+Each PDF/PNG/JPEG attachment (≤ 10 MiB, ≤ 50 per run) is appended to its thread
+as an `## Attachment: <name>` section. Card numbers are redacted. **Every thread
+in such a run is stored `confidential`**: tell the user, and don't use it for
+mail they want in shared outputs. Images need OCR (`tesseract`). A later run
+without the flag skips those threads rather than dropping the receipt text, so
+re-run with the flag to refresh them.

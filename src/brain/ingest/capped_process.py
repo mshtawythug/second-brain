@@ -29,6 +29,12 @@ then does varies: killed by SIGXFSZ, an error exit, or a quiet exit 0 with the f
 at the limit. ``afconvert`` exits 0 with the file truncated, or is killed by SIGXFSZ,
 depending on the build and how it is started; a caller handles both, judging the signal
 and the file rather than exit 0.
+
+**A third opt-in, ``resource_limits``** (RM-45, sec-117 F3: receipt attachments are parsed
+in a child): ``(resource, value)`` pairs set with ``setrlimit`` in the child before ``exec``,
+alongside ``max_file_bytes``. Each is best effort: macOS refuses ``RLIMIT_AS`` outright
+(``ValueError``, measured), so a caller that needs a memory bound there adds its own
+(the attachment worker's RSS watchdog); ``RLIMIT_CPU`` holds on both.
 The limit is set by a ``preexec_fn`` (:func:`limit_file_size`) on a value computed before
 the fork. It also sets SIGXFSZ to its default action, so a tool that does not handle the
 signal itself dies of it at the limit, ``returncode == -SIGXFSZ``. (``Popen``'s default
@@ -73,10 +79,12 @@ def run_capped(
     popen: Popen = subprocess.Popen,
     pass_fds: Sequence[int] = (),
     max_file_bytes: int | None = None,
+    resource_limits: Sequence[tuple[int, int]] = (),
 ) -> CappedRun:
     """Run ``argv`` (``argv[0]`` an absolute binary path) under the timeout and the cap.
 
-    ``pass_fds`` and ``max_file_bytes`` are the opt-in options of the module docstring.
+    ``pass_fds``, ``max_file_bytes`` and ``resource_limits`` are the opt-in options of the
+    module docstring.
     """
     timed_out = threading.Event()
     oversized = False
@@ -84,7 +92,12 @@ def run_capped(
     options: dict[str, Any] = {}
     if pass_fds:
         options["pass_fds"] = tuple(pass_fds)
-    if max_file_bytes is not None:
+    if resource_limits:
+        file_limit = None if max_file_bytes is None else file_size_limit(max_file_bytes)
+        options["preexec_fn"] = functools.partial(
+            limit_child, file_limit, tuple(resource_limits)
+        )
+    elif max_file_bytes is not None:
         limit = file_size_limit(max_file_bytes)
         options["preexec_fn"] = functools.partial(limit_file_size, limit)
     with popen(
@@ -144,6 +157,21 @@ def limit_file_size(limit: int) -> None:  # pragma: no cover — runs in the for
     """
     signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
     resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+
+def limit_child(
+    file_limit: int | None, limits: tuple[tuple[int, int], ...]
+) -> None:  # pragma: no cover — runs in the forked child
+    """The ``preexec_fn`` for ``resource_limits``: each limit best effort, then the file cap.
+
+    A limit the platform refuses (``RLIMIT_AS`` on macOS) is skipped; the hard limit is
+    lowered with the soft one, so the child cannot raise it again.
+    """
+    for which, value in limits:
+        with contextlib.suppress(ValueError, OSError):
+            resource.setrlimit(which, (value, value))
+    if file_limit is not None:
+        limit_file_size(file_limit)
 
 
 def file_size_limit(requested: int) -> int:

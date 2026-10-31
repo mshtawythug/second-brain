@@ -8,6 +8,7 @@ no mock of ``subprocess``. The command is passed by absolute path, which
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -87,3 +88,43 @@ def test_the_calendar_runner_refuses_an_oversized_answer(
 
     with pytest.raises(DirectoryRefreshError, match="exceeded 10 bytes"):
         calendar_gws_runner([exe])
+
+
+# --- sec-117 F6: process group, stdin, interrupt ---------------------------------
+
+
+@pytest.mark.timeout(60)
+def test_a_child_holding_stdout_is_killed_with_the_group_at_the_timeout(tmp_path: Path) -> None:
+    """``proc.kill()`` reached only ``gws``; a helper it started kept stdout open, so the
+    read waited for the helper rather than the timeout."""
+    exe = _script(
+        tmp_path,
+        "import subprocess\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'])\n"
+        "time.sleep(20)",
+    )
+    started = time.monotonic()
+
+    with pytest.raises(DirectoryRefreshError, match="timed out after 0.5s"):
+        gws.real_gws_runner([exe], timeout=0.5, max_stdout_bytes=1000)
+
+    assert time.monotonic() - started < 10
+
+
+def test_the_capped_read_gives_gws_no_stdin(tmp_path: Path) -> None:
+    exe = _script(
+        tmp_path,
+        "import os\n"
+        "sys.stdout.write(str(os.path.samestat(os.fstat(0), os.stat(os.devnull))))",
+    )
+
+    assert gws.real_gws_runner([exe], max_stdout_bytes=1000) == "True"
+
+
+def test_a_failing_exit_keeps_no_stderr_in_the_message(tmp_path: Path) -> None:
+    exe = _script(tmp_path, "sys.stderr.write('token=SECRET account data'); sys.exit(3)")
+
+    with pytest.raises(DirectoryRefreshError) as info:
+        gws.real_gws_runner([exe], max_stdout_bytes=1000)
+
+    assert "SECRET" not in str(info.value)
