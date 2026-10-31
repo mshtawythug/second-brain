@@ -186,7 +186,8 @@
          and found by search. Pasting the same text again changes nothing. For a
          note you will keep editing, use <strong>+ New</strong> in Notes. You can
          also upload one file at a time; a file already added with
-         <code>brain ingest</code> becomes a second copy.</p>
+         <code>brain ingest</code> becomes a second copy. Or pick a file already in your
+         inbox folder; it is moved into the inbox's <code>imported</code> folder.</p>
     </header>
     <p class="ingest-unavailable" id="ingest-unavailable" role="status" hidden></p>
     <form class="ingest-form" id="ingest-form" novalidate>
@@ -201,6 +202,10 @@
           <div class="ingest-radio">
             <input type="radio" name="ingest-mode" id="ingest-mode-file" value="file" disabled>
             <label for="ingest-mode-file">Upload a file</label>
+          </div>
+          <div class="ingest-radio">
+            <input type="radio" name="ingest-mode" id="ingest-mode-inbox" value="inbox">
+            <label for="ingest-mode-inbox">From the inbox</label>
           </div>
         </fieldset>
         <div class="ingest-group" id="ingest-paste-fields">
@@ -236,6 +241,21 @@
           <div class="ingest-field">
             <label for="ingest-file-title">Title (optional; the file's own otherwise)</label>
             <input type="text" id="ingest-file-title" autocomplete="off">
+          </div>
+        </div>
+        <!-- INBOX MODE (RM-40): js/ingest_inbox.js. One radio per file NAME in the
+             inbox folder; the server takes the name, never a path. -->
+        <div class="ingest-group" id="ingest-inbox-fields" hidden>
+          <fieldset class="ingest-choice ingest-inbox" aria-describedby="ingest-inbox-hint">
+            <legend>Files in the inbox</legend>
+            <p class="ingest-hint" id="ingest-inbox-hint"></p>
+            <ul class="ingest-inbox-list" id="ingest-inbox-list"></ul>
+            <p class="ingest-empty" id="ingest-inbox-empty" hidden></p>
+            <button class="ghost-btn" id="ingest-inbox-refresh" type="button">Refresh</button>
+          </fieldset>
+          <div class="ingest-field">
+            <label for="ingest-inbox-title">Title (optional; the file's name otherwise)</label>
+            <input type="text" id="ingest-inbox-title" autocomplete="off">
           </div>
         </div>
         <div class="ingest-field">

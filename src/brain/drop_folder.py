@@ -114,6 +114,9 @@ Write = Callable[[int, bytes], int]
 #: (``chflags uchg``) raises ``EPERM`` here, and Linux CI has no ``chflags``.
 Unlink = Callable[[str, int], None]
 Clock = Callable[[], float]
+#: ``os.fstat`` on an open fd; a seam for :func:`run_one`'s checks (``st_flags`` cannot
+#: be set by a test).
+Fstat = Callable[[int], Any]
 
 
 class DropFolderError(BrainError):
@@ -122,6 +125,22 @@ class DropFolderError(BrainError):
 
 class MoveRaceError(BrainError):
     """A file changed identity or type between being hashed and being moved."""
+
+
+class OpenRefusedError(BrainError):
+    """:func:`run_one` refused the file it opened; nothing was moved (RM-40 review round 1)."""
+
+
+class FileTooLargeError(OpenRefusedError):
+    """The opened file is over ``run_one``'s ``max_bytes`` (by ``fstat``, or while hashing)."""
+
+
+class FileIdentityError(OpenRefusedError):
+    """The opened file is not the one the caller checked, or it has another hard link."""
+
+
+class DatalessFileError(OpenRefusedError):
+    """The opened file is iCloud-evicted (``st_flags & SF_DATALESS``); reading it blocks."""
 
 
 class RejectedFileError(BrainError):
@@ -263,6 +282,84 @@ def run(
     return DropReport(folder.path, tuple(outcomes), deferred=0)
 
 
+# --- One named file (RM-40) ---------------------------------------------------------
+
+
+def run_one(
+    conn: psycopg.Connection[Any],
+    folder: DropFolder,
+    name: str,
+    *,
+    ingest: IngestFn,
+    timeout: float = RUN_DEADLINE_S,
+    max_bytes: int | None = None,
+    expect_identity: tuple[int, int] | None = None,
+    lstat: Lstat = os.lstat,
+    fstat: Fstat = os.fstat,
+    link: Link | None = None,
+    write: Write = os.write,
+    unlink: Unlink | None = None,
+) -> FileOutcome:
+    """Move the one file ``name`` into ``imported/`` and ingest it there (RM-40's inbox).
+
+    The same move-first step as :func:`run`, for a file the owner picked by name, so
+    there is no ``since`` and no settle window. ``name`` must be a bare file name this
+    folder takes (not empty, no leading ``.``, no ``/`` or NUL, one of its extensions),
+    else ``ValueError`` before anything is opened. A dataless file is refused unread. The
+    open is ``O_NOFOLLOW`` relative to the folder's fd and must be a regular file, so a
+    name swapped for a symlink, a FIFO or a directory since the caller checked it moves
+    nothing. Raises :class:`DropFolderError` as :func:`run` does; any other ``OSError``
+    is the file's ``failed`` outcome, by class.
+
+    **The opened fd is admitted, not the name** (review round 1): its ``fstat`` must
+    show one hard link (a second name could be a file from outside the folder), no
+    dataless flag, at most ``max_bytes`` (and the hash reads at most ``max_bytes + 1``,
+    so a file still growing is refused, not read whole), and, when given, the
+    ``expect_identity`` ``(st_dev, st_ino)`` the caller checked. A refusal is the
+    file's ``failed`` outcome, named by its :class:`OpenRefusedError` class.
+    """
+    if folder.mode != "ingest":  # never a capture folder: RM-39's mode deletes on success
+        raise DropFolderError("only an ingest folder's file can be run by name")
+    if folder.kind is None:
+        raise DropFolderError("an ingest folder needs a source kind")
+    if not _is_bare_name(name) or Path(name).suffix.lower() not in folder.extensions:
+        raise ValueError("not a file name this folder takes")
+    with _open_dirs(folder.path) as dirs:
+        mover = _Mover(dirs, link=link or _hard_link, write=write, unlink=unlink or _unlink)
+        try:
+            if getattr(lstat(folder.path / name), "st_flags", 0) & SF_DATALESS:
+                return FileOutcome(name, "failed", "not on disk (dataless)")
+            opening = _Opening(
+                fstat, _admit(max_bytes, expect_identity), max_bytes, _admit(max_bytes, None)
+            )
+            return _one(conn, name, ingest=ingest, timeout=timeout, mover=mover, opening=opening)
+        except FileNotFoundError:
+            return FileOutcome(name, "vanished")
+        except OSError as exc:
+            return FileOutcome(name, "failed", describe_failure(exc))
+
+
+def _admit(max_bytes: int | None, identity: tuple[int, int] | None) -> Admit:
+    """:func:`run_one`'s checks on the opened file's ``fstat`` (its docstring)."""
+
+    def admit(st: Any) -> None:
+        if identity is not None and _identity(st) != identity:
+            raise FileIdentityError("not the file the caller checked")
+        if st.st_nlink != 1:
+            raise FileIdentityError("the file has another hard link")
+        if getattr(st, "st_flags", 0) & SF_DATALESS:
+            raise DatalessFileError("the file is not on disk")
+        if max_bytes is not None and st.st_size > max_bytes:
+            raise FileTooLargeError("the file is over the cap")
+
+    return admit
+
+
+def _is_bare_name(name: str) -> bool:
+    """A name directly in the folder: no path separator, no NUL, not hidden, ``.`` or ``..``."""
+    return bool(name) and not name.startswith(".") and "/" not in name and "\0" not in name
+
+
 @dataclass(frozen=True)
 class _Dirs:
     """The folder and its ``imported/``, held open so a later swap of either path is moot."""
@@ -321,22 +418,77 @@ def _title(name: str, dst_name: str) -> str:
     return title or Path(dst_name).stem
 
 
-def _open_regular(name: str, dir_fd: int) -> tuple[int, os.stat_result]:
-    """Open ``name`` without following a symlink or blocking on a FIFO; regular files only."""
+#: Checks on an opened file's ``fstat``; raises :class:`OpenRefusedError`.
+Admit = Callable[[Any], None]
+
+
+@dataclass(frozen=True)
+class _Opening:
+    """How :func:`_one` opens and hashes the dropped file. The defaults are :func:`run`'s."""
+
+    fstat: Fstat = os.fstat
+    admit: Admit | None = None
+    max_bytes: int | None = None
+    #: For an ``imported/`` file that already holds the name (``_duplicate``): the same
+    #: checks without the identity pin, since it is a different file (#110 round 2).
+    duplicate_admit: Admit | None = None
+
+
+#: :func:`run`'s opening: no admission and no bound, exactly as before RM-40.
+_PLAIN_OPENING = _Opening()
+
+
+def _open_regular(
+    name: str, dir_fd: int, *, fstat: Fstat = os.fstat, admit: Admit | None = None
+) -> tuple[int, os.stat_result]:
+    """Open ``name`` without following a symlink or blocking on a FIFO; regular files only.
+
+    ``admit``, when given, checks the opened fd's ``fstat`` too (:func:`run_one`).
+    """
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode):
+    try:
+        st = fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise MoveRaceError("not a regular file")
+        if admit is not None:
+            admit(st)
+    except BaseException:
         os.close(fd)
-        raise MoveRaceError("not a regular file")
+        raise
     return fd, st
 
 
-def _sha256_fd(fd: int) -> str:
+def _open_hashed(name: str, dir_fd: int, opening: _Opening) -> tuple[int, os.stat_result, str]:
+    """:func:`_open_regular`, then the file's SHA-256 (bounded by ``opening.max_bytes``)."""
+    fd, st = _open_regular(name, dir_fd, fstat=opening.fstat, admit=opening.admit)
+    try:
+        return fd, st, _hash(fd, opening)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _hash(fd: int, opening: _Opening) -> str:
+    """The file's SHA-256: unbounded for :func:`run`, called exactly as before RM-40."""
+    if opening.max_bytes is None:
+        return _sha256_fd(fd)
+    return _sha256_fd(fd, max_bytes=opening.max_bytes)
+
+
+def _sha256_fd(fd: int, *, max_bytes: int | None = None) -> str:
+    """The SHA-256 of the whole file; with ``max_bytes``, at most ``max_bytes + 1`` is read."""
     digest = hashlib.sha256()
     os.lseek(fd, 0, os.SEEK_SET)
-    while chunk := os.read(fd, _CHUNK):
+    total = 0
+    while True:
+        want = _CHUNK if max_bytes is None else min(_CHUNK, max_bytes + 1 - total)
+        chunk = os.read(fd, want)
+        if not chunk:
+            return digest.hexdigest()
+        total += len(chunk)
+        if max_bytes is not None and total > max_bytes:
+            raise FileTooLargeError("the file grew over the cap")
         digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _identity(st: os.stat_result) -> tuple[int, int]:
@@ -380,7 +532,7 @@ class _Mover:
 
     def move(
         self, name: str, to_name: str, *, fd: int, identity: tuple[int, int], digest: str,
-        back: bool = False,
+        back: bool = False, max_bytes: int | None = None,
     ) -> tuple[int, int]:
         """Move ``name`` to ``to_name``; return the identity of the file now at ``to_name``."""
         dirs = self.dirs
@@ -391,7 +543,7 @@ class _Mover:
         except OSError as exc:
             if exc.errno not in _NO_HARD_LINKS:
                 raise
-            expected = self._copy_exclusive(fd, to_name, to_dir, digest)
+            expected = self._copy_exclusive(fd, to_name, to_dir, digest, max_bytes)
         if not _same_file(to_name, to_dir, expected):
             # This run created ``to_name``; what it names is not the file that was hashed
             # (a symlink or another file was swapped in), so it goes and nothing moves.
@@ -408,15 +560,26 @@ class _Mover:
             raise
         return expected
 
-    def _copy_exclusive(self, fd: int, to_name: str, to_dir: int, digest: str) -> tuple[int, int]:
-        """Copy the open ``fd`` to a new ``to_name``; the bytes must hash to ``digest``."""
+    def _copy_exclusive(
+        self, fd: int, to_name: str, to_dir: int, digest: str, max_bytes: int | None = None
+    ) -> tuple[int, int]:
+        """Copy the open ``fd`` to a new ``to_name``; the bytes must hash to ``digest``.
+
+        With ``max_bytes`` (``run_one``), at most ``max_bytes + 1`` is read: a source that
+        grew past it since the hash is :class:`FileTooLargeError`, and the partial copy goes.
+        """
         st = os.fstat(fd)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
         out = os.open(to_name, flags, stat.S_IMODE(st.st_mode), dir_fd=to_dir)
         try:
             copied = hashlib.sha256()
             os.lseek(fd, 0, os.SEEK_SET)
-            while chunk := os.read(fd, _CHUNK):
+            total = 0
+            while chunk := os.read(fd, _CHUNK if max_bytes is None
+                                   else min(_CHUNK, max_bytes + 1 - total)):
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise FileTooLargeError("the file grew over the cap during the copy")
                 copied.update(chunk)
                 view = memoryview(chunk)
                 while view:
@@ -442,16 +605,16 @@ def _one(
     ingest: IngestFn,
     timeout: float,
     mover: _Mover,
+    opening: _Opening = _PLAIN_OPENING,
 ) -> FileOutcome:
     """Move, ingest and (on a transient failure) move back one file."""
     try:
-        fd, st = _open_regular(name, mover.dirs.folder)
+        fd, st, digest = _open_hashed(name, mover.dirs.folder, opening)
     except FileNotFoundError:
         return FileOutcome(name, "vanished")
-    except (OSError, MoveRaceError) as exc:  # ELOOP / FIFO: swapped since the scan
+    except (OSError, MoveRaceError, OpenRefusedError) as exc:  # ELOOP / FIFO: swapped
         return FileOutcome(name, "failed", describe_failure(exc))
     try:
-        digest = _sha256_fd(fd)
         identity = _identity(st)
         dst_name = _imported_name(name, digest)
         step = _Step(
@@ -459,12 +622,13 @@ def _one(
             mover.delete_on_success,
         )
         try:
-            moved = mover.move(name, dst_name, fd=fd, identity=identity, digest=digest)
+            moved = mover.move(name, dst_name, fd=fd, identity=identity, digest=digest,
+                               max_bytes=opening.max_bytes)
         except FileExistsError:
-            return _duplicate(step, identity, digest)
+            return _duplicate(step, identity, digest, opening)
         except FileNotFoundError:
             return FileOutcome(name, "vanished")
-        except (OSError, MoveRaceError) as exc:
+        except (OSError, MoveRaceError, OpenRefusedError) as exc:  # the copy's bound too
             return FileOutcome(name, "failed", describe_failure(exc))
         try:
             status = step.ingest_moved(moved)
@@ -527,7 +691,9 @@ class _Step:
         return ""
 
 
-def _duplicate(step: _Step, identity: tuple[int, int], digest: str) -> FileOutcome:
+def _duplicate(
+    step: _Step, identity: tuple[int, int], digest: str, opening: _Opening = _PLAIN_OPENING
+) -> FileOutcome:
     """``imported/<dst_name>`` existed before this move: the same file, dropped again?
 
     Only when its full SHA-256 matches. Then it is ingested again (rev-105 F2, a deviation
@@ -536,22 +702,34 @@ def _duplicate(step: _Step, identity: tuple[int, int], digest: str) -> FileOutco
     a crash left in ``imported/`` without one. The drop copy is deleted after a success or
     a rejection (the import holds those bytes), and kept for the next run after a
     transient failure. The existing file is never moved or deleted.
+
+    Under :func:`run_one`, the existing file is admitted like the dropped one, without the
+    identity pin (it is a different file): one link, on disk, within the cap, and hashed
+    reading at most the cap plus a byte. Otherwise a hard link to an outside file planted
+    in ``imported/`` with the same bytes would be ingested, and the drop copy deleted
+    (#110 round 2). A refusal touches neither file.
     """
     name, dst_name, dirs = step.name, step.dst_name, step.dirs
     different = FileOutcome(name, "failed", f"a different file holds {dst_name}")
     try:
-        fd, dst_st = _open_regular(dst_name, dirs.imported)
+        fd, dst_st = _open_regular(
+            dst_name, dirs.imported, fstat=opening.fstat, admit=opening.duplicate_admit
+        )
     except FileNotFoundError:
         return FileOutcome(name, "vanished")
     except MoveRaceError:
         return different
+    except OpenRefusedError as exc:
+        return FileOutcome(name, "failed", describe_failure(exc))
     except OSError as exc:
         return different if exc.errno == errno.ELOOP else FileOutcome(
             name, "failed", describe_failure(exc)
         )
     try:
-        if _sha256_fd(fd) != digest:
+        if _hash(fd, opening) != digest:
             return different
+    except FileTooLargeError as exc:
+        return FileOutcome(name, "failed", describe_failure(exc))
     finally:
         os.close(fd)
     try:

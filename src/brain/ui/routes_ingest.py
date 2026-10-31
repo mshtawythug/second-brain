@@ -1,29 +1,43 @@
-"""`/api/ingest` — the tab's config and the paste submit (Ingest spec §6).
+"""`/api/ingest` — the tab's config, the paste submit and the inbox (Ingest spec §6, RM-40).
 
 Thin: gate → capped read → validate → submit. The upload routes (RM-13) are in
-``routes_upload.py``; they share :func:`queue_errors` from here.
+``routes_upload.py``; they share :func:`queue_errors` from here. The inbox routes
+take and return file NAMES only, never a path; the guard is :mod:`brain.ui.inbox`.
 """
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
 
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ..config import ConfigError
 from ..sensitivity import DEFAULT_SENSITIVITY, VALID_SENSITIVITY_LEVELS
 from ._http import context_of, ok, parse_json_object, read_body_capped
 from .errors import UiTooManyRequests, UiUnavailable
+from .inbox import (
+    find_inbox,
+    inbox_extensions,
+    list_inbox,
+    require_inbox,
+    resolve_inbox_file,
+)
 from .ingest_limits import (
     DEFAULT_PASTE_CONTENT_TYPE,
+    MAX_FILE_SUBMIT_WIRE_BYTES,
     MAX_PASTE_BODY_BYTES,
     MAX_PASTE_WIRE_BYTES,
     MAX_QUEUED_JOBS,
     MAX_STAGED_BYTES,
     PASTE_CONTENT_TYPES,
 )
-from .ingest_schemas import parse_paste
-from .ingest_service import require_ingest, submit_paste, unavailable_reason
+from .ingest_schemas import parse_inbox, parse_paste
+from .ingest_service import require_ingest, submit_inbox, submit_paste, unavailable_reason
 from .jobs import QueueFull, ShuttingDown
 from .routes_jobs import snapshot_payload
 from .upload_checks import upload_cap, uploadable_extensions
@@ -64,6 +78,76 @@ async def paste(request: Request) -> JSONResponse:
     spec = parse_paste(parse_json_object(raw))
     with queue_errors():
         snap = submit_paste(ctx, jobs, runtime, spec)
+    return ok(
+        snapshot_payload(snap, serve_confidential_titles=ctx.serve_confidential_titles),
+        status=202,
+    )
+
+
+async def inbox_list(request: Request) -> JSONResponse:
+    """The inbox's pickable files: names and sizes, never a path (RM-40.D6).
+
+    Always 200, so the tab renders from it. ``files`` is empty unless this server may
+    ingest (loopback, writable): the names are someone's private file names, and a
+    LAN-bound or read-only server could not ingest them anyway.
+
+    **Exempt from the confidential-titles lens, deliberately** (review round 1, L5): an
+    inbox is confidential by default and ``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`` is off by
+    default, so gating on it would make the inbox unusable out of the box. The listing
+    is a PROMPTED view (the tab fetches it only when the user picks Inbox mode), served
+    only on a loopback, writable server (the trust of ``serve_confidential_bodies``), and
+    it names local files that are not yet brain documents. A job's result keeps the lens.
+
+    The folder read and the scan run on a worker thread, never the event loop (L2).
+    """
+    ctx = context_of(request)
+    reason = unavailable_reason(ctx)
+    if reason is None:
+        reason, body = await run_in_threadpool(_inbox_listing, ctx.cfg.brain_home)
+    else:
+        body = {}
+    return ok(
+        {"available": reason is None, "reason": reason, "extensions": [], "files": [],
+         "truncated": False, "default_sensitivity": None, **body}
+    )
+
+
+def _inbox_listing(brain_home: Path) -> tuple[str | None, dict[str, Any]]:
+    """``(reason, fields)`` for :func:`inbox_list`, once ingest itself is allowed."""
+    try:
+        folder = find_inbox(brain_home)
+    except ConfigError:
+        return "inbox_misconfigured", {}
+    if folder is None:
+        return "inbox_unconfigured", {}
+    try:
+        listing = list_inbox(folder, now=time.time())
+    except OSError:  # removed since the config was read, or no permission (TCC)
+        return "inbox_unreadable", {}
+    return None, {
+        "extensions": sorted(inbox_extensions(folder)),
+        "files": [{"name": f.name, "size": f.size} for f in listing.files],
+        "truncated": listing.truncated,
+        # The tab preselects it: a submit without one gets it too (RM-40.D5).
+        "default_sensitivity": folder.sensitivity,
+    }
+
+
+async def inbox_submit(request: Request) -> JSONResponse:
+    """Queue the ingest of one inbox file, by name: 202 with the job's snapshot."""
+    ctx = context_of(request)
+    jobs, runtime = require_ingest(ctx)
+    raw = await read_body_capped(request, MAX_FILE_SUBMIT_WIRE_BYTES)
+    folder = await run_in_threadpool(require_inbox, ctx.cfg.brain_home)  # file reads: L2
+    spec = parse_inbox(
+        parse_json_object(raw),
+        extensions=inbox_extensions(folder),
+        default_sensitivity=folder.sensitivity,
+    )
+    # Resolve-then-compare and lstat now, for a clear 4xx; the job checks again (AC2).
+    checked = await run_in_threadpool(resolve_inbox_file, folder, spec.name)
+    with queue_errors():
+        snap = submit_inbox(ctx, jobs, runtime, folder, spec, checked.identity)
     return ok(
         snapshot_payload(snap, serve_confidential_titles=ctx.serve_confidential_titles),
         status=202,

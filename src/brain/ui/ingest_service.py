@@ -9,7 +9,10 @@ rejection. This module re-implements nothing of the pipeline: a paste becomes an
 ``ingest_document``, the function every ``brain ingest*`` uses. An upload is ingested
 with ``source_path=None``, so it dedups on the hash of its extracted text, and its
 staged file is deleted by the registry's ``on_settled`` whatever the outcome (the
-staging area's ``release``), a queued job that never ran included.
+staging area's ``release``), a queued job that never ran included. An inbox file
+(RM-40) goes through ``drop_folder.run_one``: moved into ``<inbox>/imported/`` first and
+ingested from there, so it keeps that permanent ``source_path`` and dedups by it. Its
+refusal codes and messages are the pure leaf ``inbox_errors``.
 
 The call shape is new and is deliberately NOT ``brain ingest-stdin``'s (§5.1): no
 external id (so dedup is by content hash, and an identical paste is a skip), no
@@ -30,11 +33,13 @@ import logging
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import psycopg
 import psycopg.errors
 
+from ..drop_folder import DropFolder, DropFolderError, FileOutcome, run_one
 from ..errors import BrainError, EmbedError, SecretGuardError, describe_failure
 from ..ingest import Embedder, ExtractedDoc, IngestResult, ingest_document
 from ..ingest.dispatch import extract_path
@@ -43,10 +48,13 @@ from ..ingest.stdin import make_doc
 from ..near_dup_store import check_document
 from ..sensitivity import SensitivityLevel
 from ..tags import normalize_tags
-from .errors import UiForbidden, UiUnavailable
+from .errors import UiError, UiForbidden, UiUnavailable
+from .inbox import resolve_inbox_file
+from .inbox_errors import InboxRefusedError, recheck_refused, refused_open
 from .ingest_progress import ProgressEmbedder
-from .ingest_schemas import FileSpec, PasteSpec
+from .ingest_schemas import FileSpec, InboxSpec, PasteSpec
 from .jobs import JobError, JobHandle, JobRegistry, JobSnapshot
+from .upload_checks import upload_cap
 from .upload_staging import StagedUpload, UploadStaging
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
@@ -58,6 +66,7 @@ logger = logging.getLogger(__name__)
 
 PASTE_KIND = "ingest.paste"
 FILE_KIND = "ingest.file"
+INBOX_KIND = "ingest.inbox"
 
 #: The source kind of every UI ingest (Ingest spec Q8: no other kind is offered).
 UI_SOURCE_KIND = "manual"
@@ -274,6 +283,174 @@ def file_runner(
     return run
 
 
+#: :func:`brain.drop_folder.run_one`'s signature, as :func:`inbox_runner` calls it.
+RunOne = Callable[..., FileOutcome]
+
+
+def inbox_failure(exc: Exception) -> JobError:
+    """Map an inbox job's exception (RM-40); the rest are :func:`ingest_failure`'s."""
+    if isinstance(exc, InboxRefusedError):
+        return JobError(exc.code, exc.message)
+    if isinstance(exc, DropFolderError):
+        return JobError(
+            "inbox_unusable",
+            "The inbox's imported/ folder is not a real directory. Nothing was moved.",
+        )
+    return ingest_failure(exc)
+
+
+def submit_inbox(
+    ctx: UiContext,
+    jobs: JobRegistry,
+    runtime: IngestRuntime,
+    folder: DropFolder,
+    spec: InboxSpec,
+    identity: tuple[int, int],
+) -> JobSnapshot:
+    """Queue the job for one inbox file (RM-40). Raises ``QueueFull`` / ``ShuttingDown``.
+
+    ``identity`` is the ``(st_dev, st_ino)`` the submit checked: the job ingests that
+    file or nothing.
+    """
+    runner = inbox_runner(ctx, runtime, folder, spec, identity=identity)
+    return jobs.submit(INBOX_KIND, runner, on_error=inbox_failure)
+
+
+def inbox_runner(
+    ctx: UiContext,
+    runtime: IngestRuntime,
+    folder: DropFolder,
+    spec: InboxSpec,
+    *,
+    identity: tuple[int, int],
+    run: RunOne = run_one,
+) -> Callable[[JobHandle], Mapping[str, Any]]:
+    """The runner for one inbox file: re-validate, then RM-33's move-first step.
+
+    The name is checked again here, on the worker thread, because the file may have
+    been swapped since the submit (RM-40 AC2); ``run_one`` then opens it ``O_NOFOLLOW``
+    against the folder's fd. Every failure moves the file back to the inbox
+    (RM-40.D4): the step never raises ``RejectedFileError``, and the captured
+    exception is re-raised here so the job reports it by class. ``empty`` stays in
+    ``imported/``, as RM-33 rules. ``run`` is a seam for the outcomes no real file
+    produces on demand (a race between the re-check and the open).
+
+    The file must still be the one the submit checked (``identity``), and ``run_one``
+    admits the opened fd against that identity and the upload cap, so a file that grew
+    or was replaced at any point after the submit is refused unread (review round 1).
+    """
+
+    def job(handle: JobHandle) -> Mapping[str, Any]:
+        handle.check_cancelled()  # point 1: on pick-up, before anything moves
+        handle.progress("preparing")
+        try:
+            checked = resolve_inbox_file(folder, spec.name)
+        except UiError as exc:
+            raise recheck_refused(exc.code) from None
+        if checked.identity != identity:  # a different file now holds the name
+            raise refused_open("FileIdentityError")
+        cap = upload_cap(Path(spec.name).suffix.lower())
+        step = _InboxStep(handle, ctx, runtime, spec, cap)
+        with ctx.connect() as conn:
+            try:
+                # The cap and the identity are admitted on the OPENED fd, so a file that
+                # grew or was swapped after the check is refused unread (review round 1, M1).
+                outcome = run(conn, folder, spec.name, ingest=step, max_bytes=cap,
+                              expect_identity=identity)
+            except OSError as exc:  # the folder itself: gone, or unreadable
+                raise InboxRefusedError(
+                    "inbox_move_failed",
+                    f"The inbox could not be opened ({describe_failure(exc)}). Nothing was moved.",
+                ) from None
+            if step.error is None and step.ingested is not None:
+                return _inbox_payload(conn, handle, ctx, step.ingested)
+        if step.error is not None:
+            raise step.error  # run_one moved it back, unless its name was retaken (D4)
+        if outcome.status == "vanished":
+            raise InboxRefusedError(
+                "inbox_file_gone", "The file is no longer in the inbox. Nothing was written."
+            )
+        raise refused_open(outcome.detail)
+
+    return job
+
+
+class _InboxStep:
+    """The :class:`~brain.drop_folder.IngestFn` an inbox job hands ``run_one``.
+
+    It records what the ingest returned or raised, because ``run_one`` reports a
+    failure as a class-only string and the job needs the exception to map it. It
+    returns as soon as ``ingest_document`` has committed: the payload's reads run
+    after ``run_one``, so a failed read can never move a committed file back.
+    """
+
+    def __init__(
+        self,
+        handle: JobHandle,
+        ctx: UiContext,
+        runtime: IngestRuntime,
+        spec: InboxSpec,
+        cap: int,
+    ) -> None:
+        self._handle, self._ctx, self._runtime, self._spec = handle, ctx, runtime, spec
+        self._cap = cap
+        self.ingested: _Ingested | None = None
+        self.error: Exception | None = None
+
+    def __call__(
+        self, conn: psycopg.Connection[Any], path: Path, *, title: str, timeout: float
+    ) -> str:
+        try:
+            ingested = self._ingest(conn, path, title)
+        except Exception as exc:
+            # Kept only to re-raise after run_one, where on_error maps it class-only; never
+            # logged (tests/log_privacy_allowlists.py's STORE_ALLOWLIST says why).
+            self.error = exc
+            raise  # run_one moves the file back
+        self.ingested = ingested
+        return _DROP_STATUS[classify(ingested.result)[0]]
+
+    def _ingest(self, conn: psycopg.Connection[Any], path: Path, title: str) -> _Ingested:
+        handle, spec = self._handle, self._spec
+        handle.check_cancelled()  # point 2: after the move
+        # The bytes were hashed under the cap; a writer still holding the file open
+        # could append before the extractor reads it, so the size is checked once more.
+        if path.stat().st_size > self._cap:
+            raise refused_open("FileTooLargeError")
+        handle.progress("extracting")
+        try:
+            extracted = extract_path(path)
+        except Exception as exc:  # broad, and only around extraction, as file_runner's
+            raise UnreadableFile(path.suffix.lower()) from exc
+        handle.check_cancelled()  # point 3: after extraction
+        # ``source_path`` stays: the imported/ path is the file's permanent home, so
+        # dedup is by path, as for every drop folder (RM-40.D7).
+        doc = replace(
+            extracted,
+            title=spec.title or title,
+            metadata={**extracted.metadata, **UI_METADATA, "original_filename": spec.name},
+        )
+        request = _Request(
+            kind=INBOX_KIND,
+            tags=spec.tags,
+            sensitivity=spec.sensitivity,
+            enrich=spec.enrich,
+            original_filename=spec.name,
+        )
+        return _write(conn, handle, self._ctx, self._runtime, doc, request)
+
+
+#: An ingest outcome as ``drop_folder``'s ``IngestFn`` reports it; the CLI's twin is
+#: ``cli_ingest_folder._STATUS``, which a ``brain.ui`` module may not import.
+_DROP_STATUS: Mapping[IngestOutcome, str] = {
+    IngestOutcome.INGESTED: "ingested",
+    IngestOutcome.UPDATED: "updated",
+    IngestOutcome.MIRROR_REPAIRED: "updated",
+    IngestOutcome.SKIPPED: "unchanged",
+    IngestOutcome.EMPTY: "empty",
+}
+
+
 @dataclass(frozen=True)
 class _Request:
     """What a runner asked for, beyond the document itself."""
@@ -293,37 +470,118 @@ def _ingest(
     request: _Request,
 ) -> Mapping[str, Any]:
     """``ingest_document`` with the UI's call shape (§5.1), then the result payload."""
+    with ctx.connect() as conn:
+        return _ingest_on(conn, handle, ctx, runtime, doc, request)
+
+
+def _ingest_on(
+    conn: psycopg.Connection[Any],
+    handle: JobHandle,
+    ctx: UiContext,
+    runtime: IngestRuntime,
+    doc: ExtractedDoc,
+    request: _Request,
+) -> Mapping[str, Any]:
+    """:func:`_ingest` on ``conn``: the write, then the payload read back from it."""
+    return _payload(conn, handle, ctx, _write(conn, handle, ctx, runtime, doc, request))
+
+
+@dataclass(frozen=True)
+class _Ingested:
+    """What ``ingest_document`` returned, with what the payload needs beside it."""
+
+    doc: ExtractedDoc
+    request: _Request
+    result: IngestResult
+    enricher: OllamaEnricher | None
+
+
+def _write(
+    conn: psycopg.Connection[Any],
+    handle: JobHandle,
+    ctx: UiContext,
+    runtime: IngestRuntime,
+    doc: ExtractedDoc,
+    request: _Request,
+) -> _Ingested:
+    """``ingest_document`` with the UI's call shape (§5.1). It commits; nothing after it."""
     embedder = ProgressEmbedder(runtime.embedder(), handle)
     enricher = runtime.enricher() if request.enrich else None
     # NOT enter_commit() here: that would close the cancel window before the
     # embed. The progress embedder calls it after its last batch.
-    with ctx.connect() as conn:
-        result = ingest_document(
-            conn,
-            embedder=embedder,
-            doc=doc,
-            source_kind=UI_SOURCE_KIND,
-            source_external_id=None,
-            # Idempotent; the write boundary holds even for a spec built
-            # without parse_paste / parse_file.
-            tags=normalize_tags(request.tags),
-            vault_root=ctx.cfg.vault_path,
-            enricher=enricher,
-            enrich=request.enrich,
-            enrich_min_tokens=ctx.cfg.enrich_min_tokens,
-            graph_syncer=None,
-            secret_guard=ctx.cfg.secret_guard,
-            allow_secrets=False,
-            sensitivity=request.sensitivity,
-        )
-        if result.secret_findings:
-            handle.note("secret_findings")
-        payload = _result_payload(ctx, conn, doc, request, result, enricher)
+    result = ingest_document(
+        conn,
+        embedder=embedder,
+        doc=doc,
+        source_kind=UI_SOURCE_KIND,
+        source_external_id=None,
+        # Idempotent; the write boundary holds even for a spec built
+        # without parse_paste / parse_file.
+        tags=normalize_tags(request.tags),
+        vault_root=ctx.cfg.vault_path,
+        enricher=enricher,
+        enrich=request.enrich,
+        enrich_min_tokens=ctx.cfg.enrich_min_tokens,
+        graph_syncer=None,
+        secret_guard=ctx.cfg.secret_guard,
+        allow_secrets=False,
+        sensitivity=request.sensitivity,
+    )
+    if result.secret_findings:
+        handle.note("secret_findings")
+    return _Ingested(doc, request, result, enricher)
+
+
+def _payload(
+    conn: psycopg.Connection[Any], handle: JobHandle, ctx: UiContext, ingested: _Ingested
+) -> Mapping[str, Any]:
+    """The result payload, read back after the commit, and the job's INFO line."""
+    result, request = ingested.result, ingested.request
+    payload = _result_payload(ctx, conn, ingested.doc, request, result, ingested.enricher)
     logger.info(
         "ui %s job %s: %s document %s",
         request.kind, handle.job_id, payload["outcome"], result.document_id,
     )
     return payload
+
+
+def _inbox_payload(
+    conn: psycopg.Connection[Any], handle: JobHandle, ctx: UiContext, ingested: _Ingested
+) -> Mapping[str, Any]:
+    """:func:`_payload`, built AFTER ``run_one`` returned (#110 round 2, rev F1).
+
+    The document is committed and the file is in ``imported/`` for good, so a failed
+    read-back is a success with fewer details, never a failure that would claim the
+    file went back. The fallback names the level as unknown, so the lens withholds the
+    title (fail-closed), and the error is named by class only.
+    """
+    try:
+        return _payload(conn, handle, ctx, ingested)
+    except psycopg.Error as exc:
+        unavailable = describe_failure(exc)
+        logger.warning(
+            "ui %s job %s: committed document %s; its details could not be read back (%s)",
+            INBOX_KIND, handle.job_id, ingested.result.document_id, unavailable,
+        )
+        handle.note("details_unavailable")
+        outcome, repaired = classify(ingested.result)
+        return {
+            "outcome": outcome.value,
+            "mirror_repaired": repaired,
+            "document_id": ingested.result.document_id,
+            "title": ingested.doc.title,
+            "vault_path": None,
+            "original_filename": ingested.request.original_filename,
+            "chunk_count": None,
+            "sensitivity": None,  # unknown: the lens withholds the naming keys
+            "summary_status": None,
+            "secret_guard": ctx.cfg.secret_guard,
+            "secret_findings": [],
+            "egress_notice": ingested.result.egress_notice,
+            "graph": _graph_state(ctx),
+            "possible_duplicates": [],
+            "details_unavailable": unavailable,
+        }
 
 
 @dataclass(frozen=True)

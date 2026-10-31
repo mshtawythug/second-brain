@@ -36,6 +36,7 @@ _UPLOADS = "/api/ingest/uploads"
 _BODIES: dict[str, dict[str, Any]] = {
     "/api/ingest/paste": {"title": "Synthetic", "body": "Synthetic body.", "enrich": False},
     "/api/ingest/file": {"upload_id": _JOB_ID, "enrich": False},
+    "/api/ingest/inbox": {"name": "synthetic.md", "enrich": False},
 }
 _OCTET = {"Content-Type": "application/octet-stream", "X-Brain-Filename": "synthetic.txt"}
 
@@ -82,12 +83,13 @@ def test_the_enumeration_finds_the_mutation_routes(
 
     assert _ingest_routes(client, mutating=True) == [
         ("POST", "/api/ingest/paste"),
+        ("POST", "/api/ingest/inbox"),
         ("POST", "/api/ingest/uploads"),
         ("DELETE", "/api/ingest/uploads/{upload_id}"),
         ("POST", "/api/ingest/file"),
         ("POST", "/api/jobs/{job_id}/cancel"),
     ]
-    assert len(_ingest_routes(client, mutating=False)) == 3
+    assert len(_ingest_routes(client, mutating=False)) == 4
 
 
 @pytest.mark.parametrize(
@@ -192,6 +194,7 @@ def test_the_ingest_gets_reject_mutating_methods(
 @pytest.mark.parametrize(
     "path",
     ["/api/ingest/paste", _UPLOADS, "/api/ingest/file", f"/api/jobs/{_JOB_ID}/cancel"],
+    # GET /api/ingest/inbox is the listing, a separate route on the same path (RM-40).
 )
 def test_the_ingest_mutations_reject_get(
     test_db: psycopg.Connection[Any], tmp_path: Path, path: str

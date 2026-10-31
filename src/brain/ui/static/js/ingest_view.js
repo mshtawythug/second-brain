@@ -22,7 +22,7 @@
 import { el } from "/static/js/dom.js";
 import { isTerminal } from "/static/js/jobs.js";
 
-const KIND_LABELS = { "ingest.paste": "Paste", "ingest.file": "File" };
+const KIND_LABELS = { "ingest.paste": "Paste", "ingest.file": "File", "ingest.inbox": "Inbox" };
 
 const OUTCOMES = {
   ingested: "Added",
@@ -229,8 +229,13 @@ function resultNodes(record) {
 
 function factsList(result) {
   const list = el("ul", "job-facts");
-  const chunks = result.chunk_count === 1 ? "1 chunk." : `${result.chunk_count} chunks.`;
-  for (const fact of [chunks, SUMMARY[result.summary_status], GRAPH[result.graph]]) {
+  /* An inbox job whose read-back failed after the commit has no counts (RM-40). */
+  const chunks = !Number.isFinite(result.chunk_count) ? ""
+    : result.chunk_count === 1 ? "1 chunk." : `${result.chunk_count} chunks.`;
+  const unavailable = result.details_unavailable
+    ? "Saved; its details could not be read back." : "";
+  for (const fact of [chunks, unavailable, SUMMARY[result.summary_status],
+    GRAPH[result.graph]]) {
     if (fact) list.append(el("li", "", fact));
   }
   return list;
