@@ -161,6 +161,16 @@ def _page(**overrides: object) -> br.Page:
     return br.Page(**values)  # type: ignore[arg-type]
 
 
+def test_the_external_id_is_the_sha256_of_the_normalized_url() -> None:
+    import hashlib
+
+    url = "https://example.com/doc"
+
+    assert br.page_external_id(url) == hashlib.sha256(url.encode()).hexdigest()
+    assert _page().external_id == br.page_external_id(url)
+    assert "/" not in br.page_external_id(url) and ":" not in br.page_external_id(url)
+
+
 def test_the_body_is_title_url_and_host() -> None:
     doc = br.build_document(_page(), "chrome")
 

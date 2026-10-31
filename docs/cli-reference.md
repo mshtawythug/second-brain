@@ -1011,7 +1011,9 @@ brain ingest-web --browser chrome --since 2026-10-01 --fetch --max 50
 
 - **One document per page** (source `web`, content type `web_page`),
   deduplicated by the normalized URL: query string, fragment, userinfo and
-  default port dropped; only `http`/`https`. The body is the title, the URL
+  default port dropped; only `http`/`https`. The source key is the URL's
+  SHA-256 (the URL itself is `metadata.url`), so the vault mirror is one flat
+  file under `_ingested/web/`. The body is the title, the URL
   and the host (plus the page text with `--fetch`).
 - **Re-runs.** A stored page gets only its metadata refreshed
   (`chrome_visits`, `chrome_last_visit`, `chrome_bookmarked`, or the `safari_`

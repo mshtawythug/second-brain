@@ -28,8 +28,9 @@ git tag scheme:
   visited at least `--min-visits` (3) times, on the hosts listed in
   `$BRAIN_HOME/web-allowlist.txt`. With no allowlist, an empty one or a malformed line, the
   command reads nothing and exits 2. Source `web`, content type `web_page`, one document per
-  normalized URL. The query string, fragment, userinfo and default port are dropped before
-  anything is stored. Default sensitivity `normal`.
+  normalized URL, keyed by the URL's SHA-256 (the URL is `metadata.url`). The query string,
+  fragment, userinfo and default port are dropped before anything is stored. Default
+  sensitivity `normal`.
 - The browser's database is copied with its write-ahead log into a private temporary folder and
   the copy is opened `mode=ro`. `immutable=1` was measured to hide every visit still in the WAL,
   so it is not used. The live profile is never opened by SQLite. Safari without Full Disk Access

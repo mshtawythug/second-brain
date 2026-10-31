@@ -16,7 +16,7 @@ allowlist is the default-deny boundary; there is no "all history".
 without it the macOS default under :data:`home_dir` is used, and any other
 platform must pass it (RM-41.D9).
 
-**Re-runs (protocol point 3, RM-41.D3).** A page whose ``(web, <url>)`` row
+**Re-runs (protocol point 3, RM-41.D3).** A page whose ``(web, <url hash>)`` row
 exists gets only its volatile metadata patched (``refresh_volatile``): no
 re-chunk, no embed, no fetch, and the stored title and body stay. ``--refresh``
 rebuilds the body instead, keeping the other browser's keys and the first
@@ -328,7 +328,7 @@ def _guarded(page: br.Page, run: _Run, step: Callable[[], str]) -> None:
 def _write_page(conn: psycopg.Connection[Any], page: br.Page, run: _Run) -> str:
     """``ingested|updated|refreshed|unchanged|empty|same_body`` for one page."""
     options = run.options
-    stored = stored_document(conn, br.SOURCE_KIND, page.url)
+    stored = stored_document(conn, br.SOURCE_KIND, page.external_id)
     if stored is not None and not options.refresh:
         return refresh_volatile(
             conn,
@@ -347,8 +347,8 @@ def _write_page(conn: psycopg.Connection[Any], page: br.Page, run: _Run) -> str:
         embedder=run.embedder,
         doc=doc,
         source_kind=br.SOURCE_KIND,
-        source_external_id=page.url,
-        source_metadata={"host": page.host},
+        source_external_id=page.external_id,
+        source_metadata={"host": page.host, "url": page.url},
         tags=options.tags,
         vault_root=run.cfg.vault_path,
         enricher=run.enricher,

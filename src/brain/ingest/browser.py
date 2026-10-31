@@ -15,7 +15,10 @@ Pages are ordered newest visit first (bookmark-only pages last, by URL), and at
 most ``limit`` are returned; the rest are counted.
 
 **The document** (:func:`build_document`). One per normalized URL (ticket D1),
-keyed ``(web, <url>)``. The body is the title, the URL and the host, plus the
+keyed ``(web, <sha256 of the url>)`` (:func:`page_external_id`; the URL itself is
+``metadata.url``). The key is a hash, not the URL, because the vault mirror names a
+file after the first characters of ``sources.external_id``, and a URL's ``https://``
+would make that name a directory (RM-41.D17). The body is the title, the URL and the host, plus the
 page text under ``--fetch``; it holds no visit counts or times, because a body
 change re-chunks and re-embeds. Those live in ``metadata`` under per-browser
 keys (:func:`volatile_keys`, RM-41.D4), so Chrome and Safari can both describe
@@ -25,6 +28,7 @@ one page without overwriting each other. ``metadata.date`` (promoted to
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -44,6 +48,7 @@ __all__ = [
     "Page",
     "PageBatch",
     "build_document",
+    "page_external_id",
     "select_pages",
     "volatile_keys",
     "volatile_metadata",
@@ -56,6 +61,11 @@ CONTENT_TYPE = "web_page"
 DEFAULT_MIN_VISITS = 3
 #: The longest title kept; a page title is a line, not a paragraph.
 MAX_TITLE_CHARS = 300
+
+
+def page_external_id(url: str) -> str:
+    """``sources.external_id`` for the page at the normalized ``url``: its SHA-256, in hex."""
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
 
 def volatile_keys(browser: Browser) -> tuple[str, ...]:
@@ -78,6 +88,10 @@ class Page:
     first_seen: datetime | None
     last_visit: datetime | None
     bookmarked: bool
+
+    @property
+    def external_id(self) -> str:
+        return page_external_id(self.url)
 
 
 @dataclass(frozen=True)

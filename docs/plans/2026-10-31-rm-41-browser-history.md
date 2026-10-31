@@ -331,3 +331,20 @@ All sixteen decisions were approved as recommended (team-lead, 2026-10-31).
 - **A4, the #113 union.** When team-lead says #113 has merged: a normal master merge (no
   rebase) that takes the union of `source_kinds`, the icon tables, the registrars, `CHANGELOG`
   and `extract_policy`. This ticket's version then becomes `v4`.
+
+## Decisions taken during implementation
+
+- **D17, the source key is the URL's SHA-256, not the URL.** The end-to-end run found that
+  `vault/export._short_id` names the mirror file after the first 8 characters of
+  `sources.external_id`, stripping only dashes. For a URL that keeps `https://`, so
+  `_ingested/web/<date>-https:/-<slug>.md` was written into a directory called `https:`. Dedup is
+  unchanged: one key per normalized URL, 1:1. The URL is in `metadata.url` and in
+  `sources.metadata.url`. A regression test pins one flat file under `_ingested/web/`.
+  `vault/export.py` (near ceiling, budget spent) is not touched.
+- **A latent bug found, not fixed here.** GitHub's external ids (`<owner>/<repo>#<n>`, RM-31)
+  hit the same `_short_id` rule whenever the owner name is shorter than 8 characters. Fixing
+  `_short_id` would move existing GitHub mirror files in the owner's vault, so it was reported
+  to team-lead as a separate item.
+- **The secret guard's notice quotes the title.** In `warn` and `reject` mode, the shared
+  notice prints the document title with the finding masked. It does this for every source, and
+  this ticket keeps that convention.

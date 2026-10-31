@@ -20,6 +20,7 @@ from typer.testing import CliRunner, Result
 from brain import cli_ingest_web
 from brain.cli import app
 from brain.ingest import web_fetch
+from brain.ingest.browser import page_external_id
 from tests import browser_fixtures as fx
 from tests.conftest import CountingEmbedder
 from tests.secret_fixtures import SYNTHETIC_AWS_KEY
@@ -73,9 +74,10 @@ def _web(profile: Path, *args: str, browser: str = "chrome") -> Result:
 
 
 def _docs(conn: psycopg.Connection[Any]) -> dict[str, dict[str, Any]]:
+    """The stored ``web`` documents keyed by their URL (``metadata.url``)."""
     rows = conn.execute(
         """
-        SELECT s.external_id, d.id::text, d.title, d.content, d.content_type,
+        SELECT d.metadata->>'url', d.id::text, d.title, d.content, d.content_type,
                d.sensitivity, d.sent_at, d.metadata, d.tags, d.summary
         FROM documents d JOIN sources s ON s.id = d.source_id
         WHERE s.kind = 'web'
@@ -254,6 +256,28 @@ def test_pages_off_the_allowlist_never_become_documents(
     assert result.exit_code == 0, result.output
     assert list(_docs(test_db)) == ["https://docs.example.org/guide"]
     assert "3 entr" in result.output and "off the allowlist" in result.output
+
+
+def test_the_source_key_is_the_url_hash_and_the_mirror_is_one_flat_file(
+    tmp_path: Path, home: Path, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a URL external id put ``https:/`` into the mirror filename, a directory."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
+    profile = _chrome(tmp_path, [fx.Page(DOC, "Doc", VISITS)])
+
+    assert _web(profile).exit_code == 0
+
+    external, vault_path = test_db.execute(
+        "SELECT s.external_id, d.vault_path FROM documents d JOIN sources s "
+        "ON s.id = d.source_id WHERE s.kind = 'web'"
+    ).fetchone()
+    assert external == page_external_id(DOC)
+    assert vault_path.count("/") == 2 and vault_path.startswith("_ingested/web/")
+    mirrored = [p.relative_to(vault) for p in vault.rglob("*.md")]
+    assert [str(p.parent) for p in mirrored] == ["_ingested/web"]
 
 
 def test_a_page_only_in_the_wal_is_ingested(
@@ -499,7 +523,7 @@ def test_a_failing_page_is_counted_by_class_and_the_rest_continue(
     real = cli_ingest_web.ingest_document
 
     def flaky(conn: Any, **kwargs: Any) -> Any:
-        if kwargs["source_external_id"] == DOC:
+        if kwargs["source_external_id"] == page_external_id(DOC):
             raise ValueError("synthetic detail that must not be printed")
         return real(conn, **kwargs)
 
