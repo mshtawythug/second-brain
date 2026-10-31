@@ -42,6 +42,12 @@ git tag scheme:
   into `brain/cli_sensitivity_rerun.py`, shared by both commands; `ingest-web` behaves as
   before. New: `brain/ingest/social_archive.py`, `brain/ingest/social_posts.py`,
   `brain/cli_ingest_bookmarks.py`, `brain/cli_sensitivity_rerun.py`.
+- Security round (sec-116): the title is built from the text after `redact_secrets`, before it
+  is cut, so a secret at the start of a post is stored nowhere under `redact`. Each entry is cut
+  to its three string fields as it is parsed, and a file with too many JSON objects and arrays
+  is refused before parsing, so memory follows the kept text. Ids must be canonical (no leading
+  zero); a file that grows while it is read is refused; files are opened `O_NOCTTY`. The title
+  gap for every other source is backlog BL-38.
 
 ### Added — browser history and bookmarks, allowlist only (RM-41, PR #114)
 

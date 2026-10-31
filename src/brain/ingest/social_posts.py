@@ -4,8 +4,9 @@ Pure logic; :mod:`brain.ingest.social_archive` reads the files and hands this
 module the inner object of each entry (``{"tweetId": …, "fullText": …,
 "expandedUrl": …}``). Everything in an entry is someone else's text, so:
 
-- **The id** must be a decimal string of at most 19 ASCII digits below
-  ``2**63``, checked before ``int()``. Anything else skips the entry as
+- **The id** must be a canonical decimal string (no leading zero) of at most
+  19 ASCII digits below ``2**63``, checked before ``int()``, so one post has
+  exactly one ``x-<id>`` key (sec-116 F3). Anything else skips the entry as
   ``malformed``.
 - **The date** comes from the id, because an archive's like carries none: the
   platform's snowflake ids encode ``(id >> 22) + 1288834974657`` milliseconds
@@ -22,6 +23,10 @@ module the inner object of each entry (``{"tweetId": …, "fullText": …,
   (a NUL cannot be stored in Postgres; an ESC must not reach a terminal), and a
   text over :data:`MAX_TEXT_CHARS` is ``malformed``. A post with no text (deleted
   or private) is skipped as ``no_text`` (plan D4).
+- **The title** is the start of the text, so it is built from the text after
+  :func:`brain.ingest.guard.redact_secrets`, before it is cut, whatever the
+  guard mode (sec-116 F1). The ingest guard redacts the body but never the
+  title, and a title never needs the secret.
 
 One post liked and bookmarked is one document. Its ``collections`` metadata is
 volatile: a re-run unions it with the stored list, so a later archive without
@@ -39,6 +44,7 @@ from typing import Any, Final, Literal
 from urllib.parse import urlsplit
 
 from . import ExtractedDoc
+from .guard import redact_secrets
 from .text_safety import one_line
 from .web_url import normalize_url
 
@@ -87,7 +93,7 @@ _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _PRE_SNOWFLAKE_MS = 60_000
 _FUTURE_SLACK = timedelta(days=1)
 _MAX_ID = 2**63 - 1
-_ID_RE = re.compile(r"[0-9]{1,19}")
+_ID_RE = re.compile(r"[1-9][0-9]{0,18}")
 _HANDLE_RE = re.compile(r"[A-Za-z0-9_]{1,15}")
 _POST_HOSTS = frozenset(
     {"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"}
@@ -286,7 +292,7 @@ def _newest_first(post: SocialPost) -> tuple[bool, datetime, int]:
 
 def build_document(post: SocialPost) -> ExtractedDoc:
     """``post`` as a ``social_post`` document; the body never depends on the collection."""
-    line = one_line(post.text)
+    line = one_line(redact_secrets(post.text)[0])
     if post.handle is not None:
         title = f"@{post.handle}: {_cut(line, TITLE_CHARS_WITH_HANDLE)}"
         body = f"@{post.handle}\n\n{post.text}\n\n{post.url}"

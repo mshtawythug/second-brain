@@ -400,3 +400,30 @@ def test_the_command_is_registered_through_the_extension_seam() -> None:
     assert ("ingest-bookmarks", cli_ingest_bookmarks.register) in (
         cli_registry.EXTENSION_REGISTRARS
     )
+
+
+def test_under_redact_a_secret_at_the_start_of_a_post_is_stored_nowhere(
+    tmp_path: Path, home: Path, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sec-116 F1: the title is the start of the text, so it is redacted before it is cut."""
+    monkeypatch.setenv("BRAIN_SECRET_GUARD", "redact")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
+    leaky = fx.fields(PID, text=f"{SYNTHETIC_AWS_KEY} pasted by mistake",
+                      expanded_url=fx.status_url(PID))
+
+    result = _ingest(_archive(tmp_path, [leaky]))
+
+    assert result.exit_code == 0, result.output
+    assert "1 ingested" in result.output
+    assert SYNTHETIC_AWS_KEY not in result.output
+    (doc,) = _docs(test_db).values()
+    assert SYNTHETIC_AWS_KEY not in doc["title"]
+    assert SYNTHETIC_AWS_KEY not in doc["content"]
+    titles = test_db.execute("SELECT title_text FROM chunks").fetchall()
+    assert titles and all(SYNTHETIC_AWS_KEY not in str(row[0]) for row in titles)
+    (mirror,) = vault.rglob("*.md")
+    assert SYNTHETIC_AWS_KEY.lower() not in mirror.name.lower()
+    assert SYNTHETIC_AWS_KEY not in mirror.read_text(encoding="utf-8")

@@ -12,7 +12,9 @@ here trusts a name, a link, a size or the code:
 - **Fixed names, no walk.** Only ``data/like.js``, ``data/like-part<N>.js``,
   ``data/bookmark.js`` and ``data/bookmark-part<N>.js`` are opened, probed by
   name from part 0 until the first missing part, relative to directory
-  descriptors. No name from the archive is ever joined to a path.
+  descriptors. No name from the archive is ever joined to a path. Files are
+  opened ``O_NOCTTY`` too, so a device node cannot become a controlling
+  terminal before ``fstat`` refuses it (sec-116 F5).
 - **No links.** ``data`` is opened ``O_DIRECTORY | O_NOFOLLOW`` under the
   root's descriptor; each file ``O_NOFOLLOW | O_NONBLOCK`` under ``data``'s.
   The open descriptor must be a regular file with one link (``fstat``), so a
@@ -20,10 +22,16 @@ here trusts a name, a link, a size or the code:
   the check and the read. The root folder itself is the owner's argument and
   may be a link.
 - **Bounded.** :class:`ArchiveLimits`: a per-file size (checked on the open
-  descriptor before reading, then enforced while reading, so a file that grows
-  is refused), a run-wide read total, a part count per collection, and an entry
-  count. JSON nesting deep enough to exhaust the parser's recursion, an
-  over-long number and invalid UTF-8 refuse the file.
+  descriptor before reading; the read stops one byte past that size, so a file
+  that grows while it is read is refused, sec-116 F4), a run-wide read total, a
+  part count per collection, an entry count, and a count of JSON objects and
+  arrays per file (sec-116 F2). JSON nesting deep enough to exhaust the parser's
+  recursion, an over-long number and invalid UTF-8 refuse the file.
+- **Memory follows the kept text, not the JSON** (sec-116 F2). The
+  ``{``/``[`` count is checked before anything is parsed, so no element can
+  build millions of containers; and each entry is cut down, as it is parsed, to
+  the three string fields :mod:`brain.ingest.social_posts` reads
+  (``tweetId``, ``fullText``, ``expandedUrl``), so nothing else is retained.
 - **Loud on an unknown shape** (the ticket's risk line). A wrong prefix, a
   payload that is not one array, or an element that is not
   ``{"<collection>": {…}}`` refuses the whole run. Field-level problems inside
@@ -58,10 +66,14 @@ MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_READ_BYTES = 256 * 1024 * 1024
 MAX_PARTS = 64
 MAX_ENTRIES = 500_000
+#: A real entry is two containers (``{"like": {…}}``); text braces add a few.
+MAX_CONTAINERS = 2 * MAX_ENTRIES + 1_000_000
+#: The only entry fields kept, and only when they are strings.
+KEPT_FIELDS = ("tweetId", "fullText", "expandedUrl")
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY
 _DATA_FLAGS = _DIR_FLAGS | os.O_NOFOLLOW
-_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY
 _CHUNK = 1024 * 1024
 _PREFIX = re.compile(r"\A﻿?[ \t\r\n]*window\.YTD\.([A-Za-z_]+)\.part([0-9]{1,4})[ \t]*=[ \t\r\n]*")
 _WHITESPACE = re.compile(r"[ \t\r\n]*")
@@ -74,6 +86,7 @@ _DATA_UNOPENED = "data/ could not be opened"
 _NO_LIKES = "the archive has no likes file (data/like.js)"
 _READ_CAP = "the archive files together are more than the read cap ({cap} bytes)"
 _ENTRY_CAP = "the archive has more entries than the cap ({cap})"
+_CONTAINER_CAP = "the file has too many JSON objects and arrays (cap {cap})"
 _BAD_PREFIX = "the prefix is not window.YTD.{collection}.part{part} ="
 _NOT_ONE_ARRAY = "the payload is not one JSON array"
 _NOT_JSON = "an entry is not valid JSON"
@@ -93,14 +106,15 @@ class ArchiveLimits:
     max_read_bytes: int = MAX_READ_BYTES
     max_parts: int = MAX_PARTS
     max_entries: int = MAX_ENTRIES
+    max_containers: int = MAX_CONTAINERS
 
 
 @dataclass(frozen=True)
 class ArchiveEntries:
-    """The inner object of every entry, per file kind, in file order."""
+    """The kept fields of every entry, per file kind, in file order."""
 
-    likes: tuple[dict[str, Any], ...]
-    bookmarks: tuple[dict[str, Any], ...]
+    likes: tuple[dict[str, str], ...]
+    bookmarks: tuple[dict[str, str], ...]
     bookmarks_present: bool
 
 
@@ -181,9 +195,9 @@ def _file_name(collection: str, part: int) -> str:
 
 def _read_collection(
     data_fd: int, collection: str, budget: _Budget, read: ReadFn
-) -> list[dict[str, Any]] | None:
+) -> list[dict[str, str]] | None:
     """The entries of every part of ``collection``; ``None`` when part 0 is absent."""
-    entries: list[dict[str, Any]] = []
+    entries: list[dict[str, str]] = []
     for part in range(budget.limits.max_parts + 1):
         name = _file_name(collection, part)
         text = _read_file(data_fd, name, budget, read)
@@ -193,7 +207,11 @@ def _read_collection(
             _refuse(f"the {collection} files have more than {part} parts")
         try:
             for entry in parse_payload(
-                text, collection=collection, part=part, max_entries=budget.entries_left
+                text,
+                collection=collection,
+                part=part,
+                max_entries=budget.entries_left,
+                max_containers=budget.limits.max_containers,
             ):
                 entries.append(entry)
                 budget.entries += 1
@@ -223,28 +241,28 @@ def _read_file(data_fd: int, name: str, budget: _Budget, read: ReadFn) -> str | 
         if info.st_size > cap:
             _refuse(f"{label} is larger than {cap} bytes")
         budget.charge_bytes(info.st_size)
-        raw = _read_bounded(fd, cap, read, label)
+        raw = _read_bounded(fd, info.st_size, read, label)
     finally:
         os.close(fd)
-    budget.charge_bytes(len(raw) - info.st_size)
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
         _refuse(f"{label} is not UTF-8")
 
 
-def _read_bounded(fd: int, cap: int, read: ReadFn, label: str) -> bytes:
+def _read_bounded(fd: int, size: int, read: ReadFn, label: str) -> bytes:
+    """At most ``size + 1`` bytes; more than ``size`` (what ``fstat`` said) is refused."""
     chunks: list[bytes] = []
     total = 0
     while True:
         try:
-            chunk = read(fd, min(_CHUNK, cap + 1 - total))
+            chunk = read(fd, min(_CHUNK, size + 1 - total))
         except OSError:
             _refuse(f"{label} could not be read")
         if not chunk:
             return b"".join(chunks)
         total += len(chunk)
-        if total > cap:
+        if total > size:
             _refuse(f"{label} grew while it was read")
         chunks.append(chunk)
 
@@ -257,9 +275,16 @@ _DECODER = json.JSONDecoder(parse_constant=_reject_constant)
 
 
 def parse_payload(
-    text: str, *, collection: str, part: int, max_entries: int = MAX_ENTRIES
-) -> Iterator[dict[str, Any]]:
-    """The inner object of each ``{"<collection>": {…}}`` element (module docstring)."""
+    text: str,
+    *,
+    collection: str,
+    part: int,
+    max_entries: int = MAX_ENTRIES,
+    max_containers: int = MAX_CONTAINERS,
+) -> Iterator[dict[str, str]]:
+    """The kept fields of each ``{"<collection>": {…}}`` element (module docstring)."""
+    if text.count("{") + text.count("[") > max_containers:
+        _refuse(_CONTAINER_CAP.format(cap=max_containers))
     match = _PREFIX.match(text)
     if match is None or match.group(1) != collection or int(match.group(2)) != part:
         _refuse(_BAD_PREFIX.format(collection=collection, part=part))
@@ -301,10 +326,11 @@ def _decode(text: str, index: int) -> tuple[Any, int]:
         _refuse(_NOT_JSON)
 
 
-def _unwrap(element: Any, collection: str) -> dict[str, Any]:
+def _unwrap(element: Any, collection: str) -> dict[str, str]:
+    """The kept string fields of one entry; everything else is dropped here (sec-116 F2)."""
     if not isinstance(element, dict) or list(element) != [collection]:
         _refuse(_UNKNOWN_SHAPE)
     inner = element[collection]
     if not isinstance(inner, dict):
         _refuse(_UNKNOWN_SHAPE)
-    return inner
+    return {key: inner[key] for key in KEPT_FIELDS if isinstance(inner.get(key), str)}

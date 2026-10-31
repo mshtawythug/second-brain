@@ -155,8 +155,8 @@ run: 2000 short embeds (minutes on local arctic) and no GraphLane model time.
 | Symlinks | `data` opened `O_NOFOLLOW \| O_DIRECTORY` under the root's fd; each file `O_NOFOLLOW`. A symlinked `data/` or `like.js` refuses the run. (The root folder itself is the owner's argument and may be a link.) | symlinked `data`, symlinked `like.js` → `/dev/zero`-like target, symlinked part |
 | FIFO / device / folder swapped in | `O_NONBLOCK` + `fstat` `S_ISREG` on the open fd (no TOCTOU between check and read). | a FIFO named `like.js` returns promptly with the refusal |
 | Hard link to another file | `st_nlink == 1` required, as RM-35 does. | a hard-linked `like.js` |
-| Huge file / file that grows | `fstat` size ≤ `max_file_bytes` (64 MiB) before reading; read `max + 1` bytes; total ≤ `max_read_bytes` (256 MiB) across parts; ≤ `max_parts` (64) per collection. | caps injected small; a file over cap; total over cap; growth simulated by a size cap below the content |
-| Huge JSON / element bombs | Element-wise `raw_decode`, so memory is the file text plus one element; `max_entries` (500 000) per run; text over `MAX_TEXT_CHARS` (30 000) skipped as malformed. | entries over cap refuse; a 1 MiB `fullText` is skipped |
+| Huge file / file that grows | `fstat` size ≤ `max_file_bytes` (64 MiB) before reading; read at most that **fstat size + 1** bytes, and refuse a file that grew (sec-116 F4); total ≤ `max_read_bytes` (256 MiB) across parts; ≤ `max_parts` (64) per collection. | caps injected small; a file over cap; total over cap; growth simulated by a size cap below the content |
+| Huge JSON / element bombs | **Corrected (sec-116 F2):** element-wise `raw_decode` alone did NOT bound memory (one 16 MiB element of empty arrays peaked at ~25× the file, and every parsed entry was retained). Now a file whose `{` + `[` count passes `max_containers` (2 × `max_entries` + 1 000 000) is refused before parsing, and each entry is cut to its three string fields as it is parsed, so retained memory follows the kept text. `max_entries` (500 000) per run; text over `MAX_TEXT_CHARS` (30 000) skipped as malformed. | entries over cap refuse; a 1 MiB `fullText` is skipped |
 | Deep nesting | `RecursionError` (CPython's scanner raises it) and `ValueError` are caught per file and turned into the fixed "malformed" refusal. | `[` × 200 000 inside an entry |
 | Huge numbers | `tweetId` must be a digit **string** of ≤ 19 chars before `int()`; a JSON number token is wrong shape. An over-long numeric literal elsewhere hits CPython's int-digit limit → `ValueError` → refusal. | `"tweetId": 1e400`, a 5000-digit literal, a 25-digit id string |
 | Wrong encoding / BOM / NUL | Decoded `utf-8` with `errors="strict"` → refusal on invalid bytes (not silently replaced); BOM stripped; control characters never reach the terminal (`one_line`). | invalid UTF-8; a title carrying ESC sequences |
@@ -337,3 +337,26 @@ D1–D13 accepted as recommended. Three conditions:
   since the URL is constructed from the id and handle and no code path carries `expandedUrl`.
 - **The test DB** `second_brain_test_rm44` did not exist on 5434; it was created with
   `CREATE DATABASE` (additive), and the conftest migrated it.
+
+## Security fix round (sec-116, team-lead rulings, 2026-10-31)
+
+Each fix landed RED first: the new tests ran against a `git archive` copy of `18445702`'s
+`src/` and failed, then passed on the fix; each fix has a killed mutant.
+
+- **F1 (MEDIUM), the title kept a secret under `redact`.** The title is the start of the post
+  text, and the ingest guard redacts only the body. `build_document` now builds the title from
+  `guard.redact_secrets(post.text)[0]`, before cutting, in every guard mode. Tests: a key at the
+  very start (title, stored row, `chunks.title_text`, mirror name and file, terminal output under
+  `BRAIN_SECRET_GUARD=redact`), and a key that a cut-then-redact title would keep half of.
+- **F2 (MEDIUM), memory followed the JSON structure.** `_unwrap` keeps only `tweetId`,
+  `fullText` and `expandedUrl`, and only when they are strings; a file whose `{` + `[` count
+  passes `ArchiveLimits.max_containers` is refused before parsing. Tests: sec-116's 16 MiB
+  nested-array file is refused at the default limits; the cap's boundary; a tracemalloc test (a
+  10 MB archive of 500 entries carrying 20 KB of junk each retains under 1 MB and peaks under 4×
+  the file).
+- **F3 (LOW), leading-zero ids.** `_ID_RE` is `[1-9][0-9]{0,18}`.
+- **F4 (LOW), growth under the cap.** The read stops at the `fstat` size + 1 byte and refuses
+  more.
+- **F5 (INFO).** `O_NOCTTY` joins the file-open flags.
+- **F6, F7:** no change, as ruled.
+- **The broader gap** (no source's title is guarded) is backlog row **BL-38**, not fixed here.

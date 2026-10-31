@@ -7,6 +7,7 @@ import pytest
 
 from brain.ingest import social_posts as sp
 from tests import social_archive_fixtures as fx
+from tests.secret_fixtures import SYNTHETIC_AWS_KEY
 
 WRITTEN = datetime(2026, 9, 14, 8, 30, 15, 250000, tzinfo=UTC)
 PID = fx.post_id_at(WRITTEN)
@@ -393,3 +394,38 @@ def test_a_malformed_stored_list_keeps_only_known_names(stored: dict) -> None:
 
 def test_the_volatile_keys() -> None:
     assert sp.VOLATILE_KEYS == ("collections",)
+
+
+# --- sec-116 F1: a secret never reaches the title -------------------------------------------------
+
+
+def test_a_secret_at_the_start_of_a_post_is_redacted_in_the_title() -> None:
+    post = _post(fx.fields(PID, text=f"{SYNTHETIC_AWS_KEY} leaked by accident",
+                           expanded_url=fx.status_url(PID)))
+
+    title = sp.build_document(post).title
+
+    assert SYNTHETIC_AWS_KEY not in title
+    assert "AKIA" not in title
+    assert title.startswith(f"@{fx.AUTHOR}: [REDACTED:")
+
+
+def test_a_secret_across_the_title_cut_is_redacted_before_cutting() -> None:
+    text = "a" * (sp.TITLE_CHARS - 5) + f" {SYNTHETIC_AWS_KEY}"
+    post = _post(fx.fields(PID, text=text))
+
+    title = sp.build_document(post).title
+
+    assert text[: sp.TITLE_CHARS].endswith("AKIA")  # a cut-then-redact title would keep it
+    assert "AKIA" not in title
+
+
+# --- sec-116 F3: one canonical id per post --------------------------------------------------------
+
+
+@pytest.mark.parametrize("post_id", ["0160000000000000000", "0", "00020", "0" * 19])
+def test_an_id_with_a_leading_zero_is_malformed(post_id: str) -> None:
+    """sec-116 F3: ``0160…`` and ``160…`` are one post; only the canonical form is accepted."""
+    assert isinstance(sp.post_from_entry(fx.fields("160000000000000000"), "like", now=fx.NOW),
+                      sp.SocialPost)
+    assert sp.post_from_entry(fx.fields(post_id), "like", now=fx.NOW) == sp.SKIP_MALFORMED

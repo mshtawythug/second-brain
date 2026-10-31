@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import ast
 import errno
+import gc
 import json
 import os
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -407,3 +409,89 @@ def test_a_read_that_fails_midway_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(SocialArchiveError, match=r"data/like\.js could not be read"):
         sa.read_archive(root, read=failing_read)
+
+
+# --- sec-116 F2: memory is bounded by the kept text, not the JSON structure -----------------------
+
+
+def test_only_the_three_string_fields_are_kept() -> None:
+    entry = {"tweetId": "7", "fullText": "t", "expandedUrl": "https://x.com/a/status/7",
+             "junk": ["x"] * 50, "nested": {"deep": [1, 2]}}
+    odd = {"tweetId": 7, "fullText": ["t"], "expandedUrl": None}
+
+    entries = _parse(fx.payload("like", 0, [entry, odd]))
+
+    assert entries == [{"tweetId": "7", "fullText": "t", "expandedUrl": "https://x.com/a/status/7"},
+                       {}]
+
+
+def test_a_container_bomb_under_the_byte_caps_is_refused(tmp_path: Path) -> None:
+    """sec-116's PoC: 16 MiB of empty arrays in one entry, well under every byte cap."""
+    bomb = ",".join(["[]"] * (16 * 1024 * 1024 // 3))
+    root = _likes(tmp_path / "a", f'window.YTD.like.part0 = [{{"like": {{"x": [{bomb}]}}}}]')
+    assert (root / "data" / "like.js").stat().st_size < sa.MAX_FILE_BYTES
+
+    with pytest.raises(SocialArchiveError, match="too many JSON objects and arrays"):
+        sa.read_archive(root)
+
+
+def test_the_container_cap_counts_braces_and_brackets() -> None:
+    text = fx.payload("like", 0, [ENTRY, ENTRY])  # 1 array + 2 x 2 objects
+    containers = text.count("{") + text.count("[")
+
+    assert len(list(parse_payload(text, collection="like", part=0,
+                                  max_containers=containers))) == 2
+    with pytest.raises(SocialArchiveError, match="too many JSON objects and arrays"):
+        list(parse_payload(text, collection="like", part=0, max_containers=containers - 1))
+
+
+def test_the_reader_passes_its_container_cap(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+
+    with pytest.raises(SocialArchiveError, match="too many JSON objects and arrays"):
+        sa.read_archive(root, limits=ArchiveLimits(max_containers=2))
+
+
+def test_retained_memory_is_bounded_by_the_kept_text(tmp_path: Path) -> None:
+    """Junk fields are dropped as each entry is parsed, so a large archive keeps only its text."""
+    junk = "j" * 10_000
+    entries = [fx.fields(str(1000 + i), text="t" * 100, junk=junk, more=[junk]) for i in range(500)]
+    root = fx.write_archive(tmp_path / "a", likes=[entries])
+    file_size = (root / "data" / "like.js").stat().st_size
+    assert file_size > 10_000_000
+
+    tracemalloc.start()
+    try:
+        read = sa.read_archive(root)
+        gc.collect()
+        retained, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert len(read.likes) == 500
+    assert retained < 1_000_000, retained
+    assert peak < 4 * file_size, peak
+
+
+# --- sec-116 F4 and F5 ----------------------------------------------------------------------------
+
+
+def test_a_file_that_grows_by_a_few_bytes_during_the_read_is_refused(tmp_path: Path) -> None:
+    root = fx.write_archive(tmp_path / "a", likes=[[ENTRY]])
+    grown = {"done": False}
+
+    def growing_read(fd: int, count: int) -> bytes:
+        chunk = os.read(fd, count)
+        if chunk or grown["done"]:
+            return chunk
+        grown["done"] = True
+        return b" "
+
+    with pytest.raises(SocialArchiveError, match=r"data/like\.js grew"):
+        sa.read_archive(root, read=growing_read)
+
+
+def test_archive_files_are_opened_without_acquiring_a_terminal() -> None:
+    assert sa._FILE_FLAGS & os.O_NOCTTY
+    assert sa._FILE_FLAGS & os.O_NOFOLLOW
+    assert sa._FILE_FLAGS & os.O_NONBLOCK
