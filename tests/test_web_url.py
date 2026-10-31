@@ -8,7 +8,13 @@ from __future__ import annotations
 
 import pytest
 
-from brain.ingest.web_url import MAX_URL_CHARS, host_of, normalize_host, normalize_url
+from brain.ingest.web_url import (
+    MAX_URL_CHARS,
+    host_of,
+    is_numeric_host,
+    normalize_host,
+    normalize_url,
+)
 
 
 @pytest.mark.parametrize(
@@ -115,3 +121,39 @@ def test_host_of_a_url_without_a_host_is_empty() -> None:
 )
 def test_normalize_host(raw: str, expected: str | None) -> None:
     assert normalize_host(raw) == expected
+
+
+# --- sec-114 F3: path parameters carry session ids -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("https://example.com/a;jsessionid=ABCDEF0123456789?x=1#f", "https://example.com/a"),
+        ("https://example.com/app;JSESSIONID=synthetic/page;sid=1", "https://example.com/app/page"),
+        ("https://example.com/;phpsessid=synthetic", "https://example.com/"),
+        ("https://example.com/a;b;c/d", "https://example.com/a/d"),
+        ("https://example.com/keep%3Bencoded", "https://example.com/keep%3Bencoded"),
+    ],
+)
+def test_path_parameters_are_dropped_from_every_segment(raw: str, expected: str) -> None:
+    assert normalize_url(raw) == expected
+
+
+# --- sec-114 F8: an address in any form is not a name ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["127.0.0.1", "10.0.0.8", "2001:db8::1", "127.1", "2130706433", "0x7f.1", "0X7F.1",
+     "1.2", "a.1", "example.0x", "8.8.1.2."],
+)
+def test_numeric_hosts(host: str) -> None:
+    assert is_numeric_host(host) is True
+
+
+@pytest.mark.parametrize(
+    "host", ["example.com", "1a.example.com", "0xexample.com", "example.0xg", "x-1.example.org"]
+)
+def test_named_hosts(host: str) -> None:
+    assert is_numeric_host(host) is False

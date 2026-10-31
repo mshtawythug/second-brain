@@ -8,10 +8,14 @@ whole line), and blank lines are ignored::
     # every subdomain of example.org, never example.org itself
     *.example.org
 
-An entry is an exact host or ``*.`` followed by a domain of at least two labels.
-It is matched against the page's normalized host (:func:`brain.ingest.web_url.normalize_host`:
-lowercase, IDNA, no trailing dot), so ``Bücher.example.com`` and its punycode form are one
-entry. A wildcard covers proper subdomains only (RM-41.D1): the apex needs its own line.
+An entry is an exact host of at least two labels, or ``*.`` followed by a domain of
+at least two labels. It is matched against the page's normalized host
+(:func:`brain.ingest.web_url.normalize_host`: lowercase, no trailing dot). A wildcard
+covers proper subdomains only (RM-41.D1): the apex needs its own line.
+
+**ASCII only** (sec-114 F8). An internationalized host is written in its punycode form
+(``xn--bcher-kva.example.com``), because IDNA 2003 and the UTS #46 rules browsers use map
+some names (``faß.de``) to different domains; a non-ASCII line is refused with that hint.
 
 **Default-deny.** :func:`load_web_allowlist` returns ``None`` when the file does not
 exist and an empty :class:`WebAllowlist` when it has no entries; ``brain ingest-web``
@@ -19,21 +23,27 @@ refuses both, so nothing is ever allowlisted implicitly.
 
 **Fail closed (RM-41.D8).** Any malformed line fails the whole load: a scheme, a path,
 a port, userinfo, whitespace or an inline comment, a ``*`` anywhere but a leading
-``*.``, a wildcard over one label (``*.com``), or an IP literal (which also keeps
-``--fetch`` off loopback and metadata addresses). The :class:`~brain.config.ConfigError`
-names the line number only, never its text.
+``*.``, a single-label host or a wildcard over one label (``*.com``), ``localhost`` and
+its subdomains, or an address in any form (``10.0.0.8``, ``127.1``, ``2130706433``,
+``0x7f.1``; :func:`brain.ingest.web_url.is_numeric_host`). :meth:`WebAllowlist.allows`
+refuses an address host too. None of this is what keeps ``--fetch`` off private
+addresses; :func:`brain.ingest.web_fetch.public_only` does that, at every hop. The
+:class:`~brain.config.ConfigError` names the line number only, never its text.
+
+**Residual: public suffixes.** A wildcard over a multi-label public suffix (``*.co.uk``,
+``*.github.io``) cannot be told apart from an owner's own domain without the Public
+Suffix List, which this module does not ship; the guide says not to write one.
 
 The file is a list rather than ``BRAIN_*`` variables, like ``drop-folders.toml``; the
 settings-leaf rule (§2.3) still holds: one loader, one frozen value type.
 """
 from __future__ import annotations
 
-import ipaddress
 from dataclasses import dataclass
 from pathlib import Path
 
 from brain.config import ConfigError
-from brain.ingest.web_url import normalize_host
+from brain.ingest.web_url import is_numeric_host, normalize_host
 
 __all__ = [
     "CONFIG_NAME",
@@ -48,6 +58,7 @@ CONFIG_NAME = "web-allowlist.txt"
 MAX_FILE_BYTES = 1024 * 1024
 _WILDCARD = "*."
 _FORBIDDEN = frozenset("/:@#[]")
+_LOCALHOST = "localhost"
 
 
 @dataclass(frozen=True)
@@ -63,7 +74,7 @@ class WebAllowlist:
 
     def allows(self, host: str) -> bool:
         """Whether the normalized ``host`` is allowlisted."""
-        if not host:
+        if not host or is_numeric_host(host):
             return False
         if host in self.exact:
             return True
@@ -97,6 +108,11 @@ def load_web_allowlist(brain_home: Path) -> WebAllowlist | None:
         entry = line.strip()
         if not entry or entry.startswith("#"):
             continue
+        if not entry.isascii():
+            raise ConfigError(
+                f"{CONFIG_NAME}: line {number} is not ASCII; write an internationalized "
+                "host in its punycode (xn--) form"
+            )
         parsed = _parse_entry(entry)
         if parsed is None:
             raise ConfigError(
@@ -116,16 +132,8 @@ def _parse_entry(entry: str) -> tuple[bool, str] | None:
     if "*" in name:
         return None
     host = normalize_host(name)
-    if host is None or _is_ip(host):
+    if host is None or is_numeric_host(host) or "." not in host:
         return None
-    if is_wildcard and "." not in host:
+    if host == _LOCALHOST or host.endswith(f".{_LOCALHOST}"):
         return None
     return is_wildcard, host
-
-
-def _is_ip(host: str) -> bool:
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return True

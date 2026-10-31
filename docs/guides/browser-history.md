@@ -30,7 +30,15 @@ example.org
 - One entry per line: an exact host, or `*.` followed by a domain. A wildcard covers
   subdomains only; list the bare domain on its own line if you want it too.
 - Lines starting with `#` are comments. A comment must take a whole line.
-- Paths, ports, `https://`, IP addresses and `*.com`-style wildcards are refused.
+- Write every entry in ASCII. An internationalized host goes in its punycode form
+  (`xn--bcher-kva.example.com`), because browsers and Python disagree about how some names
+  (`faß.de`) convert.
+- Refused: paths, ports, `https://`, a single-label host (`intranet`), `localhost` and its
+  subdomains, a wildcard over one label (`*.com`), and an address in any form (`10.0.0.8`,
+  `127.1`, `2130706433`, `0x7f.1`).
+- **Not detected: public suffixes.** `*.co.uk` or `*.github.io` would allow every site under
+  that suffix, and brain cannot tell them from your own domain without the Public Suffix List.
+  Don't write one; list the exact hosts you mean.
 - With no file, an empty file, or a malformed line, the command exits 2 and reads nothing. The
   message names the line number, never the line.
 
@@ -53,8 +61,12 @@ run `brain` from (Terminal, iTerm, …), then restart that app. Chrome needs no 
   re-chunking or re-embedding the page.
 - **The title is kept as first stored.** `--refresh` rebuilds a page from today's title or
   bookmark name.
-- **Sensitivity** is `normal` by default (the hosts are ones you chose);
-  `--sensitivity confidential` stores the pages as confidential instead.
+- **Sensitivity** is `normal` by default (the hosts are ones you chose).
+  `--sensitivity confidential` stores new pages as confidential, and also raises pages already
+  stored (their vault mirror included). A run never lowers a page to `normal`: an explicit
+  `--sensitivity normal` leaves a confidential page as it is and names `brain mark-normal`.
+- **Path parameters are dropped too.** `/app;jsessionid=…/page` is stored as `/app/page`:
+  some servers put a session id there when cookies are off.
 
 **A token in the path is not removed.** Some sites put a secret in the path itself (a share link
 like `/s/<token>`, a reset link). The query-string rule does not catch those. Don't allowlist a
@@ -69,6 +81,14 @@ locked or modified, and you don't need to quit it. If the browser was writing du
 and the copy comes out torn, brain retries once. If the retry fails, it asks you to close the
 browser and run again.
 
+- Only real files are read. A history file that is a symlink, a device or a pipe is refused.
+- The copy is counted byte by byte against a 1 GiB limit. A disk that fills up during the copy
+  stops the run with one line naming the error (for example `OSError ENOSPC`).
+- A query that runs longer than 60 seconds is stopped.
+- Closing the terminal (SIGHUP) or stopping the process (SIGTERM) still deletes the copy. A run
+  killed outright (SIGKILL, a power cut) cannot clean up, so the next run deletes your own
+  leftover copies that are more than 3 hours old.
+
 ## `--fetch`: downloading the page text (opt-in)
 
 `--fetch` downloads the text of **new** pages only (`--refresh --fetch` re-fetches stored ones).
@@ -77,11 +97,15 @@ Every request, and every redirect, must:
 - use `https`;
 - go to an allowlisted host (a redirect off the list is refused);
 - resolve only to **public** addresses. A host that resolves to anything on your local
-  network, loopback or a cloud metadata address is refused, and the connection goes to the
-  address that was checked.
+  network, loopback, a cloud metadata address, or a documentation or benchmarking range is
+  refused. So is an IPv6 address that wraps one of those (v4-mapped, NAT64, 6to4, Teredo). The
+  connection goes to the address that was checked, with a fresh connection, and a fresh
+  certificate check, for every host.
 
-Each fetch stops after 10 seconds or 1 MiB, accepts only HTML or plain text, sends no cookies,
-and ignores proxy settings. A page whose fetch is refused or fails is still stored with its title
+Each fetch stops after 10 seconds in total (every redirect included) or 1 MiB as sent. It refuses
+compressed responses (any `Content-Encoding` other than `identity`) rather than unpacking them,
+and accepts only HTML or plain text, in an ordinary text encoding. It sends no cookies and ignores
+proxy settings. A page whose fetch is refused or fails is still stored with its title
 and URL. Fetched pages get an auto-summary (`--no-enrich` skips it). Without `--fetch` there is
 no summary, because a title and a URL are too short to summarize.
 

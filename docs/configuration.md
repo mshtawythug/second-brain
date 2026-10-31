@@ -532,7 +532,11 @@ or `*.` plus a domain of at least two labels (`*.example.org`, which covers
 subdomains only, never the apex). Lines starting with `#` are comments. A
 missing file or a file with no entries means **nothing is ingested** (the
 command exits 2). A scheme, path, port, IP address, whitespace or inline comment
-on a line is a `ConfigError` naming the line number, never the line. See
+on a line is a `ConfigError` naming the line number, never the line. So are a non-ASCII entry
+(write internationalized hosts in punycode, `xn--…`), an address in any form (`127.1`,
+`2130706433`, `0x7f.1`), `localhost` and its subdomains, and a single-label host. A wildcard over
+a multi-label public suffix (`*.co.uk`) cannot be detected without the Public Suffix List; don't
+write one. See
 [guides/browser-history.md](guides/browser-history.md).
 
 ### `BRAIN_WHISPER_MODEL` — voice memos (RM-38)

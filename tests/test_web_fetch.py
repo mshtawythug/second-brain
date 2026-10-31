@@ -9,7 +9,10 @@ answer cannot be swapped in between the check and the connect.
 """
 from __future__ import annotations
 
+import gzip
 import ipaddress
+import threading
+import time
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
@@ -43,23 +46,47 @@ class Recorder:
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         key = f"{request.headers['host']}{request.url.raw_path.decode()}"
-        return self.routes.get(key, httpx.Response(404))
+        return self.routes.get(key, _response(404))
+
+
+def _response(
+    status: int,
+    *,
+    headers: dict[str, str] | None = None,
+    text: str | None = None,
+    content: Any = None,
+) -> httpx.Response:
+    """A STREAMED response, as the network delivers one.
+
+    ``httpx.Response(text=…)`` / ``content=bytes`` is read eagerly, and the fetch reads
+    raw (``iter_raw``, sec-114 F1), which a pre-read response refuses. An iterator
+    ``content`` streams already.
+    """
+    if text is not None:
+        content = text.encode("utf-8")
+    if content is None or isinstance(content, bytes):
+        return httpx.Response(status, headers=headers, stream=httpx.ByteStream(content or b""))
+    return httpx.Response(status, headers=headers, content=content)
 
 
 def _client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.Client:
     return make_client(transport=httpx.MockTransport(handler))
 
 
+def _factory(handler: Callable[[httpx.Request], httpx.Response]) -> wf.ClientFactory:
+    """A fresh client per fetch, each on a MockTransport serving ``handler``."""
+    return lambda: _client(handler)
+
+
 def _fetch(routes: dict[str, httpx.Response], url: str = "https://example.com/doc",
            table: dict[str, list[str]] = PUBLIC) -> tuple[str, Recorder]:
     recorder = Recorder(routes)
-    with _client(recorder) as client:
-        text = fetch_page(url, ALLOW, client=client, resolver=resolver(table))
+    text = fetch_page(url, ALLOW, client_factory=_factory(recorder), resolver=resolver(table))
     return text, recorder
 
 
 def _html(body: str, **headers: str) -> httpx.Response:
-    return httpx.Response(200, headers={"content-type": HTML, **headers}, text=body)
+    return _response(200, headers={"content-type": HTML, **headers}, text=body)
 
 
 def _redirect(location: str, status: int = 302) -> httpx.Response:
@@ -93,9 +120,10 @@ def test_the_request_connects_to_the_validated_address_with_the_name_in_host_and
 
 def test_an_ipv6_address_is_bracketed_and_a_port_is_kept() -> None:
     recorder = Recorder({"a.example.org:8443/p": _html("<p>v6</p>")})
-    with _client(recorder) as client:
-        text = fetch_page("https://a.example.org:8443/p", ALLOW, client=client,
-                          resolver=resolver(PUBLIC))
+    text = fetch_page(
+        "https://a.example.org:8443/p", ALLOW, client_factory=_factory(recorder),
+        resolver=resolver(PUBLIC),
+    )
 
     (request,) = recorder.requests
     assert text == "v6"
@@ -105,15 +133,18 @@ def test_an_ipv6_address_is_bracketed_and_a_port_is_kept() -> None:
 
 
 def test_plain_text_is_returned_as_it_is() -> None:
-    text, _ = _fetch({"example.com/doc": httpx.Response(
-        200, headers={"content-type": "text/plain"}, text="  plain words  ")})
+    text, _ = _fetch({"example.com/doc": _response(
+        200,
+        headers={"content-type": "text/plain"},
+        text="  plain words  ")})
 
     assert text == "plain words"
 
 
 def test_an_unknown_charset_falls_back_to_utf8() -> None:
-    text, _ = _fetch({"example.com/doc": httpx.Response(
-        200, headers={"content-type": "text/plain; charset=no-such-codec"},
+    text, _ = _fetch({"example.com/doc": _response(
+        200,
+        headers={"content-type": "text/plain; charset=no-such-codec"},
         content="café".encode())})
 
     assert text == "café"
@@ -140,8 +171,9 @@ def test_a_relative_redirect_resolves_against_the_hop_url() -> None:
 
 def test_cookies_set_by_one_hop_are_not_sent_to_the_next() -> None:
     _, recorder = _fetch({
-        "example.com/doc": httpx.Response(
-            302, headers={"location": "https://example.com/next", "set-cookie": "s=1"}),
+        "example.com/doc": _response(
+            302,
+            headers={"location": "https://example.com/next", "set-cookie": "s=1"}),
         "example.com/next": _html("<p>ok</p>"),
     })
 
@@ -164,8 +196,8 @@ def test_cookies_set_by_one_hop_are_not_sent_to_the_next() -> None:
 )
 def test_a_url_off_the_rules_is_refused_before_any_request(url: str, reason: str) -> None:
     recorder = Recorder({})
-    with _client(recorder) as client, pytest.raises(WebFetchError, match=reason):
-        fetch_page(url, ALLOW, client=client, resolver=resolver(PUBLIC))
+    with pytest.raises(WebFetchError, match=reason):
+        fetch_page(url, ALLOW, client_factory=_factory(recorder), resolver=resolver(PUBLIC))
 
     assert recorder.requests == []
 
@@ -179,8 +211,9 @@ def test_a_url_off_the_rules_is_refused_before_any_request(url: str, reason: str
 )
 def test_a_redirect_off_the_rules_is_refused(location: str) -> None:
     recorder = Recorder({"example.com/doc": _redirect(location)})
-    with _client(recorder) as client, pytest.raises(WebFetchError, match="refused"):
-        fetch_page("https://example.com/doc", ALLOW, client=client, resolver=resolver(PUBLIC))
+    with pytest.raises(WebFetchError, match="refused"):
+        fetch_page("https://example.com/doc", ALLOW,
+            client_factory=_factory(recorder), resolver=resolver(PUBLIC))
 
     assert len(recorder.requests) == 1
 
@@ -194,7 +227,7 @@ def test_too_many_redirects_are_refused() -> None:
 
 def test_a_redirect_without_a_location_is_an_error() -> None:
     with pytest.raises(WebFetchError, match="redirect without a location"):
-        _fetch({"example.com/doc": httpx.Response(302)})
+        _fetch({"example.com/doc": _response(302)})
 
 
 @pytest.mark.parametrize(
@@ -221,8 +254,9 @@ def test_a_redirect_without_a_location_is_an_error() -> None:
 def test_a_host_resolving_to_a_non_public_address_is_refused(addresses: list[str]) -> None:
     recorder = Recorder({})
     table = {**PUBLIC, "example.com": addresses}
-    with _client(recorder) as client, pytest.raises(WebFetchError, match="not public"):
-        fetch_page("https://example.com/doc", ALLOW, client=client, resolver=resolver(table))
+    with pytest.raises(WebFetchError, match="not public"):
+        fetch_page("https://example.com/doc", ALLOW,
+            client_factory=_factory(recorder), resolver=resolver(table))
 
     assert recorder.requests == []
 
@@ -230,8 +264,9 @@ def test_a_host_resolving_to_a_non_public_address_is_refused(addresses: list[str
 def test_a_redirect_to_a_host_resolving_privately_is_refused() -> None:
     table = {**PUBLIC, "docs.example.com": ["192.168.0.10"]}
     recorder = Recorder({"example.com/doc": _redirect("https://docs.example.com/x")})
-    with _client(recorder) as client, pytest.raises(WebFetchError, match="not public"):
-        fetch_page("https://example.com/doc", ALLOW, client=client, resolver=resolver(table))
+    with pytest.raises(WebFetchError, match="not public"):
+        fetch_page("https://example.com/doc", ALLOW,
+            client_factory=_factory(recorder), resolver=resolver(table))
 
     assert len(recorder.requests) == 1
 
@@ -262,10 +297,10 @@ def test_the_default_policy_is_public_only() -> None:
 @pytest.mark.parametrize(
     ("response", "reason"),
     [
-        (httpx.Response(404), "HTTP 404"),
-        (httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF"),
+        (_response(404), "HTTP 404"),
+        (_response(200, headers={"content-type": "application/pdf"}, content=b"%PDF"),
          "unsupported content type"),
-        (httpx.Response(200, content=b"no type"), "unsupported content type"),
+        (_response(200, content=b"no type"), "unsupported content type"),
     ],
 )
 def test_bad_responses_are_errors(response: httpx.Response, reason: str) -> None:
@@ -290,14 +325,16 @@ def test_the_cap_is_enforced_while_streaming(monkeypatch: pytest.MonkeyPatch) ->
             yield b"x" * 8
 
     with pytest.raises(WebFetchError, match="larger than"):
-        _fetch({"example.com/doc": httpx.Response(
-            200, headers={"content-type": "text/plain"}, content=endless())})
+        _fetch({"example.com/doc": _response(
+            200,
+            headers={"content-type": "text/plain"},
+            content=endless())})
 
     assert len(served) < 1000
 
 
 def test_the_overall_deadline_is_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
-    ticks = iter([0.0, 0.0, wf.TIMEOUT_SECONDS + 1.0])
+    ticks = iter([0.0, 0.0] + [wf.TIMEOUT_SECONDS + 1.0] * 10)
     monkeypatch.setattr(wf, "_clock", lambda: next(ticks))
 
     def chunks() -> Iterator[bytes]:
@@ -305,8 +342,10 @@ def test_the_overall_deadline_is_enforced(monkeypatch: pytest.MonkeyPatch) -> No
         yield b"b"
 
     with pytest.raises(WebFetchError, match="took longer than"):
-        _fetch({"example.com/doc": httpx.Response(
-            200, headers={"content-type": "text/plain"}, content=chunks())})
+        _fetch({"example.com/doc": _response(
+            200,
+            headers={"content-type": "text/plain"},
+            content=chunks())})
 
 
 @pytest.mark.parametrize(
@@ -316,8 +355,9 @@ def test_transport_failures_are_class_only_errors(exc: Exception) -> None:
     def failing(request: httpx.Request) -> httpx.Response:
         raise exc
 
-    with _client(failing) as client, pytest.raises(WebFetchError) as caught:
-        fetch_page("https://example.com/doc", ALLOW, client=client, resolver=resolver(PUBLIC))
+    with pytest.raises(WebFetchError) as caught:
+        fetch_page("https://example.com/doc", ALLOW,
+            client_factory=_factory(failing), resolver=resolver(PUBLIC))
 
     assert str(caught.value) == f"fetch failed ({type(exc).__name__})"
     assert caught.value.__cause__ is None
@@ -361,8 +401,8 @@ def test_the_system_resolver_maps_a_lookup_failure_to_no_addresses(
 
 def test_a_malformed_port_is_refused_before_any_request() -> None:
     recorder = Recorder({})
-    with _client(recorder) as client, pytest.raises(WebFetchError, match="malformed port"):
-        fetch_page("https://example.com:99999/x", ALLOW, client=client,
+    with pytest.raises(WebFetchError, match="malformed port"):
+        fetch_page("https://example.com:99999/x", ALLOW, client_factory=_factory(recorder),
                    resolver=resolver(PUBLIC))
 
     assert recorder.requests == []
@@ -374,7 +414,232 @@ def test_a_transport_failure_while_streaming_is_a_class_only_error() -> None:
         raise httpx.ReadError("synthetic mid-body failure")
 
     with pytest.raises(WebFetchError) as caught:
-        _fetch({"example.com/doc": httpx.Response(
-            200, headers={"content-type": "text/plain"}, content=broken())})
+        _fetch({"example.com/doc": _response(
+            200,
+            headers={"content-type": "text/plain"},
+            content=broken())})
 
     assert str(caught.value) == "fetch failed (ReadError)"
+
+
+
+# --- sec-114 F1: no decompression, raw bytes counted ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "coding", ["gzip", "gzip, gzip", "zstd", "br", "deflate", "identity, gzip", "x-custom"]
+)
+def test_any_content_encoding_but_identity_is_refused_unread(coding: str) -> None:
+    served: list[int] = []
+
+    def bomb() -> Iterator[bytes]:
+        for _ in range(1000):
+            served.append(1)
+            yield gzip.compress(b"\0" * 65536)
+
+    with pytest.raises(WebFetchError, match="unsupported content encoding"):
+        _fetch({"example.com/doc": _response(
+            200,
+            headers={"content-type": "text/plain", "content-encoding": coding},
+            content=bomb())})
+
+    assert served == []
+
+
+@pytest.mark.parametrize("coding", ["identity", "Identity", ""])
+def test_identity_or_no_encoding_is_read(coding: str) -> None:
+    headers = {"content-type": "text/plain"}
+    if coding:
+        headers["content-encoding"] = coding
+
+    text, _ = _fetch({"example.com/doc": _response(200, headers=headers, text="plain")})
+
+    assert text == "plain"
+
+
+def test_the_cap_counts_the_bytes_on_the_wire_not_decoded_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A compressed body sent WITHOUT a Content-Encoding is never decompressed."""
+    payload = gzip.compress(b"A" * 1_000_000)
+    monkeypatch.setattr(wf, "MAX_BODY_BYTES", len(payload) + 10)
+
+    text, _ = _fetch({"example.com/doc": _response(
+        200,
+        headers={"content-type": "text/plain; charset=latin-1"},
+        content=payload)})
+
+    assert len(text) < len(payload) + 10
+    assert "A" * 1000 not in text
+
+
+# --- sec-114 F4: one wall-clock deadline over every hop ---------------------------------------
+
+
+class StallingTransport(httpx.BaseTransport):
+    """Never answers until released, like a server trickling its headers."""
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.entered = threading.Event()
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.entered.set()
+        self.release.wait(30)
+        raise httpx.ReadTimeout("released", request=request)
+
+
+def test_a_stalled_server_cannot_hold_the_fetch_past_its_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wf, "TIMEOUT_SECONDS", 0.3)
+    stall = StallingTransport()
+    started = time.monotonic()
+    try:
+        with pytest.raises(WebFetchError, match="took longer than 0.3 s"):
+            fetch_page("https://example.com/doc", ALLOW,
+                       client_factory=lambda: make_client(transport=stall),
+                       resolver=resolver(PUBLIC))
+        elapsed = time.monotonic() - started
+    finally:
+        stall.release.set()
+
+    assert stall.entered.is_set()
+    assert elapsed < 5
+
+
+def test_the_deadline_is_checked_before_every_hop(monkeypatch: pytest.MonkeyPatch) -> None:
+    ticks = iter([0.0, 0.0] + [wf.TIMEOUT_SECONDS + 1.0] * 10)
+    monkeypatch.setattr(wf, "_clock", lambda: next(ticks))
+
+    with pytest.raises(WebFetchError, match="took longer than"):
+        _fetch({"example.com/doc": _redirect("/next"), "example.com/next": _html("<p>x</p>")})
+
+
+def test_each_hop_gets_only_the_time_that_remains(monkeypatch: pytest.MonkeyPatch) -> None:
+    ticks = iter([100.0, 107.5] + [107.5] * 10)
+    monkeypatch.setattr(wf, "_clock", lambda: next(ticks))
+
+    _, recorder = _fetch({"example.com/doc": _html("<p>x</p>")})
+
+    timeout = recorder.requests[0].extensions["timeout"]
+    assert timeout["connect"] == timeout["read"] == pytest.approx(2.5)
+
+
+def test_an_unexpected_failure_in_the_worker_is_a_class_only_error() -> None:
+    def broken_factory() -> httpx.Client:
+        raise RuntimeError("synthetic detail that must not be printed")
+
+    with pytest.raises(WebFetchError) as caught:
+        fetch_page("https://example.com/doc", ALLOW, client_factory=broken_factory,
+                   resolver=resolver(PUBLIC))
+
+    assert str(caught.value) == "fetch failed (RuntimeError)"
+
+
+# --- sec-114 F7: the server does not choose the decoder ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("charset", "body", "expected"),
+    [
+        ("utf-16", "héllo".encode("utf-16"), "héllo"),
+        ("windows-1252", "café".encode("cp1252"), "café"),
+        ("iso-8859-15", "€uro".encode("iso8859-15"), "€uro"),
+        ("shift_jis", "日本".encode("shift_jis"), "日本"),
+        ("punycode", b"abc-xyz", "abc-xyz"),
+        ("unicode_escape", b"\\x41\\N{BULLET}", "\\x41\\N{BULLET}"),
+        ("utf-7", b"+AGEA-", "+AGEA-"),
+        ("rot13", b"uryyb", "uryyb"),
+    ],
+)
+def test_only_text_encodings_are_honoured(charset: str, body: bytes, expected: str) -> None:
+    text, _ = _fetch({"example.com/doc": _response(
+        200,
+        headers={"content-type": f"text/plain; charset={charset}"}, content=body)})
+
+    assert text == expected
+
+
+# --- sec-114 F9: an explicit deny list, embedded IPv4 decoded ---------------------------------
+
+
+def _teredo(server: str, client: str) -> str:
+    value = (0x20010000 << 96) | (int(ipaddress.IPv4Address(server)) << 64)
+    value |= ~int(ipaddress.IPv4Address(client)) & 0xFFFFFFFF
+    return str(ipaddress.IPv6Address(value))
+
+
+@pytest.mark.parametrize(
+    ("address", "allowed"),
+    [
+        ("93.184.215.14", True),
+        ("2606:2800:21f:cb07::1", True),
+        ("0.1.2.3", False),
+        ("10.9.8.7", False),
+        ("100.64.0.1", False),
+        ("127.0.0.1", False),
+        ("169.254.169.254", False),
+        ("172.31.255.255", False),
+        ("192.0.0.8", False),
+        ("192.0.2.1", False),
+        ("192.88.99.1", False),
+        ("192.168.1.1", False),
+        ("198.18.0.1", False),
+        ("198.51.100.1", False),
+        ("203.0.113.1", False),
+        ("224.0.0.1", False),
+        ("240.0.0.1", False),
+        ("255.255.255.255", False),
+        ("::", False),
+        ("::1", False),
+        ("::7f00:1", False),  # v4-compatible (deprecated)
+        ("100::1", False),  # discard
+        ("fc00::1", False),
+        ("fd12:3456::1", False),
+        ("fe80::1", False),
+        ("fec0::1", False),  # site-local, refused on every Python version
+        ("ff02::1", False),
+        ("2001:db8::1", False),
+        ("2001:2::1", False),
+        ("2001:10::1", False),
+        ("2001:20::1", False),
+        ("3fff::1", False),
+        ("::ffff:127.0.0.1", False),
+        ("::ffff:93.184.215.14", True),
+        ("64:ff9b::7f00:1", False),
+        ("64:ff9b::a9fe:a9fe", False),
+        ("64:ff9b::5db8:d70e", True),
+        ("64:ff9b:1:7f00:0:100::", False),  # RFC 6052 /48: 127.0.0.1
+        ("64:ff9b:1:5db8:d7:e00::", True),  # RFC 6052 /48: 93.184.215.14
+        ("2002:7f00:1::1", False),  # 6to4 of 127.0.0.1
+        ("2002:a9fe:a9fe::", False),  # 6to4 of 169.254.169.254
+        ("2002:5db8:d70e::1", True),  # 6to4 of a public address
+        (_teredo("93.184.215.14", "127.0.0.1"), False),
+        (_teredo("10.0.0.1", "93.184.215.14"), False),
+        (_teredo("93.184.215.14", "93.184.215.15"), True),
+    ],
+)
+def test_public_only_pins_every_form(address: str, allowed: bool) -> None:
+    assert public_only(ipaddress.ip_address(address)) is allowed
+
+
+# --- sec-114 F13: no connection outlives its request ------------------------------------------
+
+
+def test_no_connection_is_kept_alive_and_each_fetch_gets_a_fresh_client() -> None:
+    made: list[httpx.Client] = []
+
+    def factory() -> httpx.Client:
+        made.append(_client(lambda request: _html("<p>x</p>")))
+        return made[-1]
+
+    for _ in range(2):
+        fetch_page("https://example.com/doc", ALLOW, client_factory=factory,
+                   resolver=resolver(PUBLIC))
+
+    assert len(made) == 2 and made[0] is not made[1]
+    assert wf.CONNECTION_LIMITS.max_keepalive_connections == 0
+    with make_client() as client:
+        pool = client._transport._pool  # type: ignore[attr-defined]
+        assert pool._max_keepalive_connections == 0

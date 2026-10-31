@@ -41,6 +41,14 @@ git tag scheme:
   every redirect, and every resolved address must be public. The connection goes to the checked
   address, with the name in `Host` and TLS SNI. It stops after 10 s or 1 MiB, and sends no
   cookies, no proxy settings and no `.netrc`.
+- Security round (sec-114): the fetch refuses compressed responses and counts raw bytes. The
+  deadline is wall-clock over every hop. `public_only` is an explicit deny list that decodes
+  embedded IPv4. There is no connection reuse across hosts, and only text codecs are honoured.
+  `;` path parameters are dropped. Allowlist entries must be ASCII names (no addresses in any
+  form, no localhost). The store copy reads only regular files and is byte-counted; views and
+  long queries are refused. Bookmarks are walked once per node with a node cap. SIGHUP and
+  SIGTERM remove the copy, and stale copies are swept. An explicit `--sensitivity confidential`
+  raises stored pages.
 - `web_page` joins the concept-skip policy (version `v4`). New: `brain/ingest/browser.py`,
   `browser_store.py`, `web_url.py`, `web_fetch.py`, `brain/settings/web_allowlist.py`,
   `brain/cli_ingest_web.py`, and `docs/guides/browser-history.md`.

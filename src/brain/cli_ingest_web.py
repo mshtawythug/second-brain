@@ -22,6 +22,19 @@ re-chunk, no embed, no fetch, and the stored title and body stay. ``--refresh``
 rebuilds the body instead, keeping the other browser's keys and the first
 ``date`` (:func:`brain.ingest.browser.with_stored_keys`).
 
+**Sensitivity (sec-114 F11).** A new page is stored at ``--sensitivity``
+(default ``normal``). For a page already stored, an explicit
+``--sensitivity confidential`` raises it to confidential, mirror and fences
+included (``set_document_sensitivity`` + ``propagate_sensitivity_to_vault``, the
+``brain mark-confidential`` path); without the flag the stored tier is left
+alone. A run never LOWERS a stored tier: an explicit ``--sensitivity normal``
+on a confidential page prints a notice naming ``brain mark-normal`` instead,
+the escalate-only rule every ingest path follows.
+
+**Interruption (sec-114 F10).** The store read runs with SIGTERM and SIGHUP
+raising ``SystemExit``, so a closed terminal still removes the snapshot, and
+each run first sweeps this user's stale snapshot directories.
+
 **Cost (protocol point 9).** ``web_page`` skips concept extraction; the summary
 runs only with ``--fetch`` (a title-and-URL body is too short to summarize);
 at most ``--max`` pages a run.
@@ -33,6 +46,7 @@ class name (``describe_failure``).
 from __future__ import annotations
 
 import functools
+import signal
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -41,7 +55,6 @@ from datetime import time as day_start
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
-import httpx
 import psycopg
 import typer
 
@@ -66,12 +79,16 @@ from .ingest.browser_store import (
     BrowserStoreError,
     default_profile,
     read_browser,
+    sweep_stale_snapshots,
 )
+from .ingest.capped_process import sigterm_as_system_exit
 from .ingest.text_safety import one_line
 from .ingest.volatile_patch import rare_outcomes, refresh_volatile, settle, stored_document
-from .sensitivity import DEFAULT_SENSITIVITY
+from .queries import set_document_sensitivity
+from .sensitivity import DEFAULT_SENSITIVITY, is_confidential
 from .settings.web_allowlist import WebAllowlist, load_web_allowlist
 from .tags import normalize_tags
+from .vault.sensitivity_propagate import propagate_sensitivity_to_vault
 
 if TYPE_CHECKING:
     from .enrichment import OllamaEnricher
@@ -97,9 +114,10 @@ NEEDS_PROFILE = "ingest-web: the default profile location is macOS-only; pass --
 home_dir: Callable[[], Path] = Path.home
 #: The platform the default profile is checked against; tests swap it.
 host_platform: str = sys.platform
-#: The ``--fetch`` resolver and client; tests swap both (no test reaches the network).
+#: The ``--fetch`` resolver and client factory (one client per fetch); tests swap both,
+#: so no test reaches the network.
 fetch_resolver: web_fetch.Resolver = web_fetch.system_resolver
-make_fetch_client: Callable[[], httpx.Client] = web_fetch.make_client
+make_fetch_client: web_fetch.ClientFactory = web_fetch.make_client
 
 
 def ingest_web(
@@ -126,8 +144,10 @@ def ingest_web(
     refresh: bool = typer.Option(
         False, "--refresh", help="Rebuild the body of pages already stored (and re-fetch)."
     ),
-    sensitivity: str = typer.Option(
-        DEFAULT_SENSITIVITY, "--sensitivity", help="normal (default) or confidential."
+    sensitivity: str | None = typer.Option(
+        None,
+        "--sensitivity",
+        help="normal (default) or confidential; confidential also raises stored pages.",
     ),
     tag: list[str] = typer.Option([], "--tag", "-t", help="Apply tag(s) to each page."),
     dry_run: bool = typer.Option(
@@ -144,12 +164,14 @@ def ingest_web(
     document per page URL, with the query string and fragment dropped.
     """
     chosen, first_day = _scope_or_exit(browser, since, today=datetime.now().date())
-    level = _validate_sensitivity_or_exit(sensitivity)
+    level = _validate_sensitivity_or_exit(sensitivity or DEFAULT_SENSITIVITY)
     allowlist = _allowlist_or_exit()
     store = _profile_or_exit(chosen, profile)
     window_start = datetime.combine(first_day, day_start.min).astimezone(UTC)
+    sweep_stale_snapshots()
     try:
-        rows = read_browser(chosen, store, window_start)
+        with sigterm_as_system_exit(also=(signal.SIGHUP,)):
+            rows = read_browser(chosen, store, window_start)
     except BrowserStoreError as exc:
         typer.secho(str(exc), fg="red", err=True)
         raise typer.Exit(code=1) from None
@@ -166,6 +188,7 @@ def ingest_web(
             allowlist=allowlist,
             tags=normalize_tags(list(tag)),
             sensitivity=level,
+            explicit_sensitivity=sensitivity is not None,
             fetch=fetch,
             refresh=refresh,
             enrich=enrich and fetch,
@@ -232,6 +255,11 @@ def _report_read(rows: BrowserRows, batch: br.PageBatch, *, min_visits: int, lim
             f"{_plural(batch.below_threshold, 'page', 'pages')} below --min-visits "
             f"{min_visits} skipped"
         )
+    if rows.bookmarks_truncated:
+        typer.secho(
+            f"stopped reading bookmarks at {browser_store.MAX_BOOKMARK_NODES} entries",
+            fg="yellow",
+        )
     if rows.truncated:
         typer.secho(
             f"stopped reading at {browser_store.MAX_ROWS} history entries; narrow --since",
@@ -251,6 +279,7 @@ class _Options:
     allowlist: WebAllowlist
     tags: list[str]
     sensitivity: str
+    explicit_sensitivity: bool
     fetch: bool
     refresh: bool
     enrich: bool
@@ -266,7 +295,6 @@ class _Run:
     embedder: Embedder
     enricher: OllamaEnricher | None
     graph_syncer: GraphSyncer
-    client: httpx.Client | None
     counts: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(
             ("ingested", "updated", "refreshed", "unchanged", "empty", "same_body", "failed",
@@ -278,23 +306,17 @@ class _Run:
 
 def _ingest_all(batch: br.PageBatch, options: _Options) -> None:
     cfg = Config.load()
-    client = make_fetch_client() if options.fetch else None
     run = _Run(
         options=options,
         cfg=cfg,
         embedder=_build_embedder(cfg),
         enricher=_build_enricher(cfg) if options.enrich else None,
         graph_syncer=_build_graph_syncer(cfg),
-        client=client,
     )
-    try:
-        with connect(cfg.database_url) as conn:
-            conn.autocommit = True
-            for page in batch.pages:
-                _guarded(page, run, functools.partial(_write_page, conn, page, run))
-    finally:
-        if client is not None:
-            client.close()
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        for page in batch.pages:
+            _guarded(page, run, functools.partial(_write_page, conn, page, run))
     _report_counts(run.counts)
 
 
@@ -330,7 +352,7 @@ def _write_page(conn: psycopg.Connection[Any], page: br.Page, run: _Run) -> str:
     options = run.options
     stored = stored_document(conn, br.SOURCE_KIND, page.external_id)
     if stored is not None and not options.refresh:
-        return refresh_volatile(
+        outcome = refresh_volatile(
             conn,
             document_id=stored[0],
             stored=stored[1],
@@ -339,6 +361,7 @@ def _write_page(conn: psycopg.Connection[Any], page: br.Page, run: _Run) -> str:
             vault_root=run.cfg.vault_path,
             graph_syncer=run.graph_syncer,
         )
+        return "refreshed" if _apply_explicit_sensitivity(conn, stored[0], page, run) else outcome
     doc = br.build_document(page, options.browser, fetched_text=_fetched_text(page, run))
     if stored is not None:
         doc = br.with_stored_keys(doc, stored[1], options.browser)
@@ -372,13 +395,48 @@ def _write_page(conn: psycopg.Connection[Any], page: br.Page, run: _Run) -> str:
     )
 
 
+def _apply_explicit_sensitivity(
+    conn: psycopg.Connection[Any], document_id: str, page: br.Page, run: _Run
+) -> bool:
+    """Raise a stored page to an explicit ``--sensitivity confidential``; ``True`` if changed.
+
+    Escalate only (module docstring): an explicit ``normal`` leaves a confidential page
+    as it is and says how to lower it.
+    """
+    options = run.options
+    if not options.explicit_sensitivity:
+        return False
+    if not is_confidential(options.sensitivity):
+        row = conn.execute(
+            "SELECT sensitivity FROM documents WHERE id = %s", (document_id,)
+        ).fetchone()
+        if row is not None and is_confidential(row[0]):
+            typer.echo(
+                f"  kept confidential {one_line(page.url)} "
+                f"(lower it with: brain mark-normal {document_id[:8]})"
+            )
+        return False
+    if not set_document_sensitivity(conn, document_id=document_id, level=options.sensitivity):
+        return False
+    for failure in propagate_sensitivity_to_vault(
+        conn, document_id, level=options.sensitivity, vault_root=run.cfg.vault_path
+    ):
+        typer.secho(f"  mirror not updated {one_line(page.url)}: {failure.message}",
+                    fg="yellow", err=True)
+    typer.echo(f"  marked confidential {one_line(page.url)}")
+    return True
+
+
 def _fetched_text(page: br.Page, run: _Run) -> str | None:
     """The page's text under ``--fetch``; ``None`` (title-and-URL body) when the fetch fails."""
-    if run.client is None:
+    if not run.options.fetch:
         return None
     try:
         return web_fetch.fetch_page(
-            page.url, run.options.allowlist, client=run.client, resolver=fetch_resolver
+            page.url,
+            run.options.allowlist,
+            client_factory=make_fetch_client,
+            resolver=fetch_resolver,
         )
     except web_fetch.WebFetchError as exc:
         typer.secho(f"  fetch skipped {one_line(page.url)}: {exc}", fg="yellow", err=True)

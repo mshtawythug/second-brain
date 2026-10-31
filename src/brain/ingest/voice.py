@@ -70,14 +70,12 @@ import logging
 import math
 import os
 import re
-import shutil
 import signal
 import stat
 import tempfile
-import time
 from pathlib import Path
 
-from . import ExtractedDoc
+from . import ExtractedDoc, stale_tempdirs
 from .capped_process import CappedRun
 from .whisper import AFCONVERT_PATH, AFINFO_PATH, WhisperSetup, resolve_whisper
 
@@ -184,24 +182,10 @@ def sweep_stale_tempdirs(
     (default: this process's) are removed. ``root`` (default: the temp directory),
     ``now`` and ``uid`` are test seams.
     """
-    base = Path(tempfile.gettempdir()) if root is None else root
     longest = AFINFO_TIMEOUT_S + AFCONVERT_TIMEOUT_S + whisper_timeout(max_seconds)
-    cutoff = (time.time() if now is None else now) - max(STALE_TEMPDIR_S, longest)
-    owner = os.getuid() if uid is None else uid
-    try:
-        entries = [e for e in os.scandir(base) if e.name.startswith(TEMP_PREFIX)]
-    except OSError:
-        return 0
-    removed = 0
-    for entry in entries:
-        try:
-            st = entry.stat(follow_symlinks=False)
-        except OSError:
-            continue  # removed since the listing (another run's cleanup): nothing to sweep
-        if stat.S_ISDIR(st.st_mode) and st.st_uid == owner and st.st_mtime < cutoff:
-            shutil.rmtree(entry.path, ignore_errors=True)
-            removed += 1
-    return removed
+    return stale_tempdirs.sweep_stale_tempdirs(
+        TEMP_PREFIX, max_age_s=max(STALE_TEMPDIR_S, longest), root=root, now=now, uid=uid
+    )
 
 
 def extract_voice(

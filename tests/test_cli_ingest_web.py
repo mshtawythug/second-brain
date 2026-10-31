@@ -366,10 +366,30 @@ def test_refresh_rebuilds_the_body_and_keeps_the_other_browser_and_the_first_dat
 # --- AC5: --fetch -----------------------------------------------------------------------------
 
 
+def _response(
+    status: int,
+    *,
+    headers: dict[str, str] | None = None,
+    text: str | None = None,
+    content: Any = None,
+) -> httpx.Response:
+    """A STREAMED response, as the network delivers one.
+
+    ``httpx.Response(text=…)`` / ``content=bytes`` is read eagerly, and the fetch reads
+    raw (``iter_raw``, sec-114 F1), which a pre-read response refuses. An iterator
+    ``content`` streams already.
+    """
+    if text is not None:
+        content = text.encode("utf-8")
+    if content is None or isinstance(content, bytes):
+        return httpx.Response(status, headers=headers, stream=httpx.ByteStream(content or b""))
+    return httpx.Response(status, headers=headers, content=content)
+
+
 def _serve(monkeypatch: pytest.MonkeyPatch, routes: dict[str, httpx.Response]) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return routes.get(f"{request.headers['host']}{request.url.raw_path.decode()}",
-                          httpx.Response(404))
+                          _response(404))
 
     monkeypatch.setattr(
         cli_ingest_web, "make_fetch_client",
@@ -383,8 +403,10 @@ def test_fetch_puts_the_page_text_in_the_body_and_enriches(
     tmp_path: Path, home: Path, embedder: CountingEmbedder, test_db: psycopg.Connection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _serve(monkeypatch, {"example.com/doc": httpx.Response(
-        200, headers={"content-type": "text/html"}, text="<p>The fetched words.</p>")})
+    _serve(monkeypatch, {"example.com/doc": _response(
+        200,
+        headers={"content-type": "text/html"},
+        text="<p>The fetched words.</p>")})
     built: list[int] = []
     monkeypatch.setattr("brain.cli._build_enricher", lambda cfg: built.append(1))
     profile = _chrome(tmp_path, [fx.Page(DOC, "Doc", VISITS)])
@@ -411,8 +433,9 @@ def test_fetch_refuses_a_redirect_off_the_allowlist_and_keeps_the_page(
     tmp_path: Path, home: Path, embedder: CountingEmbedder, test_db: psycopg.Connection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _serve(monkeypatch, {"example.com/doc": httpx.Response(
-        302, headers={"location": "https://example.net/elsewhere"})})
+    _serve(monkeypatch, {"example.com/doc": _response(
+        302,
+        headers={"location": "https://example.net/elsewhere"})})
 
     result = _web(_chrome(tmp_path, [fx.Page(DOC, "Doc", VISITS)]), "--fetch", "--no-enrich")
 
@@ -608,3 +631,180 @@ def test_no_url_or_title_reaches_the_logs(
     assert "example.com/doc" not in logged
     assert "Unique-Title-Marker" not in logged
     assert "synthetic-term" not in logged
+
+
+# --- sec-114 F11: an explicit --sensitivity reaches stored pages, escalate only --------------
+
+
+def _sensitivity(conn: psycopg.Connection[Any]) -> str:
+    return str(_docs(conn)[DOC]["sensitivity"])
+
+
+def test_explicit_confidential_raises_a_stored_page_and_its_mirror(
+    tmp_path: Path, home: Path, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
+    profile = _chrome(tmp_path, [fx.Page(DOC, "Doc", VISITS)])
+    assert _web(profile).exit_code == 0
+    assert _sensitivity(test_db) == "normal"
+    embeds = embedder.embed_calls
+
+    result = _web(profile, "--sensitivity", "confidential")
+
+    assert result.exit_code == 0, result.output
+    assert _sensitivity(test_db) == "confidential"
+    assert f"marked confidential {DOC}" in result.output
+    assert "1 refreshed" in result.output
+    assert embedder.embed_calls == embeds
+    (mirror,) = vault.rglob("*.md")
+    assert "sensitivity: confidential" in mirror.read_text(encoding="utf-8")
+
+
+def test_without_the_flag_a_stored_tier_is_left_alone(
+    tmp_path: Path, home: Path, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    profile = _chrome(tmp_path, [fx.Page(DOC, "Doc", VISITS)])
+    assert _web(profile, "--sensitivity", "confidential").exit_code == 0
+
+    result = _web(profile)
+
+    assert result.exit_code == 0
+    assert _sensitivity(test_db) == "confidential"
+    assert "kept confidential" not in result.output
+
+
+def test_explicit_normal_never_lowers_a_confidential_page(
+    tmp_path: Path, home: Path, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    profile = _chrome(tmp_path, [fx.Page(DOC, "Doc", VISITS)])
+    assert _web(profile, "--sensitivity", "confidential").exit_code == 0
+
+    result = _web(profile, "--sensitivity", "normal")
+
+    assert result.exit_code == 0
+    assert _sensitivity(test_db) == "confidential"
+    assert f"kept confidential {DOC} (lower it with: brain mark-normal " in result.output
+
+
+def test_explicit_normal_on_a_normal_page_says_nothing(
+    tmp_path: Path, home: Path, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    profile = _chrome(tmp_path, [fx.Page(DOC, "Doc", VISITS)])
+    assert _web(profile).exit_code == 0
+
+    result = _web(profile, "--sensitivity", "normal")
+
+    assert "kept confidential" not in result.output
+    assert "1 unchanged" in result.output
+
+
+def test_explicit_confidential_on_an_already_confidential_page_is_unchanged(
+    tmp_path: Path, home: Path, embedder: CountingEmbedder, test_db: psycopg.Connection
+) -> None:
+    profile = _chrome(tmp_path, [fx.Page(DOC, "Doc", VISITS)])
+    assert _web(profile, "--sensitivity", "confidential").exit_code == 0
+
+    result = _web(profile, "--sensitivity", "confidential")
+
+    assert "marked confidential" not in result.output
+    assert "1 unchanged" in result.output
+
+
+def test_a_mirror_that_cannot_be_updated_is_reported(
+    tmp_path: Path, home: Path, embedder: CountingEmbedder, test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from brain.vault.sensitivity_propagate import PropagationFailure
+
+    profile = _chrome(tmp_path, [fx.Page(DOC, "Doc", VISITS)])
+    assert _web(profile).exit_code == 0
+    failure = PropagationFailure(stage="mirror", message="synthetic mirror failure")
+    monkeypatch.setattr(cli_ingest_web, "propagate_sensitivity_to_vault",
+                        lambda *a, **k: [failure])
+
+    result = _web(profile, "--sensitivity", "confidential")
+
+    assert f"mirror not updated {DOC}: synthetic mirror failure" in result.output
+    assert _sensitivity(test_db) == "confidential"
+
+
+# --- sec-114 F10: a closed terminal still removes the snapshot --------------------------------
+
+
+def test_sighup_during_the_read_exits_and_removes_the_snapshot(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import signal
+
+    from brain.ingest import browser_store as bs
+
+    profile = _chrome(tmp_path, [fx.Page(DOC, "Doc", VISITS)])
+    made: list[Path] = []
+    real_mkdtemp = bs.tempfile.mkdtemp
+    before = signal.getsignal(signal.SIGHUP)
+
+    def tracking(**kwargs: Any) -> str:
+        made.append(Path(real_mkdtemp(**kwargs)))
+        return str(made[-1])
+
+    def hang_up(conn: Any, since: datetime) -> Any:
+        os.kill(os.getpid(), signal.SIGHUP)
+        raise AssertionError("SIGHUP did not interrupt the read")
+
+    monkeypatch.setattr(bs.tempfile, "mkdtemp", tracking)
+    monkeypatch.setattr(bs, "_query_chrome", hang_up)
+
+    result = _web(profile)
+
+    assert result.exit_code == 128 + signal.SIGHUP
+    assert made and not any(path.exists() for path in made)
+    assert signal.getsignal(signal.SIGHUP) == before
+
+
+def test_stale_snapshots_are_swept_when_a_run_starts(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+    monkeypatch.setattr(cli_ingest_web, "sweep_stale_snapshots", lambda: calls.append(1) or 0)
+
+    _web(_chrome(tmp_path, []), "--dry-run")
+
+    assert calls == [1]
+
+
+# --- sec-114 F5: a full disk is one line, exit 1 ---------------------------------------------
+
+
+def test_a_full_disk_while_copying_exits_1_in_one_line(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+
+    def full(fd: int, data: Any) -> int:
+        raise OSError(errno.ENOSPC, "No space left on device", str(tmp_path))
+
+    monkeypatch.setattr("brain.ingest.browser_store._write", full)
+
+    result = _web(_chrome(tmp_path, [fx.Page(DOC, "Doc", VISITS)]))
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert "(OSError ENOSPC)" in result.output
+    assert str(tmp_path) not in result.output
+    assert len(result.output.strip().splitlines()) == 1
+
+
+def test_a_bookmark_walk_at_its_cap_is_reported(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("brain.ingest.browser_store.MAX_BOOKMARK_NODES", 3)
+    pairs = [(f"https://example.com/{n}", str(n)) for n in range(5)]
+
+    result = _web(_chrome(tmp_path, [], bookmarks=pairs), "--dry-run")
+
+    assert result.exit_code == 0
+    assert "stopped reading bookmarks at 3 entries" in result.output

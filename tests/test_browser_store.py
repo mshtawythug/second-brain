@@ -446,13 +446,13 @@ def test_an_oversized_store_is_refused_before_it_is_copied(
 ) -> None:
     profile = _chrome(tmp_path, pages=[fx.Page(A, "A", IN_WINDOW)])
     monkeypatch.setattr(bs, "MAX_STORE_BYTES", 10)
-    copies: list[int] = []
-    monkeypatch.setattr(bs.shutil, "copyfile", lambda *a, **k: copies.append(1))
+    writes: list[int] = []
+    monkeypatch.setattr(bs, "_write", lambda fd, data: writes.append(len(data)) or len(data))
 
     with pytest.raises(StoreTooLargeError):
         read_browser("chrome", profile, fx.SINCE)
 
-    assert copies == []
+    assert writes == []
 
 
 def test_safari_permission_denied_is_full_disk_access(
@@ -525,3 +525,282 @@ def test_bookmarks_json_survives_round_trip_of_unicode_titles(tmp_path: Path) ->
     )
 
     assert read_browser("chrome", profile, fx.SINCE).bookmarks == (BookmarkRow(A, "Café ☕"),)
+
+
+# --- sec-114 F2: shared plist references and cycles ------------------------------------------
+
+
+def test_shared_plist_references_are_walked_once(tmp_path: Path) -> None:
+    """A 10-way fan-out nested 6 deep is a few hundred bytes and a million leaves when walked
+    naively; each node is walked once instead."""
+    leaf = {"WebBookmarkType": "WebBookmarkTypeLeaf", "URLString": A,
+            "URIDictionary": {"title": "Shared"}}
+    node: dict[str, Any] = leaf
+    for _ in range(6):
+        node = {"WebBookmarkType": "WebBookmarkTypeList", "Children": [node] * 10}
+    profile = _safari(tmp_path)
+    plist = fx.write_safari_bookmarks(profile, node)
+    assert plist.stat().st_size < 1024
+
+    rows = read_browser("safari", profile, fx.SINCE)
+
+    assert rows.bookmarks == (BookmarkRow(A, "Shared"),)
+    assert rows.bookmarks_truncated is False
+
+
+def test_a_cycle_is_walked_once() -> None:
+    folder: dict[str, Any] = {"WebBookmarkType": "WebBookmarkTypeList"}
+    folder["Children"] = [
+        folder,
+        {"WebBookmarkType": "WebBookmarkTypeLeaf", "URLString": A},
+    ]
+
+    found, malformed, truncated = bs._walk([folder], bs._safari_node)
+
+    assert found == (BookmarkRow(A, ""),)
+    assert (malformed, truncated) == (0, False)
+
+
+def test_the_walk_stops_at_the_node_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bs, "MAX_BOOKMARK_NODES", 5)
+    pairs = [(f"https://example.com/{n}", str(n)) for n in range(10)]
+    profile = _chrome(tmp_path, bookmarks=pairs)
+
+    rows = read_browser("chrome", profile, fx.SINCE)
+
+    assert rows.bookmarks_truncated is True
+    assert len(rows.bookmarks) < 5
+
+
+# --- sec-114 F5: only regular files, a counted copy, OSErrors by class -----------------------
+
+
+def _with_history(tmp_path: Path, make: Any) -> Path:
+    profile = tmp_path / "chrome"
+    profile.mkdir()
+    make(profile / "History")
+    return profile
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        pytest.param(lambda p: p.symlink_to("/dev/zero"), id="symlink-to-device"),
+        pytest.param(lambda p: os.mkfifo(p), id="fifo"),
+        pytest.param(lambda p: p.mkdir(), id="directory"),
+    ],
+)
+def test_a_store_that_is_not_a_regular_file_is_refused_unread(
+    tmp_path: Path, make: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = _with_history(tmp_path, make)
+    writes: list[int] = []
+    monkeypatch.setattr(bs, "_write", lambda fd, data: writes.append(len(data)) or len(data))
+
+    with pytest.raises(StoreUnreadableError) as caught:
+        read_browser("chrome", profile, fx.SINCE)
+
+    assert "not a regular file" in str(caught.value)
+    assert str(tmp_path) not in str(caught.value)
+    assert writes == []
+
+
+def test_a_symlinked_store_is_refused_even_when_it_points_at_a_real_store(
+    tmp_path: Path,
+) -> None:
+    real = _chrome(tmp_path, pages=[fx.Page(A, "A", IN_WINDOW)])
+    profile = tmp_path / "linked"
+    profile.mkdir()
+    (profile / "History").symlink_to(real / "History")
+
+    with pytest.raises(StoreUnreadableError, match="not a regular file"):
+        read_browser("chrome", profile, fx.SINCE)
+
+
+def test_the_copy_counts_bytes_whatever_the_size_reported(tmp_path: Path) -> None:
+    read_end, write_end = os.pipe()
+    os.write(write_end, b"x" * 300)
+    os.close(write_end)
+    try:
+        with pytest.raises(StoreTooLargeError):
+            bs._copy_bounded(read_end, tmp_path / "copy", 100)
+    finally:
+        os.close(read_end)
+
+
+def test_a_partial_write_is_completed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real_write = os.write
+    monkeypatch.setattr(bs, "_write", lambda fd, data: real_write(fd, bytes(data[:7])))
+    source = tmp_path / "source"
+    source.write_bytes(b"0123456789" * 5)
+    fd = os.open(source, os.O_RDONLY)
+    try:
+        assert bs._copy_bounded(fd, tmp_path / "copy", 1000) == 50
+    finally:
+        os.close(fd)
+
+    assert (tmp_path / "copy").read_bytes() == b"0123456789" * 5
+
+
+def test_a_full_disk_is_a_one_line_refusal_by_class(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = _chrome(tmp_path, pages=[fx.Page(A, "A", IN_WINDOW)])
+
+    def full(fd: int, data: Any) -> int:
+        raise OSError(errno.ENOSPC, "No space left on device", str(tmp_path / "copy"))
+
+    monkeypatch.setattr(bs, "_write", full)
+
+    with pytest.raises(StoreUnreadableError) as caught:
+        read_browser("chrome", profile, fx.SINCE)
+
+    assert "(OSError ENOSPC)" in str(caught.value)
+    assert str(tmp_path) not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+def test_an_oserror_without_an_errno_is_named_by_class() -> None:
+    assert bs._os_reason(OSError("synthetic")) == "OSError"
+    assert bs._os_reason(IsADirectoryError(errno.EISDIR, "x")) == "IsADirectoryError EISDIR"
+
+
+# --- sec-114 F6: views refused, queries bounded ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "statements",
+    [
+        ("ALTER TABLE urls RENAME TO urls_real",
+         "CREATE VIEW urls AS SELECT id, url, title FROM urls_real"),
+        ("ALTER TABLE visits RENAME TO visits_real",
+         "CREATE VIEW visits AS WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n)"
+         " SELECT x AS url, x AS visit_time FROM n"),
+    ],
+)
+def test_a_view_in_place_of_a_table_is_refused(tmp_path: Path, statements: tuple[str, ...]) -> None:
+    profile = _chrome(tmp_path, pages=[fx.Page(A, "A", IN_WINDOW)])
+    with sqlite3.connect(profile / "History") as conn:
+        for statement in statements:
+            conn.execute(statement)
+    conn.close()
+
+    with pytest.raises(UnsupportedSchemaError, match="not a table"):
+        read_browser("chrome", profile, fx.SINCE)
+
+
+def test_a_query_past_its_deadline_is_aborted_once_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = _chrome(tmp_path, pages=[fx.Page(A, "A", IN_WINDOW)])
+    monkeypatch.setattr(bs, "QUERY_TIMEOUT_SECONDS", -1.0)
+    monkeypatch.setattr(bs, "_PROGRESS_OPS", 1)
+    snapshots: list[int] = []
+    real_snapshot = bs.snapshot
+
+    def counting_snapshot(path: Path) -> Any:
+        snapshots.append(1)
+        return real_snapshot(path)
+
+    monkeypatch.setattr(bs, "snapshot", counting_snapshot)
+
+    with pytest.raises(StoreUnreadableError, match="took longer than"):
+        read_browser("chrome", profile, fx.SINCE)
+
+    assert snapshots == [1]
+
+
+# --- sec-114 F10: stale snapshots from killed runs --------------------------------------------
+
+
+def _aged(root: Path, name: str, age_s: float, now: float) -> Path:
+    path = root / name
+    path.mkdir()
+    (path / "History").write_bytes(b"synthetic")
+    os.utime(path, (now - age_s, now - age_s))
+    return path
+
+
+def test_stale_snapshots_are_swept_and_fresh_ones_kept(tmp_path: Path) -> None:
+    now = 50_000_000.0
+    stale = _aged(tmp_path, "brain-web-stale", bs.STALE_SNAPSHOT_S + 60, now)
+    fresh = _aged(tmp_path, "brain-web-fresh", 60, now)
+    other = _aged(tmp_path, "brain-voice-old", bs.STALE_SNAPSHOT_S * 10, now)
+
+    assert bs.sweep_stale_snapshots(root=tmp_path, now=now) == 1
+
+    assert not stale.exists()
+    assert fresh.exists() and other.exists()
+
+
+def test_another_users_snapshot_is_not_swept(tmp_path: Path) -> None:
+    now = 50_000_000.0
+    _aged(tmp_path, "brain-web-stale", bs.STALE_SNAPSHOT_S + 60, now)
+
+    assert bs.sweep_stale_snapshots(root=tmp_path, now=now, uid=os.getuid() + 1) == 0
+
+
+def test_snapshots_use_the_swept_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    profile = _chrome(tmp_path, pages=[fx.Page(A, "A", IN_WINDOW)])
+    prefixes: list[str] = []
+    real_mkdtemp = bs.tempfile.mkdtemp
+
+    def tracking(**kwargs: Any) -> str:
+        prefixes.append(kwargs["prefix"])
+        return real_mkdtemp(**kwargs)
+
+    monkeypatch.setattr(bs.tempfile, "mkdtemp", tracking)
+
+    read_browser("chrome", profile, fx.SINCE)
+
+    assert prefixes == [bs.TEMP_PREFIX] == ["brain-web-"]
+
+
+def test_a_file_swapped_between_the_lstat_and_the_open_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fstat of the opened fd must be the file the lstat saw (no TOCTOU swap)."""
+    profile = _chrome(tmp_path, pages=[fx.Page(A, "A", IN_WINDOW)])
+    decoy = tmp_path / "decoy"
+    decoy.write_bytes(b"another regular file")
+    real_stat = bs._stat
+    monkeypatch.setattr(bs, "_stat", lambda path: real_stat(decoy) if path.name == "History"
+                        else real_stat(path))
+
+    with pytest.raises(StoreUnreadableError, match="not a regular file"):
+        read_browser("chrome", profile, fx.SINCE)
+
+
+def test_a_store_removed_before_the_copy_is_not_silently_skipped(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError), bs.snapshot(tmp_path / "History"):
+        pass  # pragma: no cover - the snapshot never yields
+
+
+def test_a_query_inside_its_deadline_runs_under_the_progress_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = _chrome(tmp_path, pages=[fx.Page(A, "A", IN_WINDOW)])
+    monkeypatch.setattr(bs, "_PROGRESS_OPS", 1)
+
+    assert [row.url for row in read_browser("chrome", profile, fx.SINCE).history] == [A]
+
+
+def test_an_operational_error_that_is_not_the_deadline_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = _chrome(tmp_path, pages=[fx.Page(A, "A", IN_WINDOW)])
+    calls: list[int] = []
+
+    def locked(conn: sqlite3.Connection, since: datetime) -> Any:
+        calls.append(1)
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(bs, "_query_chrome", locked)
+
+    with pytest.raises(StoreUnreadableError) as caught:
+        read_browser("chrome", profile, fx.SINCE)
+
+    assert len(calls) == 2
+    assert "took longer" not in str(caught.value)

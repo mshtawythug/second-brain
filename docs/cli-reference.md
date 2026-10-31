@@ -1061,9 +1061,9 @@ brain ingest-web --browser chrome --since 2026-10-01 --fetch --max 50
 | `--profile DIR` | the macOS location | The profile directory (Chrome: `…/Google/Chrome/Default`; Safari: `~/Library/Safari`). Required off macOS. |
 | `--min-visits N` | 3 | Visits inside the window that make an unbookmarked page qualify. A bookmark always qualifies. |
 | `--max N` | 500 | Pages written per run, newest visit first; the rest are counted. |
-| `--fetch` | off | Download the text of new pages: https, allowlisted hosts, public addresses only, at most 3 redirects, 10 s, 1 MiB. |
+| `--fetch` | off | Download the text of new pages: https, allowlisted hosts, public addresses only (connection pinned to the checked address), at most 3 redirects, 10 s in total, 1 MiB as sent, no compressed responses. |
 | `--refresh` | off | Rebuild the body of pages already stored (and re-fetch with `--fetch`). |
-| `--sensitivity` | `normal` | Or `confidential`. |
+| `--sensitivity` | `normal` | Or `confidential`, which also raises pages already stored. A run never lowers a stored page (use `brain mark-normal`). |
 | `--tag` / `-t` | — | Tags for every page. |
 | `--dry-run` | off | List `host  title` for each page; write nothing. |
 | `--enrich/--no-enrich` | on | The auto-summary, with `--fetch` only. |

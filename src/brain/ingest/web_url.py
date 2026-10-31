@@ -8,6 +8,8 @@ protocol point 6):
 
 - the **query string** and the **fragment** (session tokens, search terms);
 - the **userinfo** (``user:password@``), which a browser can record verbatim;
+- every ``;`` **path parameter** (``/a;jsessionid=…/b`` → ``/a/b``): servlet and SSO
+  stacks put a session id there when cookies are off (sec-114 F3);
 - the default port, and a trailing dot on the host.
 
 The host is lowercased and IDNA-encoded, so ``Bücher.Example.com`` and
@@ -24,7 +26,7 @@ import re
 import unicodedata
 from urllib.parse import urlsplit
 
-__all__ = ["MAX_URL_CHARS", "host_of", "normalize_host", "normalize_url"]
+__all__ = ["MAX_URL_CHARS", "host_of", "is_numeric_host", "normalize_host", "normalize_url"]
 
 #: The longest normalized URL stored; a longer one is not a page anybody revisits.
 MAX_URL_CHARS = 2048
@@ -32,6 +34,7 @@ _SCHEMES = frozenset({"http", "https"})
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 _LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _MAX_HOST_CHARS = 253
+_HEX = frozenset("0123456789abcdef")
 
 
 def normalize_host(host: str) -> str | None:
@@ -77,8 +80,28 @@ def normalize_url(raw: str) -> str | None:
     netloc = f"[{host}]" if ":" in host else host
     if port is not None and port != _DEFAULT_PORTS[scheme]:
         netloc = f"{netloc}:{port}"
-    url = f"{scheme}://{netloc}{parts.path or '/'}"
+    path = "/".join(segment.split(";", 1)[0] for segment in parts.path.split("/"))
+    url = f"{scheme}://{netloc}{path or '/'}"
     return url if len(url) <= MAX_URL_CHARS else None
+
+
+def is_numeric_host(host: str) -> bool:
+    """Whether ``host`` is an address rather than a name (sec-114 F8).
+
+    An IP literal in any form ``ipaddress`` reads, or a host whose last label is a
+    number, which is WHATWG's "ends in a number" rule: ``127.1``, ``2130706433`` and
+    ``0x7f.1`` are all IPv4 addresses to a browser and a resolver.
+    """
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        return True
+    last = host.rstrip(".").rsplit(".", 1)[-1].lower()
+    if last.isascii() and last.isdigit():
+        return True
+    return last.startswith("0x") and all(ch in _HEX for ch in last[2:])
 
 
 def host_of(url: str) -> str:

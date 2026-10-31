@@ -79,13 +79,38 @@ def test_allows(host: str, allowed: bool) -> None:
     assert allowlist.allows(host) is allowed
 
 
-def test_an_idn_entry_matches_its_punycode_host(tmp_path: Path) -> None:
-    _write(tmp_path, "bücher.example.com\n")
+def test_a_punycode_entry_matches_its_host(tmp_path: Path) -> None:
+    _write(tmp_path, "xn--bcher-kva.example.com\n")
 
     allowlist = load_web_allowlist(tmp_path)
 
     assert allowlist is not None
     assert allowlist.allows("xn--bcher-kva.example.com")
+
+
+@pytest.mark.parametrize("entry", ["bücher.example.com", "faß.example.de", "*.ｅxample.org"])
+def test_a_non_ascii_entry_is_refused_with_the_punycode_hint(
+    tmp_path: Path, entry: str
+) -> None:
+    """sec-114 F8: IDNA 2003 and UTS #46 disagree (faß), so entries must be punycode."""
+    _write(tmp_path, f"example.com\n{entry}\n")
+
+    with pytest.raises(ConfigError) as caught:
+        load_web_allowlist(tmp_path)
+
+    assert f"{CONFIG_NAME}: line 2 is not ASCII" in str(caught.value)
+    assert "punycode (xn--)" in str(caught.value)
+    assert entry not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "host", ["127.0.0.1", "127.1", "2130706433", "0x7f.1", "8.8.1.2", "2001:db8::1"]
+)
+def test_allows_never_matches_an_address_host(host: str) -> None:
+    """sec-114 F8: even an allowlist built by hand cannot let an address through."""
+    allowlist = WebAllowlist(exact=frozenset({host}), suffixes=frozenset({"1.2", "8.1.2"}))
+
+    assert allowlist.allows(host) is False
 
 
 @pytest.mark.parametrize(
@@ -111,6 +136,17 @@ def test_an_idn_entry_matches_its_punycode_host(tmp_path: Path) -> None:
         "*.10.0.0.8",
         "example..com",
         "-bad.example.com",
+        # sec-114 F8: an address in any form, localhost, single labels.
+        "127.1",
+        "2130706433",
+        "0x7f.1",
+        "*.1.2",
+        "*.0x7f.1",
+        "localhost",
+        "LOCALHOST.",
+        "docs.localhost",
+        "*.localhost",
+        "intranet",
     ],
 )
 def test_a_malformed_line_fails_with_its_number_and_never_its_text(

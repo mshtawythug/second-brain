@@ -183,12 +183,12 @@ capped run is 500 short embeds and no graph-lane time. With `--fetch`, the fetch
 | # | Threat | Mitigation | Test |
 |---|---|---|---|
 | T1 | Over-collection of private browsing | The allowlist is mandatory and denies by default. Missing or empty → refuse. The wildcard rules are narrow. The host is checked after normalization and before anything is kept. | AC1, AC3; mutation proof on the `allows()` call |
-| T2 | Secrets in URLs | Query, fragment and userinfo are dropped; the secret guard runs on the body; D10 residual | AC2; userinfo and fragment cases; mutation proofs |
+| T2 | Secrets in URLs | Query, fragment, userinfo and `;` path parameters (F3) are dropped; the secret guard runs on the body; D10 residual | AC2; userinfo and fragment cases; mutation proofs |
 | T3 | Locking or corrupting the live browser DB | SQLite never opens the live files. The byte copy lands in a 0700 temp dir that is removed in `finally`. The copy is opened `mode=ro` with `query_only`. | Live-dir unchanged test; temp dir removed even on error |
-| T4 | A hostile SQLite file (`--profile` is user-supplied) | Fixed SELECTs, `trusted_schema=OFF`, no extension loading, a size cap and a row cap; `sqlite3.DatabaseError` → exit 1 | Garbage-file and missing-column tests |
-| T5 | A hostile bookmarks JSON or plist | A size cap; an iterative walk with a depth cap; a non-string field is skipped and counted | Deep-nesting and wrong-type fixtures |
+| T4 | A hostile SQLite file (`--profile` is user-supplied) | Fixed SELECTs, `trusted_schema=OFF`, no extension loading. Every object read must be a real table in `sqlite_master` (no views). A progress-handler deadline (60 s) on every query. Only regular files: `lstat`, `O_NOFOLLOW` open, `fstat` the same inode, then a byte-counted copy (1 GiB). Any `OSError` → one line by class and errno. A row cap; `sqlite3.DatabaseError` → exit 1 (sec-114 F5, F6) | Garbage-file and missing-column tests |
+| T5 | A hostile bookmarks JSON or plist | A size cap; an iterative walk with a depth cap, a visited set (shared references and cycles are walked once) and a 100,000-node cap; a non-string field is skipped and counted (sec-114 F2) | Deep-nesting and wrong-type fixtures |
 | T6 | Terminal injection via titles | `one_line` on every title and host printed | ESC-in-title fixture |
-| T7 | `--fetch` egress and SSRF | https only; every redirect hop must be allowlisted; at most 3 hops; IP-literal allowlist entries refused; `trust_env=False` (no proxy env vars, and no `.netrc` credentials sent); no cookies; 10 s timeout; 1 MiB cap; content-type check. DNS that resolves an allowlisted name to a private address is accepted, because the owner chose the host. | AC5; MockTransport tests for each rule |
+| T7 | `--fetch` egress and SSRF | https only. Every redirect hop must be allowlisted; at most 3 hops. Every resolved address must pass `public_only`, an explicit, version-independent deny list (loopback, RFC 1918, CGNAT, link-local, ULA, `fec0::/10`, multicast, unspecified, reserved, benchmarking, documentation), with the IPv4 inside v4-mapped, NAT64, 6to4 and Teredo addresses checked too. **A name that resolves to a private address is refused** (A1). The connection is pinned to the validated IP (`Host` + `sni_hostname`), with a fresh client and no keep-alive per fetch (F13). One 10 s wall-clock deadline over every hop, enforced by a joined worker thread (F4). A raw-byte 1 MiB cap and any `Content-Encoding` but identity refused (F1). Only allowlisted text codecs (F7). `trust_env=False`, no cookies. Allowlist entries: ASCII only, no address in any form, no localhost, no single label (F8); public suffixes are a documented residual | AC5; MockTransport and fake-resolver tests for each rule; mutation proofs |
 | T8 | Hosted-embedder egress | `normal` rows can reach Voyage when that backend is active; the existing egress notice prints, as with every ingester | Covered by the existing notice |
 | T9 | Leaks through logs | Class-only errors; URLs never logged | `test_log_privacy_rules.py`, `test_log_privacy.py` |
 
@@ -350,3 +350,22 @@ All sixteen decisions were approved as recommended (team-lead, 2026-10-31).
   this ticket keeps that convention.
 - **D12, resolved at the #113 merge (A4).** RM-43 merged first with `v3` (`code`), so this
   ticket's bump is **`v4`** (`web_page`). The union keeps both types and both docstring lines.
+
+## Security fix round (sec-114, team-lead rulings, 2026-10-31)
+
+| # | Ruling | Where |
+|---|---|---|
+| F1 HIGH | The body is read with `iter_raw()` and the 1 MiB cap counts raw bytes. Any `Content-Encoding` other than identity or absent is refused, so no decompressor runs. | `web_fetch._read_text` |
+| F2 | The bookmark walk skips nodes it has already visited (by `id`), which also breaks cycles, and stops after `MAX_BOOKMARK_NODES` (100,000). The run reports the stop. | `browser_store._walk` |
+| F3 | `;` path parameters are dropped from every segment before the allowlist check and the key. | `web_url.normalize_url` |
+| F4 | One wall-clock deadline: the whole fetch runs in a worker thread joined for `TIMEOUT_SECONDS`, the deadline is checked before every hop, and each hop's httpx timeout is the time that remains. Measured first: `client.close()` from another thread does NOT interrupt a request blocked on headers, which is why a join is used. | `web_fetch.fetch_page` |
+| F5 | `lstat` (regular only), `O_NOFOLLOW \| O_NONBLOCK` open, `fstat` the same inode, then a byte-counted copy. `OSError` → `StoreUnreadableError("(OSError ENOSPC)")`: one line, no path. | `browser_store.snapshot` |
+| F6 | `sqlite_master` must list each object as `type='table'`. A progress-handler deadline (`QUERY_TIMEOUT_SECONDS`) aborts the query; that abort is not retried. | `browser_store._require_tables`, `_query` |
+| F7 | Only allowlisted text codecs; anything else decodes as UTF-8 with replacement. | `web_fetch._text_codec` |
+| F8 | Entries must be ASCII (a punycode hint is given). No address in any form (WHATWG "ends in a number"), no `localhost`, no single label. `allows()` refuses an address host. The public-suffix residual is in the guide. | `settings/web_allowlist.py`, `web_url.is_numeric_host` |
+| F9 | `public_only` is an explicit deny list. Embedded IPv4 in v4-mapped, NAT64 (`/96` and `/48`), 6to4 and Teredo is decoded and checked. Note: an embedded *public* address is allowed, which is looser than the 3.11.17 `ipaddress` tables. | `web_fetch.public_only` |
+| F10 | `capped_process.sigterm_as_system_exit(also=(SIGHUP,))` wraps the read. The stale-snapshot sweep (3 h) runs at startup through the shared leaf `ingest/stale_tempdirs.py`, which `voice.py` now uses too. | `cli_ingest_web`, `browser_store.sweep_stale_snapshots` |
+| F11 | An explicit `--sensitivity confidential` raises stored pages (`set_document_sensitivity` + `propagate_sensitivity_to_vault`). Without the flag nothing changes. **Escalate only:** an explicit `normal` never lowers a confidential page; it prints a `brain mark-normal` hint (the repo-wide rule, flagged to team-lead). | `cli_ingest_web._apply_explicit_sensitivity` |
+| F12 | No change (ruling). | — |
+| F13 | `CONNECTION_LIMITS` (no keep-alive) and a fresh client per fetch. | `web_fetch.make_client`, `fetch_page` |
+| F14 | This table, T2/T4/T5/T7 above, the guide, and the module docstrings. | — |
