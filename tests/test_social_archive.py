@@ -544,3 +544,80 @@ def test_oversized_text_is_not_retained(tmp_path: Path) -> None:
     assert read.likes == ({},) * 100
     assert retained < 1_000_000, retained
     assert peak < 4 * file_size, peak
+
+
+# --- rev-116 round 2: one element's decode is bounded, scalars included ---------------------------
+
+
+def _wide_scalar_file(root: Path, item: str, mib: int) -> Path:
+    """rev-116's probe shape: one entry carrying a flat array of short scalars, no containers."""
+    count = mib * 1024 * 1024 // (len(item) + 1)
+    junk = ",".join([item] * count)
+    return _likes(root, 'window.YTD.like.part0 = [{"like": {"tweetId": "1", "fullText": "x", '
+                        f'"junk": [{junk}]}}}}]')
+
+
+@pytest.mark.parametrize("item", ['"ab"', "1.5", "123456"])
+def test_a_wide_scalar_array_entry_is_refused(tmp_path: Path, item: str) -> None:
+    root = _wide_scalar_file(tmp_path / "a", item, 2)
+
+    with pytest.raises(SocialArchiveError, match="longer than"):
+        sa.read_archive(root)
+
+
+def test_a_16_mib_scalar_bomb_peaks_within_a_bound(tmp_path: Path) -> None:
+    """Before the element cap this decoded the whole element: ~17x the file (rev-116)."""
+    root = _wide_scalar_file(tmp_path / "a", '"ab"', 16)
+    file_size = (root / "data" / "like.js").stat().st_size
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(SocialArchiveError):
+            sa.read_archive(root)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 4 * file_size, peak
+
+
+def test_an_entry_at_the_element_cap_is_read() -> None:
+    entry = fx.fields("7", text="t")
+    element = json.dumps({"like": entry})
+    pad = sa.MAX_ELEMENT_CHARS - len(element)
+    padded = element[:-2] + " " * pad + element[-2:]
+    assert len(padded) == sa.MAX_ELEMENT_CHARS
+
+    assert _parse(f"window.YTD.like.part0 = [{padded}]") == [entry]
+    with pytest.raises(SocialArchiveError, match="longer than"):
+        _parse(f"window.YTD.like.part0 = [{padded[:-2]} {padded[-2:]}]")
+
+
+def test_many_real_entries_still_parse(tmp_path: Path) -> None:
+    entries = [fx.fields(str(1000 + i), text=f"post {i}, with a comma [and brackets]")
+               for i in range(2000)]
+    root = fx.write_archive(tmp_path / "a", likes=[entries])
+
+    assert len(sa.read_archive(root).likes) == 2000
+
+
+# --- rev-116 round 2: a non-string text is malformed, not missing ---------------------------------
+
+
+def test_a_non_string_text_or_id_is_counted_malformed_end_to_end(tmp_path: Path) -> None:
+    from brain.ingest import social_posts
+
+    entries = [
+        {"tweetId": "160000000000000000", "fullText": 5},
+        {"tweetId": 160000000000000001, "fullText": "t"},
+        {"tweetId": "160000000000000002", "fullText": None},
+        {"tweetId": "160000000000000003"},
+        {"tweetId": "160000000000000004", "fullText": "kept", "expandedUrl": 7},
+    ]
+    root = fx.write_archive(tmp_path / "a", likes=[entries])
+
+    read = sa.read_archive(root)
+    collected = social_posts.collect_posts(read.likes, read.bookmarks, now=fx.NOW)
+
+    assert (collected.malformed, collected.no_text) == (2, 2)
+    assert [post.post_id for post in collected.posts] == ["160000000000000004"]

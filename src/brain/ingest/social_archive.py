@@ -27,14 +27,21 @@ here trusts a name, a link, a size or the code:
   part count per collection, an entry count, and a count of JSON objects and
   arrays per file (sec-116 F2). JSON nesting deep enough to exhaust the parser's
   recursion, an over-long number and invalid UTF-8 refuse the file.
-- **Memory follows the kept text, not the JSON** (sec-116 F2). The
-  ``{``/``[`` count is checked before anything is parsed, so no element can
-  build millions of containers; and each entry is cut down, as it is parsed, to
-  the three string fields :mod:`brain.ingest.social_posts` reads
-  (``tweetId``, ``fullText``, ``expandedUrl``), so nothing else is retained.
-  An entry with any of those over :data:`MAX_FIELD_CHARS` keeps nothing at all
-  (its post is then skipped as malformed), so no single long string is held
-  until the whole archive is read (sec-116 R1).
+- **Memory follows the kept text, not the JSON** (sec-116 F2, rev-116).
+  Decoding one element can allocate many times its own text (a flat array of
+  short strings is about 17x), so no element is ever decoded past
+  :data:`MAX_ELEMENT_CHARS`: each is decoded from a slice of the text that
+  starts small and doubles up to that cap, and an element that is still
+  incomplete at the cap refuses the file. The transient cost of one element is
+  therefore bounded whatever it holds (containers or scalars). The ``{``/``[``
+  count is also checked before anything is parsed. Each entry is then cut
+  down, as it is parsed, to the three string fields
+  :mod:`brain.ingest.social_posts` reads (``tweetId``, ``fullText``,
+  ``expandedUrl``), so nothing else is retained. An entry with any of those
+  over :data:`MAX_FIELD_CHARS`, or a ``tweetId`` or ``fullText`` that is
+  present but not a string, keeps nothing at all, so its post is skipped as
+  malformed and no single long string is held until the whole archive is read
+  (sec-116 R1). A JSON ``null`` counts as absent.
 - **Loud on an unknown shape** (the ticket's risk line). A wrong prefix, a
   payload that is not one array, or an element that is not
   ``{"<collection>": {…}}`` refuses the whole run. Field-level problems inside
@@ -75,6 +82,12 @@ MAX_CONTAINERS = 2 * MAX_ENTRIES + 1_000_000
 KEPT_FIELDS = ("tweetId", "fullText", "expandedUrl")
 #: A kept field longer than this drops its entry; a post tops out near 25 000 characters.
 MAX_FIELD_CHARS = 65_536
+#: No element is decoded past this many characters of its JSON text (rev-116). A real
+#: entry is well under it even with every character of its text escaped.
+MAX_ELEMENT_CHARS = 1_048_576
+_FIRST_SLICE_CHARS = 4096
+#: Kept fields whose non-string value marks the entry malformed (``expandedUrl`` is optional).
+_REQUIRED_STRINGS = frozenset({"tweetId", "fullText"})
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY
 _DATA_FLAGS = _DIR_FLAGS | os.O_NOFOLLOW
@@ -95,6 +108,7 @@ _CONTAINER_CAP = "the file has too many JSON objects and arrays (cap {cap})"
 _BAD_PREFIX = "the prefix is not window.YTD.{collection}.part{part} ="
 _NOT_ONE_ARRAY = "the payload is not one JSON array"
 _NOT_JSON = "an entry is not valid JSON"
+_TOO_LONG = "an entry is not valid JSON, or is longer than {cap} characters"
 _UNKNOWN_SHAPE = "an entry has an unknown shape"
 _TRAILING = "something follows the array"
 
@@ -325,10 +339,25 @@ def _skip_whitespace(text: str, index: int) -> int:
 
 
 def _decode(text: str, index: int) -> tuple[Any, int]:
-    try:
-        return _DECODER.raw_decode(text, index)
-    except (ValueError, RecursionError):
-        _refuse(_NOT_JSON)
+    """The element at ``index`` and the index after it, never decoding past the cap.
+
+    Each attempt decodes a slice, so a truncated element fails instead of reading on;
+    the slice doubles until the element fits or the cap is reached. Only an object is
+    accepted later (``_unwrap``), and no object is complete before its last ``}``.
+    """
+    size = _FIRST_SLICE_CHARS
+    while True:
+        window = text[index:index + size]
+        try:
+            element, end = _DECODER.raw_decode(window)
+        except RecursionError:
+            _refuse(_NOT_JSON)
+        except ValueError:
+            if size >= MAX_ELEMENT_CHARS or index + size >= len(text):
+                _refuse(_TOO_LONG.format(cap=MAX_ELEMENT_CHARS))
+            size = min(size * 2, MAX_ELEMENT_CHARS)
+            continue
+        return element, index + end
 
 
 def _unwrap(element: Any, collection: str) -> dict[str, str]:
@@ -338,7 +367,16 @@ def _unwrap(element: Any, collection: str) -> dict[str, str]:
     inner = element[collection]
     if not isinstance(inner, dict):
         _refuse(_UNKNOWN_SHAPE)
-    kept = {key: inner[key] for key in KEPT_FIELDS if isinstance(inner.get(key), str)}
-    if any(len(value) > MAX_FIELD_CHARS for value in kept.values()):
-        return {}
+    kept: dict[str, str] = {}
+    for key in KEPT_FIELDS:
+        value = inner.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            if key in _REQUIRED_STRINGS:
+                return {}
+            continue
+        if len(value) > MAX_FIELD_CHARS:
+            return {}
+        kept[key] = value
     return kept

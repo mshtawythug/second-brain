@@ -156,7 +156,7 @@ run: 2000 short embeds (minutes on local arctic) and no GraphLane model time.
 | FIFO / device / folder swapped in | `O_NONBLOCK` + `fstat` `S_ISREG` on the open fd (no TOCTOU between check and read). | a FIFO named `like.js` returns promptly with the refusal |
 | Hard link to another file | `st_nlink == 1` required, as RM-35 does. | a hard-linked `like.js` |
 | Huge file / file that grows | `fstat` size ≤ `max_file_bytes` (64 MiB) before reading; read at most that **fstat size + 1** bytes, and refuse a file that grew (sec-116 F4); total ≤ `max_read_bytes` (256 MiB) across parts; ≤ `max_parts` (64) per collection. | caps injected small; a file over cap; total over cap; growth simulated by a size cap below the content |
-| Huge JSON / element bombs | **Corrected (sec-116 F2):** element-wise `raw_decode` alone did NOT bound memory (one 16 MiB element of empty arrays peaked at ~25× the file, and every parsed entry was retained). Now a file whose `{` + `[` count passes `max_containers` (2 × `max_entries` + 1 000 000) is refused before parsing, and each entry is cut to its three string fields as it is parsed, so retained memory follows the kept text; an entry with any of those over `MAX_FIELD_CHARS` (65 536) keeps nothing and its post is skipped as malformed (sec-116 R1), so no long string is held until the whole archive is read. `max_entries` (500 000) per run; text over `MAX_TEXT_CHARS` (30 000) skipped as malformed. | entries over cap refuse; a 1 MiB `fullText` is skipped; tracemalloc bounds (junk fields, 128 K-character posts) |
+| Huge JSON / element bombs | **Corrected (sec-116 F2, rev-116):** element-wise `raw_decode` alone did NOT bound memory: one 16 MiB element of empty arrays peaked at ~25× the file, a flat array of short strings at ~17×, and every parsed entry was retained. Now no element is decoded past `MAX_ELEMENT_CHARS` (1 MiB of JSON text): each is decoded from a slice that starts at 4 KiB and doubles to the cap, and an element still incomplete at the cap refuses the file, so one element's transient cost is bounded whatever it holds. A file whose `{` + `[` count passes `max_containers` (2 × `max_entries` + 1 000 000) is also refused before parsing. Each entry is cut to its three string fields as it is parsed; an entry with any of them over `MAX_FIELD_CHARS` (65 536), or a `tweetId`/`fullText` that is present but not a string, keeps nothing and its post is skipped as malformed (sec-116 R1). What is retained follows the kept text; the transient peak is the file text plus one capped element. `max_entries` (500 000) per run; text over `MAX_TEXT_CHARS` (30 000) skipped as malformed. | entries over cap refuse; a 1 MiB `fullText` is skipped; flat scalar arrays (strings, floats, ints) refused; tracemalloc bounds (junk fields, 128 K-character posts, a 16 MiB scalar bomb) |
 | Deep nesting | `RecursionError` (CPython's scanner raises it) and `ValueError` are caught per file and turned into the fixed "malformed" refusal. | `[` × 200 000 inside an entry |
 | Huge numbers | `tweetId` must be a digit **string** of ≤ 19 chars before `int()`; a JSON number token is wrong shape. An over-long numeric literal elsewhere hits CPython's int-digit limit → `ValueError` → refusal. | `"tweetId": 1e400`, a 5000-digit literal, a 25-digit id string |
 | Wrong encoding / BOM / NUL | Decoded `utf-8` with `errors="strict"` → refusal on invalid bytes (not silently replaced); BOM stripped; control characters never reach the terminal (`one_line`). | invalid UTF-8; a title carrying ESC sequences |
@@ -366,3 +366,20 @@ Each fix landed RED first: the new tests ran against a `git archive` copy of `18
   is counted as malformed. Tests: the boundary (65 536 kept, 65 537 dropped, in `fullText` and in
   `expandedUrl`); the post counted as malformed; tracemalloc on a 13 MB archive of 128 K-character
   posts retains under 1 MB.
+- **rev-116 round 2, flat scalar arrays (MEDIUM).** The `{`/`[` count did not see a flat array of
+  short scalars inside one entry (~17× the file in transient memory). Team-lead suggested adding
+  `,` to the pre-parse count; I bounded the decode itself instead: no element is decoded past
+  `MAX_ELEMENT_CHARS` (1 MiB), through a slice that doubles from 4 KiB. That caps one element's
+  transient memory for any value type (strings, numbers, `true`/`null`, containers), and it does
+  not count the commas inside post text, which a `,` cap would have to allow for. Tests: the
+  flat-array file refused at the default limits for strings, floats and ints; a tracemalloc test
+  on rev-116's 16 MiB string-array file (peak under 4× the file); an element of exactly the cap
+  read and one character more refused; 2 000 real entries with commas and brackets in their text
+  still read.
+- **rev-116 round 2, non-string text (LOW).** The projection dropped a non-string `fullText`, so
+  its post was counted "without text". `_unwrap` now drops the whole entry when `tweetId` or
+  `fullText` is present but not a string, so the post is counted malformed; a JSON `null` still
+  counts as absent, and a non-string `expandedUrl` only loses the handle. The
+  `not isinstance(raw_text, str)` branch in `social_posts.post_from_entry` stays as a guard for
+  direct callers of that public function (its unit tests pin it). Pinned end to end through
+  `read_archive` + `collect_posts`.
