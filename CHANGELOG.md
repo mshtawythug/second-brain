@@ -22,7 +22,7 @@ git tag scheme:
 
 ## [Unreleased]
 
-### Added — social bookmarks from your own data archive (RM-44)
+### Added — social bookmarks from your own data archive (RM-44, PR #116)
 
 - `brain ingest-bookmarks --format x-archive <archive-dir>` stores the posts you liked or
   bookmarked on X, from the platform's data-archive export (unzipped). Source `social` (one kind
