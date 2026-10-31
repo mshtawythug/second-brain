@@ -697,7 +697,7 @@ def test_a_file_appended_to_after_the_hash_is_refused_before_extraction(
         try:
             ingest(conn, moved, title="x", timeout=1.0)
         except Exception:  # noqa: BLE001 - run_one moves the file back here
-            return FileOutcome(name, "failed", "InboxRefused")
+            return FileOutcome(name, "failed", "InboxRefusedError")
         return FileOutcome(name, "ingested")  # pragma: no cover - the step must refuse
 
     snap = _run_with(ctx, registry, inbox, run)

@@ -76,6 +76,13 @@ STORE_ALLOWLIST: dict[tuple[str, str, str], str] = {
         "class-only by construction: every mapper builds the message from a fixed string, "
         "the class name, an allow-listed extension or describe_ask_failure"
     ),
+    ("ui/ingest_service.py", "__call__", "self.error = exc"): (
+        "the inbox job's IngestFn (_InboxStep) keeps the exception only to re-raise it "
+        "after run_one returns: it is never logged or rendered, and the registry's "
+        "on_error (inbox_failure, then ingest_failure) maps it to a fixed, class-only "
+        "JobError, which needs the instance (EmbedError.transient, UnreadableFile.ext, "
+        "JobCancelled). The same shape as ui/jobs.py's `job.error = error` above (RM-40)"
+    ),
     ("graph_rag/chunk_split.py", "on_truncated", "tally.entries.extend(salvaged)"): (
         "the salvaged entities ARE the extraction's output: the complete items of the "
         "truncated reply (ChatOutputTruncated.partial), returned to the graph build like "

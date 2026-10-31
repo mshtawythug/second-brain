@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from ..errors import BrainError
 
 
-class InboxRefused(BrainError):
+class InboxRefusedError(BrainError):
     """The inbox job stopped before anything was ingested; ``code`` and ``message`` are fixed."""
 
     def __init__(self, code: str, message: str) -> None:
@@ -27,7 +27,7 @@ class InboxRefused(BrainError):
 CLASS_ONLY = re.compile(r"[A-Za-z_]\w*(\[[A-Z0-9]+\])?")
 
 #: ``run_one``'s refusals of the file it opened, by class: ``(code, message)``. A fresh
-#: :class:`InboxRefused` is raised each time; an exception instance is never shared.
+#: :class:`InboxRefusedError` is raised each time; an exception instance is never shared.
 _OPEN_REFUSALS: Mapping[str, tuple[str, str]] = {
     "FileTooLargeError": (
         "inbox_file_too_large",
@@ -54,22 +54,22 @@ _RECHECK_REFUSALS: Mapping[str, tuple[str, str]] = {
 }
 
 
-def refused_open(detail: str) -> InboxRefused:
+def refused_open(detail: str) -> InboxRefusedError:
     """The job error for a ``run_one`` failure that never reached the ingest, class-only."""
     if detail in _OPEN_REFUSALS:
-        return InboxRefused(*_OPEN_REFUSALS[detail])
+        return InboxRefusedError(*_OPEN_REFUSALS[detail])
     reason = detail if CLASS_ONLY.fullmatch(detail) else "it changed"
-    return InboxRefused(
+    return InboxRefusedError(
         "inbox_move_failed",
         f"The file could not be moved into imported/ ({reason}). Nothing was written.",
     )
 
 
-def recheck_refused(code: str) -> InboxRefused:
+def recheck_refused(code: str) -> InboxRefusedError:
     """The job error when its re-check refuses the file (``code`` is the route's)."""
     if code in _RECHECK_REFUSALS:
-        return InboxRefused(*_RECHECK_REFUSALS[code])
-    return InboxRefused(
+        return InboxRefusedError(*_RECHECK_REFUSALS[code])
+    return InboxRefusedError(
         "inbox_file_changed",
         f"The file changed since it was listed ({code}). Nothing was moved.",
     )

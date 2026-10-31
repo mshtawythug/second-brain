@@ -228,3 +228,13 @@ read) ran inside the IngestFn after `ingest_document` had committed. A failure t
   in `ingest_service`, per the confinement rule.
 - A regression test makes `_read_back` raise, and a browser row covers the result. Four
   mutations were killed.
+
+**CI fix (at `c522a51`):** `tests/test_log_privacy_rules.py` failed on two counts, and had done
+so since `59c7d04` (the earlier CI runs were cancelled, and the named set had never included this
+repo-wide rule).
+- `InboxRefused` is renamed `InboxRefusedError`, the house suffix the rule requires.
+- `_InboxStep.__call__`'s `self.error = exc` gets a narrowly keyed `STORE_ALLOWLIST` entry in
+  `tests/log_privacy_allowlists.py`, by team-lead's ruling. The exception is kept only to re-raise
+  after `run_one`, where `on_error` maps it class-only, and that mapping needs the instance. The
+  shape is the same as `ui/jobs.py`'s `job.error = error`.
+- Both changes are mutation-checked. Every test that scans `src/` is now part of the named set.

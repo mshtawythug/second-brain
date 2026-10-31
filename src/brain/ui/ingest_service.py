@@ -50,7 +50,7 @@ from ..sensitivity import SensitivityLevel
 from ..tags import normalize_tags
 from .errors import UiError, UiForbidden, UiUnavailable
 from .inbox import resolve_inbox_file
-from .inbox_errors import InboxRefused, recheck_refused, refused_open
+from .inbox_errors import InboxRefusedError, recheck_refused, refused_open
 from .ingest_progress import ProgressEmbedder
 from .ingest_schemas import FileSpec, InboxSpec, PasteSpec
 from .jobs import JobError, JobHandle, JobRegistry, JobSnapshot
@@ -289,7 +289,7 @@ RunOne = Callable[..., FileOutcome]
 
 def inbox_failure(exc: Exception) -> JobError:
     """Map an inbox job's exception (RM-40); the rest are :func:`ingest_failure`'s."""
-    if isinstance(exc, InboxRefused):
+    if isinstance(exc, InboxRefusedError):
         return JobError(exc.code, exc.message)
     if isinstance(exc, DropFolderError):
         return JobError(
@@ -358,7 +358,7 @@ def inbox_runner(
                 outcome = run(conn, folder, spec.name, ingest=step, max_bytes=cap,
                               expect_identity=identity)
             except OSError as exc:  # the folder itself: gone, or unreadable
-                raise InboxRefused(
+                raise InboxRefusedError(
                     "inbox_move_failed",
                     f"The inbox could not be opened ({describe_failure(exc)}). Nothing was moved.",
                 ) from None
@@ -367,7 +367,7 @@ def inbox_runner(
         if step.error is not None:
             raise step.error  # run_one moved it back, unless its name was retaken (D4)
         if outcome.status == "vanished":
-            raise InboxRefused(
+            raise InboxRefusedError(
                 "inbox_file_gone", "The file is no longer in the inbox. Nothing was written."
             )
         raise refused_open(outcome.detail)
@@ -403,6 +403,8 @@ class _InboxStep:
         try:
             ingested = self._ingest(conn, path, title)
         except Exception as exc:
+            # Kept only to re-raise after run_one, where on_error maps it class-only; never
+            # logged (tests/log_privacy_allowlists.py's STORE_ALLOWLIST says why).
             self.error = exc
             raise  # run_one moves the file back
         self.ingested = ingested
