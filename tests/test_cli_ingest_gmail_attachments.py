@@ -398,7 +398,7 @@ def test_a_draft_reply_contributes_no_attachment(
     assert "## Attachment:" not in _row(test_db)["content"]
 
 
-def test_an_image_without_ocr_is_unreadable_with_the_hint_once(
+def test_an_image_without_ocr_is_no_ocr_with_the_hint_once(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     parts = [attachment_part(str(i), f"photo{i}.png", "image/png", size=100,
@@ -408,8 +408,8 @@ def test_an_image_without_ocr_is_unreadable_with_the_hint_once(
     result = _receipts()
 
     assert result.exit_code == 0, result.output
-    assert f"attachment 1 of thread {TID}: unreadable" in result.output
-    assert "2 unreadable" in result.output
+    assert f"attachment 1 of thread {TID}: no ocr" in result.output
+    assert "2 no ocr" in result.output
     assert result.output.count("OCR is off") == 1
 
 
@@ -450,3 +450,36 @@ def test_without_the_flag_there_is_no_attachment_line(
     assert result.exit_code == 0, result.output
     assert "attachments:" not in result.output
     assert gws.attachment_calls() == []
+
+
+def test_a_broken_pdf_is_not_fetched_again_even_when_it_adds_no_text(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, test_db: psycopg.Connection
+) -> None:
+    """Regression (RM-45 e2e): a thread whose attachments gave no text kept its body, so
+    ``ingest_document`` skipped it and the attachment records were never stored; every run
+    downloaded them again. The records are now patched in metadata only, and ``unreadable``
+    is final."""
+    gws = _serve(monkeypatch, _thread_gws([_pdf(attachment_id="broken")],
+                                          **{"broken": b"%PDF-1.7\nbroken"}))
+    assert _gmail("--label", "receipts").exit_code == 0
+    assert "1 unreadable" in _receipts().output
+    assert [r["status"] for r in _row(test_db)["metadata"]["attachments"]] == ["unreadable"]
+
+    result = _receipts()
+
+    assert result.exit_code == 0, result.output
+    assert f"skipped thread {TID} (unchanged)" in result.output
+    assert len(gws.attachment_calls()) == 1
+
+
+def test_a_re_run_retries_a_no_ocr_image(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = attachment_part("1", "photo.png", "image/png", size=100, attachment_id="image")
+    gws = _serve(monkeypatch, _thread_gws([image], image=receipt_png()))
+    assert "1 no ocr" in _receipts().output
+
+    result = _receipts()
+
+    assert "1 no ocr" in result.output
+    assert len(gws.attachment_calls()) == 2

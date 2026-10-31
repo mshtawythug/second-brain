@@ -45,7 +45,7 @@ from .ingest.gmail_attachments import (
     gws_stdout_cap,
     plan_thread,
 )
-from .ingest.volatile_patch import stored_document
+from .ingest.volatile_patch import refresh_volatile, stored_document
 from .sensitivity import CONFIDENTIAL, DEFAULT_SENSITIVITY
 from .vault.derived_links import real_gws_runner
 from .vault.sensitivity_propagate import propagate_sensitivity_to_vault
@@ -71,10 +71,12 @@ DRY_RUN_NOTE = "--with-attachments: --dry-run fetches no attachments"
 GWS_TIMEOUT_SECONDS = 60.0
 #: The report's order; ``extracted`` leads and ``failed`` ends it, both always shown.
 _REPORT_ORDER = (
-    "empty", "too large", "too many pages", "encrypted", "unsupported", "unreadable",
+    "empty", "too large", "too many pages", "encrypted", "unsupported", "unreadable", "no ocr",
     "malformed", "truncated", "over cap", "deadline",
 )
 _SOURCE_KIND = "gmail"
+#: The metadata keys this pass owns on a thread document.
+_ATTACHMENT_KEYS = ("attachments", "attachments_fingerprint")
 
 
 def gws_runner(args: list[str]) -> str:
@@ -123,6 +125,11 @@ class AttachmentPass:
         self._vault_root = vault_root
         self._run = AttachmentRun(limits or AttachmentLimits(), clock=clock)
         self._workdir: Path | None = None
+        #: The last augmented thread: its id, its stored row (or ``None``) and the
+        #: attachment metadata, for :meth:`after_ingest` when the body did not change.
+        self._pending: tuple[str, tuple[str, Mapping[str, Any]] | None, dict[str, Any]] | None = (
+            None
+        )
 
     @property
     def sensitivity(self) -> str:
@@ -178,14 +185,36 @@ class AttachmentPass:
             "attachments": [record.as_metadata() for record in out.records],
             "attachments_fingerprint": plan.fingerprint,
         }
+        # A draft-only window is not the thread (``ingest_document`` refuses it), so its
+        # records are never patched onto the stored row.
+        self._pending = None if doc.metadata.get("_is_draft") else (tid, stored, metadata)
         return with_sections(doc, out.sections, metadata)
 
     def after_ingest(self, conn: psycopg.Connection[Any], tid: str, result: IngestResult) -> None:
-        """Escalate a thread the ingest left unchanged (a changed one already was)."""
+        """For a thread whose body did not change: store its attachment records, escalate it.
+
+        Attachments that gave no text leave the body as it was, so ``ingest_document``
+        skips the row and would drop their records; without them every run downloads the
+        same files again. They are patched in metadata only (no re-chunk, no embed).
+        """
+        pending, self._pending = self._pending, None
         if not self.enabled or result.created or result.body_changed:
             return
-        if result.document_id is not None:
-            self._escalate(conn, result.document_id, tid)
+        if result.document_id is None:
+            return
+        if pending is not None and pending[0] == tid and pending[1] is not None:
+            stored_id, stored_metadata = pending[1]
+            if stored_id == result.document_id:
+                refresh_volatile(
+                    conn,
+                    document_id=stored_id,
+                    stored=stored_metadata,
+                    metadata=pending[2],
+                    keys=_ATTACHMENT_KEYS,
+                    vault_root=self._vault_root,
+                    graph_syncer=None,
+                )
+        self._escalate(conn, result.document_id, tid)
 
     def _escalate(self, conn: psycopg.Connection[Any], document_id: str, tid: str) -> None:
         escalate_stored_sensitivity(

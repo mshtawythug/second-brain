@@ -81,3 +81,30 @@ def test_after_ingest_without_a_document_id_does_nothing(
     attachments.after_ingest(test_db, TID, IngestResult(document_id=None, created=False))
 
     assert capsys.readouterr().out == ""
+
+
+MISSING_ID = "00000000-0000-4000-8000-000000000001"
+OTHER_ID = "00000000-0000-4000-8000-000000000002"
+
+
+@pytest.mark.parametrize(
+    "pending",
+    [
+        ("another-thread", (MISSING_ID, {}), {"attachments": []}),
+        (TID, None, {"attachments": []}),
+        (TID, (OTHER_ID, {}), {"attachments": []}),
+    ],
+)
+def test_after_ingest_patches_only_the_thread_it_augmented(
+    test_db: psycopg.Connection, tmp_path: Path, pending: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patched: list[Any] = []
+    monkeypatch.setattr(cga, "refresh_volatile", lambda *a, **k: patched.append(k))
+    attachments = cga.AttachmentPass(True, vault_root=tmp_path)
+    attachments._pending = pending
+
+    attachments.after_ingest(test_db, TID, IngestResult(document_id=MISSING_ID, created=False))
+
+    assert patched == []
+    assert attachments._pending is None

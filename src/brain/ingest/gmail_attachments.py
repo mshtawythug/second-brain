@@ -89,11 +89,13 @@ __all__ = [
 ATTACHMENT_POLICY_VERSION = "v1"
 #: The private work directory's name prefix (also what the stale sweep matches).
 WORKDIR_PREFIX = "brain-gmail-att-"
-#: Statuses a re-run tries again; every other status is final for unchanged mail.
-RETRYABLE_STATUSES = frozenset({"failed", "over cap", "deadline", "unreadable", "truncated"})
+#: Statuses a re-run tries again; every other status is final for unchanged mail. ``no ocr``
+#: (an image while OCR is off or ``tesseract`` missing) is retried, so turning OCR on reads
+#: it; ``unreadable`` (a file its parser refused) is not, so a broken PDF is not re-fetched.
+RETRYABLE_STATUSES = frozenset({"failed", "over cap", "deadline", "no ocr", "truncated"})
 FINAL_STATUSES = frozenset(
     {"extracted", "empty", "too large", "too many pages", "encrypted", "unsupported",
-     "malformed"}
+     "unreadable", "malformed"}
 )
 
 Kind = Literal["pdf", "png", "jpeg"]
@@ -525,8 +527,8 @@ def _one(
             return replace(record, status="unsupported", type=None), None
         doc = _extract_file(data, kind, workdir=workdir, limits=run.limits, extract=extract)
     except GmailAttachmentError as exc:
-        _note_ocr_hint(exc, run)
-        return replace(record, status=exc.status), None
+        status = "no ocr" if _note_ocr_hint(exc, run) else exc.status
+        return replace(record, status=status), None
     record = replace(
         record,
         pages=_int_or_none(doc.metadata.get("page_count")),
@@ -537,13 +539,17 @@ def _one(
     return replace(record, status="empty" if section is None else "extracted"), section
 
 
-def _note_ocr_hint(exc: GmailAttachmentError, run: AttachmentRun) -> None:
-    """Keep the OCR-unavailable hint once, rebuilt from the OCR setup, never from ``exc``."""
+def _note_ocr_hint(exc: GmailAttachmentError, run: AttachmentRun) -> bool:
+    """``True`` when OCR was unavailable; the hint is kept once, rebuilt from the OCR setup,
+    never from ``exc``."""
     from .image import OcrUnavailableError, ocr_unavailable_hint
     from .ocr import resolve_ocr
 
-    if run.ocr_hint is None and isinstance(exc.__cause__, OcrUnavailableError):
+    if not isinstance(exc.__cause__, OcrUnavailableError):
+        return False
+    if run.ocr_hint is None:
         run.ocr_hint = ocr_unavailable_hint(resolve_ocr(os.environ))
+    return True
 
 
 def extract_attachments(

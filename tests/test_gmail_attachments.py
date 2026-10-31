@@ -506,7 +506,7 @@ def test_an_extractor_error_is_unreadable_and_carries_no_text(
     assert MERCHANT not in repr(out) and run.ocr_hint is None
 
 
-def test_ocr_unavailable_is_unreadable_and_sets_the_hint_from_the_setup(
+def test_ocr_unavailable_is_no_ocr_and_sets_the_hint_from_the_setup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("BRAIN_OCR", "off")
@@ -516,7 +516,7 @@ def test_ocr_unavailable_is_unreadable_and_sets_the_hint_from_the_setup(
 
     out, run = _run_one(tmp_path, _pdf_part(inline=receipt_png()), extract=no_ocr)
 
-    assert out.records[0].status == "unreadable"
+    assert out.records[0].status == "no ocr"
     assert run.ocr_hint == OCR_OFF_HINT
 
 
@@ -537,7 +537,7 @@ def test_the_ocr_hint_is_kept_from_the_first_image(
                            extract=no_ocr)
 
     assert run.ocr_hint == OCR_OFF_HINT
-    assert run.counts["unreadable"] == 2
+    assert run.counts["no ocr"] == 2
 
 
 def test_empty_text_is_empty_and_gets_no_section(tmp_path: Path) -> None:
@@ -660,7 +660,7 @@ def test_the_thread_cap_truncates_then_stops_extracting(tmp_path: Path) -> None:
 
 
 def test_retryable_statuses() -> None:
-    expected = frozenset({"failed", "over cap", "deadline", "unreadable", "truncated"})
+    expected = frozenset({"failed", "over cap", "deadline", "no ocr", "truncated"})
 
     assert expected == ga.RETRYABLE_STATUSES
     assert expected.isdisjoint(ga.FINAL_STATUSES)
