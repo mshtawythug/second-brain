@@ -22,6 +22,30 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — receipts: Gmail PDF and image attachments (RM-45)
+
+- `brain ingest-gmail --with-attachments` appends the text of each thread's PDF, PNG and JPEG
+  attachments to the thread document as `## Attachment: <name>` sections, so a receipt is
+  found by its contents. Source `gmail` and content type `email_thread`, unchanged; no new
+  document per attachment. The flag needs `--label` or `--query` (exit 2 otherwise).
+- Caps: 10 MiB per attachment (skipped unfetched past it), 50 per run, 50 pages per PDF,
+  50,000 characters per attachment and 200,000 per thread, a 15-minute run deadline, and a
+  60 s timeout and stdout cap on each `gws ... attachments get` call. The MIME walk is
+  iterative and depth- and width-capped; base64url is checked before and after decoding;
+  magic bytes decide the type; files are written to a private directory under fixed names
+  (`O_EXCL | O_NOFOLLOW`, mode 0600); encrypted PDFs are skipped. Extraction goes through the
+  extractor registry, so RM-32's PDF and RM-33's image bounds apply.
+- Every thread such a run writes is `confidential`; a stored `normal` one is escalated and its
+  mirror re-fenced. Luhn-valid card numbers standing as their own word become
+  `[REDACTED:card-number]`; attachment text is HTML-escaped and its markdown neutralized, so
+  it cannot pose as thread structure or pull in links, images or wikilinks. Filenames appear
+  only in the section heading, never in metadata or terminal output.
+- An unchanged thread is skipped on a re-run without downloading anything; a run without the
+  flag skips a thread that holds attachment text instead of dropping it.
+- `ingest-gmail` now prints the hosted-embedder egress notice. New:
+  `brain/ingest/gmail_attachments.py`, `brain/ingest/attachment_text.py`,
+  `brain/cli_gmail_attachments.py`; `ingest/gmail.py` exposes `rendered_messages`.
+
 ### Added — social bookmarks from your own data archive (RM-44, PR #116)
 
 - `brain ingest-bookmarks --format x-archive <archive-dir>` stores the posts you liked or
