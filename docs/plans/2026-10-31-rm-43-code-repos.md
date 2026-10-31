@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use team-driven-development to implement this plan task-by-task.
 
-**Ticket:** `docs/specs/2026-10-23-roadmap-completion-design.md`, "#### RM-43". The ticket is the
+**Ticket:** `docs/specs/2026-10-23-roadmap-completion-design.md`, "#### RM-43". **PR:** #113. The ticket is the
 spec; this is the task list. Base: `second-brain/master` at `75a7074`. Depends on RM-06 (the
 `cli_registry` seam) and RM-42 (`ingest/chunk_dispatch.chunk_for`, the code chunker), both merged.
 

@@ -22,7 +22,7 @@ git tag scheme:
 
 ## [Unreleased]
 
-### Added — `brain ingest-code`: your own files from a local git repository (RM-43)
+### Added — `brain ingest-code`: your own files from a local git repository (RM-43, PR #113)
 
 - `brain ingest-code <repo-dir> --author-email E [--author-email E2 …] --since YYYY-MM-DD`
   stores the tracked files that a commit by one of your addresses touched since that day, one
