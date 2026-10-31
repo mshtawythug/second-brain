@@ -35,15 +35,19 @@ the build commands, the layout, the key patterns and the lessons learned.
 
 ## Sizes (characters)
 
-| File | Before | After |
+| File | Before (`f311a94`) | After (PR #112) |
 |---|---|---|
-| `CLAUDE.md` | 117,129 | 26,851 |
-| `docs/ceiling-table.md` | — | 78,201 |
+| `CLAUDE.md` | 129,893 | 26,851 |
+| `docs/ceiling-table.md` | — | 91,321 |
 | `docs/audits/f6-residue-audit.md` | — | 3,978 |
 | `docs/eval-gate.md` | — | 13,865 |
 
-"Before" is `CLAUDE.md` at `92438fe`, the master this commit is based on. It was
-116,030 at `e1f613d`, where the work began, when the warning reported 154.9k in total.
+Counted as characters (`len()` of the decoded text; `wc -c` gives bytes, which run
+higher because of the em dashes and arrows). "Before" is `CLAUDE.md` at `f311a94`, the
+master PR #112 is based on. It was 117,129 at `92438fe` (PR #81's base) and 116,030 at
+`e1f613d`, where the work began, when the warning reported 154.9k in total.
+`docs/ceiling-table.md` grew from 78,201 on PR #81 because the seven rows master
+rewrote after `92438fe` came across with it (see "Reconciled onto `f311a94`" below).
 
 ## Edits made after the verbatim move
 
@@ -58,11 +62,14 @@ These are the only changes to the moved text, made deliberately and recorded her
    promoted to a SHA and count before this change's own descriptive hop was added:
    - `vault/graph.py`: 955 (`f0abf64`, the 2026-09-02 merge).
    - `graph_rag/extract.py`: 928 (`ad67f43`, PR #58).
-   - `vault/watch.py`: 1,300 (`e7a26ca`, the PR #56 second review round).
+   - `vault/watch.py`: 1,300 (`e7a26ca`, the PR #56 second review round). That was
+     PR #81's edit. Master had already promoted `e7a26ca` itself by `f311a94`, so on
+     PR #112 the row runs SHA-bound through master's `8351382`, then this change's
+     own hop (see "Reconciled onto `f311a94`" below).
    - `setup.py`: its trail was already SHA-bound through `6074b97`.
 
-   The next commit to touch any of these files must promote this change's
-   descriptive hop.
+   On PR #112 the reconciliation commits bound every one of these descriptive hops
+   to its SHA (`5cba1e9`), so none is left to promote.
 
 ## Code that followed the table
 
@@ -78,7 +85,10 @@ These are the only changes to the moved text, made deliberately and recorded her
   `CONTRIBUTING.md`, and `tests/eval/baselines/README.md` were all repointed.
 - These docstrings named the table, a row or the residue section, and were repointed
   to `docs/ceiling-table.md`: `setup.py`, `graph_rag/extract.py`, `vault/graph.py`
-  (two lines), `vault/watch.py`, `related.py` and `snippet_context.py`.
+  (two lines), `vault/watch.py` (two lines: the race-fixes line, and on PR #112 the
+  owed-work line master added after `92438fe`), `related.py` and `snippet_context.py`.
+  On PR #112, `eval/baseline.py`'s "no per-metric overrides" comment was also
+  repointed at `docs/eval-gate.md`, where that decision now lives.
   `snippet_context.py` also loses a stale claim that `search.py` is under the
   ceiling; it is in the table.
 
@@ -92,9 +102,41 @@ region: the `cli_ingest.py` row of the ceiling table (by `cc62cf4`), and the
 branch copy of those rows was still identical to the base, so each was replaced
 with master's line exactly as master has it. A line-by-line check confirmed
 that every line of master's moved sections is in the new files. The only
-exceptions are the five lines edited on purpose (listed above). Master did not
-change the four over-ceiling files this change touches, and no file newly
-crossed 800 lines.
+exceptions are the five lines edited on purpose (listed above). Up to `92438fe`,
+master did not change the four over-ceiling files this change touches, and no
+file newly crossed 800 lines. That stopped being true by `f311a94`; see the next
+section.
+
+## Reconciled onto `f311a94` (PR #112)
+
+PR #81 could not take master `f311a94`: master was 357 files ahead, and the merge
+commit's staged diff (+63,181/−1,214) was too large for the pre-commit PII gate's
+semantic pass, which errors on input that size. So PR #112 replays PR #81's two
+commits on `f311a94` as `5cba1e9` and `1c87b23`. `5cba1e9`'s one conflict,
+`CLAUDE.md`, resolved to the slim file. Two further commits carry master's
+changes into the moved text:
+
+- **Six rows ported verbatim.** Since `92438fe`, master rewrote seven ceiling rows:
+  `cli.py`, `mcp_server.py`, `ingest/__init__.py`, `vault/watch.py`, `people.py`,
+  `search.py` and `cli_ingest.py`. All but `vault/watch.py` were untouched on this
+  branch, so each was replaced with master's line exactly.
+- **`vault/watch.py`, the one row both sides changed.** Master changed
+  `src/brain/vault/watch.py` in `9099853`, `5a52835`, `ae467f5`, `305b9a4` and
+  `8351382` (RM-26 and PR #95), promoted `e7a26ca` itself, and added an owed-work
+  docstring line that named "CLAUDE.md's ceiling table". The row is master's,
+  character for character, plus two hops after `8351382`: 1,366 (`5cba1e9`) and
+  1,366 (`07c760e`, the commit that repoints that docstring line). Both are net-zero.
+- **Descriptive hops bound.** The `setup.py`, `graph_rag/extract.py` and
+  `vault/graph.py` rows ended in a descriptive "the docs/slim-claude-md commit". A
+  later commit that does not touch those files bound each one to `5cba1e9` (1,224,
+  928 and 955), by the `bc3b868` precedent.
+- No other line of master's `CLAUDE.md` changed after `92438fe`, and no file newly
+  crossed 800 lines (`check_ceiling_table.py` passes: 16 files, one row each).
+
+A line-by-line check of master's `CLAUDE.md` at `f311a94` against the slim
+`CLAUDE.md` plus the three new files and `CONTRIBUTING.md` found 604 of 613
+non-empty lines verbatim. The other 9 are the deliberate edits: four rewritten
+rows, the row-count grep, and the four open-design lines.
 
 ## Left alone on purpose
 
@@ -119,3 +161,6 @@ crossed 800 lines.
   `**the ... commit**, **net-zero**:` form).
 - The rebased history went to a new branch with a replacement PR, because
   force-pushing is blocked here.
+- That replacement, PR #81, was itself superseded by PR #112 when it fell 357 files
+  behind master (see "Reconciled onto `f311a94`" above). PR #81 was closed with a
+  pointer, and its branch was left in place.
