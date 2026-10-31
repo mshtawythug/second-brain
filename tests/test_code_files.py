@@ -146,6 +146,23 @@ def test_a_file_that_grows_after_the_fstat_is_still_capped(
     assert cf.read_code_file(root, "grows.py") == cf.SKIP_TOO_LARGE
 
 
+def test_the_fstat_size_alone_refuses_a_file_before_it_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-read check: an over-cap ``fstat`` size is refused without reading the file."""
+    root = _root(tmp_path)
+    _put(root, "small.py", b"x = 1\n")
+    real_fstat = os.fstat
+
+    def large_fstat(fd: int) -> os.stat_result:
+        info = real_fstat(fd)
+        return os.stat_result((*info[:6], cf.MAX_FILE_BYTES + 1, *info[7:]))
+
+    monkeypatch.setattr("brain.ingest.code_files.os.fstat", large_fstat)
+
+    assert cf.read_code_file(root, "small.py") == cf.SKIP_TOO_LARGE
+
+
 @pytest.mark.parametrize(
     "data",
     [b"abc\x00def", "caf\xe9\n".encode("latin-1"), b"\xff\xfe"],
@@ -172,6 +189,18 @@ def test_a_symlink_is_not_followed(tmp_path: Path) -> None:
     (root / "link.py").symlink_to("real.py")
 
     assert cf.read_code_file(root, "link.py") == cf.SKIP_NOT_REGULAR
+
+
+def test_a_file_symlink_out_of_the_tree_is_not_regular_and_not_followed(
+    tmp_path: Path,
+) -> None:
+    """A tracked symlink is refused as a symlink, before where it points is looked at."""
+    root = _root(tmp_path)
+    outside = tmp_path / "outside.py"
+    outside.write_text("x = 1\n")
+    (root / "out.py").symlink_to(outside)
+
+    assert cf.read_code_file(root, "out.py") == cf.SKIP_NOT_REGULAR
 
 
 def test_a_directory_and_a_missing_file_are_not_regular(tmp_path: Path) -> None:
