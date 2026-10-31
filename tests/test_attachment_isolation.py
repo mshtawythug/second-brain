@@ -532,3 +532,24 @@ def test_the_lowered_limits_are_in_force_while_the_registry_extracts(
     worker.extract_in_process(_write(tmp_path, "attachment.pdf", receipt_pdf()), max_pages=5)
 
     assert seen == [worker.PDF_STREAM_LIMIT_BYTES]
+
+
+def test_zero_width_characters_cannot_push_a_card_past_the_slack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sec-117 I-r3-4: the worker cut the raw text, the parent redacted the normalized one,
+    so zero-width characters before a card spent the slack and left its digits behind."""
+    from brain.ingest.attachment_text import render_section
+
+    raw = "a" * 95 + " " + "​" * 300 + "4111111111111111 ok"
+
+    def text(path: Path, *, max_pages: int) -> ExtractedDoc:
+        return ExtractedDoc("x", raw, "pdf", None, {})
+
+    monkeypatch.setattr(worker, "extract_in_process", text)
+
+    result = worker.run(tmp_path / "a.pdf", max_pages=1, max_chars=100)
+    section = render_section("r.pdf", result["content"], max_chars=100)
+
+    assert section is not None
+    assert "4111" not in section and "​" not in result["content"]

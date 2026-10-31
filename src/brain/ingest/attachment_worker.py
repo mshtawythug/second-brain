@@ -50,6 +50,7 @@ from .attachment_errors import (
     TooManyPagesError,
     UnreadableAttachmentError,
 )
+from .attachment_text import normalize_text
 
 __all__ = [
     "PDF_CONTENT_BUDGET_BYTES",
@@ -172,7 +173,9 @@ def run(path: Path, *, max_pages: int, max_chars: int) -> dict[str, Any]:
     ocr = doc.metadata.get("ocr")
     engine = ocr.get("engine") if isinstance(ocr, dict) else None
     return {
-        "content": doc.content[: max_chars + 1 + TEXT_SLACK_CHARS],
+        # Normalized before the cut (sec-117 I-r3-4): the parent redacts normalized text,
+        # so zero-width characters before a card must not spend the slack in the raw text.
+        "content": normalize_text(doc.content)[: max_chars + 1 + TEXT_SLACK_CHARS],
         "page_count": _int_or_none(doc.metadata.get("page_count")),
         "ocr": engine if isinstance(engine, str) else None,
     }

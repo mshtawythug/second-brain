@@ -409,3 +409,25 @@ def test_rev117_ordinary_numbers_come_back_unchanged(text: str) -> None:
     out = render_section("receipt.pdf", text, max_chars=1000)
 
     assert out == f"## Attachment: receipt.pdf\n\n{text.strip()}"
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "4111 1111  1111 1111",  # I-r3-2a: uneven spacing is one kind of separator
+        "4111  1111 1111   1111",
+        "4111-1111-\n1111-1111",  # I-r3-2b: a hyphen, then the one allowed wrap
+    ],
+)
+def test_uneven_spacing_and_a_hyphen_wrap_are_still_one_layout(layout: str) -> None:
+    out = render_section("statement.pdf", f"Card {layout} paid", max_chars=1000)
+
+    assert out is not None
+    assert "REDACTED:card-number" in out and "4111" not in out
+
+
+@pytest.mark.parametrize("mixed", ["4111 1111-1111 1111", "4111 1111.1111 1111"])
+def test_space_mixed_with_a_hyphen_or_dot_stays_a_residual(mixed: str) -> None:
+    out = render_section("statement.pdf", mixed, max_chars=1000)
+
+    assert out is not None and "REDACTED" not in out

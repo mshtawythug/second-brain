@@ -19,9 +19,9 @@ is built:
 
   1. one unseparated run of 13 to 19 digits;
   2. 4-digit groups, the last one 1 to 4 digits, 13 to 19 digits in all, joined by
-     **one** separator used throughout (one to three spaces, a tab, ``-``, ``.``, ``/``,
-     an en dash, an em dash or U+2212), with at most one line wrap and only between two
-     4-digit groups;
+     **one** kind of separator used throughout (one to three spaces, however many each
+     time; a tab; ``-``, ``.``, ``/``, an en dash, an em dash or U+2212), with at most one
+     line wrap (after a hyphen too) and only between two 4-digit groups;
   3. Amex 4-6-5 or Diners 4-6-4, with one separator throughout.
 
   Windows are group-aligned inside a longer run, so a card printed before an expiry
@@ -78,8 +78,8 @@ MAX_NAME_CHARS = 120
 
 #: A separator a card layout may use between its groups (one kind per card).
 _SEPARATOR = "(?: {1,3}|[\t\\-./–—−])"
-#: A line wrap between two groups, with blanks around it.
-_WRAP = "[ \t]{0,3}\n[ \t]{0,3}"
+#: A line wrap between two groups, with blanks around it, or after a hyphen (I-r3-2b).
+_WRAP = "-?[ \t]{0,3}\n[ \t]{0,3}"
 #: A maximal digit-group run that stands as a word: no letter, digit or underscore
 #: touching either end. The word rule keeps the redaction out of tokens
 #: (``ghp_…0000000000000000``): cutting digits out of a credential would leave the rest
@@ -121,7 +121,14 @@ def _is_card_layout(lengths: Sequence[int], separators: Sequence[str]) -> bool:
     if len(lengths) == 1:
         return _MIN_CARD_DIGITS <= total <= _MAX_CARD_DIGITS
     wraps = [index for index, separator in enumerate(separators) if "\n" in separator]
-    if len(set(separators) - {separators[index] for index in wraps}) > 1:
+    # One to three spaces are one kind of separator (I-r3-2a): uneven spacing inside a
+    # number is still one layout. Space mixed with "-" or "." stays a residual.
+    kinds = {
+        " " if separator.strip(" ") == "" else separator
+        for index, separator in enumerate(separators)
+        if index not in wraps
+    }
+    if len(kinds) > 1:
         return False  # more than one kind of separator
     if tuple(lengths) in _FIXED_LAYOUTS:
         return not wraps
