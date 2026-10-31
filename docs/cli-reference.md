@@ -688,6 +688,62 @@ Dates passed to `--since` / `--until` are converted into Gmail `after:` /
 `before:` query terms, so use Gmail's `YYYY/MM/DD` shape. Raw `--query` is
 passed through and can use any Gmail search syntax.
 
+### Receipts: `--with-attachments` (RM-45)
+
+`--with-attachments` also reads each thread's PDF, PNG and JPEG attachments and
+appends their text to the thread document, one `## Attachment: <name>` section
+per attachment, so a receipt is found by what it says. Attachments are never
+separate documents; the source stays `gmail` and the content type
+`email_thread`.
+
+```bash
+brain ingest-gmail --label receipts --with-attachments
+brain ingest-gmail --query 'has:attachment subject:receipt' --since 2026/01/01 --with-attachments
+```
+
+- **Scope.** The flag needs `--label` or `--query`. With only `--since`,
+  `--until` or `--from` it exits 2: "--with-attachments needs --label or
+  --query: an attachment pull over a date range or a sender alone is too broad".
+- **Caps.** At most 10 MiB per attachment (a larger one is skipped without
+  being downloaded), 50 attachments per run, 50 pages per PDF, 50,000
+  characters per attachment and 200,000 per thread, and 15 minutes of
+  attachment work per run. Each download is one `gws gmail users messages
+  attachments get` call with a 60 s timeout and a stdout cap.
+- **Isolation.** Each attachment is parsed in a child process with a 60 s CPU
+  limit, a 1 GiB memory bound, a 180 s wall clock and its own process group;
+  hitting any of them, or any parser error, makes it `unreadable` and the run
+  goes on.
+- **What is read.** The file's magic bytes decide its type, whatever the email
+  says. A PDF's text layer is used, or OCR (RM-32) for a scanned page; an image
+  is OCR'd (RM-33), so it needs `tesseract` and `BRAIN_OCR` not `off`. An
+  encrypted PDF is skipped. Images marked inline (logos) are not read.
+- **Sensitivity.** Every thread such a run writes is `confidential`, including
+  one already stored as `normal` (its mirror is re-fenced). Nothing lowers it;
+  `brain mark-normal` does.
+- **What is stored.** The text, with card numbers replaced by
+  `[REDACTED:card-number]` (Luhn-valid, in a card layout: 13 to 19 digits in one
+  run, 4-digit groups joined by one consistent separator, or Amex 4-6-5 / Diners
+  4-6-4; amounts and phone numbers are kept), and the secret guard run
+  over the whole thread. The filename appears only in the section heading. The
+  thread's `metadata.attachments` lists each attachment's message and part ids,
+  type, size, page count and status, never its name.
+- **Re-runs.** A re-run with the flag skips an unchanged thread without
+  downloading anything. Otherwise only attachments without a final outcome are
+  fetched: one that failed, hit the run cap or ran out of time, and an image
+  read while OCR was off or `tesseract` missing (`no ocr`). The others are
+  `kept` with their stored text, so a thread with more than 50 attachments
+  finishes over several runs. A file its parser refused (`unreadable`) and one
+  past the thread's text budget (`truncated`) are not tried again. If stored
+  text cannot be rebuilt this run, the stored thread is kept as it is
+  ("kept thread <id> …"). At most 100 attachments per thread are recorded
+  (`too many`). A run **without** the flag skips a thread that holds
+  attachment text, with "skipped thread <id> (has attachments: re-run with
+  --with-attachments)", so the receipt text is never dropped.
+- **Output.** A line per attachment that was not extracted (`attachment 2 of
+  thread <id>: too large`), never its filename, and a closing count line:
+  `attachments: 3 extracted, 1 too large, 0 failed`. `--dry-run` downloads no
+  attachments.
+
 ## Calendar ingest
 
 `brain ingest-calendar` (RM-30) stores Google Calendar events as documents
