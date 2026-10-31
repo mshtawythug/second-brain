@@ -112,6 +112,37 @@ git tag scheme:
   (`O_EXCL`, retrying `-2`, `-3`… on a taken name), so two concurrent writers can no longer
   overwrite each other, and a failed write leaves no partial file.
 
+### Added — the Ingest tab's inbox folder (RM-40)
+
+- `brain ui`'s Ingest tab gains **From the inbox**: pick, by name, a file already sitting in
+  the inbox folder and ingest it. The inbox is the first `drop-folders.toml` entry with
+  `kind = "manual"` and `auto = false`, so the `--configured` LaunchAgent never ingests it
+  first; it takes the uploadable types (`.md`, `.markdown`, `.txt`, `.pdf`, `.docx`) its entry
+  lists. The file is moved into the inbox's `imported/` folder first (RM-33's move-first step,
+  through the new `brain.drop_folder.run_one`), ingested from there under source `manual`
+  with the folder's sensitivity (confidential unless set), and so appears in the tree.
+- `GET /api/ingest/inbox` lists names and sizes only (never a path), and only on a loopback,
+  writable server; `POST /api/ingest/inbox {name, ...}` queues a job of kind `ingest.inbox`.
+- A new traversal surface, guarded three times: the name must be one plain file name
+  (no `/`, `..`, NUL, control character or leading dot) and is checked with `vault/paths.py`'s
+  resolve-then-compare rule and `lstat` at submit; the job checks it again before anything
+  moves; and the move opens it `O_NOFOLLOW` against the folder's descriptor. A symlink, a
+  folder, a pipe, an iCloud-only file or a file over the upload caps is refused, and a file
+  swapped after it was listed or submitted is never read.
+- Every failure (database, embedder, secret guard, unreadable file, cancel) puts the file
+  back in the inbox; a file with no text stays in `imported/`. Job errors name the cause by
+  class or fixed code only. Guide: `docs/guides/drop-folders.md#the-ingest-tabs-inbox-rm-40`.
+- Hardening from the PR #110 review: the job ingests the exact file the submit checked or
+  nothing (its identity, one hard link, and the size cap are checked on the opened file, and
+  the hash reads at most the cap plus a byte, so a file that grew or was swapped is refused
+  unread); a symlink loop or an inbox that cannot be searched is a 4xx, never a 500; a file
+  with a second hard link is refused; the listing reads at most 5,000 entries off the event
+  loop and is fetched only when the user picks Inbox mode. A file already in `imported/`
+  under the same content-addressed name is held to the same checks before it counts as the
+  same file, and the copy used on a volume without hard links is bounded by the cap too. A
+  result that cannot be read back after the commit is reported as saved, never as a failure
+  that would put the file back in the inbox.
+
 ### Added — voice memos, transcribed on this machine (RM-38)
 
 - A drop folder with `kind = "voice"` takes `.m4a`, `.mp3` and `.wav` memos (shared or

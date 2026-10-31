@@ -14,6 +14,7 @@ from ..errors import SensitivityError
 from ..sensitivity import SensitivityLevel, normalize_level
 from ..tags import normalize_tags
 from .errors import UiBadRequest, UiPayloadTooLarge
+from .inbox import check_name
 from .ingest_limits import (
     DEFAULT_PASTE_CONTENT_TYPE,
     MAX_PASTE_BODY_BYTES,
@@ -81,13 +82,50 @@ def parse_file(payload: Mapping[str, Any]) -> FileSpec:
     upload_id = payload.get("upload_id")
     if not isinstance(upload_id, str) or not upload_id:
         raise UiBadRequest("upload_id must be a string", code="invalid_upload_id")
-    title = payload.get("title")
     return FileSpec(
         upload_id=upload_id,
-        title=None if title is None or (isinstance(title, str) and not title.strip())
-        else _title(title),
+        title=_optional_title(payload.get("title")),
         tags=_tags(payload.get("tags", [])),
         sensitivity=_sensitivity(payload.get("sensitivity")),
+        enrich=_enrich(payload.get("enrich", True)),
+    )
+
+
+#: The fields an inbox submit may carry (RM-40). A ``name``, never a path.
+_INBOX_FIELDS = frozenset({"name", "title", "tags", "sensitivity", "enrich"})
+
+
+@dataclass(frozen=True)
+class InboxSpec:
+    """A validated inbox submit. ``name`` has passed :func:`brain.ui.inbox.check_name`."""
+
+    name: str
+    title: str | None
+    tags: tuple[str, ...]
+    sensitivity: SensitivityLevel
+    enrich: bool
+
+
+def parse_inbox(
+    payload: Mapping[str, Any],
+    *,
+    extensions: frozenset[str],
+    default_sensitivity: str,
+) -> InboxSpec:
+    """Validate ``POST /api/ingest/inbox``'s body. Raises 400, or 415 for a file type.
+
+    ``sensitivity`` defaults to the inbox folder's configured level (RM-40.D5),
+    ``confidential`` unless its entry says otherwise, not the paste's ``normal``.
+    """
+    unknown = sorted(set(payload) - _INBOX_FIELDS)
+    if unknown:
+        raise UiBadRequest(f"unknown field(s): {', '.join(unknown)}", code="unknown_field")
+    level = payload.get("sensitivity")
+    return InboxSpec(
+        name=check_name(payload.get("name"), extensions),
+        title=_optional_title(payload.get("title")),
+        tags=_tags(payload.get("tags", [])),
+        sensitivity=_sensitivity(default_sensitivity if level is None else level),
         enrich=_enrich(payload.get("enrich", True)),
     )
 
@@ -114,6 +152,13 @@ def _title(value: Any) -> str:
             f"title must be at most {MAX_TITLE_CHARS} characters", code="invalid_title"
         )
     return title
+
+
+def _optional_title(value: Any) -> str | None:
+    """An override title, or ``None`` when absent or blank (the extracted one stands)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return _title(value)
 
 
 def _body(value: Any) -> str:

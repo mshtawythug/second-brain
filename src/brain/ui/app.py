@@ -226,6 +226,8 @@ def create_app(context: UiContext) -> Starlette:
         ),
         Route("/api/ingest/config", routes_ingest.ingest_config, methods=["GET"]),
         Route("/api/ingest/paste", routes_ingest.paste, methods=["POST"]),
+        Route("/api/ingest/inbox", routes_ingest.inbox_list, methods=["GET"]),
+        Route("/api/ingest/inbox", routes_ingest.inbox_submit, methods=["POST"]),
         # The ONE non-JSON route (security.UPLOAD_ROUTE, Ingest spec §7.2).
         Route("/api/ingest/uploads", routes_upload.stage_upload, methods=["POST"]),
         Route(

@@ -676,6 +676,12 @@ Plus three notices, which can stack:
 
 ### 5.5 Server-side path ingest, evaluated and deferred
 
+> **Built by RM-40** (roadmap spec §RM-40), with the two changes that ticket names: the inbox is
+> RM-33's drop folder with `kind = "manual"` and `auto = false` (no `config.py` knob), and the job
+> uses RM-33's move-first step, so an ingested file ends in `<inbox>/imported/` (which answers the
+> lifecycle question below). The name rule, the three-layer TOCTOU guard and the error codes are in
+> `docs/cli-reference.md` and `docs/plans/2026-10-30-rm-40-ingest-inbox.md`.
+
 The option: `GET /api/ingest/inbox` lists the files in one configured drop folder (say,
 `BRAIN_UI_INGEST_INBOX`), and `POST /api/ingest/inbox {name}` ingests one by name. It needs no upload
 body, it keeps natural `source_path` dedup, and the memory cost is zero.
@@ -984,7 +990,7 @@ job, and each runs the rule-14 review plus audit loop until both pass clean.
 | **1. Jobs + paste backend** | `ui/jobs.py`; `ui/ingest_limits.py`; `ui/ingest_progress.py`; `ui/ingest_service.py` (paste only); `ui/routes_jobs.py`; `ui/routes_ingest.py` (`config`, `paste`); the lifespan in `app.py`; the `UiContext.jobs` / `ingest_enabled` fields; `brain/ingest/outcome.py`, with `cli_ingest` switched to it; the new `UiError`s; the mutation-confinement docstring amendments (§1.3). Tests §9.1, §9.2 (paste rows), §9.3 (paste rows). | Paste works end to end over HTTP against the test DB. All of C3, C5 and §5.6 are verified by tests. | ~900 src / ~1,100 tests |
 | **2. Paste front end** | `jobs.js`, `ingest.js` (paste mode), `ingest.css`, the `index.html` panel, the `tests/test_ui_tabs_static.py` copy update, the browser tests (paste rows), the `ci.yml` roster entry. | §3.4 items 1, 2, 4, 5 and 6 hold for paste. Manual pass on the demo sandbox. | ~450 src / ~300 tests |
 | **3. File upload** | The middleware exception (§7.2); upload staging, sniffing and sweep; `getToken()` added to and exported from `api.js`; `upload.js` plus file mode in `ingest.js`; tests §9.2 (upload) and §9.3 (Content-Type parametrized), browser upload rows. **Its own security review**, dispatched with `ecc:security-reviewer` on opus, in addition to the rule-14 loop. | §3.4 item 3. The parametrized Content-Type test proves the exception is exactly one route. | ~600 src / ~700 tests |
-| **4. Optional: inbox folder** | §5.5, only if asked for. | — | — |
+| **4. Optional: inbox folder** | §5.5, only if asked for. **Built by RM-40** (§5.5's note). | — | — |
 | **After** | Docs: `docs/cli-reference.md` (the `brain ui` section), README, and `docs/guides/brain-ui-on-your-phone.md` (ingest is unavailable over LAN). Auto-memory: `cli.md` for the endpoints and `types.md` for `JobSnapshot`, `JobRegistry`, `IngestOutcome` and `ProgressEmbedder` (CLAUDE.md rule 11). | — | — |
 
 Phase 1 is first because it carries every correctness property (C3, C4, C5) and every one of them is

@@ -212,7 +212,7 @@ JS_ORDER = (
     "inspector.js", "tree.js", "results.js", "keys.js",
     "palette.js", "note_fetch.js", "marginalia.js", "graph.js", "related.js",
     "discovery.js", "thread.js", "watcher_status.js", "watcher.js",
-    "jobs.js", "ingest_view.js", "upload.js", "ingest_file.js", "ingest.js",
+    "jobs.js", "ingest_view.js", "upload.js", "ingest_file.js", "ingest_inbox.js", "ingest.js",
     "ask_view.js", "ask.js", "main.js",
 )
 JS = {name: (STATIC / "js" / name).read_text(encoding="utf-8") for name in JS_ORDER}
@@ -1781,10 +1781,11 @@ def check_hidden_toggles_survive_the_cascade(bundle: str) -> None:
     here). Six of the resolved elements have a competing author ``display`` and
     are saved by an explicit ``[hidden]`` rule (``.shell``, ``#discovery``,
     ``.field``, ``.pager``, and RM-13's ``.ingest-group`` and ``.ingest-staged``).
-    Five have none and are left to the UA sheet
-    (``#mode-badge``, ``#new-note``, and RM-11's ``#ingest-unavailable``,
-    ``#ingest-error`` and ``#ingest-jobs-empty``). Three carry a defensive
-    ``[hidden]`` rule with nothing to compete against (``.toast``,
+    Six have none and are left to the UA sheet
+    (``#mode-badge``, ``#new-note``, RM-11's ``#ingest-unavailable``,
+    ``#ingest-error`` and ``#ingest-jobs-empty``, and RM-40's ``#ingest-inbox-empty``;
+    RM-40's ``#ingest-inbox-fields`` is an ``.ingest-group``, saved by its rule).
+    Three carry a defensive ``[hidden]`` rule with nothing to compete against (``.toast``,
     ``.thread-message`` and RM-03's ``.search-fallback``). The guard does not
     demand a rule on those three defensive ones — requiring a rule that changes
     no pixel would be the roster habit in a new costume — it demands only that
@@ -2429,7 +2430,7 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
     # guard is green while looking at an empty list. Renaming the property at
     # all eleven sites is the shape that produces that.
     ("hidden-toggle-scan-finds-nothing", check_hidden_toggles_survive_the_cascade,
-     "static/*", ".hidden =", ".hiddenFlag =", 26),
+     "static/*", ".hidden =", ".hiddenFlag =", 28),
     # The DISCOVERY clause. `toast()`'s element stops being resolvable, the site
     # count is unchanged so the first assertion stays green, and only
     # "cannot tell what this hides" can fire. A guard that skipped the site
