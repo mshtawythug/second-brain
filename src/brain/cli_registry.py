@@ -45,6 +45,7 @@ from .cli_ingest_code import register as register_ingest_code
 from .cli_ingest_folder import register as register_ingest_folder
 from .cli_ingest_github import register as register_ingest_github
 from .cli_ingest_notion import register as register_ingest_notion
+from .cli_ingest_web import register as register_ingest_web
 from .cli_note import register as register_note
 from .cli_recall import register as register_recall
 from .cli_search import register as register_search
@@ -96,6 +97,7 @@ EXTENSION_REGISTRARS: tuple[tuple[str, Registrar], ...] = (
     ("ingest-notion", register_ingest_notion),  # RM-35, Notion's Markdown export
     ("ingest-folder", register_ingest_folder),  # RM-33, drop folders (screenshots)
     ("ingest-code", register_ingest_code),  # RM-43, the owner's files in a git work tree
+    ("ingest-web", register_ingest_web),  # RM-41, allowlisted browser history and bookmarks
 )
 
 #: Registrars that attach to a SUB-APP rather than the root ``app``, and so

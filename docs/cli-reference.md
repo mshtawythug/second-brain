@@ -1037,6 +1037,56 @@ brain ingest-apple-notes --folder Recipes --sensitivity normal --tag cooking
   `apple notes` row says whether `/usr/bin/osascript` exists.
 - `--dry-run` lists `folder / title` for each note and writes nothing.
 
+## Browser history ingest
+
+`brain ingest-web` (RM-41) stores pages you bookmarked, or visited at least
+`--min-visits` times, **on the hosts listed in `$BRAIN_HOME/web-allowlist.txt`**.
+It reads Chrome's or Safari's own history files; nothing is downloaded unless
+you pass `--fetch`. It requires `--browser chrome|safari` and `--since
+YYYY-MM-DD`; otherwise it exits 2 with `ingest-web requires --browser
+chrome|safari and --since YYYY-MM-DD; whole-history import is not offered`.
+With no allowlist, an empty one, or a malformed line, it exits 2 and reads
+nothing. See [guides/browser-history.md](guides/browser-history.md).
+
+```bash
+brain ingest-web --browser chrome --since 2026-10-01 --dry-run
+brain ingest-web --browser safari --since 2026-10-01 --tag reading
+brain ingest-web --browser chrome --since 2026-10-01 --fetch --max 50
+```
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--browser` | (required) | `chrome` or `safari`. |
+| `--since` | (required) | Count visits on or after this day (local time). |
+| `--profile DIR` | the macOS location | The profile directory (Chrome: `…/Google/Chrome/Default`; Safari: `~/Library/Safari`). Required off macOS. |
+| `--min-visits N` | 3 | Visits inside the window that make an unbookmarked page qualify. A bookmark always qualifies. |
+| `--max N` | 500 | Pages written per run, newest visit first; the rest are counted. |
+| `--fetch` | off | Download the text of new pages: https, allowlisted hosts, public addresses only (connection pinned to the checked address), at most 3 redirects, 10 s in total, 1 MiB as sent, no compressed responses. |
+| `--refresh` | off | Rebuild the body of pages already stored (and re-fetch with `--fetch`). |
+| `--sensitivity` | `normal` | Or `confidential`, which also raises pages already stored. A run never lowers a stored page (use `brain mark-normal`). |
+| `--tag` / `-t` | — | Tags for every page. |
+| `--dry-run` | off | List `host  title` for each page; write nothing. |
+| `--enrich/--no-enrich` | on | The auto-summary, with `--fetch` only. |
+| `--allow-secrets` | off | Store a page the secret guard would refuse. |
+
+- **One document per page** (source `web`, content type `web_page`),
+  deduplicated by the normalized URL: query string, fragment, userinfo and
+  default port dropped; only `http`/`https`. The source key is the URL's
+  SHA-256 (the URL itself is `metadata.url`), so the vault mirror is one flat
+  file under `_ingested/web/`. The body is the title, the URL
+  and the host (plus the page text with `--fetch`).
+- **Re-runs.** A stored page gets only its metadata refreshed
+  (`chrome_visits`, `chrome_last_visit`, `chrome_bookmarked`, or the `safari_`
+  keys), with no re-chunk, no embed and no fetch; the stored title stays.
+  Chrome and Safari describe one page side by side. `sent_at` is the first
+  visit seen.
+- **Reading.** The store and its write-ahead log are copied to a private
+  temporary folder and the copy is opened read-only; the browser's own files
+  are never opened by SQLite. Safari without Full Disk Access exits 1 with one
+  line naming the setting. A missing table or column exits 1
+  (`unsupported … history schema`).
+- **Cost.** `web_page` skips concept extraction; no summary without `--fetch`.
+
 ## Status and health
 
 ```bash

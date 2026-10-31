@@ -57,6 +57,7 @@ from tests.db_lock import concurrent_suite_message, try_acquire_suite_lock
 # tests.delivery_isolation_plugin forces brief delivery off per test (RM-16, that module).
 # tests.ocr_isolation_plugin forces OCR off per test (RM-32, that module).
 # tests.voice_isolation_plugin forces voice memos off per test (RM-38, that module).
+# tests.browser_isolation_plugin keeps ingest-web off real profiles and the network (RM-41).
 pytest_plugins = (
     "tests.browser_timeout",
     "tests.env_isolation",
@@ -64,6 +65,7 @@ pytest_plugins = (
     "tests.delivery_isolation_plugin",
     "tests.ocr_isolation_plugin",
     "tests.voice_isolation_plugin",
+    "tests.browser_isolation_plugin",
 )
 
 load_dotenv()

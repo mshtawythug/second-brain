@@ -22,6 +22,40 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — browser history and bookmarks, allowlist only (RM-41, PR #114)
+
+- `brain ingest-web --browser chrome|safari --since YYYY-MM-DD` stores pages you bookmarked, or
+  visited at least `--min-visits` (3) times, on the hosts listed in
+  `$BRAIN_HOME/web-allowlist.txt`. With no allowlist, an empty one or a malformed line, the
+  command reads nothing and exits 2. Source `web`, content type `web_page`, one document per
+  normalized URL, keyed by the URL's SHA-256 (the URL is `metadata.url`). The query string,
+  fragment, userinfo and default port are dropped before anything is stored. Default
+  sensitivity `normal`.
+- The browser's database is copied with its write-ahead log into a private temporary folder and
+  the copy is opened `mode=ro`. `immutable=1` was measured to hide every visit still in the WAL,
+  so it is not used. The live profile is never opened by SQLite. Safari without Full Disk Access
+  exits 1 with one line.
+- Re-runs patch only the per-browser metadata (`chrome_visits`, `safari_last_visit`, …): no
+  re-chunk, no embed. `--refresh` rebuilds a stored page.
+- `--fetch` (opt-in) downloads new pages' text. It allows https only and an allowlisted host at
+  every redirect, and every resolved address must be public. The connection goes to the checked
+  address, with the name in `Host` and TLS SNI. It stops after 10 s or 1 MiB, and sends no
+  cookies, no proxy settings and no `.netrc`.
+- Security round (sec-114): the fetch refuses compressed responses and counts raw bytes. The
+  deadline is wall-clock over every hop. `public_only` is an explicit deny list that decodes
+  the IPv4 inside v4-mapped and NAT64 addresses and refuses 6to4 and Teredo outright. There
+  is no connection reuse across hosts, and only text codecs are honoured. Local-use NAT64 is
+  refused. After three fetches stuck on servers that never answer, `--fetch` turns itself off for
+  the run. Virtual tables are refused like views.
+  `;` path parameters are dropped. Allowlist entries must be ASCII names (no addresses in any
+  form, no localhost). The store copy reads only regular files and is byte-counted; views and
+  long queries are refused. Bookmarks are walked once per node with a node cap. SIGHUP and
+  SIGTERM remove the copy, and stale copies are swept. An explicit `--sensitivity confidential`
+  raises stored pages.
+- `web_page` joins the concept-skip policy (version `v4`). New: `brain/ingest/browser.py`,
+  `browser_store.py`, `web_url.py`, `web_fetch.py`, `brain/settings/web_allowlist.py`,
+  `brain/cli_ingest_web.py`, and `docs/guides/browser-history.md`.
+
 ### Added — `brain ingest-code`: your own files from a local git repository (RM-43, PR #113)
 
 - `brain ingest-code <repo-dir> --author-email E [--author-email E2 …] --since YYYY-MM-DD`

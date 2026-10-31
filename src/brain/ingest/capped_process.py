@@ -153,22 +153,27 @@ def file_size_limit(requested: int) -> int:
 
 
 @contextlib.contextmanager
-def sigterm_as_system_exit() -> Iterator[None]:
-    """While inside, SIGTERM raises ``SystemExit(143)`` in the main thread.
+def sigterm_as_system_exit(*, also: tuple[int, ...] = ()) -> Iterator[None]:
+    """While inside, SIGTERM (and each signal in ``also``) raises ``SystemExit(128 + n)``.
 
     The exception unwinds through :func:`run_capped` (which kills its child) and every
     ``finally`` and ``with`` above it. Outside the main thread, where Python cannot set a
-    handler, nothing changes. The previous handler is restored on the way out; one set
-    outside Python reads as ``None`` and is restored as the default.
+    handler, nothing changes. The previous handlers are restored on the way out; one set
+    outside Python reads as ``None`` and is restored as the default. ``also`` lets a
+    caller holding a sensitive temporary copy add ``SIGHUP`` (a closed terminal tab;
+    ``brain ingest-web``, sec-114 F10).
     """
     if threading.current_thread() is not threading.main_thread():
         yield
         return
-    previous = signal.signal(signal.SIGTERM, _raise_system_exit)
+    previous = {
+        signum: signal.signal(signum, _raise_system_exit) for signum in (signal.SIGTERM, *also)
+    }
     try:
         yield
     finally:
-        signal.signal(signal.SIGTERM, previous or signal.SIG_DFL)
+        for signum, handler in previous.items():
+            signal.signal(signum, handler or signal.SIG_DFL)
 
 
 def _raise_system_exit(signum: int, frame: FrameType | None) -> None:

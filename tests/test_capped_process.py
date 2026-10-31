@@ -425,3 +425,17 @@ def test_the_context_restores_the_python_handler_it_replaced() -> None:
 
     assert inside is not sentinel
     assert after is sentinel
+
+
+def test_also_turns_more_signals_into_a_system_exit_and_restores_them() -> None:
+    """sec-114 F10: ``brain ingest-web`` adds SIGHUP (a closed terminal tab)."""
+    import signal
+
+    from brain.ingest.capped_process import sigterm_as_system_exit
+
+    before = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP))
+    with pytest.raises(SystemExit) as info, sigterm_as_system_exit(also=(signal.SIGHUP,)):
+        signal.raise_signal(signal.SIGHUP)
+
+    assert info.value.code == 128 + signal.SIGHUP
+    assert (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)) == before

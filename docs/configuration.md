@@ -523,6 +523,22 @@ with the `BRAIN_OCR*` knobs above, and voice memos with the `BRAIN_WHISPER_*` kn
 The opt-in LaunchAgent is `brain-install-launchd --with-dropfolders`; see
 [guides/drop-folders.md](guides/drop-folders.md).
 
+### `web-allowlist.txt` — hosts `brain ingest-web` may read (RM-41)
+
+No environment variable: `$BRAIN_HOME/web-allowlist.txt` lists the hosts whose
+pages `brain ingest-web` may store, one per line, read by
+`brain/settings/web_allowlist.py`. An entry is an exact host (`docs.example.com`)
+or `*.` plus a domain of at least two labels (`*.example.org`, which covers
+subdomains only, never the apex). Lines starting with `#` are comments. A
+missing file or a file with no entries means **nothing is ingested** (the
+command exits 2). A scheme, path, port, IP address, whitespace or inline comment
+on a line is a `ConfigError` naming the line number, never the line. So are a non-ASCII entry
+(write internationalized hosts in punycode, `xn--…`), an address in any form (`127.1`,
+`2130706433`, `0x7f.1`), `localhost` and its subdomains, and a single-label host. A wildcard over
+a multi-label public suffix (`*.co.uk`) cannot be detected without the Public Suffix List; don't
+write one. See
+[guides/browser-history.md](guides/browser-history.md).
+
 ### `BRAIN_WHISPER_MODEL` — voice memos (RM-38)
 
 | Env var | Default | Purpose |

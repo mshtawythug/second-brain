@@ -57,6 +57,7 @@ const SOURCE_ICONS = {
   screenshot: "📸",
   voice: "🎙️",
   code: "💻",
+  web: "🌐",
 };
 const sourceIconFor = (kind) => SOURCE_ICONS[kind] || SOURCE_ICONS.vault;
 
