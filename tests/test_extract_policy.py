@@ -21,9 +21,14 @@ def test_screenshot_is_a_skipped_type() -> None:
     assert "screenshot" in CONCEPT_SKIP_CONTENT_TYPES
 
 
-def test_the_policy_version_was_bumped_for_screenshot() -> None:
-    """The set changed at RM-33, so the version did too (the module's own rule)."""
-    assert CONCEPT_SKIP_POLICY_VERSION == "v2"
+def test_code_is_a_skipped_type() -> None:
+    """RM-43: a code file's definition-level chunks are its value; concepts add little."""
+    assert "code" in CONCEPT_SKIP_CONTENT_TYPES
+
+
+def test_the_policy_version_was_bumped_for_code() -> None:
+    """The set changed at RM-33 (v2) and again at RM-43 (v3), so the version did too."""
+    assert CONCEPT_SKIP_POLICY_VERSION == "v3"
 
 
 def test_skip_watermark_for_a_skipped_type() -> None:

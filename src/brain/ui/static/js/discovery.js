@@ -56,6 +56,7 @@ const SOURCE_ICONS = {
   notion: "📓",
   screenshot: "📸",
   voice: "🎙️",
+  code: "💻",
 };
 const sourceIconFor = (kind) => SOURCE_ICONS[kind] || SOURCE_ICONS.vault;
 

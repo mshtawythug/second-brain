@@ -14,7 +14,7 @@ and the MCP server map the plain :mod:`brain.errors` exceptions raised here to
 their own frameworks.
 
 **File-size ceiling (CLAUDE.md): already over at the branch base, and it grew.**
-This pointer carries no live line count on purpose — the ceiling table's entry
+This pointer carries no live line count on purpose — docs/ceiling-table.md's entry
 for this file asserted ``925 -> 925`` for a full day *after* the growth below
 had landed, so a reader auditing compliance was told there was nothing to
 audit. Re-derive with ``wc -l src/brain/connect.py``. What does not rot is the

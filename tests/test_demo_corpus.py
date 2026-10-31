@@ -77,11 +77,17 @@ CAST = frozenset(
 # manifest seeds text, not audio, and the demo has no whisper model, so a demo memo
 # would exercise neither the transcription nor the tier.
 # ``tests/test_cli_ingest_folder_voice.py`` covers it.
+# ``code`` (RM-43): a code document is a file from a local git work tree, picked
+# by the owner's commit address and stored ``confidential`` by default; the
+# manifest seeds text with no repository and no sensitivity field, so a demo code
+# document would exercise neither the git selection nor the tier.
+# ``tests/test_cli_ingest_code.py`` covers it. Keeping it out also keeps the
+# 22-doc count.
 # The exemption is checked against the canonical set below, so it cannot outlive
 # the kind, and any kind added later still fails this guard until it is either
 # seeded or exempted here.
 DEMO_EXEMPT_KINDS = frozenset(
-    {"calendar", "jira", "github", "applenotes", "notion", "screenshot", "voice"}
+    {"calendar", "jira", "github", "applenotes", "notion", "screenshot", "voice", "code"}
 )
 EXPECTED_SOURCES = VALID_SOURCE_KINDS - DEMO_EXEMPT_KINDS
 

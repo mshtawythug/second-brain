@@ -22,6 +22,42 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — `brain ingest-code`: your own files from a local git repository (RM-43, PR #113)
+
+- `brain ingest-code <repo-dir> --author-email E [--author-email E2 …] --since YYYY-MM-DD`
+  stores the tracked files that a commit by one of your addresses touched since that day, one
+  document each (source `code`, content type `code`), chunked one definition per chunk by the
+  RM-42 code chunker. Both scope flags are required (exit 2 without them). `--ext` and a
+  subdirectory narrow the run. Each address matches the whole address, case-insensitively.
+- Always skipped and counted: git-ignored files (a force-added ignored file included),
+  `node_modules`, `.venv`, `vendor`, `dist`, `build` and `third_party` directories, lockfiles,
+  minified files, files over 200 KB, binary or non-UTF-8 files, empty files, and anything that is
+  not a regular file inside the work tree.
+- The secret guard always runs in `reject` mode for this command, whatever `BRAIN_SECRET_GUARD`
+  says, and there is no `--allow-secrets`. A refused file is named with its finding kinds and
+  line numbers, never the match, and counted on its own summary line.
+- `confidential` by default (`--sensitivity normal` for a personal repository). Summaries are off
+  unless `--enrich`. `--max-files` (default 2,000) caps the files written a run; unchanged files
+  are free, and a re-run updates changed files in place.
+- `git` runs by its absolute path with a minimal environment, a timeout and an output cap. The
+  scanned repository is treated as untrusted (security review sec-113). Its config cannot make
+  `git` run a command: lazy fetch and every transport are off, and hooks, fsmonitor and
+  signature display are forced off. Global config is not read (`GIT_CONFIG_GLOBAL=/dev/null`). A
+  partial clone, or a `core.worktree` outside the named directory, is refused (exit 1), and
+  only files that resolve inside that directory are read. `brain doctor` gains a `git` row (a
+  WARN when `git` is not on `PATH`).
+- **Concept-skip policy `v2` → `v3`:** `code` joins `CONCEPT_SKIP_CONTENT_TYPES`. As with any
+  change to the set, the next `brain graphrag build --backfill` re-reconciles every existing
+  `calendar_event` and `screenshot` document once, with an empty extraction and no model call.
+- **Fixed (BL-35):** `brain vault sync` re-chunks an edited `_ingested/` mirror through the
+  chunker its content type calls for, so an edited `code` mirror keeps its definition-level
+  chunks instead of being re-chunked as prose. A `code` mirror also materializes no wiki links:
+  a `[[Name]]` in code would otherwise have linked the file to a note titled "Name".
+- **Fixed (shared runner, macOS):** a CLI that wrote past its output cap and had already exited
+  was reported as failing to start (`PermissionError`), because macOS answers `killpg` on a group
+  of unreaped children with `EPERM`. The runner behind `gh`, `osascript`, the voice tools and now
+  `git` treats that as a group already gone.
+
 ### Added — a code-aware chunker for the `code` content type (RM-42, PR #109)
 
 - Documents with `content_type="code"` are chunked at definition boundaries,
