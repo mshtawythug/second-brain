@@ -1,0 +1,211 @@
+"""`brain ingest-gmail --with-attachments`: the CLI side of receipt attachments (RM-45).
+
+``cli_ingest.py`` is over the 800-line ceiling, so it gets only wiring; the rules for
+the flag live here, and the hostile-input work in :mod:`brain.ingest.gmail_attachments`
+and :mod:`brain.ingest.attachment_text`.
+
+**Scope (protocol point 5).** The flag needs ``--label`` or ``--query``
+(:func:`refuse_unless_scoped`, exit 2 before any ``gws`` call): a date range or a sender
+alone is too broad a pull of files.
+
+**Re-runs (protocol point 3).** With the flag, a stored thread whose fingerprint matches
+and whose attachments all ended in a final status is skipped before anything is
+downloaded. Without the flag, a stored thread that holds extracted receipt text is
+skipped with a hint, because rebuilding it from the mail alone would drop that text.
+
+**Sensitivity (protocol point 6).** With the flag every thread is ``confidential``: a new
+one is inserted so, a changed one is escalated by ``ingest_document``'s escalate-only
+update, and an unchanged one through :func:`brain.cli_sensitivity_rerun.escalate_stored_sensitivity`
+(which re-fences the mirror). Nothing here lowers a tier.
+
+**Privacy.** Nothing here logs. Lines name the thread id and an attachment's position,
+never its filename; failures are statuses, never exception text.
+"""
+from __future__ import annotations
+
+import contextlib
+import time
+from collections.abc import Callable, Iterator, Mapping
+from pathlib import Path
+from typing import Any
+
+import psycopg
+import typer
+
+from .cli_sensitivity_rerun import escalate_stored_sensitivity
+from .ingest import ExtractedDoc, IngestResult
+from .ingest.attachment_text import with_sections
+from .ingest.gmail import rendered_messages, to_extracted_thread
+from .ingest.gmail_attachments import (
+    FINAL_STATUSES,
+    AttachmentLimits,
+    AttachmentRun,
+    attachment_workdir,
+    extract_attachments,
+    gws_stdout_cap,
+    plan_thread,
+)
+from .ingest.volatile_patch import stored_document
+from .sensitivity import CONFIDENTIAL, DEFAULT_SENSITIVITY
+from .vault.derived_links import real_gws_runner
+from .vault.sensitivity_propagate import propagate_sensitivity_to_vault
+
+__all__ = [
+    "DRY_RUN_NOTE",
+    "WITH_ATTACHMENTS_HELP",
+    "AttachmentPass",
+    "gws_runner",
+    "refuse_unless_scoped",
+]
+
+WITH_ATTACHMENTS_HELP = (
+    "Also extract PDF and image attachments (10 MiB each, 50 per run) into each thread; "
+    "the threads are stored confidential. Needs --label or --query."
+)
+REFUSAL = (
+    "--with-attachments needs --label or --query: an attachment pull over a date range "
+    "or a sender alone is too broad"
+)
+DRY_RUN_NOTE = "--with-attachments: --dry-run fetches no attachments"
+#: One ``attachments get`` call's time limit; the process group is killed past it.
+GWS_TIMEOUT_SECONDS = 60.0
+#: The report's order; ``extracted`` leads and ``failed`` ends it, both always shown.
+_REPORT_ORDER = (
+    "empty", "too large", "too many pages", "encrypted", "unsupported", "unreadable",
+    "malformed", "truncated", "over cap", "deadline",
+)
+_SOURCE_KIND = "gmail"
+
+
+def gws_runner(args: list[str]) -> str:
+    """The production ``gws`` runner, with this command's timeout and stdout cap."""
+    return real_gws_runner(
+        args, timeout=GWS_TIMEOUT_SECONDS, max_stdout_bytes=gws_stdout_cap(AttachmentLimits())
+    )
+
+
+def refuse_unless_scoped(with_attachments: bool, *, label: str | None, query: str | None) -> None:
+    """Exit 2 when ``--with-attachments`` comes without ``--label`` or ``--query``."""
+    if with_attachments and not (label or query):
+        typer.secho(REFUSAL, fg="red", err=True)
+        raise typer.Exit(code=2)
+
+
+def _records(metadata: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    records = metadata.get("attachments")
+    if not isinstance(records, list):
+        return []
+    return [r for r in records if isinstance(r, Mapping)]
+
+
+def _holds_receipt_text(metadata: Mapping[str, Any]) -> bool:
+    return any(r.get("status") == "extracted" for r in _records(metadata))
+
+
+def _unchanged(metadata: Mapping[str, Any], fingerprint: str) -> bool:
+    if metadata.get("attachments_fingerprint") != fingerprint:
+        return False
+    return all(r.get("status") in FINAL_STATUSES for r in _records(metadata))
+
+
+class AttachmentPass:
+    """One ``ingest-gmail`` run's attachment work; a no-op shell without the flag."""
+
+    def __init__(
+        self,
+        enabled: bool,
+        *,
+        vault_root: Path,
+        limits: AttachmentLimits | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.enabled = enabled
+        self._vault_root = vault_root
+        self._run = AttachmentRun(limits or AttachmentLimits(), clock=clock)
+        self._workdir: Path | None = None
+
+    @property
+    def sensitivity(self) -> str:
+        """The tier this run writes: ``confidential`` with the flag."""
+        return CONFIDENTIAL if self.enabled else DEFAULT_SENSITIVITY
+
+    @contextlib.contextmanager
+    def session(self) -> Iterator[None]:
+        """Hold the private work directory for the run (nothing without the flag)."""
+        if not self.enabled:
+            yield
+            return
+        with attachment_workdir() as workdir:
+            self._workdir = workdir
+            try:
+                yield
+            finally:
+                self._workdir = None
+
+    def dry_run_note(self) -> None:
+        """Say that ``--dry-run`` fetches nothing (nothing without the flag)."""
+        if self.enabled:
+            typer.echo(DRY_RUN_NOTE)
+
+    def augment(
+        self, conn: psycopg.Connection[Any], tid: str, messages: list[dict[str, Any]]
+    ) -> ExtractedDoc | None:
+        """The thread's document with its attachment sections; ``None`` when it is skipped."""
+        doc = to_extracted_thread(messages)
+        stored = stored_document(conn, _SOURCE_KIND, tid)
+        if not self.enabled:
+            if stored is not None and _holds_receipt_text(stored[1]):
+                typer.echo(
+                    f"  skipped thread {tid} (has attachments: re-run with --with-attachments)"
+                )
+                return None
+            return doc
+        plan = plan_thread(rendered_messages(messages), doc.content, limits=self._run.limits)
+        if stored is not None and _unchanged(stored[1], plan.fingerprint):
+            typer.echo(f"  skipped thread {tid} (unchanged)")
+            self._escalate(conn, stored[0], tid)
+            return None
+        if self._workdir is None:
+            raise RuntimeError("AttachmentPass.augment called outside session()")
+        self._run.counts["malformed"] += plan.malformed
+        out = extract_attachments(
+            plan.candidates, run=self._run, runner=gws_runner, workdir=self._workdir
+        )
+        for position, record in enumerate(out.records, start=1):
+            if record.status != "extracted":
+                typer.echo(f"  attachment {position} of thread {tid}: {record.status}")
+        metadata = {
+            "attachments": [record.as_metadata() for record in out.records],
+            "attachments_fingerprint": plan.fingerprint,
+        }
+        return with_sections(doc, out.sections, metadata)
+
+    def after_ingest(self, conn: psycopg.Connection[Any], tid: str, result: IngestResult) -> None:
+        """Escalate a thread the ingest left unchanged (a changed one already was)."""
+        if not self.enabled or result.created or result.body_changed:
+            return
+        if result.document_id is not None:
+            self._escalate(conn, result.document_id, tid)
+
+    def _escalate(self, conn: psycopg.Connection[Any], document_id: str, tid: str) -> None:
+        escalate_stored_sensitivity(
+            conn,
+            document_id,
+            level=CONFIDENTIAL,
+            explicit=True,
+            vault_root=self._vault_root,
+            label=f"thread {tid}",
+            propagate=propagate_sensitivity_to_vault,
+        )
+
+    def report(self) -> None:
+        """Print the run's attachment counts, and the OCR hint once (nothing without the flag)."""
+        if not self.enabled:
+            return
+        counts = self._run.counts
+        parts = [f"{counts['extracted']} extracted"]
+        parts.extend(f"{counts[s]} {s}" for s in _REPORT_ORDER if counts[s])
+        parts.append(f"{counts['failed']} failed")
+        typer.echo(f"attachments: {', '.join(parts)}")
+        if self._run.ocr_hint is not None:
+            typer.secho(self._run.ocr_hint, fg="yellow", err=True)
