@@ -12,6 +12,7 @@ Reference docs for [Second Brain](../README.md). The [top-level README](../READM
 | [guides/mobile-capture.md](guides/mobile-capture.md) | Capturing from a phone: the "Save to Brain" iOS Shortcut, an iCloud Drive capture folder, `brain capture import`, and what passes through iCloud. |
 | [guides/brain-ui-on-your-phone.md](guides/brain-ui-on-your-phone.md) | Reading from a phone or tablet: `brain ui --lan` or `--host <LAN address> --token`, how the token travels, and the security caveats. |
 | [guides/local-reranker.md](guides/local-reranker.md) | The local cross-encoder reranker: installing `llama-server` and the `bge-reranker-v2-m3` GGUF (tested version, size, measured memory), the opt-in `com.brain.reranker` launchd job, and `brain doctor`'s `reranker` line. |
+| [guides/browser-history.md](guides/browser-history.md) | Ingesting allowlisted browser history and bookmarks (`brain ingest-web`): the allowlist file, Safari's Full Disk Access, what is stored and dropped, and the `--fetch` egress rules. |
 | [guides/apple-notes.md](guides/apple-notes.md) | Ingesting named Apple Notes folders on macOS (`brain ingest-apple-notes`): the Automation permission prompt, what is stored and skipped, and how to revoke access. |
 | [guides/claude-desktop-setup.md](guides/claude-desktop-setup.md) | Step-by-step walkthrough for wiring `brain-mcp` into Claude Desktop (symlink, boot smoke-test, config, troubleshooting). |
 

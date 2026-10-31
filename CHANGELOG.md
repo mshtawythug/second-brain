@@ -22,6 +22,28 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — browser history and bookmarks, allowlist only (RM-41)
+
+- `brain ingest-web --browser chrome|safari --since YYYY-MM-DD` stores pages you bookmarked, or
+  visited at least `--min-visits` (3) times, on the hosts listed in
+  `$BRAIN_HOME/web-allowlist.txt`. With no allowlist, an empty one or a malformed line, the
+  command reads nothing and exits 2. Source `web`, content type `web_page`, one document per
+  normalized URL. The query string, fragment, userinfo and default port are dropped before
+  anything is stored. Default sensitivity `normal`.
+- The browser's database is copied with its write-ahead log into a private temporary folder and
+  the copy is opened `mode=ro`. `immutable=1` was measured to hide every visit still in the WAL,
+  so it is not used. The live profile is never opened by SQLite. Safari without Full Disk Access
+  exits 1 with one line.
+- Re-runs patch only the per-browser metadata (`chrome_visits`, `safari_last_visit`, …): no
+  re-chunk, no embed. `--refresh` rebuilds a stored page.
+- `--fetch` (opt-in) downloads new pages' text. It allows https only and an allowlisted host at
+  every redirect, and every resolved address must be public. The connection goes to the checked
+  address, with the name in `Host` and TLS SNI. It stops after 10 s or 1 MiB, and sends no
+  cookies, no proxy settings and no `.netrc`.
+- `web_page` joins the concept-skip policy (version `v3`). New: `brain/ingest/browser.py`,
+  `browser_store.py`, `web_url.py`, `web_fetch.py`, `brain/settings/web_allowlist.py`,
+  `brain/cli_ingest_web.py`, and `docs/guides/browser-history.md`.
+
 ### Added — a code-aware chunker for the `code` content type (RM-42, PR #109)
 
 - Documents with `content_type="code"` are chunked at definition boundaries,

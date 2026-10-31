@@ -77,11 +77,15 @@ CAST = frozenset(
 # manifest seeds text, not audio, and the demo has no whisper model, so a demo memo
 # would exercise neither the transcription nor the tier.
 # ``tests/test_cli_ingest_folder_voice.py`` covers it.
+# ``web`` (RM-41): a page is read from a browser's own history store through an
+# allowlist; the manifest seeds bodies, not browser stores, so a demo web row would
+# exercise neither the allowlist nor the store reader. ``tests/test_cli_ingest_web.py``
+# covers it.
 # The exemption is checked against the canonical set below, so it cannot outlive
 # the kind, and any kind added later still fails this guard until it is either
 # seeded or exempted here.
 DEMO_EXEMPT_KINDS = frozenset(
-    {"calendar", "jira", "github", "applenotes", "notion", "screenshot", "voice"}
+    {"calendar", "jira", "github", "applenotes", "notion", "screenshot", "voice", "web"}
 )
 EXPECTED_SOURCES = VALID_SOURCE_KINDS - DEMO_EXEMPT_KINDS
 
