@@ -92,6 +92,13 @@ git tag scheme:
   - the endpoint answers POST only (405 otherwise);
   - every refusal sends `Connection: close`;
   - the statement-timeout URL rewrite keeps `+` literally.
+- Security re-check (sec-118c):
+  - over HTTP, `mode="auto"`'s person scan knows public people only, so a name only
+    confidential documents carry routes as an unknown name does;
+  - over HTTP, `brain_ask` refuses `max_iterations` above `BRAIN_ASK_MAX_ITERATIONS` and
+    `limit` above `BRAIN_ASK_DOCS_PER_ITER`, and stops at its next step once
+    `--call-timeout` has passed; graph tools refuse `depth` above `BRAIN_GRAPH_DEPTH`;
+  - a tool result holding a NamedTuple no longer fails the HTTP result filter.
 - New `http` extra (`pip install 'secondbrain-py[http]'`) pins `mcp>=2.0,<3.0`. The base pin
   still admits 1.x for stdio, and `brain mcp serve` on 1.x exits 2 naming the extra. Guide:
   `docs/guides/mcp-http-transport.md`.
