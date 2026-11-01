@@ -92,3 +92,10 @@ audit already look.
   community `communities_with_confidential_members` names. That is `list_communities`'
   own predicate (`confidential_member_sql`), now shared. Over HTTP, theme summaries drawn
   from a withheld entity name are dropped too (`public_entities._public_themes`).
+- **People and timeline names over HTTP (sec-118b):** `queries.resolve_person_to_keys`
+  gains `public_only`. In HTTP hide mode, a person no non-confidential document names is
+  unknown (search, recall, timeline and themes), and `person_keys` is dropped from results.
+  `timeline_entities.resolve_entities` (moved out of `timeline.py`) gains the same
+  public-mention filter on its substring match. The resolver's own docstring explains why
+  stdio stays permissive: identities come from the directory, which the local owner
+  already holds.

@@ -84,6 +84,14 @@ git tag scheme:
     too) never returns a community with a confidential member, as
     `brain_graphrag_communities` already withheld it;
   - `brain mcp serve` exits 2 if uvicorn lacks the internals its idle deadline uses.
+- Security re-check (sec-118b):
+  - over HTTP a `person` argument resolves public people only, and `person_keys` (email
+    addresses) are dropped from results;
+  - `brain_timeline` names only public entities over HTTP;
+  - a 504 no longer leaks SDK tasks (the call finishes, discarded, and stays counted);
+  - the endpoint answers POST only (405 otherwise);
+  - every refusal sends `Connection: close`;
+  - the statement-timeout URL rewrite keeps `+` literally.
 - New `http` extra (`pip install 'secondbrain-py[http]'`) pins `mcp>=2.0,<3.0`. The base pin
   still admits 1.x for stdio, and `brain mcp serve` on 1.x exits 2 naming the extra. Guide:
   `docs/guides/mcp-http-transport.md`.
