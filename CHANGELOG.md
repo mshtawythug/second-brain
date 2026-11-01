@@ -69,6 +69,16 @@ git tag scheme:
     document mentions;
   - `brain_link_proposal` takes `include_confidential` and no longer resolves a
     confidential destination by default, on stdio too (F6).
+- Review round (rev-118):
+  - `brain mcp token --rotate` says a running server must be restarted, and
+    `brain mcp token` says when `BRAIN_MCP_TOKEN` overrides the file;
+  - `--no-auth` is refused with `--allow-remote` or `--allowed-host`;
+  - a wildcard bind's refusal names `--allowed-host` or the private address;
+  - `brain-mcp` checks its arguments before loading config;
+  - `--log-level` defaults to `BRAIN_MCP_LOG_LEVEL`;
+  - `brain_graphrag_stats`' top entity names are filtered over HTTP like the listing;
+  - a `brain-maintenance` skill reference (`reference/mcp-http.md`) carries the serve
+    and token recipe.
 - New `http` extra (`pip install 'secondbrain-py[http]'`) pins `mcp>=2.0,<3.0`. The base pin
   still admits 1.x for stdio, and `brain mcp serve` on 1.x exits 2 naming the extra. Guide:
   `docs/guides/mcp-http-transport.md`.
