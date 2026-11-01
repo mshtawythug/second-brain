@@ -158,6 +158,11 @@ def timeline_entities(test_db: psycopg.Connection[Any], people: dict[str, str]) 
     secret = seed_entity(test_db, name="Zephyrcode", canonical_key="zephyrcode")
     seed_mention(test_db, public, people["alice"])
     seed_mention(test_db, secret, people["abner"])
+    # The gated lens names an entity only if a public record carries its name.
+    for name, doc in (("Zephyrpublic", people["alice"]), ("Zephyrcode", people["abner"])):
+        test_db.execute(
+            "UPDATE documents SET content = content || %s WHERE id = %s", (f" {name}", doc)
+        )
 
 
 @pytest.mark.usefixtures("timeline_entities")

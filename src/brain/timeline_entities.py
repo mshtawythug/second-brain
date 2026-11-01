@@ -7,6 +7,8 @@ the file-size ceiling and asks to be extracted from before it grows: sec-118b's
 ``--include-confidential`` the substring match would enumerate entity names only
 confidential documents mention). ``brain_timeline`` is the one entity-name surface
 still served in that mode; the graph tools are withheld there (RM-46 round 5).
+:func:`top_cotopics` moved here for the same reason when the co-topics needed the
+same rule (sec-118f LOW-1).
 """
 from __future__ import annotations
 
@@ -15,15 +17,15 @@ from typing import Any
 
 import psycopg
 
-from .sensitivity import not_confidential_sql
+from .sensitivity import name_in_public_record_sql
 
-#: ``graph_entities`` row has a mention in a non-confidential document.
-_PUBLIC_MENTION_SQL = (
-    " AND EXISTS (SELECT 1 FROM graph_entity_mentions m "
-    "JOIN documents d ON d.id = m.document_id "
-    "WHERE m.tenant_id = graph_entities.tenant_id AND m.entity_id = graph_entities.id "
-    f"AND {not_confidential_sql('d')})"
-)
+#: The gated lens names an entity only if a non-confidential record carries its name
+#: (sec-118f LOW-1: a public mention alone can be an alias re-pointed onto a target
+#: named only in confidential mail).
+_PUBLIC_MENTION_SQL = " AND " + name_in_public_record_sql("graph_entities")
+
+#: Co-topic entities surfaced per bucket (spec §3f step 3).
+COTOPIC_LIMIT = 3
 
 #: Entity-resolution fan-out cap — a free-text query that ILIKE-matches more than
 #: this many entities is almost certainly too broad; mirrors the
@@ -77,3 +79,54 @@ def resolve_entities(
         )
         for r in rows
     ]
+
+
+def top_cotopics(
+    conn: psycopg.Connection[Any],
+    tenant_id: str,
+    doc_ids: list[str],
+    seed_entity_ids: list[str],
+    owner_entity_ids: list[str],
+    *,
+    public_only: bool = False,
+) -> list[str]:
+    """Top co-occurring entity names for a bucket's docs (spec §3f step 3).
+
+    Aggregates ``graph_edge_contributions`` restricted to the bucket's docs and
+    edges touching a seed entity; the non-seed endpoint is the co-topic. Excludes
+    the seed entities and the corpus owner (same suppression as themes mode).
+    Returns up to :data:`COTOPIC_LIMIT` names by descending co-occurrence.
+    ``public_only`` (HTTP hide mode) names only co-topics a non-confidential
+    record names, as :func:`resolve_entities` does.
+    """
+    if not doc_ids or not seed_entity_ids:
+        return []
+    excluded = seed_entity_ids + owner_entity_ids
+    public = " AND " + name_in_public_record_sql("ge") if public_only else ""
+    rows = conn.execute(
+        "SELECT ge.name, SUM(sub.cooccur) AS total FROM ("
+        "    SELECT CASE WHEN gec.src_id = ANY(%s) THEN gec.dst_id "
+        "                ELSE gec.src_id END AS co_id, "
+        "           gec.cooccur_count AS cooccur "
+        "    FROM graph_edge_contributions gec "
+        "    WHERE gec.tenant_id = %s AND gec.document_id = ANY(%s) "
+        "      AND (gec.src_id = ANY(%s) OR gec.dst_id = ANY(%s)) "
+        ") sub "
+        "JOIN graph_entities ge ON ge.id = sub.co_id AND ge.tenant_id = %s "
+        f"WHERE sub.co_id::text <> ALL(%s){public} "
+        "GROUP BY ge.name "
+        "ORDER BY total DESC, ge.name ASC "
+        "LIMIT %s",
+        (
+            seed_entity_ids,
+            tenant_id,
+            doc_ids,
+            seed_entity_ids,
+            seed_entity_ids,
+            tenant_id,
+            excluded,
+            COTOPIC_LIMIT,
+        ),
+    ).fetchall()
+    return [str(r[0]) for r in rows]
+

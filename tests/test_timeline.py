@@ -32,7 +32,7 @@ import pytest
 from mcp.types import INVALID_PARAMS
 from typer.testing import CliRunner
 
-from brain import mcp_server
+from brain import mcp_server, timeline_entities
 from brain import timeline as timeline_mod
 from brain.cli import app
 from brain.config import Config
@@ -921,7 +921,7 @@ def test_build_timeline_auto_unknown_entity_resolves_concrete_granularity(
 
 def test_empty_helpers_short_circuit(test_db: psycopg.Connection[Any]) -> None:
     # Direct guards: empty doc/seed inputs return [] without touching real rows.
-    assert timeline_mod._top_cotopics(test_db, TENANT, [], ["x"], []) == []
+    assert timeline_entities.top_cotopics(test_db, TENANT, [], ["x"], []) == []
     assert timeline_mod._bucket_doc_titles(test_db, []) == []
     assert timeline_mod._bucket_doc_summaries(test_db, []) == []
     assert timeline_mod._scope_to_person(test_db, TENANT, [], ["k"]) == []

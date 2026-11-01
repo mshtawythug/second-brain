@@ -53,9 +53,21 @@ def seed_entity(
 def seed_mention(
     conn: psycopg.Connection, entity_id: str, document_id: str, *, tenant_id: str = TENANT
 ) -> None:
-    """Record that ``document_id`` mentions ``entity_id``."""
+    """Record that ``document_id`` mentions ``entity_id``, as a participant.
+
+    A ``people`` mention means the document lists that person, so the entity's name
+    joins the document's ``metadata.participants`` too: the gated lens names an
+    entity only if a record carries its name (RM-46 sec-118f LOW-1).
+    """
     conn.execute(
         "INSERT INTO graph_entity_mentions (tenant_id, entity_id, document_id, source)"
         " VALUES (%s, %s, %s, 'people')",
         (tenant_id, entity_id, document_id),
+    )
+    conn.execute(
+        "UPDATE documents SET metadata = jsonb_set(coalesce(metadata, '{}'::jsonb),"
+        " '{participants}', coalesce(metadata->'participants', '[]'::jsonb)"
+        " || to_jsonb((SELECT name FROM graph_entities WHERE id = %s::uuid)))"
+        " WHERE id = %s::uuid",
+        (entity_id, document_id),
     )

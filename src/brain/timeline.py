@@ -72,7 +72,7 @@ from .config import (
 from .graph_rag.tenancy import resolve_tenant
 from .queries import resolve_person_to_keys
 from .sensitivity import not_confidential_sql
-from .timeline_entities import resolve_entities
+from .timeline_entities import resolve_entities, top_cotopics
 from .token_budget import pack_greedy
 
 if TYPE_CHECKING:
@@ -80,8 +80,6 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# Number of co-topic entities surfaced per bucket (spec §3f step 3).
-_COTOPIC_LIMIT = 3
 # Auto-granularity: the coarsest of {year, quarter, month} that yields at least
 # this many non-empty buckets wins; if none clears the bar, fall back to month
 # (so a young/sparse corpus still shows the finest-grained view available).
@@ -509,51 +507,6 @@ def _query_buckets(
     ]
 
 
-def _top_cotopics(
-    conn: psycopg.Connection[Any],
-    tenant_id: str,
-    doc_ids: list[str],
-    seed_entity_ids: list[str],
-    owner_entity_ids: list[str],
-) -> list[str]:
-    """Top co-occurring entity names for a bucket's docs (spec §3f step 3).
-
-    Aggregates ``graph_edge_contributions`` restricted to the bucket's docs and
-    edges touching a seed entity; the non-seed endpoint is the co-topic. Excludes
-    the seed entities and the corpus owner (same suppression as themes mode).
-    Returns up to :data:`_COTOPIC_LIMIT` names by descending co-occurrence.
-    """
-    if not doc_ids or not seed_entity_ids:
-        return []
-    excluded = seed_entity_ids + owner_entity_ids
-    rows = conn.execute(
-        "SELECT ge.name, SUM(sub.cooccur) AS total FROM ("
-        "    SELECT CASE WHEN gec.src_id = ANY(%s) THEN gec.dst_id "
-        "                ELSE gec.src_id END AS co_id, "
-        "           gec.cooccur_count AS cooccur "
-        "    FROM graph_edge_contributions gec "
-        "    WHERE gec.tenant_id = %s AND gec.document_id = ANY(%s) "
-        "      AND (gec.src_id = ANY(%s) OR gec.dst_id = ANY(%s)) "
-        ") sub "
-        "JOIN graph_entities ge ON ge.id = sub.co_id AND ge.tenant_id = %s "
-        "WHERE sub.co_id::text <> ALL(%s) "
-        "GROUP BY ge.name "
-        "ORDER BY total DESC, ge.name ASC "
-        "LIMIT %s",
-        (
-            seed_entity_ids,
-            tenant_id,
-            doc_ids,
-            seed_entity_ids,
-            seed_entity_ids,
-            tenant_id,
-            excluded,
-            _COTOPIC_LIMIT,
-        ),
-    ).fetchall()
-    return [str(r[0]) for r in rows]
-
-
 def _bucket_doc_titles(
     conn: psycopg.Connection[Any], doc_ids: list[str]
 ) -> list[str]:
@@ -817,7 +770,9 @@ def build_timeline(
     owner_ids = _owner_entity_ids(conn, tenant_id, cfg.owner_participants)
     enriched: list[TimelineBucket] = []
     for raw in raw_buckets:
-        cotopics = _top_cotopics(conn, tenant_id, raw.doc_ids, entity_ids, owner_ids)
+        cotopics = top_cotopics(
+            conn, tenant_id, raw.doc_ids, entity_ids, owner_ids, public_only=public_entities_only
+        )
         titles = _bucket_doc_titles(conn, raw.doc_ids)
         enriched.append(
             TimelineBucket(

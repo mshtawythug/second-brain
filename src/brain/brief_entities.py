@@ -46,7 +46,7 @@ from typing import Any
 import psycopg
 
 from .config import Config
-from .sensitivity import not_confidential_sql
+from .sensitivity import name_in_public_record_sql, not_confidential_sql
 
 #: "New this week": the window the brief reports on.
 WINDOW_DAYS = 7
@@ -77,7 +77,12 @@ _NEW_ENTITIES_SQL = """
     ORDER  BY document_count DESC, first_ingested_at DESC, e.name, e.id
     LIMIT  %s
 """
-_GATED_SQL = _NEW_ENTITIES_SQL.format(lens=f"AND  {not_confidential_sql('d')}")
+# The gated lens also asks that a non-confidential record NAME the entity, not just mention
+# it: an alias can re-point a public mention onto a target named only in confidential mail
+# (RM-46 sec-118f LOW-1).
+_GATED_SQL = _NEW_ENTITIES_SQL.format(
+    lens=f"AND  {not_confidential_sql('d')} AND {name_in_public_record_sql('e')}"
+)
 _PERMISSIVE_SQL = _NEW_ENTITIES_SQL.format(lens="")
 
 

@@ -182,3 +182,32 @@ def confidential_member_sql(alias: str) -> str:
         f"    AND cm.community_key = {alias}.community_key"
         f"    AND NOT ({not_confidential_sql('d')}))"
     )
+
+
+def name_in_public_record_sql(alias: str) -> str:
+    """``EXISTS`` predicate: a non-confidential record that mentions entity row ``alias`` names it.
+
+    True when some non-draft, non-confidential document that mentions the entity
+    carries its display name (case-insensitively) in its title, content or
+    metadata. A public MENTION alone is not enough (RM-46 sec-118f LOW-1): an
+    owner-written alias rule re-points a public document's "ZC" onto the target
+    "Zephyrcode", so a target named only in confidential mail would pass a
+    mention test. Metadata counts, so a person known from an email header or a
+    call's participant list still passes.
+
+    The one rule for every gated surface that names entities: the timeline's
+    entity match and co-topics, the brief's new entities, the conflict scan's
+    candidates and the review findings list. ``alias`` is a ``graph_entities``
+    row (``tenant_id``, ``id``, ``name``) and is validated like
+    :func:`not_confidential_sql`'s.
+    """
+    if not alias.isidentifier():
+        raise ValueError(f"table alias must be a plain identifier (got {alias!r})")
+    return (
+        "EXISTS (SELECT 1 FROM graph_entity_mentions pm"
+        " JOIN documents pd ON pd.id = pm.document_id"
+        f" WHERE pm.tenant_id = {alias}.tenant_id AND pm.entity_id = {alias}.id"
+        f" AND pd.draft = FALSE AND {not_confidential_sql('pd')}"
+        " AND strpos(lower(coalesce(pd.title, '') || ' ' || pd.content || ' '"
+        f" || coalesce(pd.metadata::text, '')), lower({alias}.name)) > 0)"
+    )
