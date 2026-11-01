@@ -51,6 +51,7 @@ from .mcp_http_guard import (
     ASGIApp,
     ConfidentialGateMiddleware,
     HealthzRoute,
+    PathAllowlistMiddleware,
     ReadyzRoute,
     RequestLogMiddleware,
     ResponseGuardMiddleware,
@@ -262,12 +263,9 @@ def build_http_app(
         host=plan.host,
     )
     if not opts.include_confidential:
-        app = ConfidentialGateMiddleware(
-            app, endpoint=opts.path, max_body_bytes=opts.max_body_bytes
-        )
+        app = ConfidentialGateMiddleware(app, max_body_bytes=opts.max_body_bytes)
     app = ResponseGuardMiddleware(
         app,
-        endpoint=opts.path,
         max_response_bytes=MAX_RESPONSE_BYTES,
         timeout_s=opts.call_timeout_s,
     )
@@ -281,6 +279,10 @@ def build_http_app(
         TrustedHostMiddleware(
             cast(Any, app), allowed_hosts=sorted(plan.allowed_hosts), www_redirect=False
         ),
+    )
+    # Outermost but for the log: only the three exact paths reach anything else.
+    app = PathAllowlistMiddleware(
+        app, paths=frozenset({opts.path, HEALTHZ_PATH, READYZ_PATH})
     )
     return RequestLogMiddleware(app, endpoint=opts.path)
 

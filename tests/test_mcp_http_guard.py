@@ -16,9 +16,11 @@ import pytest
 from starlette.testclient import TestClient
 
 from brain.mcp_http_guard import (
+    CONFIDENTIAL_REFUSAL,
     MAX_JSON_DEPTH,
     ConfidentialGateMiddleware,
     HealthzRoute,
+    PathAllowlistMiddleware,
     ReadyzRoute,
     RequestLogMiddleware,
     ResponseGuardMiddleware,
@@ -68,7 +70,7 @@ def _call(arguments: Any, *, method: str = "tools/call", rid: Any = 7) -> bytes:
 
 
 def _gate(echo: _Echo, *, cap: int = 1024 * 1024) -> TestClient:
-    return TestClient(ConfidentialGateMiddleware(echo, endpoint=ENDPOINT, max_body_bytes=cap))
+    return TestClient(ConfidentialGateMiddleware(echo, max_body_bytes=cap))
 
 
 # ----------------------------------------------------------- the confidential gate
@@ -108,15 +110,30 @@ def test_an_ordinary_call_passes_byte_for_byte(arguments: dict[str, Any]) -> Non
     assert echo.bodies == [body]
 
 
-def test_other_methods_and_paths_pass_untouched() -> None:
+def test_other_methods_and_non_post_requests_pass_untouched() -> None:
     echo = _Echo()
     client = _gate(echo)
     listing = _call({"include_confidential": True}, method="tools/list")
 
     assert client.post(ENDPOINT, content=listing).status_code == 200
-    assert client.post("/elsewhere", content=b"not json").status_code == 200
     assert client.get(ENDPOINT).status_code == 200
+    assert client.get("/elsewhere").status_code == 200
     assert echo.calls == 3
+
+
+@pytest.mark.parametrize("path", ["/mcp%0A", "/mcp%0D", "/mcp%09", "//mcp", "/elsewhere"])
+def test_the_gate_checks_every_post_whatever_its_path(path: str) -> None:
+    # sec-118 #1: the SDK's ``^/mcp$`` route also matches "/mcp\n"; a gate
+    # keyed on the exact endpoint path let that request through unchecked.
+    echo = _Echo()
+    gate = _gate(echo)
+
+    refused = gate.post(path, content=_call({"query": "q", "include_confidential": True}))
+    ordinary = gate.post(path, content=_call({"query": "q"}))
+
+    assert refused.json()["error"]["message"] == CONFIDENTIAL_REFUSAL
+    assert ordinary.status_code == 200
+    assert echo.calls == 1
 
 
 def test_a_duplicate_key_is_refused() -> None:
@@ -248,7 +265,7 @@ class _Answer:
 
 def _guarded(app: Any, *, cap: int = 1000, timeout: float = 5.0) -> TestClient:
     return TestClient(
-        ResponseGuardMiddleware(app, endpoint=ENDPOINT, max_response_bytes=cap, timeout_s=timeout)
+        ResponseGuardMiddleware(app, max_response_bytes=cap, timeout_s=timeout)
     )
 
 
@@ -281,11 +298,22 @@ def test_a_prompt_call_is_not_timed_out() -> None:
     assert response.status_code == 200
 
 
-def test_other_paths_are_not_buffered_or_capped() -> None:
-    response = _guarded(_Answer(b"x" * 5000)).get("/elsewhere")
+def test_a_get_is_not_buffered_or_capped() -> None:
+    response = _guarded(_Answer(b"x" * 5000)).get(ENDPOINT)
 
     assert response.status_code == 200
     assert len(response.content) == 5000
+
+
+@pytest.mark.parametrize("path", ["/mcp%0A", "//mcp", "/elsewhere"])
+def test_the_caps_hold_on_every_post_whatever_its_path(path: str) -> None:
+    capped = _guarded(_Answer(b"x" * 3000)).post(path)
+    slow = _guarded(_Answer(b"{}", delay=2.0), timeout=0.2).post(path)
+    ordinary = _guarded(_Answer(b"{}")).post(path)
+
+    assert capped.status_code == 502
+    assert slow.status_code == 504
+    assert ordinary.status_code == 200
 
 
 # ------------------------------------------------------------------ health routes
@@ -370,6 +398,9 @@ def test_a_failing_app_is_still_logged_and_the_error_propagates(
     assert any(" endpoint 500 " in record.getMessage() for record in caplog.records)
 
 
+_ALLOWED_FOR_LIFESPAN = frozenset({ENDPOINT})
+
+
 def test_lifespan_and_non_http_scopes_pass_every_guard() -> None:
     seen: list[str] = []
 
@@ -380,8 +411,9 @@ def test_lifespan_and_non_http_scopes_pass_every_guard() -> None:
         return {}
 
     guards = [
-        ConfidentialGateMiddleware(inner, endpoint=ENDPOINT, max_body_bytes=10),
-        ResponseGuardMiddleware(inner, endpoint=ENDPOINT, max_response_bytes=10, timeout_s=1),
+        ConfidentialGateMiddleware(inner, max_body_bytes=10),
+        ResponseGuardMiddleware(inner, max_response_bytes=10, timeout_s=1),
+        PathAllowlistMiddleware(inner, paths=_ALLOWED_FOR_LIFESPAN),
         RequestLogMiddleware(inner, endpoint=ENDPOINT),
         HealthzRoute(inner),
         ReadyzRoute(inner, probe=_ready),
@@ -420,7 +452,7 @@ def test_the_app_can_keep_receiving_after_the_replay() -> None:
         seen.append((await receive())["type"])
         seen.append((await receive())["type"])
 
-    gate = ConfidentialGateMiddleware(listener, endpoint=ENDPOINT, max_body_bytes=4096)
+    gate = ConfidentialGateMiddleware(listener, max_body_bytes=4096)
     messages = iter(
         [
             {"type": "http.request", "body": _call({"query": "q"}), "more_body": False},
@@ -442,7 +474,7 @@ def test_the_app_can_keep_receiving_after_the_replay() -> None:
 
 def test_a_client_that_disconnects_mid_body_gets_no_response() -> None:
     echo = _Echo()
-    gate = ConfidentialGateMiddleware(echo, endpoint=ENDPOINT, max_body_bytes=4096)
+    gate = ConfidentialGateMiddleware(echo, max_body_bytes=4096)
     messages = iter(
         [
             {"type": "http.request", "body": b'{"jsonrpc"', "more_body": True},
@@ -484,3 +516,52 @@ def test_nesting_within_the_limit_passes() -> None:
 
     assert response.status_code == 200
     assert echo.calls == 1
+
+
+# ------------------------------------------------------------- the path allowlist
+
+_ALLOWED = frozenset({ENDPOINT, "/healthz", "/readyz"})
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/mcp%0A", "/mcp%0a", "/mcp%0D", "/mcp%09", "/mcp%20", "//mcp", "/mcp/", "/MCP", "/", "/x"],
+)
+def test_a_path_off_the_allowlist_is_404_before_anything_runs(path: str) -> None:
+    echo = _Echo()
+    client = TestClient(PathAllowlistMiddleware(echo, paths=_ALLOWED))
+
+    response = client.post(path, content=_call({"query": "q"}))
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "not found"}
+    assert echo.calls == 0
+
+
+@pytest.mark.parametrize("path", sorted(_ALLOWED))
+def test_an_allowlisted_path_passes(path: str) -> None:
+    echo = _Echo()
+
+    response = TestClient(PathAllowlistMiddleware(echo, paths=_ALLOWED)).get(path)
+
+    assert response.status_code == 200
+    assert echo.calls == 1
+
+
+@pytest.mark.parametrize("raw", ["/mcp\n", "/mcp\r", "/mcp\t", "/mcp\x00"])
+def test_a_decoded_control_character_path_is_404(raw: str) -> None:
+    # What uvicorn hands the app for ``/mcp%0A``: the path already decoded.
+    echo = _Echo()
+    sent: list[Any] = []
+
+    async def receive() -> Any:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Any) -> None:
+        sent.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": raw, "headers": []}
+    anyio.run(PathAllowlistMiddleware(echo, paths=_ALLOWED), scope, receive, send)
+
+    assert sent[0]["status"] == 404
+    assert echo.calls == 0

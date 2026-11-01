@@ -79,10 +79,34 @@ async def send_json(send: Send, status: int, payload: Any) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
-def _is_endpoint_post(scope: Scope, endpoint: str) -> bool:
-    return bool(
-        scope["type"] == "http" and scope["method"] == "POST" and scope["path"] == endpoint
-    )
+def _is_post(scope: Scope) -> bool:
+    """Every HTTP POST, WHATEVER its path (sec-118 #1).
+
+    Keying a guard on ``scope["path"] == endpoint`` let ``POST /mcp%0A`` past
+    it: uvicorn decodes the path to ``"/mcp\n"``, and starlette's ``^/mcp$``
+    route still matches it, because ``$`` also matches before a final newline.
+    A guard that checks every POST cannot be routed around.
+    """
+    return bool(scope["type"] == "http" and scope["method"] == "POST")
+
+
+class PathAllowlistMiddleware:
+    """Answer 404 for any path that is not EXACTLY one of ``paths``, before anything runs.
+
+    Plain set membership, never a pattern: the SDK's route regex is exactly what
+    ``/mcp\n`` slipped past (sec-118 #1). Outermost but for the request log, so
+    no auth, Host check, guard or route ever sees an unlisted path.
+    """
+
+    def __init__(self, app: ASGIApp, *, paths: frozenset[str]) -> None:
+        self._app = app
+        self._paths = paths
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope["path"] in self._paths:
+            await self._app(scope, receive, send)
+            return
+        await send_json(send, 404, {"error": "not found"})
 
 
 class RequestLogMiddleware:
@@ -162,16 +186,13 @@ class ResponseGuardMiddleware:
     dropped. The concurrency cap bounds how many such threads can exist.
     """
 
-    def __init__(
-        self, app: ASGIApp, *, endpoint: str, max_response_bytes: int, timeout_s: float
-    ) -> None:
+    def __init__(self, app: ASGIApp, *, max_response_bytes: int, timeout_s: float) -> None:
         self._app = app
-        self._endpoint = endpoint
         self._cap = max_response_bytes
         self._timeout = timeout_s
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if not _is_endpoint_post(scope, self._endpoint):
+        if not _is_post(scope):
             await self._app(scope, receive, send)
             return
         start: Message | None = None
@@ -301,13 +322,12 @@ async def _read_capped(receive: Receive, cap: int) -> tuple[bytes, str]:
 class ConfidentialGateMiddleware:
     """Refuse ``include_confidential`` over HTTP; replay every other request unchanged."""
 
-    def __init__(self, app: ASGIApp, *, endpoint: str, max_body_bytes: int) -> None:
+    def __init__(self, app: ASGIApp, *, max_body_bytes: int) -> None:
         self._app = app
-        self._endpoint = endpoint
         self._cap = max_body_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if not _is_endpoint_post(scope, self._endpoint):
+        if not _is_post(scope):
             await self._app(scope, receive, send)
             return
         encodings = [

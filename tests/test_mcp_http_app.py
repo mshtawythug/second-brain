@@ -466,3 +466,26 @@ def test_serve_refuses_a_bad_bind_before_building_anything(
 def test_an_absent_distribution_reports_unknown() -> None:
     assert distribution_version("synthetic-not-installed-dist") == "unknown"
     assert distribution_version("mcp") != "unknown"
+
+
+# ------------------------------------------------- sec-118 #1: path variants
+
+
+@pytest.mark.parametrize("path", ["/mcp%0A", "/mcp%0a", "/mcp%0D", "/mcp%09", "//mcp", "/mcp/"])
+def test_a_path_variant_never_reaches_the_sdk(client: TestClient, path: str) -> None:
+    body = _rpc(
+        "tools/call",
+        {"name": "brain_search", "arguments": {"query": "q", "include_confidential": True}},
+    )
+
+    response = client.post(path, content=body, headers={**MCP_HEADERS, **AUTH})
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "not found"}
+    assert "structuredContent" not in response.text
+
+
+def test_the_exact_paths_still_answer(client: TestClient) -> None:
+    assert _call(client, {"query": "q"}).status_code == 200
+    assert client.get("/healthz").json() == {"status": "ok"}
+    assert client.get("/readyz", headers=AUTH).status_code == 200
