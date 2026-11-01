@@ -27,6 +27,9 @@ brain doctor            # shows the "replica" row
 - **Refreshing is a restore.** After the first restore the replica is non-empty, so every
   refresh asks for the typed phrase `restore and overwrite my brain`. `--yes` does not skip it.
   Never type it for the user, and never offer to automate it.
+- **After every restore, rebuild the graph mirror** (`brain graphrag build --force`) if the user
+  uses GraphRAG. The archive carries the relational graph tables but not the AGE mirror, and until
+  the rebuild `brain doctor` shows `graph drift`.
 - **Treat the replica as read-only.** Ingest, capture, note edits and the vault watcher on the
   replica are lost at the next restore. Do not run them there. Never restore a replica's archive
   onto the primary.
