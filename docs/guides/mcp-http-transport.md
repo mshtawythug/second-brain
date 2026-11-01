@@ -112,7 +112,8 @@ A connection with no request in flight is closed after 10 seconds, whether or no
 arrive, so silent or slowly dribbling clients cannot hold connections open. A call that
 times out (504) stops waiting, but a tool already running on a worker thread finishes in the
 background. Its database statements are cancelled at the same deadline
-(`statement_timeout`), and its worker stays counted until it returns.
+(`statement_timeout`), and it keeps one of the 16 worker-thread slots until it returns.
+New calls get 503 while every slot is held, rather than waiting behind it.
 
 `GET /healthz` answers `{"status": "ok"}` without a token, for a process supervisor.
 `GET /readyz` needs the token. It reports whether the database answers, plus the embedder,

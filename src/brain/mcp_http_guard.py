@@ -183,11 +183,14 @@ class ResponseGuardMiddleware:
 
     The deadline stops the WAIT, not the work: a synchronous tool already
     running on a worker thread finishes in the background, and its result is
-    dropped. Two things bound that work (sec-118 #4): its database statements
-    carry a ``statement_timeout`` equal to the deadline, and the thread keeps its
-    worker-limiter token until it returns, so
-    :class:`brain.mcp_http_conn.WorkLimitMiddleware` refuses new calls (503)
-    rather than queueing them behind orphans.
+    dropped. This guard does NOT bound that thread. Two other things do
+    (sec-118 #4, rev-118 #6): its database statements carry a
+    ``statement_timeout`` equal to the deadline, and it holds a token on the
+    worker-thread CapacityLimiter until it returns. That limiter is
+    ``anyio.to_thread``'s default for the loop, which only the SDK's sync tool
+    calls use (``/readyz`` has its own), and
+    :class:`brain.mcp_http_conn.WorkLimitMiddleware` caps it at 16 and answers
+    503 when every token is held, instead of queueing calls behind orphans.
     """
 
     def __init__(self, app: ASGIApp, *, max_response_bytes: int, timeout_s: float) -> None:
