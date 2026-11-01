@@ -22,7 +22,7 @@ git tag scheme:
 
 ## [Unreleased]
 
-### Added — MCP over HTTP: `brain mcp serve` and `brain mcp token` (RM-46)
+### Added — MCP over HTTP: `brain mcp serve` and `brain mcp token` (RM-46, PR #118)
 
 - `brain mcp serve` serves the MCP tools over streamable HTTP, for another device on a
   private network. Off until run. Loopback by default (`127.0.0.1:8787`). A non-loopback
