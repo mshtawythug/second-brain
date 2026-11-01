@@ -4571,7 +4571,7 @@ def brain_graphrag_stats(
         with connect_age(state.cfg.database_url) as conn:
             conn.autocommit = True
             _require_age_or_mcp_error(conn)
-            stats = graph_stats(conn, tenant_id)
+            stats = graph_stats(conn, tenant_id, public_only=state.hide_confidential)
     except GraphTenantError as exc:
         raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
     except psycopg.Error as exc:

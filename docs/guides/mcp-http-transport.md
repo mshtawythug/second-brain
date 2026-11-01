@@ -86,10 +86,21 @@ Without the flag, confidential METADATA stays home too:
 
 Three small things remain visible, and are accepted:
 
-- `brain_status` and `brain_graphrag_stats` count every document and entity.
+- `brain_status` and `brain_graphrag_stats` counts cover every document and entity,
+  confidential ones included. These are numbers only: `brain_graphrag_stats`' top-10 entity
+  NAMES are filtered like the entity listing.
 - An id prefix shared by a normal and a confidential document answers "ambiguous".
 - Guessing an exact entity name for a search filter or a timeline confirms that some
   document mentions it, but returns no content.
+
+"Read-only" means no tool that changes your knowledge is served. It does not mean the
+server never writes to the database:
+
+- Read tools still log telemetry (`search_queries`, citation `interactions`).
+- `brain_graphrag_search`, `brain_graphrag_themes`, `brain_graphrag_entity` and
+  `brain_ask`'s graph modes run the graph backend's bootstrap on each call. That is idempotent DDL: it creates the AGE graph, its labels and
+  their indexes only if they are missing, exactly as over stdio. On a built graph it
+  changes nothing.
 
 ## Requests the server refuses
 

@@ -82,4 +82,6 @@ audit already look.
   non-confidential mention (`graph_rag/public_entities.public_mention_sql`). The same
   rule filters every entity list a graph retrieval returns
   (`withhold_confidential_entities`), and every by-prefix lookup answers a confidential
-  document as an unknown prefix (`McpState.hide_confidential`).
+  document as an unknown prefix (`McpState.hide_confidential`). `brain_graphrag_stats`'
+  top-10 entity names go through the same filter (`graph_stats(public_only=…)`, rev-118
+  #10); its counts stay corpus-wide, a documented residual.

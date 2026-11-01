@@ -314,7 +314,7 @@ def test_brain_mcp_tools_list_advertises_all_tools() -> None:
 
 
 #: Every tool the server registers at RM-46: 42 in ``mcp_server`` plus 9
-#: extension tools. The HTTP transport's read-only mode withholds 22 of them;
+#: extension tools. The HTTP transport's read-only mode withholds 23 of them;
 #: stdio must keep serving all of them.
 RM46_TOOL_COUNT = 51
 

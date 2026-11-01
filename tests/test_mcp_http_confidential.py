@@ -314,3 +314,23 @@ def test_public_mention_sql_refuses_a_non_identifier_alias() -> None:
     with pytest.raises(ValueError, match="plain identifier"):
         public_mention_sql("e; DROP TABLE documents")
     assert "e.tenant_id" in public_mention_sql("e")
+
+
+@pytest.mark.parametrize(("hide", "expected"), [
+    (True, {"Project Harbor", "Project Lantern"}),
+    (False, {"Codename Zephyr", "Project Harbor", "Project Lantern"}),
+])
+def test_brain_graphrag_stats_top_names_follow_the_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    corpus: Path,
+    entities: dict[str, str],
+    hide: bool,
+    expected: set[str],
+) -> None:
+    """rev-118 #10: stats' top-10 are NAMES; only its counts are corpus-wide."""
+    _state(monkeypatch, corpus, hide=hide)
+
+    payload = mcp_server.brain_graphrag_stats()
+
+    assert {row["name"] for row in payload["top_entities"]} == expected
+    assert payload["total_entities"] == 3  # counts are documented as corpus-wide

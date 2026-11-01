@@ -379,6 +379,8 @@ def list_entities(
 def graph_stats(
     conn: psycopg.Connection[Any],
     tenant_id: str,
+    *,
+    public_only: bool = False,
 ) -> GraphStats:
     """Return an at-a-glance graph overview for the tenant.
 
@@ -387,6 +389,8 @@ def graph_stats(
     ``graph_communities``, and the top-10 entities by ``doc_count``
     (the same slice :func:`list_entities` with ``limit=10, sort="docs"``
     returns). All queries are tenant-scoped and parameterized. Read-only.
+    ``public_only`` filters the top-10 NAMES as :func:`list_entities` does; the
+    counts always cover the whole tenant.
     """
     type_rows = conn.execute(
         "SELECT entity_type, COUNT(*) FROM graph_entities "
@@ -408,24 +412,11 @@ def graph_stats(
     ).fetchone()
     total_communities = int(comm_row[0]) if comm_row is not None else 0
 
-    top_rows = conn.execute(
-        "SELECT entity_type, name, canonical_key, doc_count, description "
-        "FROM graph_entities WHERE tenant_id = %s "
-        # Total sort -- same tiebreak as list_entities, so the "top 10"
-        # is a stable slice rather than an arbitrary one among ties.
-        "ORDER BY doc_count DESC, name ASC, entity_type ASC, canonical_key ASC "
-        "LIMIT 10",
-        (tenant_id,),
-    ).fetchall()
+    # The same slice list_entities(sort="docs", limit=10) returns, so it shares
+    # that total sort and, over HTTP, its public_only filter: these are NAMES
+    # (RM-46 rev-118 #10). The counts above stay corpus-wide.
     top_entities = tuple(
-        EntitySummary(
-            entity_type=str(row[0]),
-            name=str(row[1]),
-            canonical_key=str(row[2]),
-            doc_count=int(row[3]),
-            description=str(row[4]) if row[4] is not None else None,
-        )
-        for row in top_rows
+        list_entities(conn, tenant_id, sort="docs", limit=10, public_only=public_only)
     )
     return GraphStats(
         counts_by_type=counts_by_type,

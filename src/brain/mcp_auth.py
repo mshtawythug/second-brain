@@ -13,8 +13,10 @@ on ``str`` it raises ``TypeError`` for a non-ASCII header, which is how
 one byte-identical 401, so a client learns nothing about why it failed. The
 reason is logged as a fixed word; the token and the header never are.
 
-A leaf: stdlib, :mod:`brain.errors` and the settings leaf only, so
-``brain mcp token`` never pays for the MCP SDK or the 5,000-line server.
+Imports: stdlib, :mod:`brain.errors` and the settings leaf, which pulls in
+:mod:`brain.config` (for ``ConfigError`` and the env parsers). No MCP SDK,
+starlette, typer or :mod:`brain.mcp_server`, so ``brain mcp token`` stays cheap;
+``tests/test_import_hygiene.py`` pins that.
 """
 from __future__ import annotations
 
