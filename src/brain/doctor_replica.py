@@ -29,32 +29,36 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 
 _NAME = "replica"
 _GUIDE = "docs/guides/second-machine.md"
-_MARKER = "$BRAIN_HOME/state/restored-from.json"
-_PRIMARY_NOTE = (
-    f"a primary recovered from a backup is not a replica: remove {_MARKER} ({_GUIDE})"
-)
+#: Prose, not a shell line: a bare ``$BRAIN_HOME`` expands to nothing when it is
+#: unset (rev-119 #2). ``~/.brain`` is the default outside a dev checkout.
+_REMOVE = "remove restored-from.json from $BRAIN_HOME/state (~/.brain/state by default)"
+_PRIMARY_NOTE = f"a primary recovered from a backup is not a replica: {_REMOVE} ({_GUIDE})"
 
 
 def replica_doctor_check(*, brain_home: Path | None = None) -> list[_DoctorCheck]:
-    """The ``replica`` row. ``brain_home`` is a test seam (default ``$BRAIN_HOME``)."""
-    from .backup.replica_marker import ReplicaMarkerError, read_marker
+    """The ``replica`` row. ``brain_home`` is a test seam (default ``$BRAIN_HOME``).
+
+    Never raises: any failure to read the marker, expected or not, is the fixed
+    WARN, so a hostile or damaged marker cannot take ``brain doctor`` down.
+    """
+    from .backup import replica_marker
 
     home = brain_home if brain_home is not None else _brain_home_root()
     try:
-        marker = read_marker(home)
-    except ReplicaMarkerError:
+        marker = replica_marker.read_marker(home)
+        if marker is None:
+            return []
+        taken = f"{marker.created_at.astimezone(UTC):%Y-%m-%d %H:%M} UTC"
+    except Exception:  # noqa: BLE001 — sec-119: doctor must never crash on a marker
         return [
             _check(
                 _NAME,
                 "warn",
-                "restored-from marker is unreadable",
-                remedy=f'rm "{_MARKER}"',
+                replica_marker.MARKER_UNREADABLE,
+                remedy=_REMOVE,
                 notes=(f"a replica writes it again at its next brain restore ({_GUIDE})",),
             )
         ]
-    if marker is None:
-        return []
-    taken = f"{marker.created_at.astimezone(UTC):%Y-%m-%d %H:%M} UTC"
     detail = (
         f"read replica, restored from a backup taken at {taken} ({marker.archive_name}); "
         "writes here are lost at the next restore"

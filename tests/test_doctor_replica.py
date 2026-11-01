@@ -9,17 +9,19 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from brain.backup.replica_marker import marker_path
+from brain.backup.replica_marker import MARKER_UNREADABLE, marker_path
 from brain.doctor_replica import replica_doctor_check
 
 pytestmark = pytest.mark.nodb
 
 ARCHIVE_NAME = "brain-backup-20261030-181500.tar.gz"
 GUIDE = "docs/guides/second-machine.md"
-MARKER_LITERAL = "$BRAIN_HOME/state/restored-from.json"
+#: rev-119 #2: prose, because a bare ``$BRAIN_HOME`` expands to nothing when it is unset.
+MARKER_PROSE = "remove restored-from.json from $BRAIN_HOME/state (~/.brain/state by default)"
 
 
 def _put(home: Path, raw: str) -> None:
@@ -72,7 +74,7 @@ def test_the_ok_row_points_a_recovered_primary_at_the_guide(tmp_path: Path) -> N
     [check] = replica_doctor_check(brain_home=tmp_path)
 
     text = _all_text(check)
-    assert MARKER_LITERAL in text
+    assert MARKER_PROSE in text
     assert GUIDE in text
     assert not any(line.err for line in check.lines)
 
@@ -91,11 +93,11 @@ def test_an_unreadable_marker_warns_without_echoing_it(tmp_path: Path) -> None:
     [check] = replica_doctor_check(brain_home=tmp_path)
 
     assert check.status == "warn"
-    assert check.detail == "restored-from marker is unreadable"
+    assert check.detail == MARKER_UNREADABLE
     text = _all_text(check)
     assert "SYNTHETIC-SECRET-BYTES" not in text
     assert str(tmp_path) not in text
-    assert MARKER_LITERAL in text
+    assert MARKER_PROSE in text
     assert GUIDE in text
     assert not check.lines[0].err  # a WARN, never a FAIL
 
@@ -128,3 +130,44 @@ def test_the_module_imports_cold_without_the_backup_package() -> None:
     )
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, check=False)
     assert proc.returncode == 0, proc.stderr.decode()
+
+
+def test_an_out_of_range_backup_time_warns_instead_of_crashing(tmp_path: Path) -> None:
+    """sec-119 L1: ``astimezone(UTC)`` on this used to raise OverflowError in doctor."""
+    _put(tmp_path, _valid(created_at="0001-01-01T00:00:00+14:00"))
+
+    [check] = replica_doctor_check(brain_home=tmp_path)
+
+    assert check.status == "warn"
+    assert check.detail == MARKER_UNREADABLE
+
+
+def test_deeply_nested_json_warns_instead_of_crashing(tmp_path: Path) -> None:
+    """sec-119 L2: RecursionError on 3.11 escaped the read."""
+    _put(tmp_path, "[" * 4000)
+
+    [check] = replica_doctor_check(brain_home=tmp_path)
+
+    assert check.status == "warn"
+
+
+def test_any_unexpected_error_in_the_read_becomes_the_fixed_warning(tmp_path: Path) -> None:
+    """Defence in depth: the replica row never takes ``brain doctor`` down."""
+    _put(tmp_path, _valid())
+    with patch(
+        "brain.backup.replica_marker.read_marker",
+        side_effect=RuntimeError("SYNTHETIC-UNEXPECTED"),
+    ):
+        [check] = replica_doctor_check(brain_home=tmp_path)
+
+    assert check.status == "warn"
+    assert check.detail == MARKER_UNREADABLE
+    assert "SYNTHETIC-UNEXPECTED" not in _all_text(check)
+
+
+def test_a_valid_marker_is_still_ok_after_the_hardening(tmp_path: Path) -> None:
+    _put(tmp_path, _valid(created_at="2026-10-30T11:15:00-07:00"))
+
+    [check] = replica_doctor_check(brain_home=tmp_path)
+
+    assert check.status == "ok"
