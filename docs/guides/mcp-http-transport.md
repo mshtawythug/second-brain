@@ -138,11 +138,15 @@ DNS could re-point it.
 ## The token
 
 - `brain mcp token --rotate` writes a new 256-bit token. It is written at mode 0600 and
-  replaces the old file atomically. Clients holding the old token get 401 from then on.
+  replaces the old file atomically. **A running `brain mcp serve` keeps the token it read
+  at start: restart it to apply the new one.** After the restart, clients holding the old
+  token get 401. The command says so when it rotates.
 - `brain mcp token` describes the file: its path, mode and fingerprint. Add `--show` to
   print the token and `--json` for machine-readable output.
-- The default path is `<brain_home>/mcp_token`. `BRAIN_MCP_TOKEN_PATH` moves it, and
-  `--token-file` overrides both for one run.
+- `brain mcp serve` takes its token from, in order: `--token-file`, `BRAIN_MCP_TOKEN`,
+  `BRAIN_MCP_TOKEN_PATH`, and `<brain_home>/mcp_token`. **With `BRAIN_MCP_TOKEN` set,
+  rotating the file changes nothing until you unset it or pass `--token-file`.**
+  `brain mcp token` says so when the variable is set.
 - `BRAIN_MCP_TOKEN` supplies the token from the environment, for containers. It must look
   like a minted token (43 to 256 URL-safe characters). The file is preferred, because an
   environment variable is copied into every child process and its permissions cannot be

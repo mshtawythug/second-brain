@@ -172,3 +172,56 @@ def test_a_malformed_env_token_exits_2_without_echoing_it(
     assert result.exit_code == 2
     assert "BRAIN_MCP_TOKEN" in result.output
     assert "weak-synthetic" not in result.output
+
+
+# ------------------------------------------- rev-118 #2: what rotation does and does not do
+
+
+def test_rotate_says_a_running_server_needs_a_restart(home: Path) -> None:
+    result = runner.invoke(app, ["mcp", "token", "--rotate"])
+
+    assert result.exit_code == 0
+    assert "restart brain mcp serve to apply it" in result.output
+
+
+def test_describing_does_not_mention_a_restart(home: Path) -> None:
+    runner.invoke(app, ["mcp", "token", "--rotate"])
+
+    result = runner.invoke(app, ["mcp", "token"])
+
+    assert "restart" not in result.output
+
+
+def test_rotate_as_json_keeps_stdout_pure_json(home: Path) -> None:
+    result = runner.invoke(app, ["mcp", "token", "--rotate", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["exists"] is True
+    assert "restart brain mcp serve to apply it" in result.stderr
+
+
+def test_an_env_token_is_named_as_overriding_the_file(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner.invoke(app, ["mcp", "token", "--rotate"])
+    monkeypatch.setenv("BRAIN_MCP_TOKEN", "B" * 43)
+
+    described = runner.invoke(app, ["mcp", "token"])
+    as_json = runner.invoke(app, ["mcp", "token", "--json"])
+
+    assert "BRAIN_MCP_TOKEN is set" in described.output
+    assert "B" * 43 not in described.output
+    assert "BRAIN_MCP_TOKEN is set" in as_json.stderr
+    assert json.loads(as_json.stdout)["exists"] is True
+
+
+def test_an_explicit_path_is_not_said_to_be_overridden(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BRAIN_MCP_TOKEN", "B" * 43)
+    explicit = tmp_path / "explicit"
+
+    result = runner.invoke(app, ["mcp", "token", "--rotate", "--path", str(explicit)])
+
+    assert result.exit_code == 0
+    assert "BRAIN_MCP_TOKEN is set" not in result.output

@@ -43,20 +43,31 @@ def _fail(message: str, code: int) -> typer.Exit:
     return typer.Exit(code)
 
 
-def _token_path(explicit: Path | None) -> Path:
-    """``--path``, else ``$BRAIN_MCP_TOKEN_PATH``, else ``<brain_home>/mcp_token``.
+#: Rotation rewrites the file; a running server holds the token it read at start.
+RESTART_NOTICE = "restart brain mcp serve to apply it: a running server keeps the old token"
+#: ``brain mcp serve`` prefers BRAIN_MCP_TOKEN to any file it would find by default.
+ENV_OVERRIDE_NOTICE = (
+    "BRAIN_MCP_TOKEN is set: brain mcp serve uses it, not this file, unless it is "
+    "started with --token-file"
+)
 
-    ``Config.load_minimal`` publishes the dotenv chain first, so a path set in a
+
+def _token_path(explicit: Path | None) -> tuple[Path, bool]:
+    """The file to act on, and whether ``BRAIN_MCP_TOKEN`` overrides it for ``serve``.
+
+    ``--path``, else ``$BRAIN_MCP_TOKEN_PATH``, else ``<brain_home>/mcp_token``.
+    ``Config.load_minimal`` publishes the dotenv chain first, so a value set in a
     ``.env`` is honoured; it does not need ``DATABASE_URL``.
     """
-    if explicit is not None:
-        return explicit
     try:
         cfg = Config.load_minimal()
         settings = load_mcp_http_settings(os.environ)
     except ConfigError as exc:
         raise _fail(str(exc), 2) from exc
-    return settings.token_path or default_token_path(cfg.brain_home)
+    if explicit is not None:
+        return explicit, False
+    path = settings.token_path or default_token_path(cfg.brain_home)
+    return path, settings.token is not None
 
 
 def _describe(path: Path, info: TokenInfo | None, *, show: bool) -> dict[str, Any]:
@@ -87,7 +98,7 @@ def token(
     as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of text."),
 ) -> None:
     """Create, rotate or describe the bearer token `brain mcp serve` requires."""
-    target = _token_path(path)
+    target, env_overrides = _token_path(path)
     info: TokenInfo | None
     try:
         if rotate:
@@ -101,6 +112,11 @@ def token(
         typer.echo(f"no token at {target}; create one with: brain mcp token --rotate")
     else:
         _print_info(target, info, show=show)
+    # Notices go to stderr under --json, so stdout stays one JSON document.
+    if rotate:
+        typer.echo(RESTART_NOTICE, err=as_json)
+    if env_overrides:
+        typer.echo(ENV_OVERRIDE_NOTICE, err=as_json)
     if info is None:
         raise typer.Exit(1)
 

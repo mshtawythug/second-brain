@@ -1728,7 +1728,7 @@ entry point MCP clients spawn, takes no arguments, and exits 2 if given any.
 | `--allow-writes` | off | Also serve the 23 write tools. Without it they are removed from the server. |
 | `--include-confidential` | off | Let callers ask for confidential documents. Without it, such a call is refused. |
 | `--allowed-host` | none | Extra `Host` value to accept (repeatable): a hostname or IP, no port or wildcard. |
-| `--token-file` | `$BRAIN_MCP_TOKEN_PATH` or `<brain_home>/mcp_token` | The bearer-token file. |
+| `--token-file` | `$BRAIN_MCP_TOKEN`, else `$BRAIN_MCP_TOKEN_PATH`, else `<brain_home>/mcp_token` | The bearer-token file. Read once at start: after `brain mcp token --rotate`, restart the server. `BRAIN_MCP_TOKEN` outranks every file but this flag. |
 | `--no-auth` | off | No token. Loopback only. |
 | `--max-body-bytes` | `1048576` | 1 KiB to 16 MiB. |
 | `--call-timeout` | `300` | Seconds per tool call before a 504 (1 to 3600). |
