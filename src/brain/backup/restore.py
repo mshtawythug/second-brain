@@ -65,6 +65,7 @@ from .pgtool import (
     server_version,
 )
 from .replica_marker import ReplicaMarkerError, write_marker
+from .staging_prep import prepare_staging_extensions
 
 #: The phrase a user must type when the target is not empty. No flag can supply
 #: it — see §5.9 and `uninstall.py:103-109`, which exists for the same reason.
@@ -621,6 +622,8 @@ def _restore_database(
         try:
             staging_parts = dict(parts)
             staging_parts["dbname"] = staging_db
+            with connect(psycopg.conninfo.make_conninfo(**staging_parts)) as staged:
+                prepare_staging_extensions(staged)  # AGE's dump entry (staging_prep.py)
             _restore_into(
                 plan, staging_parts, state.staging_dir / DUMP_MEMBER, staging_db, runner
             )

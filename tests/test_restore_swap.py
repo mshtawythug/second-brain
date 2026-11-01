@@ -19,6 +19,7 @@ from psycopg import sql
 from brain.backup import create_backup, read_manifest, restore_backup
 from brain.backup.replica_marker import marker_path, read_marker
 from brain.backup.restore import RESTORED_FROM_NOT_RECORDED
+from brain.backup.staging_prep import prepare_staging_extensions
 from brain.config import Config
 from brain.errors import BackupError, RestoreAborted
 from tests.backup_fakes import (
@@ -478,3 +479,80 @@ def test_a_marker_write_failure_is_reported_and_the_restore_still_succeeds(
 
     assert report.db_restored is True
     assert RESTORED_FROM_NOT_RECORDED in steps
+
+
+# --- RM-47 AC3 finding: AGE's extension entry survives the ag_catalog exclusion -----
+
+
+class _ExtensionProbingRunner(StubAndRestoreRunner):
+    """Records which extensions the staging database holds when pg_restore starts.
+
+    A real dump of an AGE brain carries ``CREATE EXTENSION IF NOT EXISTS age WITH
+    SCHEMA ag_catalog`` even though ``ag_catalog`` itself is excluded, and with
+    ``--exit-on-error`` that statement fails unless ``age`` already exists.
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.extensions_at_restore: list[set[str]] = []
+
+    def run(self, argv: Any, *, timeout: float, env: Any = None) -> Any:
+        parts = list(argv)
+        if any(part.endswith("pg_restore") for part in parts) and "-d" in parts:
+            dsn = dsn_for_database(TEST_DATABASE_URL, parts[parts.index("-d") + 1])
+            with psycopg.connect(dsn) as conn:
+                rows = conn.execute("SELECT extname FROM pg_extension").fetchall()
+            self.extensions_at_restore.append({str(row[0]) for row in rows})
+        return super().run(argv, timeout=timeout, env=env)
+
+
+def test_staging_has_age_before_pg_restore_runs(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+) -> None:
+    """Regression: every real restore of an AGE brain failed at ``CREATE EXTENSION``."""
+    probing = _ExtensionProbingRunner(
+        base_dsn=TEST_DATABASE_URL, responses={"--version": CONTAINER_VERSION}
+    )
+
+    report = _restore(archive, cfg, probing)
+
+    assert report.db_restored is True
+    assert len(probing.extensions_at_restore) == 1
+    assert "age" in probing.extensions_at_restore[0]
+
+
+def test_staging_prep_skips_an_extension_the_server_does_not_offer(
+    test_db: psycopg.Connection,
+) -> None:
+    """A stock pgvector server has no ``age``; preparing staging must not fail there."""
+    test_db.commit()
+    test_db.autocommit = True
+    try:
+        created = prepare_staging_extensions(test_db, names=("rm47_no_such_extension",))
+    finally:
+        test_db.autocommit = False
+
+    assert created == ()
+    row = test_db.execute(
+        "SELECT count(*) FROM pg_extension WHERE extname = 'rm47_no_such_extension'"
+    ).fetchone()
+    assert row is not None and row[0] == 0
+
+
+def test_staging_prep_failure_is_a_backup_error_with_a_fixed_message(
+    test_db: psycopg.Connection,
+) -> None:
+    """A refused ``CREATE EXTENSION`` surfaces as a BrainError the CLI prints, not a raw one."""
+    test_db.commit()
+    test_db.autocommit = True
+    test_db.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+    try:
+        with pytest.raises(BackupError, match="Nothing was changed") as excinfo:
+            prepare_staging_extensions(test_db, names=("age",))
+    finally:
+        test_db.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE")
+        test_db.autocommit = False
+
+    assert TEST_DATABASE_URL not in str(excinfo.value)
