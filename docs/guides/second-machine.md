@@ -53,11 +53,14 @@ On the **primary**:
 brain backup                       # prints the archive path, e.g. ~/.brain/backups/brain-backup-<ts>.tar.gz
 ```
 
-Copy the archive **and** its `.sha256` sidecar to the replica over an encrypted channel. For
-example:
+Copy the archive **and** its `.sha256` sidecar to the replica over an encrypted channel, such as
+`scp` or `rsync -e ssh`. On the replica, first make a private incoming directory, so that other
+accounts on that machine cannot read the corpus while it waits there:
 
 ```bash
+mkdir -p ~/incoming && chmod 700 ~/incoming        # on the replica
 scp ~/.brain/backups/brain-backup-<ts>.tar.gz* replica.example.internal:~/incoming/
+chmod 600 ~/incoming/brain-backup-<ts>.tar.gz*     # on the replica
 ```
 
 On the **replica**:
@@ -79,13 +82,14 @@ graph queries find nothing.
 
 ### What `brain doctor` shows
 
-Every successful `brain restore` writes `$BRAIN_HOME/state/restored-from.json`. The file records
+Every successful `brain restore` writes `restored-from.json` into `$BRAIN_HOME/state` (that is
+`~/.brain/state` when `BRAIN_HOME` is not set). The file records
 when the restored backup was taken, the archive's file name (never its full path), and when the
 restore ran. `brain doctor` reads it and prints:
 
 ```text
 replica         OK (read replica, restored from a backup taken at 2026-10-30 18:15 UTC (brain-backup-20261030-181500.tar.gz); writes here are lost at the next restore)
-                — a primary recovered from a backup is not a replica: remove $BRAIN_HOME/state/restored-from.json (docs/guides/second-machine.md)
+                — a primary recovered from a backup is not a replica: remove restored-from.json from $BRAIN_HOME/state (~/.brain/state by default) (docs/guides/second-machine.md)
 ```
 
 A machine that has never been restored has no such file and no `replica` row.
@@ -138,7 +142,14 @@ Searching, `brain ask`, `brain show`, `brain ui` and the read-only MCP tools are
 
 An archive is the whole corpus: every document, transcript and email body, plus the vault.
 
-- Copy it only over an encrypted channel (`scp`, `rsync -e ssh`, or a private network).
+- Copy it only over an encrypted channel, such as `scp`, `rsync -e ssh` or another SSH-based
+  transfer. A private network is not encryption by itself: a file share on your LAN (SMB, NFS or an
+  rsync daemon) usually sends the data in cleartext.
+- Keep the incoming directory at mode 700 and the archive at 600 (`chmod 700 ~/incoming`,
+  `chmod 600` on the archive), as in the recipe above.
+- The `.sha256` sidecar travels with the archive, so it catches a damaged copy but not a tampered
+  one. A restore replays the archive's database dump, so **restore only archives you made
+  yourself** and copied over a channel you control.
 - Do not leave it on an unencrypted USB stick or a synced cloud folder.
 - Delete the copy on the replica once the restore succeeds. The replica's own pre-restore backups
   are enough to undo a refresh.
@@ -150,7 +161,7 @@ Restoring a backup onto the **primary**, for example after a disk failure, also 
 primary is back in service as the writer, remove the file:
 
 ```bash
-rm "$BRAIN_HOME/state/restored-from.json"
+rm "${BRAIN_HOME:-$HOME/.brain}/state/restored-from.json"
 ```
 
 `brain doctor` then shows no `replica` row. The file only describes the machine; removing it

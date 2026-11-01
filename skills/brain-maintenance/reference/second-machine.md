@@ -15,7 +15,8 @@ suggest rsyncing `data/postgres`, two machines writing to one vault, or merging 
 ```bash
 # primary
 brain backup
-# copy the archive AND its .sha256 sidecar over an encrypted channel (scp / rsync -e ssh)
+# copy the archive AND its .sha256 sidecar over scp / rsync -e ssh into a chmod 700 ~/incoming
+# (a LAN file share such as SMB or NFS is cleartext; the sidecar catches damage, not tampering)
 # replica: same BRAIN_EMBEDDER as the primary, no --daemons
 brain setup
 brain restore <archive>
@@ -38,14 +39,16 @@ brain doctor            # shows the "replica" row
   name once satisfied. Do not drop databases yourself.
 - **A replica holds every document, confidential ones included.** It belongs on an encrypted
   disk, and the archive is handled like the corpus: no unencrypted cloud folders.
+- **Restore only archives the user made.** A restore replays the archive's dump, and the sidecar
+  proves the copy is intact, not who made it.
 
 ## The `replica` doctor row
 
-Every successful `brain restore` writes `$BRAIN_HOME/state/restored-from.json` (backup time and
+Every successful `brain restore` writes `"${BRAIN_HOME:-$HOME/.brain}/state/restored-from.json"` (backup time and
 archive name). `brain doctor` then prints `replica  OK (read replica, restored from a backup taken
 at …)`. With no file there is no row.
 
 - **WARN `restored-from marker is unreadable`:** the file was edited, replaced by a symlink or
   grew. The user removes it; a replica's next restore writes it again.
 - **A primary restored after a disaster** also shows the row. Once it is the writer again, the
-  user removes `$BRAIN_HOME/state/restored-from.json`. That changes no data.
+  user removes `"${BRAIN_HOME:-$HOME/.brain}/state/restored-from.json"`. That changes no data.
