@@ -103,3 +103,15 @@ audit already look.
   `brain mcp serve` withholds every `brain_graphrag_*` tool in that mode
   (`mcp_tool_classes.apply_graph_hide`); `brain_ask` answers in `hybrid` only. The
   global-mode community exclusion above stays: stdio uses it.
+- **The weekly review's graph themes, stdio and HTTP (sec-118e).**
+  `review/weekly.weekly_active_communities` ranked communities by in-window edge weight
+  with no sensitivity predicate, and each theme carried its members' names and the stored
+  community summary (written from member names and titles). Only the theme's `docs` were
+  gated, so the default lens, the "always gated" vault page and a remote caller received
+  confidential-derived names and summaries. Under `exclude_confidential` the statement now
+  carries `NOT confidential_member_sql('gcm')` before its `LIMIT`: the same rule as
+  `list_communities` and global retrieval. The predicate moved to `brain.sensitivity` so
+  review code shares it without importing the graph package. Over HTTP without
+  `--include-confidential`, `brain_review_weekly` is also withheld
+  (`mcp_tool_classes.GRAPH_DERIVED_TOOLS`), and `tests/test_mcp_http_graph_reach.py` fails
+  on any served tool that reads graph tables without a recorded judgement.

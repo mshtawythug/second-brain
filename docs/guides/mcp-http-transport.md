@@ -81,16 +81,30 @@ Without the flag, confidential METADATA stays home too:
   and source path never leave the machine.
 - `brain_link_proposal` never resolves a confidential destination. This one applies on
   stdio too, unless the caller passes `include_confidential`.
-- **The graph tools are not served** (every `brain_graphrag_*` tool: 6 read, 6 write), and
-  `brain_ask` answers in `mode="hybrid"` only; any other mode is refused with a fixed
-  message. The entity graph is built from every document, confidential ones included:
-  entity names, which entities occur together and how strongly, themes and communities.
-  Four security reviews in a row each found one more graph output carrying that, so the
-  server withholds the family rather than filtering it. Start the server with
-  `--include-confidential` to use the graph remotely.
-- `brain_timeline` stays. It returns only entities a non-confidential document mentions,
-  and its buckets, co-topics and titles come from non-confidential documents only.
-  `brain_explain` stays too: it is `brain_search`'s ranking, with no graph.
+- **The graph tools are not served**, and `brain_ask` answers in `mode="hybrid"` only; any
+  other mode is refused with a fixed message. The entity graph is built from every
+  document, confidential ones included: entity names, which entities occur together and how
+  strongly, themes and communities. Five security reviews in a row each found one more
+  graph output carrying that, so the server withholds the family rather than filtering it.
+  Start the server with `--include-confidential` to use the graph remotely.
+- The withheld family is every `brain_graphrag_*` tool (6 read, 6 write) plus
+  `brain_review_weekly`, whose themes are graph communities under another name (a write
+  tool, so it only matters with `--allow-writes`). The name prefix alone would not catch a
+  future graph tool named otherwise, so the family is the prefix, plus that pinned list,
+  plus a test that walks every tool's code for graph reads and fails on one nobody has
+  judged (`src/brain/mcp_tool_classes.py`).
+- These tools still touch the graph and stay served, each because its output is built from
+  non-confidential documents only:
+
+  | Tool | Why it stays |
+  |---|---|
+  | `brain_timeline` | Matches only entities a non-confidential document mentions; its buckets, co-topics and titles come from non-confidential documents only. |
+  | `brain_brief` | Its new entities are named, counted and dated from non-confidential, non-draft documents only. |
+  | `brain_search`, `brain_explain`, `brain_recall`, `brain_watch_check` | The `entity` filter is an exact match that returns non-confidential documents only. `brain_explain` is `brain_search`'s ranking. |
+  | `brain_review_findings_list` | A finding is withheld whole unless every evidence document is non-confidential. |
+  | `brain_connect_list` | Its `graph_score` counts the two documents' own shared mentions, and both documents pass the lens. |
+  | `brain_ask` | `hybrid` only; no graph leg runs. |
+  | With `--allow-writes`: `brain_review_scan`, `brain_watch_add`, `brain_gaps` | Scan through the lens; validate a saved search; purge gaps whose entity is gone. |
 
 Global graph search never returns a community any of whose members a confidential
 document mentions, so its stored summary (written from member names and titles) stays
@@ -106,6 +120,13 @@ A few small things remain visible, and are accepted:
 - Guessing a public person's exact email address resolves that person even when the
   address itself appears only in confidential mail. It returns their display name, which
   is public, and nothing else.
+- `brain_brief`'s new entities carry one bit by absence. If a non-confidential document this
+  week names an entity and the brief does not list it, the entity's record was created
+  before the week by a document you cannot see: confidential, a draft, or since deleted. No
+  name, no content, and not which of the three.
+- An entity alias you curate re-points mentions onto its target. A target whose own name
+  appears only in confidential documents then counts as mentioned by the alias's
+  non-confidential documents, so `brain_timeline` and `brain_brief` can name it.
 
 People follow the same rule. A `person` argument (`brain_search`, `brain_recall`,
 `brain_timeline`) resolves only people named as a participant in at least one

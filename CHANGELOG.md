@@ -98,6 +98,13 @@ git tag scheme:
   `brain_ask` answers in `hybrid` mode only. The entity graph is built from every document,
   confidential ones included, so per-output filtering did not converge. With the flag the
   graph is served as before. `brain_timeline` and `brain_explain` stay served.
+- Round 6 (sec-118e):
+  - the weekly review's graph themes (CLI, MCP and the emitted page; stdio too) skip a
+    community any of whose members a confidential document mentions, as
+    `brain_graphrag_communities` and global search already did;
+  - over HTTP without `--include-confidential`, `brain_review_weekly` is withheld with the
+    graph family (`--allow-writes` serves 38 of 51), and a test fails on any tool that
+    reads graph tables without a recorded keep-or-withhold judgement.
 - New `http` extra (`pip install 'secondbrain-py[http]'`) pins `mcp>=2.0,<3.0`. The base pin
   still admits 1.x for stdio, and `brain mcp serve` on 1.x exits 2 naming the extra. Guide:
   `docs/guides/mcp-http-transport.md`.
