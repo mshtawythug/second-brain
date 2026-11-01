@@ -16,6 +16,7 @@ import psycopg
 import pytest
 
 from brain import mcp_server
+from brain import mcp_state as mcp_state_mod
 from brain.config import Config, ConfigError
 from brain.embeddings import OllamaEmbedError
 from brain.errors import BrainError
@@ -1474,7 +1475,11 @@ def _install_main_doubles(
     """
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     monkeypatch.setattr(mcp_server, "_state", None)
-    monkeypatch.setattr(mcp_server, "make_embedder", embedder_cls)
+    # RM-46: the state builder moved to the ``brain.mcp_state`` leaf, so the
+    # factory is looked up there; and ``main()`` now refuses arguments, so it
+    # must not see pytest's own argv.
+    monkeypatch.setattr(mcp_state_mod, "make_embedder", embedder_cls)
+    monkeypatch.setattr(sys, "argv", ["brain-mcp"])
 
     captured: dict[str, object] = {}
 

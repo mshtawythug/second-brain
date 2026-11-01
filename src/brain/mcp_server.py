@@ -256,7 +256,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import date as date_cls
 from datetime import datetime
 from pathlib import Path
@@ -274,9 +274,8 @@ from .config import (
     MCP_SEARCH_DEFAULT_LIMIT,
     Config,
 )
-from .db import PersistentConnection, age_extension_available, connect, connect_age
-from .embeddings import make_embedder
-from .enrichment import ContradictionVerdict, OllamaEnricher, make_enricher
+from .db import age_extension_available, connect, connect_age
+from .enrichment import ContradictionVerdict, OllamaEnricher
 from .entity_filter import search_kwargs as entity_search_kwargs
 from .errors import (
     BrainError,
@@ -340,6 +339,7 @@ from .mcp_limits import (
     saturation_notice,
     strip_content_markers,
 )
+from .mcp_state import McpState, build_state
 from .mcp_tools import ToolContext, register_extension_tools
 from .queries import (
     fetch_document,
@@ -363,7 +363,6 @@ if TYPE_CHECKING:
     from .ask import AskResult
     from .graph_rag.reconcile import ReconcileConfig
     from .graph_rag.schema import GraphContext
-    from .graph_rag.sync import GraphSyncer
 from .vault.delete import delete_document, describe_delete_target
 from .vault.frontmatter import (
     dump_frontmatter,
@@ -380,6 +379,12 @@ from .vault.templates import render_template
 logger = logging.getLogger("brain.mcp")
 
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+#: What ``brain-mcp`` prints (stderr) when it is given arguments (RM-46).
+_ARGV_REFUSAL = (
+    "brain-mcp takes no arguments (stdio transport only).\n"
+    "HTTP transport lives on the human CLI: brain mcp serve --help"
+)
 
 # Tag automatically added to every document ingested via ``brain_ingest_stdin``
 # so MCP-saved snippets are distinguishable from CLI-ingested ones.
@@ -405,41 +410,10 @@ _HEX_ONLY_RE = re.compile(r"^[0-9a-f-]+$")
 _WARMUP_RETRY_DELAY_SECONDS = 1.0
 
 
-@dataclass
-class _State:
-    """Shared server state initialized once in :func:`main`.
-
-    Tests build this directly and assign to ``_state`` (via
-    ``monkeypatch.setattr``) instead of calling :func:`main`.
-
-    Wave Q2-SUMMARY-WIKI (2026-05-11): added ``enricher`` so the
-    ``brain_edit`` MCP tool can refresh ``documents.summary`` on
-    body-changing edits — without it the post-ingest hook hits the
-    "no enricher supplied" skip and the Q2 wiki lede shows the
-    pre-edit summary above the new body. ``None`` is an allowed
-    value so tests can opt out of the LLM round-trip; production
-    :func:`main` always populates it via :func:`make_enricher`.
-
-    DB-08 (perf/waves-0-2 T6): ``db_conn`` holds the persistent connection
-    opened once in :func:`main` and reused across all tool calls. Tests
-    that build ``_State`` directly may leave it ``None``; :func:`_mcp_conn`
-    then falls back to the per-call :func:`connect` path so all existing
-    test-doubles remain functional.
-    """
-
-    cfg: Config
-    embedder: Embedder
-    enricher: OllamaEnricher | None = None
-    # Wave G1-c: people-aspect graph syncer wired through ``brain_ingest`` /
-    # ``brain_edit`` so MCP-driven writes keep the graph in lock-step. ``None``
-    # (tests that build ``_State`` directly) skips graph sync; production
-    # :func:`main` always populates it via :func:`make_graph_syncer`.
-    # String-quoted forward ref: ``GraphSyncer`` is TYPE_CHECKING-only so the
-    # networkx-pulling graph_rag chain stays off MCP-server startup.
-    graph_syncer: "GraphSyncer | None" = None
-    # DB-08: persistent connection opened at server startup, reused per call.
-    # ``None`` preserves per-call ``connect()`` semantics for existing tests.
-    db_conn: PersistentConnection | None = None
+# The state class and its builder live in the ``brain.mcp_state`` leaf (RM-46),
+# shared with the HTTP transport. ``_State`` stays this module's name for it,
+# because tests build ``mcp_server._State(...)`` by hand.
+_State = McpState
 
 
 _state: _State | None = None
@@ -5085,38 +5059,29 @@ def _load_config() -> Config:
     return cfg
 
 
+def install_state(state: _State) -> None:
+    """Make ``state`` the one every tool reads through :func:`_get_state`.
+
+    Here and not in :mod:`brain.mcp_state`, because the ``_state`` global it
+    assigns is this module's: tests patch ``mcp_server._state`` directly.
+    """
+    global _state
+    _state = state
+
+
 def main() -> None:
     """Initialize shared state and run the brain-mcp server over stdio."""
-    global _state
     cfg = _load_config()
-    embedder = make_embedder(cfg)
-    # Wave Q2-SUMMARY-WIKI: build the long-lived enricher so the
-    # ``brain_edit`` MCP tool can refresh ``documents.summary`` on
-    # body-changing edits. Construction is cheap (no Ollama probe — the
-    # hook handles unavailability inline). Per CLAUDE.md, every external
-    # service has explicit timeouts; the enricher reads
-    # ``Config.enrich_timeout_seconds`` from env.
-    enricher = make_enricher(cfg)
-    # Wave G1-c: build the per-process people-aspect graph syncer (shares one
-    # ReconcileConfig). Cheap + self-gating on BRAIN_GRAPH_ENABLED + AGE
-    # availability, so it's a no-op on a stock pgvector DB. Imported lazily so
-    # the networkx graph_rag chain stays off the hot import path.
-    from .graph_rag.sync import make_graph_syncer
-
-    graph_syncer = make_graph_syncer(cfg)
-    # DB-08: open the persistent connection once at server startup; every tool
-    # call reuses it via _mcp_conn(state), saving the ~10–30 ms TCP handshake
-    # overhead per request. autocommit=True is set inside PersistentConnection.get.
-    db_conn = PersistentConnection(cfg.database_url)
-    _state = _State(
-        cfg=cfg,
-        embedder=embedder,
-        enricher=enricher,
-        graph_syncer=graph_syncer,
-        db_conn=db_conn,
-    )
+    # RM-46: an MCP client spawns this binary with no arguments and owns its
+    # stdout, so a stray flag (``brain-mcp --http``) used to start stdio
+    # silently on a terminal that never speaks JSON-RPC. The HTTP transport is
+    # an operator command on the human CLI instead.
+    if sys.argv[1:]:
+        print(_ARGV_REFUSAL, file=sys.stderr)
+        raise SystemExit(2)
+    install_state(build_state(cfg))
     # F7: warm the embedding model into VRAM before the first real query.
-    _warmup_embed(_state.embedder)
+    _warmup_embed(_get_state().embedder)
     logger.info("brain-mcp starting (stdio transport)")
     mcp_app.run(transport="stdio")
 
