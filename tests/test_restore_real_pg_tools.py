@@ -16,11 +16,13 @@ it reaches the 5434 test container and nothing else:
   the suite database, and teardown puts its original back with
   ``drop_restore_artifacts`` exactly as ``test_restore_swap.py`` does.
 
-Skipped when ``docker`` is not on ``PATH``. CI runs the same AGE test container
-on port 5434, so it runs there.
+Skipped when ``docker`` is not on ``PATH``, except under GitHub Actions, where a
+missing ``docker`` is an error: CI runs the same AGE test container on port
+5434, and must run this test rather than skip it.
 """
 from __future__ import annotations
 
+import os
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
@@ -49,6 +51,10 @@ from tests.conftest import FakeEmbedder, _looks_like_prod_db
 from tests.test_backup_manifest import EMBEDDER_NAME, EMBEDDING_DIM
 
 if shutil.which("docker") is None:
+    # In CI a skip here would turn the only real-tool regression test into a green
+    # no-op, so CI must provide the tools: fail loudly there instead of skipping.
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        raise RuntimeError("CI must run the real pg_dump/pg_restore round trip: no docker")
     pytest.skip("docker is not on PATH: no real pg_dump/pg_restore", allow_module_level=True)
 
 try:
