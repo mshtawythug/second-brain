@@ -248,7 +248,10 @@ and its destination lookup carries the F6 predicate (stdio too);
 ``brain_graphrag_entities``, the graph retrieval seam and ``brain_timeline`` drop
 entity names only confidential documents mention, and the ``person`` arguments of
 ``brain_search`` / ``brain_recall`` / ``brain_timeline`` resolve public people only
-(sec-118b), in HTTP mode only. Each growth is reasoned inline
+(sec-118b), in HTTP mode only. Over HTTP (``McpState.call_timeout_s``, sec-118c)
+``brain_ask`` refuses loop arguments above the Agent tab's and stops at its next
+step past ``--call-timeout``, and the graph seam refuses a deeper ``depth`` than
+configured, because a timed-out call keeps its slot until it returns. Each growth is reasoned inline
 ("Grew (RM-46, sec-118 …)"); the HTTP policy itself lives in ``brain.mcp_http*``
 and ``brain.graph_rag.public_entities``. Plan: ``docs/plans/2026-10-31-rm-46-mcp-http.md``.
 
@@ -3156,6 +3159,7 @@ def brain_ask(
     """
     from .ask import ASK_MODES, HYBRID_MODE
     from .ask import ask as run_ask
+    from .ask_deadline import AskTimedOut, Deadline, deadline_on_step
     from .ask_errors import ASK_FAILURES, describe_ask_failure
     from .chat import chat_json
 
@@ -3177,6 +3181,14 @@ def brain_ask(
         else state.cfg.ask_max_iterations
     )
     resolved_limit = limit if limit is not None else state.cfg.ask_docs_per_iter
+    on_step = None
+    if state.call_timeout_s is not None:
+        # Grew (RM-46, sec-118c LOW-2): over HTTP a timed-out call keeps its slot
+        # until it returns, so the loop is held to the Agent tab's values and
+        # stops at its next step once --call-timeout has passed.
+        _ceiling(resolved_max_iter, ceiling=state.cfg.ask_max_iterations, param="max_iterations")
+        _ceiling(resolved_limit, ceiling=state.cfg.ask_docs_per_iter, param="limit")
+        on_step = deadline_on_step(Deadline(time.monotonic, state.call_timeout_s))
 
     try:
         if mode == HYBRID_MODE:
@@ -3193,6 +3205,7 @@ def brain_ask(
                     limit=resolved_limit,
                     max_iterations=resolved_max_iter,
                     exclude_confidential=not include_confidential,
+                    on_step=on_step,
                 )
                 _log_ask_interactions_mcp(conn, result)
         else:
@@ -3216,8 +3229,11 @@ def brain_ask(
                     backend=backend,
                     exclude_confidential=not include_confidential,
                     public_entities_only=state.hide_confidential,
+                    on_step=on_step,
                 )
                 _log_ask_interactions_mcp(conn, result)
+    except AskTimedOut:
+        raise _mcp_error(INTERNAL_ERROR, "brain_ask passed this server's call deadline") from None
     except ASK_FAILURES as exc:
         # RM-02: one fixed, class-only sentence per family, shared with the CLI
         # (``brain.ask_errors``). It also maps a graph mode's own embed failure,
@@ -3448,6 +3464,9 @@ def _graphrag_search_or_mcp_error(
     from .graph_rag import graph_rag_search
     from .graph_rag.backends import AgeBackend
 
+    if depth is not None and _state is not None and _state.call_timeout_s is not None:
+        # Grew (RM-46, sec-118c LOW-2): over HTTP, no deeper than configured.
+        _ceiling(depth, ceiling=cfg.graph_depth, param="depth")
     try:
         with connect_age(cfg.database_url) as conn:
             conn.autocommit = True
@@ -5105,7 +5124,11 @@ def _load_config() -> Config:
 
 
 def start_state(
-    cfg: Config, *, persistent_db: bool = True, hide_confidential: bool = False
+    cfg: Config,
+    *,
+    persistent_db: bool = True,
+    hide_confidential: bool = False,
+    call_timeout_s: float | None = None,  # Grew: RM-46 sec-118c LOW-2
 ) -> _State:
     """Build the server state for ``cfg``, make it the one the tools read, and warm up.
 
@@ -5116,7 +5139,10 @@ def start_state(
     """
     global _state
     _state = build_state(
-        cfg, persistent_db=persistent_db, hide_confidential=hide_confidential
+        cfg,
+        persistent_db=persistent_db,
+        hide_confidential=hide_confidential,
+        call_timeout_s=call_timeout_s,
     )
     # F7: warm the embedding model into VRAM before the first real query.
     _warmup_embed(_state.embedder)

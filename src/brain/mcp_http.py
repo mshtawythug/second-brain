@@ -514,7 +514,11 @@ def serve_http(
         timeout_ms = int(opts.call_timeout_s * 1000)
         cfg = replace(cfg, database_url=with_statement_timeout(cfg.database_url, timeout_ms))
         mcp_server.start_state(
-            cfg, persistent_db=False, hide_confidential=not opts.include_confidential
+            cfg,
+            persistent_db=False,
+            hide_confidential=not opts.include_confidential,
+            # sec-118c LOW-2: brain_ask stops working, not just waiting, at the deadline.
+            call_timeout_s=opts.call_timeout_s,
         )
         names = anyio.run(registered_tool_names, target)
         withheld = () if opts.allow_writes else apply_read_only(target, names)

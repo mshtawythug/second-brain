@@ -54,10 +54,19 @@ class McpState:
     # unknown prefix does, and a graph entity is named only if a non-confidential
     # document mentions it. stdio leaves it False, so its behaviour is unchanged.
     hide_confidential: bool = False
+    # RM-46, sec-118c LOW-2: ``--call-timeout``, set by ``brain mcp serve``. A call
+    # past it gets its 504 but keeps its work-limit slot until the tool returns,
+    # so ``brain_ask`` stops at its next step past it, and over HTTP the loop and
+    # depth arguments are refused above their configured values. stdio: None.
+    call_timeout_s: float | None = None
 
 
 def build_state(
-    cfg: Config, *, persistent_db: bool = True, hide_confidential: bool = False
+    cfg: Config,
+    *,
+    persistent_db: bool = True,
+    hide_confidential: bool = False,
+    call_timeout_s: float | None = None,
 ) -> McpState:
     """Construct the embedder, enricher, graph syncer and connection for ``cfg``.
 
@@ -82,4 +91,5 @@ def build_state(
         graph_syncer=graph_syncer,
         db_conn=db_conn,
         hide_confidential=hide_confidential,
+        call_timeout_s=call_timeout_s,
     )

@@ -572,6 +572,8 @@ def test_serve_bounds_every_statement_by_the_call_deadline(
     serve_http(opts, cfg, server=_server(), run=recorder.run, announce=recorder.say)
 
     assert "statement_timeout%3D30000" in mcp_server._get_state().cfg.database_url
+    # sec-118c LOW-2: and brain_ask stops at the same deadline.
+    assert mcp_server._get_state().call_timeout_s == 30.0
 
 
 @pytest.mark.parametrize(("include", "hidden"), [(False, True), (True, False)])
