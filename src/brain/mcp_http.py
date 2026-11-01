@@ -33,11 +33,13 @@ import re
 import socket
 import sys
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import anyio
 import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import mcp_server
@@ -45,6 +47,13 @@ from .config import Config
 from .errors import BrainError, McpTransportError
 from .mcp_auth import BearerAuthMiddleware, TokenInfo
 from .mcp_compat import MCP_MAJOR
+from .mcp_http_conn import (
+    IDLE_TIMEOUT_S,
+    MAX_CALLS,
+    MAX_CONNECTIONS,
+    WorkLimitMiddleware,
+    idle_deadline_protocol,
+)
 from .mcp_http_guard import (
     HEALTHZ_PATH,
     READYZ_PATH,
@@ -84,9 +93,6 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 DEFAULT_CALL_TIMEOUT_S = 300.0
 MIN_CALL_TIMEOUT_S = 1.0
 MAX_CALL_TIMEOUT_S = 3600.0
-#: Requests served at once; uvicorn answers 503 above it. Each is a worker thread
-#: and, for a tool call, a database connection.
-LIMIT_CONCURRENCY = 16
 TIMEOUT_KEEP_ALIVE_S = 5
 TIMEOUT_GRACEFUL_SHUTDOWN_S = 10
 #: How long ``/readyz`` waits for the database before reporting it unavailable.
@@ -253,6 +259,7 @@ def build_http_app(
     plan: BindPlan,
     *,
     probe: Callable[[], Awaitable[dict[str, Any]]],
+    max_calls: int = MAX_CALLS,
 ) -> ASGIApp:
     """The SDK app wrapped in every guard, outermost last in this function."""
     app: ASGIApp = server.streamable_http_app(
@@ -270,6 +277,8 @@ def build_http_app(
         max_response_bytes=MAX_RESPONSE_BYTES,
         timeout_s=opts.call_timeout_s,
     )
+    # sec-118 #3/#4: work is capped in the app, orphaned workers included.
+    app = WorkLimitMiddleware(app, max_calls=max_calls)
     app = ReadyzRoute(app, probe=probe)
     if not opts.no_auth:
         assert opts.token is not None  # validate_options guarantees it
@@ -296,6 +305,28 @@ def distribution_version(name: str) -> str:
         return "unknown"
 
 
+def with_statement_timeout(database_url: str, timeout_ms: int) -> str:
+    """``database_url`` with ``statement_timeout`` added to its libpq ``options``.
+
+    Every connection the HTTP server opens (one per tool call, RM-46.D5) then
+    cancels a statement that outlives the call's deadline, instead of running on
+    after the 504 (sec-118 #4). Existing ``options`` are kept. Works on a URI and
+    on a ``key=value`` connection string.
+    """
+    setting = f"-c statement_timeout={timeout_ms}"
+    if "://" not in database_url:
+        current = conninfo_to_dict(database_url).get("options")
+        merged = f"{current} {setting}" if current else setting
+        return make_conninfo(database_url, options=merged)
+    parts = urlsplit(database_url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    existing = [value for key, value in query if key == "options"]
+    kept = [(key, value) for key, value in query if key != "options"]
+    merged = " ".join([*existing, setting])
+    encoded = urlencode([*kept, ("options", merged)], quote_via=quote)
+    return urlunsplit(parts._replace(query=encoded))
+
+
 def database_reachable(database_url: str) -> bool:
     """``SELECT 1`` on a fresh connection, bounded in connect and statement time."""
     try:
@@ -315,8 +346,16 @@ def readiness_probe(
 ) -> Callable[[], Awaitable[dict[str, Any]]]:
     """``/readyz``'s body: whether the brain is usable. No corpus statistics, no paths."""
 
+    # Its own worker thread, so a busy server still answers readiness.
+    limiter: anyio.CapacityLimiter | None = None
+
     async def probe() -> dict[str, Any]:
-        reachable = await anyio.to_thread.run_sync(database_reachable, cfg.database_url)
+        nonlocal limiter
+        if limiter is None:
+            limiter = anyio.CapacityLimiter(1)
+        reachable = await anyio.to_thread.run_sync(
+            database_reachable, cfg.database_url, limiter=limiter
+        )
         return {
             "status": "ok" if reachable else "degraded",
             "database": "ok" if reachable else "unavailable",
@@ -339,7 +378,10 @@ def uvicorn_config_kwargs(plan: BindPlan, port: int, log_level: str) -> dict[str
         # The client address comes from the socket: no X-Forwarded-For trust.
         "proxy_headers": False,
         "server_header": False,
-        "limit_concurrency": LIMIT_CONCURRENCY,
+        # Connections, loosely: idle ones are closed by the idle deadline, and
+        # work is capped in the app (WorkLimitMiddleware). sec-118 #3.
+        "limit_concurrency": MAX_CONNECTIONS,
+        "http": idle_deadline_protocol(IDLE_TIMEOUT_S),
         "timeout_keep_alive": TIMEOUT_KEEP_ALIVE_S,
         "timeout_graceful_shutdown": TIMEOUT_GRACEFUL_SHUTDOWN_S,
         "lifespan": "on",
@@ -440,6 +482,9 @@ def serve_http(
         raise McpTransportError(str(exc)) from None
     try:
         _configure_logging(opts.log_level)
+        # sec-118 #4: no statement outlives the call that started it.
+        timeout_ms = int(opts.call_timeout_s * 1000)
+        cfg = replace(cfg, database_url=with_statement_timeout(cfg.database_url, timeout_ms))
         mcp_server.start_state(cfg, persistent_db=False)
         names = anyio.run(registered_tool_names, target)
         withheld = () if opts.allow_writes else apply_read_only(target, names)

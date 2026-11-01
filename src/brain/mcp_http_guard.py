@@ -183,7 +183,11 @@ class ResponseGuardMiddleware:
 
     The deadline stops the WAIT, not the work: a synchronous tool already
     running on a worker thread finishes in the background, and its result is
-    dropped. The concurrency cap bounds how many such threads can exist.
+    dropped. Two things bound that work (sec-118 #4): its database statements
+    carry a ``statement_timeout`` equal to the deadline, and the thread keeps its
+    worker-limiter token until it returns, so
+    :class:`brain.mcp_http_conn.WorkLimitMiddleware` refuses new calls (503)
+    rather than queueing them behind orphans.
     """
 
     def __init__(self, app: ASGIApp, *, max_response_bytes: int, timeout_s: float) -> None:

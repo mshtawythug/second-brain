@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -26,7 +27,6 @@ from brain.mcp_auth import TokenInfo, fingerprint
 from brain.mcp_compat import make_server
 from brain.mcp_http import (
     HTTP_EXTRA_HINT,
-    LIMIT_CONCURRENCY,
     MAX_RESPONSE_BYTES,
     BindPlan,
     HttpServeOptions,
@@ -37,7 +37,9 @@ from brain.mcp_http import (
     serve_http,
     uvicorn_config_kwargs,
     validate_options,
+    with_statement_timeout,
 )
+from brain.mcp_http_conn import MAX_CONNECTIONS
 from brain.mcp_http_guard import CONFIDENTIAL_REFUSAL
 from brain.mcp_tool_classes import registered_tool_names
 from tests.conftest import isolate_config_dotenv
@@ -362,7 +364,9 @@ def test_uvicorn_is_hardened() -> None:
     opts = HttpServeOptions(token=TOKEN)
 
     kwargs = uvicorn_config_kwargs(_plan(opts), 8787, "INFO")
+    protocol = kwargs.pop("http")
 
+    assert protocol.__name__ == "IdleDeadlineProtocol"
     assert kwargs == {
         "host": "127.0.0.1",
         "port": 8787,
@@ -370,7 +374,7 @@ def test_uvicorn_is_hardened() -> None:
         "access_log": False,
         "proxy_headers": False,
         "server_header": False,
-        "limit_concurrency": LIMIT_CONCURRENCY,
+        "limit_concurrency": MAX_CONNECTIONS,
         "timeout_keep_alive": 5,
         "timeout_graceful_shutdown": 10,
         "lifespan": "on",
@@ -523,3 +527,72 @@ def test_serve_wraps_every_served_tool(cfg: Config, monkeypatch: pytest.MonkeyPa
     assert "/synthetic" not in failed.text
     assert "brain_show failed (PermissionError)" in failed.text
     assert ordinary.json()["result"]["structuredContent"]["echo"] == "synthetic"
+
+
+# ------------------------------------------- sec-118 #4: orphaned work and statements
+
+
+def test_a_call_behind_an_orphaned_worker_is_503_until_it_returns() -> None:
+    server = _server()
+
+    def brain_show(id_prefix: str) -> dict[str, Any]:
+        """A stand-in read tool that blocks its worker thread."""
+        time.sleep(2.0)
+        return {"id": id_prefix}
+
+    server.tool()(brain_show)
+    opts = HttpServeOptions(token=TOKEN, call_timeout_s=1.0)
+    app = build_http_app(server, opts, validate_options(opts), probe=_not_probed, max_calls=1)
+    show = _rpc("tools/call", {"name": "brain_show", "arguments": {"id_prefix": "abcdef"}})
+    with TestClient(app, base_url="http://127.0.0.1:8787") as test_client:
+        timed_out = _post(test_client, show)
+        behind_orphan = _call(test_client, {"query": "q"})
+        time.sleep(2.0)
+        after = _call(test_client, {"query": "q"})
+
+    assert timed_out.status_code == 504
+    assert behind_orphan.status_code == 503
+    assert after.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "postgresql://u:p@db.example.com:5434/brain",
+            "postgresql://u:p@db.example.com:5434/brain?options=-c%20statement_timeout%3D1500",
+        ),
+        (
+            "postgresql://u@db.example.com/brain?sslmode=disable&options=-c%20search_path%3Dx",
+            "postgresql://u@db.example.com/brain?sslmode=disable"
+            "&options=-c%20search_path%3Dx%20-c%20statement_timeout%3D1500",
+        ),
+    ],
+)
+def test_statement_timeout_is_added_to_a_uri(url: str, expected: str) -> None:
+    assert with_statement_timeout(url, 1500) == expected
+
+
+def test_statement_timeout_is_added_to_a_key_value_string() -> None:
+    from psycopg.conninfo import conninfo_to_dict
+
+    plain = with_statement_timeout("host=db.example.com dbname=brain", 1500)
+    merged = with_statement_timeout(
+        "host=db.example.com dbname=brain options='-c search_path=x'", 1500
+    )
+
+    assert conninfo_to_dict(plain)["options"] == "-c statement_timeout=1500"
+    assert conninfo_to_dict(merged)["options"] == "-c search_path=x -c statement_timeout=1500"
+    assert conninfo_to_dict(merged)["dbname"] == "brain"
+
+
+def test_serve_bounds_every_statement_by_the_call_deadline(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(mcp_server, "_state", None)
+    recorder = _Recorder()
+    opts = HttpServeOptions(token=TOKEN, port=_free_port(), call_timeout_s=30.0)
+
+    serve_http(opts, cfg, server=_server(), run=recorder.run, announce=recorder.say)
+
+    assert "statement_timeout%3D30000" in mcp_server._get_state().cfg.database_url

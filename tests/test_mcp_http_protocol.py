@@ -238,3 +238,61 @@ def test_overlapping_calls_each_get_their_own_connection(tmp_path: Path) -> None
 @pytest.mark.usefixtures("test_db")
 def test_the_readiness_check_reaches_the_test_database() -> None:
     assert database_reachable(TEST_DATABASE_URL) is True
+
+
+@pytest.mark.usefixtures("test_db")
+def test_a_statement_cannot_outlive_the_call_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sec-118 #4: a 504 must not leave its query running in Postgres."""
+    from starlette.testclient import TestClient
+
+    from brain import mcp_server
+    from brain.config import Config
+    from brain.mcp_auth import TokenInfo, fingerprint
+    from brain.mcp_compat import make_server
+    from brain.mcp_http import HttpServeOptions, serve_http
+    from tests.conftest import isolate_config_dotenv
+
+    isolate_config_dotenv(monkeypatch, tmp_path)
+    monkeypatch.setenv("BRAIN_EMBEDDER", "none")
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setattr(mcp_server, "_state", None)
+    marker = "rm46-synthetic-sleep"
+    server = make_server("throwaway")
+
+    def brain_show(id_prefix: str) -> dict[str, Any]:
+        """A stand-in read tool whose query outlives its deadline."""
+        url = mcp_server._get_state().cfg.database_url
+        with psycopg.connect(url, autocommit=True) as conn:
+            conn.execute(f"SELECT pg_sleep(5) /* {marker} */")
+        return {"id": id_prefix}
+
+    server.tool()(brain_show)
+    secret = "A" * 43
+    token = TokenInfo(
+        path=None, secret=secret, mode_octal="", mode_ok=True, fingerprint=fingerprint(secret)
+    )
+    apps: list[Any] = []
+    opts = HttpServeOptions(token=token, port=_free_port(), call_timeout_s=1.0)
+    serve_http(
+        opts, Config.load(), server=server, run=lambda app, *_: apps.append(app),
+        announce=lambda _line: None,
+    )
+
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "brain_show", "arguments": {"id_prefix": "abcdef"}}}
+    headers = {"Authorization": f"Bearer {secret}", "Accept": "application/json, text/event-stream",
+               "Host": "127.0.0.1:8787"}
+    with TestClient(apps[0], base_url="http://127.0.0.1:8787") as client:
+        response = client.post("/mcp", json=body, headers=headers)
+        time.sleep(1.5)
+        with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as watcher:
+            running = watcher.execute(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE query LIKE %s AND pid <> pg_backend_pid()",
+                (f"%{marker}%",),
+            ).fetchone()
+
+    assert response.status_code == 504
+    assert running is not None and running[0] == 0
