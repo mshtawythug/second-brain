@@ -35,7 +35,6 @@ from brain.db import bootstrap_age, connect, ensure_embedding_column, run_migrat
 from tests.backup_fakes import (
     ProdDsnLeak,
     SuiteDatabaseNameTooLong,
-    _looks_like_prod_db,
     drop_restore_artifacts,
     dsn_database,
     dsn_for_database,
@@ -46,7 +45,7 @@ from tests.backup_fakes import (
 )
 from tests.backup_fakes import restore_sandbox_dsn as _restore_sandbox_dsn
 from tests.conftest import TEST_DATABASE_URL as _SUITE_DATABASE_URL
-from tests.conftest import FakeEmbedder
+from tests.conftest import FakeEmbedder, _looks_like_prod_db
 from tests.test_backup_manifest import EMBEDDER_NAME, EMBEDDING_DIM
 
 if shutil.which("docker") is None:
@@ -65,9 +64,10 @@ ADMIN_DSN = dsn_for_database(_SUITE_DATABASE_URL, "postgres")
 
 def _refuse_prod(dsn: str) -> None:
     params = psycopg.conninfo.conninfo_to_dict(dsn)
+    port = params.get("port")
     if _looks_like_prod_db(
         str(params.get("host") or "") or None,
-        int(params["port"]) if params.get("port") else None,
+        int(str(port)) if port else None,
         str(params.get("dbname") or "") or None,
     ):
         raise ProdDsnLeak(f"refusing a real pg tool run against production: {dsn!r}")

@@ -357,3 +357,31 @@ recipe cannot work around. Both are fixed in this PR.
    `cfg.database_url`.
 
 Line budget after both: `backup/restore.py` 755 → 767, which is +12 of its +15 (spec §2.2).
+
+### 10.1 The coordinator's follow-ups to fix A
+
+These ran on throwaway databases on 5434 only. Every step printed and asserted its host and port,
+and the databases were dropped by exact name afterwards.
+
+- **Graph data.** The primary held the demo corpus with embeddings and HNSW, plus
+  `graphrag build --backfill`: 66 entities, 84 mentions, 11 relationships, and AGE with 87
+  vertices and 95 edges over 4 labels.
+  - After the restore, all 7 `graph_*` tables matched row for row.
+  - The AGE mirror is empty after the restore. That is by design: `EXCLUDED_SCHEMAS =
+    ("ag_catalog", "brain_graph")`, F3 §5.2.
+  - `brain graphrag build --force` rebuilt it exactly: 87 vertices, 95 edges, the 4 labels, and
+    `graph drift OK`.
+  - Nothing in `public` depends on `ag_catalog`. No migration references `agtype` or `ag_catalog`,
+    and the dump has no such object entries.
+- **Other defects of the same kind:** none found.
+  - vector: the extension, NOT NULL and HNSW restore.
+  - Owner statements are skipped by `--no-owner`, and there are no GRANT entries.
+  - `search_path=''` in the dump breaks no index build.
+- **Existing archives.** The backup side is unchanged by this PR. An archive taken by master's
+  code fails master's restore and succeeds with this branch's.
+- **Regression test.** `tests/test_restore_real_pg_tools.py` runs a real `pg_dump`→`pg_restore`
+  through production's container discovery.
+  - Source: a throwaway database. Target: the restore sandbox.
+  - It fails on master with the production error, as a mutation run in a git-archive copy shows.
+  - Its pair, a source without `age`, passes.
+  - It is skipped without `docker`. CI runs the same 5434 AGE container.

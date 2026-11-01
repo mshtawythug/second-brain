@@ -37,12 +37,22 @@ git tag scheme:
 
 ### Fixed — `brain restore` of an AGE-enabled brain (found by RM-47's end-to-end run)
 
-- Every real restore of a brain with Apache AGE failed at `pg_restore`: the dump excludes the
-  `ag_catalog` schema but keeps the `age` extension entry, which replays as `CREATE EXTENSION IF
-  NOT EXISTS age WITH SCHEMA ag_catalog` and fails on a fresh staging database. The restore now
-  creates `age` in the staging database first, when the server offers it, so the dump's
-  statement is a no-op. Nothing was ever damaged: the failure came before any swap. The restore
-  tests had faked `pg_restore`, which is why they did not see it.
+- **Restoring an AGE-enabled brain failed at `pg_restore`, and now works.** The dump excludes the
+  `ag_catalog` schema but keeps the `age` extension entry. That entry replays as `CREATE EXTENSION
+  IF NOT EXISTS age WITH SCHEMA ag_catalog`, which fails on a fresh staging database with `schema
+  "ag_catalog" does not exist`.
+  - The restore now creates `age` in the staging database first, when the server offers it, so the
+    dump's statement is a no-op.
+  - Nothing was ever damaged: the failure came before any swap, and the staging database was
+    dropped.
+  - The restore tests had faked `pg_restore`, which is why they missed it. A new test runs a real
+    `pg_dump`→`pg_restore` round trip, both with and without AGE.
+- **Existing archives are restorable as they are; no re-backup is needed.** The fix is on the
+  restore side only, and `brain backup` is unchanged. It was verified with an archive taken by the
+  previous code: the old restore failed on it and the new one restored it.
+- **The AGE graph mirror is still not in the archive (by design, F3 §5.2).** The relational graph
+  tables restore exactly. Run `brain graphrag build --force` after a restore to rebuild the mirror,
+  as `brain restore` prints. Until then `brain doctor` reports graph drift.
 - The restore summary's "WILL BE OVERWRITTEN" line now names the database being replaced. It
   used to name the database the archive was taken from, which differs on a read replica.
 

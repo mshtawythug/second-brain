@@ -72,8 +72,10 @@ brain doctor                       # look for the "replica" row
 pre-restore backup of the replica first. On a fresh install the database and vault are empty, so
 the only prompt is the y/N confirmation.
 
-The archive leaves out the knowledge graph. If you use GraphRAG on the replica, run
-`brain graphrag build --force` afterwards, as `brain restore` reminds you.
+The archive leaves out the AGE graph mirror, though the graph's relational tables are restored
+exactly. If you use GraphRAG on the replica, run `brain graphrag build --force` after every
+restore, as `brain restore` reminds you. Until you do, `brain doctor` reports `graph drift`, and
+graph queries find nothing.
 
 ### What `brain doctor` shows
 
