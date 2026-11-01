@@ -64,6 +64,7 @@ from .pgtool import (
     resolve_pg_tool,
     server_version,
 )
+from .replica_marker import ReplicaMarkerError, write_marker
 
 #: The phrase a user must type when the target is not empty. No flag can supply
 #: it — see §5.9 and `uninstall.py:103-109`, which exists for the same reason.
@@ -77,6 +78,8 @@ _VAULT_DISK_FACTOR = 2
 #: Printed, not run: the graph rebuild takes minutes on a 1,200-doc corpus and
 #: is not needed for `brain search` to work (§5.2).
 FOLLOW_UP = ("brain graphrag build --force", "brain doctor")
+#: The step reported when the RM-47 marker cannot be written after a completed restore.
+RESTORED_FROM_NOT_RECORDED = "restored-from marker NOT recorded (brain doctor will not show it)"
 
 
 @dataclass(frozen=True)
@@ -740,6 +743,12 @@ def restore_backup(
             report(f"brain init ({len(applied)} new migrations)")
             analyze_tables(conn, ["chunks", "documents"])
             report("brain analyze (chunks, documents)")
+
+    if db_restored or vault_restored:  # RM-47: the replica marker; D4: never fail here
+        try:
+            write_marker(cfg.brain_home, manifest, archive, now=now)
+        except ReplicaMarkerError:
+            report(RESTORED_FROM_NOT_RECORDED)
 
     shutil.rmtree(state.staging_dir, ignore_errors=True)
 

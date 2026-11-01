@@ -17,6 +17,8 @@ import pytest
 from psycopg import sql
 
 from brain.backup import create_backup, read_manifest, restore_backup
+from brain.backup.replica_marker import marker_path, read_marker
+from brain.backup.restore import RESTORED_FROM_NOT_RECORDED
 from brain.config import Config
 from brain.errors import BackupError, RestoreAborted
 from tests.backup_fakes import (
@@ -393,3 +395,86 @@ def test_follow_up_names_the_graph_rebuild(
     report = _restore(archive, cfg, runner)
 
     assert "brain graphrag build --force" in report.follow_up
+
+
+# --- RM-47: the restored-from marker -------------------------------------------------
+
+
+def test_successful_restore_records_the_restored_from_marker(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+    runner: StubAndRestoreRunner,
+) -> None:
+    """AC1: after a restore the marker holds the manifest's ``created_at``."""
+    _restore(archive, cfg, runner)
+
+    marker = read_marker(cfg.brain_home)
+    assert marker is not None
+    assert marker.created_at == read_manifest(archive).created_at
+    assert marker.archive_name == archive.name
+    assert marker.restored_at == NOW
+
+
+def test_failed_restore_leaves_an_earlier_marker_untouched(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+) -> None:
+    """Only a restore that completed may claim this machine holds that archive."""
+    earlier = marker_path(cfg.brain_home)
+    earlier.parent.mkdir(parents=True)
+    earlier.write_text('{"synthetic": "earlier marker"}', encoding="utf-8")
+    before = earlier.read_bytes()
+    inert = StubAndRestoreRunner(
+        base_dsn=TEST_DATABASE_URL, responses={"--version": CONTAINER_VERSION}
+    )
+    inert.migrate_enabled = False
+
+    with pytest.raises(BackupError, match="Nothing was changed"):
+        _restore(archive, cfg, inert)
+
+    assert earlier.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("legs", "expect_db", "expect_vault"),
+    [
+        ({"vault_leg": False}, True, False),
+        ({"db_leg": False}, False, True),
+    ],
+    ids=["db-only", "vault-only"],
+)
+def test_a_single_leg_restore_also_records_the_marker(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+    runner: StubAndRestoreRunner,
+    legs: dict[str, bool],
+    expect_db: bool,
+    expect_vault: bool,
+) -> None:
+    """RM-47.D3: either leg makes this machine a copy of the archive."""
+    report = _restore(archive, cfg, runner, **legs)
+
+    assert (report.db_restored, report.vault_restored) == (expect_db, expect_vault)
+    marker = read_marker(cfg.brain_home)
+    assert marker is not None
+    assert marker.archive_name == archive.name
+
+
+def test_a_marker_write_failure_is_reported_and_the_restore_still_succeeds(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+    runner: StubAndRestoreRunner,
+) -> None:
+    """RM-47.D4: the data is already swapped in, so failing now would misreport it."""
+    cfg.brain_home.mkdir(parents=True, exist_ok=True)
+    (cfg.brain_home / "state").write_text("a file, not a directory", encoding="utf-8")
+    steps: list[str] = []
+
+    report = _restore(archive, cfg, runner, on_step=steps.append)
+
+    assert report.db_restored is True
+    assert RESTORED_FROM_NOT_RECORDED in steps
