@@ -621,3 +621,24 @@ def test_the_readiness_probe_reuses_its_own_worker(cfg: Config) -> None:
 
     assert first == second
     assert first["database"] == "unavailable"
+
+
+def test_calling_a_withheld_tool_names_it_unknown(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 §6.6: in read-only mode a write tool does not exist over HTTP."""
+    monkeypatch.setattr(mcp_server, "_state", None)
+    recorder = _Recorder()
+    opts = HttpServeOptions(token=TOKEN, port=_free_port())
+
+    serve_http(opts, cfg, server=_server(), run=recorder.run, announce=recorder.say)
+    (app, _, _), = recorder.calls
+    edit = _rpc("tools/call", {"name": "brain_edit", "arguments": {"id": "abcdef"}})
+    with TestClient(app, base_url="http://127.0.0.1:8787") as test_client:
+        withheld = _post(test_client, edit)
+        ordinary = _call(test_client, {"query": "synthetic"})
+
+    assert "Unknown tool" in withheld.text
+    assert "brain_edit" in withheld.text
+    assert "edited" not in withheld.text
+    assert ordinary.json()["result"]["structuredContent"]["echo"] == "synthetic"
