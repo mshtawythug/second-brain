@@ -489,3 +489,37 @@ def test_the_exact_paths_still_answer(client: TestClient) -> None:
     assert _call(client, {"query": "q"}).status_code == 200
     assert client.get("/healthz").json() == {"status": "ok"}
     assert client.get("/readyz", headers=AUTH).status_code == 200
+
+
+# ------------------------------------------------------ sec-118 #5: error text
+
+
+def _failing_server() -> Any:
+    server = _server()
+
+    def brain_show(id_prefix: str) -> dict[str, Any]:
+        """A stand-in read tool that fails like an unreadable vault file."""
+        raise PermissionError(13, "Permission denied", "/synthetic/vault/private-note.md")
+
+    server.tool()(brain_show)
+    return server
+
+
+def test_serve_wraps_every_served_tool(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mcp_server, "_state", None)
+    server = _failing_server()
+    recorder = _Recorder()
+    opts = HttpServeOptions(token=TOKEN, port=_free_port())
+
+    serve_http(opts, cfg, server=server, run=recorder.run, announce=recorder.say)
+    (app, _, _), = recorder.calls
+    with TestClient(app, base_url="http://127.0.0.1:8787") as test_client:
+        failed = _post(
+            test_client,
+            _rpc("tools/call", {"name": "brain_show", "arguments": {"id_prefix": "abcdef"}}),
+        )
+        ordinary = _call(test_client, {"query": "synthetic"})
+
+    assert "/synthetic" not in failed.text
+    assert "brain_show failed (PermissionError)" in failed.text
+    assert ordinary.json()["result"]["structuredContent"]["echo"] == "synthetic"

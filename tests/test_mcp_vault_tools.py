@@ -1041,3 +1041,52 @@ def test_brain_daily_missing_vault_path(
     with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_daily(date="2026-04-29")
     assert "vault path does not exist" in exc_info.value.error.message
+
+
+# ---------------------------------------------------------------------------
+# RM-46 sec-118 #5: a failure reading the source names its class, not its path
+# ---------------------------------------------------------------------------
+
+
+def test_brain_link_proposal_unreadable_src_names_no_path(
+    test_db: psycopg.Connection,
+    vault_dir: Path,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    src_id = "11111111-1111-1111-1111-111111111111"
+    _make_doc(test_db, doc_id=src_id, title="Q1 review", vault_path="q1-review.md")
+    _make_doc(test_db, doc_id="22222222-2222-2222-2222-222222222222", title="Target note")
+    src_path = _seed_vault_note(
+        vault_dir, relative="q1-review.md", doc_id=src_id, title="Q1 review"
+    )
+    src_path.chmod(0o000)
+    try:
+        with pytest.raises(MCPError) as exc_info:
+            mcp_server.brain_link_proposal(
+                src_id_prefix=src_id[:8], dst_id_or_title="Target note"
+            )
+    finally:
+        src_path.chmod(0o600)
+
+    message = exc_info.value.error.message
+    assert message == "could not read src vault file (PermissionError)"
+    assert str(vault_dir) not in message
+
+
+def test_brain_link_proposal_malformed_src_names_no_text(
+    test_db: psycopg.Connection,
+    vault_dir: Path,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    src_id = "11111111-1111-1111-1111-111111111111"
+    _make_doc(test_db, doc_id=src_id, title="Q1 review", vault_path="q1-review.md")
+    _make_doc(test_db, doc_id="22222222-2222-2222-2222-222222222222", title="Target note")
+    path = vault_dir / "q1-review.md"
+    path.write_text("---\nfoo: [unclosed synthetic-secret-line\n---\nbody\n", encoding="utf-8")
+
+    with pytest.raises(MCPError) as exc_info:
+        mcp_server.brain_link_proposal(src_id_prefix=src_id[:8], dst_id_or_title="Target note")
+
+    message = exc_info.value.error.message
+    assert message.startswith("src has malformed frontmatter (")
+    assert "synthetic-secret-line" not in message

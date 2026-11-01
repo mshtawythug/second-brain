@@ -56,6 +56,7 @@ from .mcp_http_guard import (
     RequestLogMiddleware,
     ResponseGuardMiddleware,
 )
+from .mcp_http_tools import sanitize_tool_errors
 from .mcp_tool_classes import ToolRegistry, apply_read_only, registered_tool_names
 from .ui.context import (
     HostRefused,
@@ -442,6 +443,8 @@ def serve_http(
         mcp_server.start_state(cfg, persistent_db=False)
         names = anyio.run(registered_tool_names, target)
         withheld = () if opts.allow_writes else apply_read_only(target, names)
+        # sec-118 #5: an unexpected failure answers its class, never its text.
+        sanitize_tool_errors(target, [name for name in names if name not in withheld])
         served = len(names) - len(withheld)
         probe = readiness_probe(cfg, read_only=not opts.allow_writes, tools=served)
         app = build_http_app(target, opts, plan, probe=probe)

@@ -43,6 +43,7 @@ def _fresh(code: str) -> subprocess.CompletedProcess[bytes]:
         "brain.mcp_auth",
         "brain.mcp_tool_classes",
         "brain.mcp_http_guard",
+        "brain.mcp_http_tools",
         "brain.settings.mcp_http",
         "brain.cli_mcp",
         "brain.mcp_http",

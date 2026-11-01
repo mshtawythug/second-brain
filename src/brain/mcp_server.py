@@ -3271,13 +3271,13 @@ def brain_link_proposal(
         text = abs_src.read_text(encoding="utf-8")
     except OSError as e:
         raise _mcp_error(
-            INTERNAL_ERROR, f"could not read src vault file: {e}"
+            INTERNAL_ERROR, f"could not read src vault file ({type(e).__name__})"
         ) from e
     try:
         _, body = parse_frontmatter(text)
     except (ValueError, yaml.YAMLError) as e:
         raise _mcp_error(
-            INTERNAL_ERROR, f"src has malformed frontmatter: {e}"
+            INTERNAL_ERROR, f"src has malformed frontmatter ({type(e).__name__})"
         ) from e
 
     # The proposed snippet appends a "See also" line at the end of the
