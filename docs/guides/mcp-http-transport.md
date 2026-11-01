@@ -125,6 +125,8 @@ the mode and the tool count, and nothing about the corpus.
   alone. A wildcard bind also accepts only loopback `Host` values unless you add
   `--allowed-host`.
 - `no bearer token`. Run `brain mcp token --rotate`, or pass `--no-auth` on loopback.
+- `--no-auth cannot be combined with --allow-remote or --allowed-host`. Both widen who can
+  reach the server, so a token is required.
 - `token file … is mode 0644; expected 0600`. Run `chmod 600` on the file. The server also
   refuses a token file that is a symbolic link, is not a regular file, belongs to another
   user, or does not hold a token.

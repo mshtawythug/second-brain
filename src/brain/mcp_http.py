@@ -106,7 +106,7 @@ _RESERVED_PATHS = frozenset({HEALTHZ_PATH, READYZ_PATH})
 HTTP_EXTRA_HINT = "pip install 'secondbrain-py[http]'"
 _REMOTE_HELP = (
     "\n\n  1. brain mcp token --rotate          # writes <brain_home>/mcp_token (mode 0600)\n"
-    "  2. brain mcp serve --host {host} --allow-remote\n\n"
+    "  2. {step2}\n\n"
     "Never expose this port to the public internet or port-forward it. Put both\n"
     "machines on a private network (e.g. Tailscale) and bind the private address.\n"
     "See docs/guides/mcp-http-transport.md."
@@ -119,8 +119,16 @@ REFUSE_NO_TOKEN_REMOTE = (
     "refusing to bind {host} without a bearer token — the token is mandatory off "
     "loopback." + _REMOTE_HELP
 )
-REFUSE_NO_AUTH_REMOTE = (
-    "refusing to bind {host} with --no-auth — a token is mandatory off loopback." + _REMOTE_HELP
+#: Step 2 for a wildcard bind (rev-118 #7): it answers only loopback Host values,
+#: so "--host 0.0.0.0 --allow-remote" alone starts a server no other device can use.
+_WILDCARD_STEP2 = (
+    "brain mcp serve --host <this machine's private address> --allow-remote\n"
+    "     (or keep --host {host} and add --allowed-host <the name clients use>: a\n"
+    "     wildcard bind answers only loopback Host values)"
+)
+REFUSE_NO_AUTH_WIDENED = (
+    "--no-auth cannot be combined with --allow-remote or --allowed-host: both open the "
+    "server beyond this machine's loopback names, and then a token is mandatory."
 )
 REFUSE_NO_TOKEN = (
     "no bearer token: create one with `brain mcp token --rotate`, or pass --no-auth "
@@ -209,13 +217,18 @@ def validate_options(opts: HttpServeOptions, *, resolver: Any = None) -> BindPla
     except BrainError as exc:
         raise McpTransportError(str(exc)) from None
     kind = address_class(host, addresses)
+    if opts.no_auth and (opts.allow_remote or opts.allowed_hosts):
+        raise McpTransportError(REFUSE_NO_AUTH_WIDENED)
     if kind != "loopback":
+        step2 = (
+            _WILDCARD_STEP2.format(host=host)
+            if kind == "wildcard"
+            else f"brain mcp serve --host {host} --allow-remote"
+        )
         if not opts.allow_remote:
-            raise McpTransportError(REFUSE_NO_ALLOW_REMOTE.format(host=host))
-        if opts.no_auth:
-            raise McpTransportError(REFUSE_NO_AUTH_REMOTE.format(host=host))
+            raise McpTransportError(REFUSE_NO_ALLOW_REMOTE.format(host=host, step2=step2))
         if opts.token is None:
-            raise McpTransportError(REFUSE_NO_TOKEN_REMOTE.format(host=host))
+            raise McpTransportError(REFUSE_NO_TOKEN_REMOTE.format(host=host, step2=step2))
     if not opts.no_auth and opts.token is None:
         raise McpTransportError(REFUSE_NO_TOKEN)
     if not opts.no_auth and opts.token is not None and not opts.token.mode_ok:

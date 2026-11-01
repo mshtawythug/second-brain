@@ -345,3 +345,27 @@ def test_brain_mcp_refuses_arguments() -> None:
     assert proc.returncode == 2
     assert b"brain mcp serve" in proc.stderr
     assert proc.stdout == b""
+
+
+def test_brain_mcp_refuses_arguments_even_with_a_broken_config(tmp_path: Path) -> None:
+    """rev-118 #8: the refusal comes before config loading, so it never hides behind it."""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"DATABASE_URL", "TEST_DATABASE_URL"}
+    }
+    env.update(
+        {"BRAIN_HOME": str(tmp_path), "BRAIN_IGNORE_CWD_DOTENV": "1", "PYTHONPATH": ""}
+    )
+    proc = subprocess.run(
+        [sys.executable, "-m", "brain.mcp_server", "--http"],
+        capture_output=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode == 2
+    assert b"brain mcp serve" in proc.stderr
+    assert b"DATABASE_URL" not in proc.stderr

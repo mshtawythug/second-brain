@@ -1729,10 +1729,10 @@ entry point MCP clients spawn, takes no arguments, and exits 2 if given any.
 | `--include-confidential` | off | Let callers ask for confidential documents. Without it, such a call is refused. |
 | `--allowed-host` | none | Extra `Host` value to accept (repeatable): a hostname or IP, no port or wildcard. |
 | `--token-file` | `$BRAIN_MCP_TOKEN`, else `$BRAIN_MCP_TOKEN_PATH`, else `<brain_home>/mcp_token` | The bearer-token file. Read once at start: after `brain mcp token --rotate`, restart the server. `BRAIN_MCP_TOKEN` outranks every file but this flag. |
-| `--no-auth` | off | No token. Loopback only. |
+| `--no-auth` | off | No token. Loopback only, and refused with `--allow-remote` or `--allowed-host`. |
 | `--max-body-bytes` | `1048576` | 1 KiB to 16 MiB. |
 | `--call-timeout` | `300` | Seconds per tool call before a 504 (1 to 3600). |
-| `--log-level` | `INFO` | One line per request: client address, method, route label, status, time. Never a path, header, body or token. |
+| `--log-level` | `$BRAIN_MCP_LOG_LEVEL`, else `INFO` | One line per request: client address, method, route label, status, time. Never a path, header, body or token. |
 
 Only the endpoint, `/healthz` and `/readyz` are served (404 otherwise). A connection with no
 request in flight closes after 10 s, at most 16 calls run at once (503 beyond), and a call's

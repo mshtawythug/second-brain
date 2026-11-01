@@ -1243,6 +1243,9 @@ def test_main_loads_config_before_configuring_logging(
 
     monkeypatch.setattr(mcp_server, "_load_config", _record("load_config"))
     monkeypatch.setattr(mcp_server, "_configure_logging", _record("configure_logging"))
+    # main() refuses arguments before anything else (RM-46); pytest's own argv
+    # must not reach it.
+    monkeypatch.setattr(sys, "argv", ["brain-mcp"])
 
     with pytest.raises(_StartupStop):
         mcp_server.main()

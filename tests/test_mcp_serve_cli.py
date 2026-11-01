@@ -163,3 +163,35 @@ def test_no_auth_does_not_read_any_token(
 
     assert result.exit_code == 0, result.output
     assert recorded[0].token is None and recorded[0].no_auth is True
+
+
+# ------------------------------------------------- rev-118 #9: log-level precedence
+
+
+@pytest.mark.parametrize(
+    ("flag", "env", "expected"),
+    [
+        (None, None, "INFO"),
+        (None, "debug", "DEBUG"),
+        ("warning", "debug", "WARNING"),
+        (None, "CHATTY", "INFO"),
+    ],
+)
+def test_the_log_level_is_flag_then_env_then_info(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: list[mcp_http.HttpServeOptions],
+    flag: str | None,
+    env: str | None,
+    expected: str,
+) -> None:
+    if env is None:
+        monkeypatch.delenv("BRAIN_MCP_LOG_LEVEL", raising=False)
+    else:
+        monkeypatch.setenv("BRAIN_MCP_LOG_LEVEL", env)
+    args = ["mcp", "serve", "--no-auth", *(["--log-level", flag] if flag else [])]
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 0, result.output
+    assert recorded[0].log_level == expected

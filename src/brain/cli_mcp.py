@@ -133,6 +133,21 @@ def _print_info(path: Path, info: TokenInfo, *, show: bool) -> None:
         typer.echo("Use --show to print the token. Treat it like a password.")
 
 
+_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
+
+
+def _log_level(flag: str | None) -> str:
+    """``--log-level``, else a valid ``BRAIN_MCP_LOG_LEVEL``, else INFO (rev-118 #9).
+
+    An invalid environment value falls back to INFO, as ``brain-mcp`` does; an
+    invalid flag is refused by ``validate_options``.
+    """
+    if flag is not None:
+        return flag.upper()
+    env = os.environ.get("BRAIN_MCP_LOG_LEVEL", "").strip().upper()
+    return env if env in _LOG_LEVELS else "INFO"
+
+
 @mcp_app.command("serve")
 def serve(
     host: str = typer.Option(
@@ -176,8 +191,10 @@ def serve(
     call_timeout: float = typer.Option(
         300.0, "--call-timeout", help="Seconds a tool call may take before a 504 (1 to 3600)."
     ),
-    log_level: str = typer.Option(
-        "INFO", "--log-level", help="DEBUG, INFO, WARNING, ERROR or CRITICAL."
+    log_level: str | None = typer.Option(
+        None,
+        "--log-level",
+        help="DEBUG, INFO, WARNING, ERROR or CRITICAL. Default: $BRAIN_MCP_LOG_LEVEL, else INFO.",
     ),
 ) -> None:
     """Serve the MCP tools over streamable HTTP, for another device on a private network."""
@@ -208,7 +225,7 @@ def serve(
         no_auth=no_auth,
         max_body_bytes=max_body_bytes,
         call_timeout_s=call_timeout,
-        log_level=log_level.upper(),
+        log_level=_log_level(log_level),
     )
     try:
         serve_http(opts, cfg)

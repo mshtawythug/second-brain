@@ -5120,14 +5120,14 @@ def start_state(
 
 def main() -> None:
     """Initialize shared state and run the brain-mcp server over stdio."""
-    cfg = _load_config()
-    # RM-46: an MCP client spawns this binary with no arguments and owns its
-    # stdout, so a stray flag (``brain-mcp --http``) used to start stdio
-    # silently on a terminal that never speaks JSON-RPC. The HTTP transport is
-    # an operator command on the human CLI instead.
+    # RM-46: MCP clients spawn this with no arguments and own its stdout; a
+    # stray flag (``brain-mcp --http``) used to start stdio silently. HTTP is
+    # ``brain mcp serve``. Checked before the config loads, so a broken config
+    # cannot hide the refusal (rev-118 #8).
     if sys.argv[1:]:
         print(_ARGV_REFUSAL, file=sys.stderr)
         raise SystemExit(2)
+    cfg = _load_config()
     start_state(cfg)
     logger.info("brain-mcp starting (stdio transport)")
     mcp_app.run(transport="stdio")

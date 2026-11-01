@@ -209,3 +209,39 @@ def test_a_call_timeout_out_of_range_is_refused(seconds: float) -> None:
 def test_an_unknown_log_level_is_refused() -> None:
     with pytest.raises(McpTransportError, match="--log-level"):
         validate_options(_opts(log_level="CHATTY"))
+
+
+# ----------------------------------------------- rev-118 #5 and #7
+
+
+@pytest.mark.parametrize(
+    "widening", [{"allow_remote": True}, {"allowed_hosts": ("brain.tailnet.example.com",)}]
+)
+def test_no_auth_refuses_every_widening_flag_even_on_loopback(widening: dict[str, Any]) -> None:
+    with pytest.raises(McpTransportError, match="--no-auth cannot be combined"):
+        validate_options(_opts(token=None, no_auth=True, **widening))
+
+
+def test_no_auth_alone_on_loopback_is_still_accepted() -> None:
+    assert validate_options(_opts(token=None, no_auth=True)).kind == "loopback"
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::"])
+def test_a_wildcard_refusal_names_a_remedy_that_works(host: str) -> None:
+    # A wildcard bind trusts only loopback Host values, so "--host 0.0.0.0
+    # --allow-remote" alone would start a server no other device can use.
+    with pytest.raises(McpTransportError) as excinfo:
+        validate_options(_opts(host=host))
+
+    message = str(excinfo.value)
+    assert "--allowed-host" in message
+    assert "private address" in message
+
+
+def test_an_address_refusal_names_that_address() -> None:
+    with pytest.raises(McpTransportError) as excinfo:
+        validate_options(_opts(host="192.0.2.10"))
+
+    message = str(excinfo.value)
+    assert "brain mcp serve --host 192.0.2.10 --allow-remote" in message
+    assert "--allowed-host" not in message
