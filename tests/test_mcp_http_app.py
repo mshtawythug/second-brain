@@ -609,3 +609,15 @@ def test_serve_hides_confidential_metadata_unless_opted_in(
     serve_http(opts, cfg, server=_server(), run=recorder.run, announce=recorder.say)
 
     assert mcp_server._get_state().hide_confidential is hidden
+
+
+def test_the_readiness_probe_reuses_its_own_worker(cfg: Config) -> None:
+    probe = readiness_probe(cfg, read_only=True, tools=28)
+
+    async def twice() -> list[dict[str, Any]]:
+        return [await probe(), await probe()]
+
+    first, second = anyio.run(twice)
+
+    assert first == second
+    assert first["database"] == "unavailable"

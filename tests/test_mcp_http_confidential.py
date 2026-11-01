@@ -306,3 +306,11 @@ def test_mcp_state_defaults_to_stdio_behaviour(corpus: Path) -> None:
 
     assert state.hide_confidential is False
     assert dataclasses.replace(state, hide_confidential=True).hide_confidential is True
+
+
+def test_public_mention_sql_refuses_a_non_identifier_alias() -> None:
+    from brain.graph_rag.public_entities import public_mention_sql
+
+    with pytest.raises(ValueError, match="plain identifier"):
+        public_mention_sql("e; DROP TABLE documents")
+    assert "e.tenant_id" in public_mention_sql("e")

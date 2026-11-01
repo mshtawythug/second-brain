@@ -258,3 +258,27 @@ def test_lifespan_passes_the_work_limit() -> None:
     anyio.run(WorkLimitMiddleware(inner, max_calls=1), {"type": "lifespan"}, noop, noop)
 
     assert seen == ["lifespan"]
+
+
+class _Transport:
+    def __init__(self, *, closing: bool) -> None:
+        self.closing = closing
+        self.closed = 0
+
+    def is_closing(self) -> bool:
+        return self.closing
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+@pytest.mark.parametrize(("closing", "closes"), [(False, 1), (True, 0)])
+def test_the_deadline_closes_an_idle_connection_once(closing: bool, closes: int) -> None:
+    cls = idle_deadline_protocol(IDLE_S)
+    protocol = cls.__new__(cls)  # the handler needs only these attributes
+    protocol.cycle = None  # type: ignore[assignment]
+    protocol.transport = _Transport(closing=closing)  # type: ignore[assignment]
+
+    protocol._idle_deadline_expired()
+
+    assert protocol.transport.closed == closes  # type: ignore[attr-defined]

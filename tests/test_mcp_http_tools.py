@@ -124,3 +124,19 @@ def test_a_server_without_a_tool_registry_is_refused() -> None:
 def test_an_unknown_tool_name_is_refused() -> None:
     with pytest.raises(McpTransportError, match="brain_nope"):
         sanitize_tool_errors(_server(), ["brain_nope"])
+
+
+def test_an_async_tools_own_refusal_passes_verbatim() -> None:
+    server = make_server("throwaway")
+
+    async def brain_async_refuses(id_prefix: str) -> dict[str, Any]:
+        """Refuses with the tools' own INVALID_PARAMS, asynchronously."""
+        raise mcp_error(INVALID_PARAMS, f"document not found: {id_prefix}")
+
+    server.tool()(brain_async_refuses)
+    sanitize_tool_errors(server, ["brain_async_refuses"])
+
+    with pytest.raises(MCPError) as excinfo:
+        _call(server, "brain_async_refuses", {"id_prefix": "abcdef"})
+
+    assert "document not found: abcdef" in str(excinfo.value)
