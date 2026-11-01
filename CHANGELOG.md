@@ -78,7 +78,12 @@ git tag scheme:
   - `--log-level` defaults to `BRAIN_MCP_LOG_LEVEL`;
   - `brain_graphrag_stats`' top entity names are filtered over HTTP like the listing;
   - a `brain-maintenance` skill reference (`reference/mcp-http.md`) carries the serve
-    and token recipe.
+    and token recipe;
+  - over HTTP, theme summaries drawn from a withheld entity name are dropped, and
+    `brain_ask`'s graph modes write from the filtered labels; global graph search (stdio
+    too) never returns a community with a confidential member, as
+    `brain_graphrag_communities` already withheld it;
+  - `brain mcp serve` exits 2 if uvicorn lacks the internals its idle deadline uses.
 - New `http` extra (`pip install 'secondbrain-py[http]'`) pins `mcp>=2.0,<3.0`. The base pin
   still admits 1.x for stdio, and `brain mcp serve` on 1.x exits 2 naming the extra. Guide:
   `docs/guides/mcp-http-transport.md`.

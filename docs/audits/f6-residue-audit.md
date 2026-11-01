@@ -85,3 +85,10 @@ audit already look.
   document as an unknown prefix (`McpState.hide_confidential`). `brain_graphrag_stats`'
   top-10 entity names go through the same filter (`graph_stats(public_only=…)`, rev-118
   #10); its counts stay corpus-wide, a documented residual.
+- **Global graph retrieval, stdio and HTTP (rev-118 round 2):** `graph_rag/global_.py`
+  returned stored community SUMMARIES, which are generated from member names and
+  representative titles, for communities that `list_communities` withholds whole. Only
+  their `doc_ids` were gated. `_retrieve_global` now drops, before the ranking cut, every
+  community `communities_with_confidential_members` names. That is `list_communities`'
+  own predicate (`confidential_member_sql`), now shared. Over HTTP, theme summaries drawn
+  from a withheld entity name are dropped too (`public_entities._public_themes`).

@@ -82,7 +82,13 @@ Without the flag, confidential METADATA stays home too:
 - `brain_link_proposal` never resolves a confidential destination. This one applies on
   stdio too, unless the caller passes `include_confidential`.
 - Graph tools name an entity (a person, project, organisation or topic) only if at least
-  one non-confidential document mentions it.
+  one non-confidential document mentions it. The same goes for text written from names:
+  a synthesized theme summary that drew on a withheld name is dropped, and a theme with no
+  public entity is not returned. `brain_ask`'s graph modes write their answer from the
+  same filtered labels.
+- Global graph search never returns a community any of whose members a confidential
+  document mentions, so its stored summary (written from member names and titles) stays
+  home. This holds over stdio too, matching `brain_graphrag_communities`.
 
 Three small things remain visible, and are accepted:
 
