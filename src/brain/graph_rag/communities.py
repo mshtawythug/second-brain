@@ -59,7 +59,7 @@ from networkx.algorithms.community import louvain_communities
 
 from ..config import Config
 from ..errors import GraphTenantError
-from ..sensitivity import not_confidential_sql
+from ..sensitivity import confidential_member_sql
 from ..set_similarity import jaccard
 from .schema import CommunityMember, CommunityRecord
 from .write_lock import acquire_graph_write_lock
@@ -370,6 +370,21 @@ def build_communities(
         )
 
 
+def communities_with_confidential_members(
+    conn: psycopg.Connection[Any], tenant: str, keys: list[str]
+) -> set[str]:
+    """The subset of community ``keys`` that :func:`confidential_member_sql` withholds."""
+    if not keys:
+        return set()
+    rows = conn.execute(
+        "SELECT c.community_key::text FROM graph_communities c "
+        "WHERE c.tenant_id = %s AND c.community_key::text = ANY(%s) AND "
+        + confidential_member_sql("c"),
+        (tenant, keys),
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
 def list_communities(
     conn: psycopg.Connection[Any],
     tenant: str,
@@ -422,18 +437,9 @@ def list_communities(
             "(resolve via brain.graph_rag.tenancy.resolve_tenant first)"
         )
     confidential_clause = (
-        ""
-        if not exclude_confidential
-        else (
-            " AND NOT EXISTS ("
-            "  SELECT 1 FROM graph_community_members cm"
-            "  JOIN graph_entity_mentions m"
-            "    ON m.tenant_id = cm.tenant_id AND m.entity_id = cm.entity_id"
-            "  JOIN documents d ON d.id = m.document_id"
-            "  WHERE cm.tenant_id = graph_communities.tenant_id"
-            "    AND cm.community_key = graph_communities.community_key"
-            f"    AND NOT ({not_confidential_sql('d')}))"
-        )
+        " AND NOT " + confidential_member_sql("graph_communities")
+        if exclude_confidential
+        else ""
     )
     base = (
         "SELECT community_key::text, source_graph_hash, members_hash, level, "

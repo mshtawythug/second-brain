@@ -1707,6 +1707,44 @@ newest that fit in 2,000 tokens, and shows them to the plan step only. Like
 ingest, asking is refused on `--read-only` (403 `read_only`) and over `--host` /
 `--lan` (403 `ask_requires_loopback`).
 
+## brain mcp
+
+```bash
+brain mcp token --rotate                  # mint <brain_home>/mcp_token (0600)
+brain mcp token [--show] [--json] [--path P]
+brain mcp serve                           # 127.0.0.1:8787/mcp, token, read-only
+brain mcp serve --host <tailnet address> --allow-remote --allowed-host <tailnet name>
+```
+
+`brain mcp serve` serves the MCP tools over streamable HTTP (RM-46). `brain-mcp`, the stdio
+entry point MCP clients spawn, takes no arguments, and exits 2 if given any.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--host` | `127.0.0.1` | Judged by the address it resolves to, once. Off loopback, needs `--allow-remote` **and** a token. |
+| `--port` | `8787` | 1 to 65535. A port in use exits 2; there is no auto-port. |
+| `--path` | `/mcp` | The endpoint path. |
+| `--allow-remote` | off | Acknowledge a network bind. |
+| `--allow-writes` | off | Also serve the 23 write tools. Without it they are removed from the server. |
+| `--include-confidential` | off | Let callers ask for confidential documents. Without it, such a call is refused. |
+| `--allowed-host` | none | Extra `Host` value to accept (repeatable): a hostname or IP, no port or wildcard. |
+| `--token-file` | `$BRAIN_MCP_TOKEN`, else `$BRAIN_MCP_TOKEN_PATH`, else `<brain_home>/mcp_token` | The bearer-token file. Read once at start: after `brain mcp token --rotate`, restart the server. `BRAIN_MCP_TOKEN` outranks every file but this flag. |
+| `--no-auth` | off | No token. Loopback only, and refused with `--allow-remote` or `--allowed-host`. |
+| `--max-body-bytes` | `1048576` | 1 KiB to 16 MiB. |
+| `--call-timeout` | `300` | Seconds per tool call before a 504 (1 to 3600). |
+| `--log-level` | `$BRAIN_MCP_LOG_LEVEL`, else `INFO` | One line per request: client address, method, route label, status, time. Never a path, header, body or token. |
+
+Only the endpoint, `/healthz` and `/readyz` are served (404 otherwise). A connection with no
+request in flight closes after 10 s, at most 16 calls run at once (503 beyond), and a call's
+database statements are cancelled at its deadline. Without `--include-confidential`, a
+confidential document answers as an unknown id prefix.
+
+Exit codes: `2` for a refused option, an unsafe token file, a port in use, or mcp 1.x
+(the message names `pip install 'secondbrain-py[http]'`); `1` for a broken config.
+`brain mcp token` exits `1` when no token exists yet and `2` for an unsafe file. The JSON
+keys are exactly `path`, `exists`, `mode`, `mode_ok`, `fingerprint` and `token`; `token` is
+`null` without `--show`. Guide: [Reaching your brain from another machine](guides/mcp-http-transport.md).
+
 ## brain people
 
 ```bash

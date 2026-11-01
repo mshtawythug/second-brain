@@ -597,6 +597,14 @@ class MigrationLockTimeout(BrainError):
     """
 
 
+class McpTransportError(BrainError):
+    """``brain mcp serve`` refused to start; the message says why and how to fix it (RM-46)."""
+
+
+class McpTokenError(McpTransportError):
+    """The MCP bearer-token file is missing, unsafe or malformed (RM-46)."""
+
+
 # ---------------------------------------------------------------------------
 # Config-resolution diagnostics (not exceptions — message rendering).
 #

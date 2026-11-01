@@ -3,6 +3,12 @@
 > Design section of `docs/specs/2026-07-25-agent-memory-safety-ui-design.md`.
 > Global constraints (PII, production safety, quality gates, style) are inherited from
 > section 4 of that document and are not restated here.
+>
+> **Implemented by RM-46** (2026-10-31): plan `docs/plans/2026-10-31-rm-46-mcp-http.md`. The
+> roadmap's five updates and the plan's decisions D1–D13 supersede parts of §§2, 4, 5 and 6.10:
+> mcp 2.x API (keyword arguments, not `settings`), `brain ui`'s bind code, a connection per
+> call, stateless JSON sessions, the confidential gate, and 28 read / 23 write tools of 51
+> (`brain_gaps` is a write). The text below is the design as evaluated, kept for its reasoning.
 
 ## Optional HTTP transport for the MCP server — reach your brain from another machine
 

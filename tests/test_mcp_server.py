@@ -4,6 +4,7 @@ Each test installs a fresh ``_State`` (real test-DB Config + fake embedder)
 via ``monkeypatch.setattr`` and calls the tool functions directly. The
 JSON-RPC round-trip is exercised separately by the protocol integration test.
 """
+import asyncio
 import logging
 import os
 import subprocess
@@ -16,6 +17,7 @@ import psycopg
 import pytest
 
 from brain import mcp_server
+from brain import mcp_state as mcp_state_mod
 from brain.config import Config, ConfigError
 from brain.embeddings import OllamaEmbedError
 from brain.errors import BrainError
@@ -1241,6 +1243,9 @@ def test_main_loads_config_before_configuring_logging(
 
     monkeypatch.setattr(mcp_server, "_load_config", _record("load_config"))
     monkeypatch.setattr(mcp_server, "_configure_logging", _record("configure_logging"))
+    # main() refuses arguments before anything else (RM-46); pytest's own argv
+    # must not reach it.
+    monkeypatch.setattr(sys, "argv", ["brain-mcp"])
 
     with pytest.raises(_StartupStop):
         mcp_server.main()
@@ -1474,7 +1479,11 @@ def _install_main_doubles(
     """
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     monkeypatch.setattr(mcp_server, "_state", None)
-    monkeypatch.setattr(mcp_server, "make_embedder", embedder_cls)
+    # RM-46: the state builder moved to the ``brain.mcp_state`` leaf, so the
+    # factory is looked up there; and ``main()`` now refuses arguments, so it
+    # must not see pytest's own argv.
+    monkeypatch.setattr(mcp_state_mod, "make_embedder", embedder_cls)
+    monkeypatch.setattr(sys, "argv", ["brain-mcp"])
 
     captured: dict[str, object] = {}
 
@@ -1497,6 +1506,20 @@ def test_main_initializes_state_and_starts_server(
     assert captured["transport"] == "stdio"
     assert isinstance(captured["state"], mcp_server._State)
     assert captured["state"].cfg.database_url == TEST_DATABASE_URL  # type: ignore[union-attr]
+
+
+def test_main_serves_every_registered_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RM-46: the HTTP transport's read-only filter must never reach stdio."""
+    _install_main_doubles(monkeypatch, embedder_cls=_RecordingEmbedder)
+    before = {tool.name for tool in asyncio.run(mcp_server.mcp_app.list_tools())}
+
+    mcp_server.main()
+
+    after = {tool.name for tool in asyncio.run(mcp_server.mcp_app.list_tools())}
+    assert after == before
+    assert {"brain_edit", "brain_rm", "brain_gaps"} <= after
 
 
 def test_main_runs_warmup_embed(

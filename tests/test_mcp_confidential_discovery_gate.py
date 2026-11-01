@@ -83,9 +83,11 @@ _WRITE_TOOLS = frozenset(
 #: cannot tell it about one it had not already identified. This is the settled
 #: ruling ``_PROMPTED`` records for ``/api/notes/{id_prefix}`` on the HTTP side.
 #:
-#: ``brain_link_proposal`` takes BOTH endpoints (``src_id_prefix`` and
-#: ``dst_id_or_title``) and returns nothing else.
-_PROMPTED = frozenset({"brain_link_proposal"})
+#: Empty since RM-46 (sec-118 #2a). ``brain_link_proposal`` sat here because the
+#: caller names both endpoints, but a 6-hex prefix or a guessed title named a
+#: confidential destination's id and title back to it: an enumeration oracle. It
+#: now carries the lens and is in ``_KNOWN_GATED``.
+_PROMPTED: frozenset[str] = frozenset()
 
 #: NO DOCUMENT DATA. The payload contains no document title, body, summary or id
 #: — verified against the return statement, not assumed from the name.
@@ -93,7 +95,9 @@ _PROMPTED = frozenset({"brain_link_proposal"})
 #: - ``brain_status`` / ``brain_graphrag_stats`` — integer counts only.
 #: - ``brain_graphrag_entities`` — entity names, which are a separate tier the
 #:   branch already treats as ungated (an entity is not a document, and no
-#:   document is identified through it).
+#:   document is identified through it). Over HTTP without
+#:   ``--include-confidential`` it names only entities a non-confidential
+#:   document mentions (RM-46, sec-118 #2c); stdio is unchanged.
 #: - ``brain_gaps`` — the caller's own FAILED QUERIES (``{query, count, kind}``).
 #:   Never a document; the text is the caller's own input echoed back.
 #: - ``brain_watch_list`` — the owner's saved searches (``{name, query, mode, enabled,
@@ -165,6 +169,8 @@ _KNOWN_GATED = frozenset(
         # confidential documents is not named and no count covers both tiers.
         "brain_tags_list",
         "brain_tags_suggest_merges",
+        # RM-46 (sec-118 #2a): the destination lookup carries the lens.
+        "brain_link_proposal",
     }
 )
 

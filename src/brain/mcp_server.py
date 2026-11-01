@@ -240,6 +240,24 @@ because the tool lives here. Resolution and the graph checks are in
 the facet predicate, recorded inline at the mapping. Plan:
 ``docs/plans/2026-10-30-rm-24-entity-filter.md``.
 
+**And 2026-10-31 (RM-46, sec-118 #2): confidential metadata over HTTP.**
+``_resolve_id`` answers a confidential document as an unknown prefix when
+``McpState.hide_confidential`` is set (``brain mcp serve`` without
+``--include-confidential``); ``brain_link_proposal`` takes ``include_confidential``
+and its destination lookup carries the F6 predicate (stdio too);
+``brain_timeline`` drops entity names only confidential documents mention, and the
+``person`` arguments of ``brain_search`` / ``brain_recall`` / ``brain_timeline``
+resolve public people only (sec-118b), in HTTP mode only. In that mode the graph
+tools are not served at all and ``brain_ask`` refuses every mode but ``hybrid``
+(round 5: the graph is derived from every document; ``brain.mcp_tool_classes``).
+Over HTTP (``McpState.call_timeout_s``, sec-118c) ``brain_ask`` refuses loop
+arguments above the Agent tab's and stops at its next step past
+``--call-timeout``, and the graph seam refuses a deeper ``depth`` than configured
+(graph tools are served over HTTP with ``--include-confidential``), because a
+timed-out call keeps its slot until it returns. Each growth is reasoned inline
+("Grew (RM-46, …)"); the HTTP policy itself lives in ``brain.mcp_http*`` and
+``brain.mcp_tool_classes``. Plan: ``docs/plans/2026-10-31-rm-46-mcp-http.md``.
+
 **Hazard this file has already been bitten by.** Every tool is a bare ``def``
 under a lone ``@mcp_app.tool()`` line, so inserting a helper between a decorator
 and the function it was written for silently moves the registration onto the
@@ -256,7 +274,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import date as date_cls
 from datetime import datetime
 from pathlib import Path
@@ -274,9 +292,8 @@ from .config import (
     MCP_SEARCH_DEFAULT_LIMIT,
     Config,
 )
-from .db import PersistentConnection, age_extension_available, connect, connect_age
-from .embeddings import make_embedder
-from .enrichment import ContradictionVerdict, OllamaEnricher, make_enricher
+from .db import age_extension_available, connect, connect_age
+from .enrichment import ContradictionVerdict, OllamaEnricher
 from .entity_filter import search_kwargs as entity_search_kwargs
 from .errors import (
     BrainError,
@@ -340,6 +357,7 @@ from .mcp_limits import (
     saturation_notice,
     strip_content_markers,
 )
+from .mcp_state import McpState, build_state
 from .mcp_tools import ToolContext, register_extension_tools
 from .queries import (
     fetch_document,
@@ -354,7 +372,7 @@ from .resurface import resurface_docs
 from .search import SearchDiagnostics, build_tsquery, hybrid_search
 from .search_pipeline import pipeline_json, run_search
 from .search_predicate import build_predicate
-from .sensitivity import is_confidential
+from .sensitivity import is_confidential, not_confidential_sql
 from .source_kinds import InvalidSourceKind, validate_source_kind
 from .tags import normalize_tags
 from .token_report import count_payload_tokens, count_results_tokens
@@ -363,7 +381,6 @@ if TYPE_CHECKING:
     from .ask import AskResult
     from .graph_rag.reconcile import ReconcileConfig
     from .graph_rag.schema import GraphContext
-    from .graph_rag.sync import GraphSyncer
 from .vault.delete import delete_document, describe_delete_target
 from .vault.frontmatter import (
     dump_frontmatter,
@@ -380,6 +397,12 @@ from .vault.templates import render_template
 logger = logging.getLogger("brain.mcp")
 
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+#: What ``brain-mcp`` prints (stderr) when it is given arguments (RM-46).
+_ARGV_REFUSAL = (
+    "brain-mcp takes no arguments (stdio transport only).\n"
+    "HTTP transport lives on the human CLI: brain mcp serve --help"
+)
 
 # Tag automatically added to every document ingested via ``brain_ingest_stdin``
 # so MCP-saved snippets are distinguishable from CLI-ingested ones.
@@ -405,41 +428,10 @@ _HEX_ONLY_RE = re.compile(r"^[0-9a-f-]+$")
 _WARMUP_RETRY_DELAY_SECONDS = 1.0
 
 
-@dataclass
-class _State:
-    """Shared server state initialized once in :func:`main`.
-
-    Tests build this directly and assign to ``_state`` (via
-    ``monkeypatch.setattr``) instead of calling :func:`main`.
-
-    Wave Q2-SUMMARY-WIKI (2026-05-11): added ``enricher`` so the
-    ``brain_edit`` MCP tool can refresh ``documents.summary`` on
-    body-changing edits — without it the post-ingest hook hits the
-    "no enricher supplied" skip and the Q2 wiki lede shows the
-    pre-edit summary above the new body. ``None`` is an allowed
-    value so tests can opt out of the LLM round-trip; production
-    :func:`main` always populates it via :func:`make_enricher`.
-
-    DB-08 (perf/waves-0-2 T6): ``db_conn`` holds the persistent connection
-    opened once in :func:`main` and reused across all tool calls. Tests
-    that build ``_State`` directly may leave it ``None``; :func:`_mcp_conn`
-    then falls back to the per-call :func:`connect` path so all existing
-    test-doubles remain functional.
-    """
-
-    cfg: Config
-    embedder: Embedder
-    enricher: OllamaEnricher | None = None
-    # Wave G1-c: people-aspect graph syncer wired through ``brain_ingest`` /
-    # ``brain_edit`` so MCP-driven writes keep the graph in lock-step. ``None``
-    # (tests that build ``_State`` directly) skips graph sync; production
-    # :func:`main` always populates it via :func:`make_graph_syncer`.
-    # String-quoted forward ref: ``GraphSyncer`` is TYPE_CHECKING-only so the
-    # networkx-pulling graph_rag chain stays off MCP-server startup.
-    graph_syncer: "GraphSyncer | None" = None
-    # DB-08: persistent connection opened at server startup, reused per call.
-    # ``None`` preserves per-call ``connect()`` semantics for existing tests.
-    db_conn: PersistentConnection | None = None
+# The state class and its builder live in the ``brain.mcp_state`` leaf (RM-46),
+# shared with the HTTP transport. ``_State`` stays this module's name for it,
+# because tests build ``mcp_server._State(...)`` by hand.
+_State = McpState
 
 
 _state: _State | None = None
@@ -576,7 +568,7 @@ def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:
     the failure to the caller.
     """
     try:
-        return resolve_document_prefix(conn, prefix)
+        doc_id = resolve_document_prefix(conn, prefix)
     except (
         IdPrefixTooShort,
         IdPrefixNotHex,
@@ -584,6 +576,14 @@ def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:
         IdPrefixAmbiguous,
     ) as e:
         raise _mcp_error(INVALID_PARAMS, str(e)) from e
+    # Grew (RM-46, sec-118 #2b): over HTTP without --include-confidential, a
+    # confidential document answers EXACTLY as an unknown prefix does, so its
+    # title, tags and source path never leave the machine. stdio: never set.
+    if _state is not None and _state.hide_confidential:
+        row = conn.execute("SELECT sensitivity FROM documents WHERE id = %s", (doc_id,))
+        if is_confidential((row.fetchone() or (None,))[0]):
+            raise _mcp_error(INVALID_PARAMS, str(IdPrefixNotFound(prefix)))
+    return doc_id
 
 
 def _assert_within_vault(target: Path, vault_path: Path, *, label: str) -> None:
@@ -825,7 +825,9 @@ def brain_search(
             person_match = None
             if person is not None:
                 try:
-                    person_match = resolve_person_to_keys(conn, person)
+                    person_match = resolve_person_to_keys(  # Grew: RM-46 sec-118b N1
+                        conn, person, public_only=state.hide_confidential
+                    )
                 except (PersonNotFound, PersonAmbiguous) as e:
                     raise _mcp_error(INVALID_PARAMS, str(e)) from e
             # Twelfth growth (RM-24): the --entity filter, splatted into the search
@@ -1099,7 +1101,9 @@ def brain_recall(
             person_match = None
             if person is not None:
                 try:
-                    person_match = resolve_person_to_keys(conn, person)
+                    person_match = resolve_person_to_keys(  # Grew: RM-46 sec-118b N1
+                        conn, person, public_only=state.hide_confidential
+                    )
                 except (PersonNotFound, PersonAmbiguous) as e:
                     raise _mcp_error(INVALID_PARAMS, str(e)) from e
             source_kind, source_missing = _split_source_filter(source)
@@ -3141,7 +3145,8 @@ def brain_ask(
     was text-only. Relay ``fallback_note`` to the user when it is set.
     Requires a local Ollama for the LLM steps; an unavailable Ollama (or any
     other ``ask`` failure) is ``INTERNAL_ERROR`` with one fixed sentence. A bad
-    ``mode`` is ``INVALID_PARAMS``.
+    ``mode`` is ``INVALID_PARAMS``, and so is any mode but ``hybrid`` on a server
+    run without ``--include-confidential``.
 
     F6 confidentiality: documents marked ``sensitivity='confidential'`` are
     **excluded from retrieval** — from BOTH the hybrid leg and (for the graph
@@ -3158,8 +3163,10 @@ def brain_ask(
     """
     from .ask import ASK_MODES, HYBRID_MODE
     from .ask import ask as run_ask
+    from .ask_deadline import AskTimedOut, Deadline, deadline_on_step
     from .ask_errors import ASK_FAILURES, describe_ask_failure
     from .chat import chat_json
+    from .mcp_tool_classes import ASK_GRAPH_MODES_REFUSAL
 
     state = _get_state()
     if mode not in ASK_MODES:
@@ -3167,6 +3174,9 @@ def brain_ask(
             INVALID_PARAMS,
             f"mode must be one of: {', '.join(sorted(ASK_MODES))}",
         )
+    if state.hide_confidential and mode != HYBRID_MODE:
+        # Grew (RM-46 round 5): the graph is derived from every document.
+        raise _mcp_error(INVALID_PARAMS, ASK_GRAPH_MODES_REFUSAL)
     if max_iterations is not None and max_iterations < 1:
         raise _mcp_error(
             INVALID_PARAMS, "max_iterations must be >= 1"
@@ -3179,6 +3189,14 @@ def brain_ask(
         else state.cfg.ask_max_iterations
     )
     resolved_limit = limit if limit is not None else state.cfg.ask_docs_per_iter
+    on_step = None
+    if state.call_timeout_s is not None:
+        # Grew (RM-46, sec-118c LOW-2): over HTTP a timed-out call keeps its slot
+        # until it returns, so the loop is held to the Agent tab's values and
+        # stops at its next step once --call-timeout has passed.
+        _ceiling(resolved_max_iter, ceiling=state.cfg.ask_max_iterations, param="max_iterations")
+        _ceiling(resolved_limit, ceiling=state.cfg.ask_docs_per_iter, param="limit")
+        on_step = deadline_on_step(Deadline(time.monotonic, state.call_timeout_s))
 
     try:
         if mode == HYBRID_MODE:
@@ -3195,6 +3213,7 @@ def brain_ask(
                     limit=resolved_limit,
                     max_iterations=resolved_max_iter,
                     exclude_confidential=not include_confidential,
+                    on_step=on_step,
                 )
                 _log_ask_interactions_mcp(conn, result)
         else:
@@ -3217,8 +3236,11 @@ def brain_ask(
                     max_iterations=resolved_max_iter,
                     backend=backend,
                     exclude_confidential=not include_confidential,
+                    on_step=on_step,
                 )
                 _log_ask_interactions_mcp(conn, result)
+    except AskTimedOut:
+        raise _mcp_error(INTERNAL_ERROR, "brain_ask passed this server's call deadline") from None
     except ASK_FAILURES as exc:
         # RM-02: one fixed, class-only sentence per family, shared with the CLI
         # (``brain.ask_errors``). It also maps a graph mode's own embed failure,
@@ -3236,8 +3258,12 @@ def brain_ask(
 def brain_link_proposal(
     src_id_prefix: str,
     dst_id_or_title: str,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Propose adding a ``[[link]]`` from ``src`` to ``dst``. Writes nothing.
+
+    ``include_confidential`` (default False): a confidential destination is not
+    found unless set (F6; RM-46 sec-118).
 
     Resolves both endpoints, builds the line that would append the link
     to the source's body, and returns the diff data — the source's vault
@@ -3282,7 +3308,7 @@ def brain_link_proposal(
                 )
 
             dst_id, dst_title, link_text = _resolve_proposal_dst(
-                conn, dst_id_or_title
+                conn, dst_id_or_title, include_confidential=include_confidential
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -3297,13 +3323,13 @@ def brain_link_proposal(
         text = abs_src.read_text(encoding="utf-8")
     except OSError as e:
         raise _mcp_error(
-            INTERNAL_ERROR, f"could not read src vault file: {e}"
+            INTERNAL_ERROR, f"could not read src vault file ({type(e).__name__})"
         ) from e
     try:
         _, body = parse_frontmatter(text)
     except (ValueError, yaml.YAMLError) as e:
         raise _mcp_error(
-            INTERNAL_ERROR, f"src has malformed frontmatter: {e}"
+            INTERNAL_ERROR, f"src has malformed frontmatter ({type(e).__name__})"
         ) from e
 
     # The proposed snippet appends a "See also" line at the end of the
@@ -3445,6 +3471,9 @@ def _graphrag_search_or_mcp_error(
     from .graph_rag import graph_rag_search
     from .graph_rag.backends import AgeBackend
 
+    if depth is not None and _state is not None and _state.call_timeout_s is not None:
+        # Grew (RM-46, sec-118c LOW-2): over HTTP, no deeper than configured.
+        _ceiling(depth, ceiling=cfg.graph_depth, param="depth")
     try:
         with connect_age(cfg.database_url) as conn:
             conn.autocommit = True
@@ -3785,6 +3814,7 @@ def brain_timeline(
                 enricher=enricher,
                 tenant=tenant,
                 exclude_confidential=not include_confidential,
+                public_entities_only=state.hide_confidential,  # Grew: sec-118b #2-i, N1
             )
     except (PersonNotFound, PersonAmbiguous, GraphTenantError) as exc:
         raise _mcp_error(INVALID_PARAMS, f"timeline: {exc}") from exc
@@ -4466,6 +4496,11 @@ def brain_graphrag_entities(
     document text, and this tool cannot be used to test a hypothesis about one
     document's contents the way a search hit can.
 
+    **Over HTTP it is not served at all** without ``--include-confidential``
+    (RM-46 round 5): a name extracted from a confidential body is content to a
+    remote caller, and the whole graph family is withheld in that mode. stdio
+    keeps the exemption below.
+
     **The exemption ends the moment ``description`` is written.** Populating it
     from document text — the obvious way to fill it — makes this tool a body
     egress and it must then take the flag like every other. Contrast
@@ -4756,7 +4791,7 @@ def _build_note_file_text(
 
 
 def _resolve_proposal_dst(
-    conn: psycopg.Connection[Any], value: str
+    conn: psycopg.Connection[Any], value: str, *, include_confidential: bool = False
 ) -> tuple[str, str, str]:
     """Resolve ``value`` to ``(document_id, title, link_text)`` for proposals.
 
@@ -4774,13 +4809,17 @@ def _resolve_proposal_dst(
     the candidate ids included in the error message.
     """
     cleaned = value.strip()
+    # Grew (RM-46, sec-118 #2a; F6): a confidential destination is not found
+    # unless the caller opts in, on stdio and HTTP alike, so neither query can
+    # name one (an id + title oracle before).
+    gate = "" if include_confidential else f" AND {not_confidential_sql('d')}"
     if (
         len(cleaned) >= _ID_PREFIX_MIN_LEN
         and _HEX_ONLY_RE.match(cleaned.lower()) is not None
     ):
         rows = conn.execute(
-            "SELECT id::text, title FROM documents "
-            "WHERE id::text LIKE %s LIMIT 2",
+            "SELECT id::text, title FROM documents d "
+            f"WHERE id::text LIKE %s{gate} LIMIT 2",
             (cleaned.lower() + "%",),
         ).fetchall()
         if len(rows) == 1:
@@ -4795,8 +4834,8 @@ def _resolve_proposal_dst(
         # Zero hex matches → fall through to title resolution; users may
         # legitimately have a title that happens to look like hex.
     rows = conn.execute(
-        "SELECT id::text, title FROM documents "
-        "WHERE LOWER(title) = LOWER(%s) LIMIT 5",
+        "SELECT id::text, title FROM documents d "
+        f"WHERE LOWER(title) = LOWER(%s){gate} LIMIT 5",
         (cleaned,),
     ).fetchall()
     if not rows:
@@ -5085,38 +5124,43 @@ def _load_config() -> Config:
     return cfg
 
 
-def main() -> None:
-    """Initialize shared state and run the brain-mcp server over stdio."""
-    global _state
-    cfg = _load_config()
-    embedder = make_embedder(cfg)
-    # Wave Q2-SUMMARY-WIKI: build the long-lived enricher so the
-    # ``brain_edit`` MCP tool can refresh ``documents.summary`` on
-    # body-changing edits. Construction is cheap (no Ollama probe — the
-    # hook handles unavailability inline). Per CLAUDE.md, every external
-    # service has explicit timeouts; the enricher reads
-    # ``Config.enrich_timeout_seconds`` from env.
-    enricher = make_enricher(cfg)
-    # Wave G1-c: build the per-process people-aspect graph syncer (shares one
-    # ReconcileConfig). Cheap + self-gating on BRAIN_GRAPH_ENABLED + AGE
-    # availability, so it's a no-op on a stock pgvector DB. Imported lazily so
-    # the networkx graph_rag chain stays off the hot import path.
-    from .graph_rag.sync import make_graph_syncer
+def start_state(
+    cfg: Config,
+    *,
+    persistent_db: bool = True,
+    hide_confidential: bool = False,
+    call_timeout_s: float | None = None,  # Grew: RM-46 sec-118c LOW-2
+) -> _State:
+    """Build the server state for ``cfg``, make it the one the tools read, and warm up.
 
-    graph_syncer = make_graph_syncer(cfg)
-    # DB-08: open the persistent connection once at server startup; every tool
-    # call reuses it via _mcp_conn(state), saving the ~10–30 ms TCP handshake
-    # overhead per request. autocommit=True is set inside PersistentConnection.get.
-    db_conn = PersistentConnection(cfg.database_url)
-    _state = _State(
-        cfg=cfg,
-        embedder=embedder,
-        enricher=enricher,
-        graph_syncer=graph_syncer,
-        db_conn=db_conn,
+    The one startup path for stdio (:func:`main`) and HTTP
+    (:func:`brain.mcp_http.serve_http`, which passes ``persistent_db=False``).
+    Here and not in :mod:`brain.mcp_state` because the ``_state`` global it
+    assigns is this module's: tests patch ``mcp_server._state`` directly.
+    """
+    global _state
+    _state = build_state(
+        cfg,
+        persistent_db=persistent_db,
+        hide_confidential=hide_confidential,
+        call_timeout_s=call_timeout_s,
     )
     # F7: warm the embedding model into VRAM before the first real query.
     _warmup_embed(_state.embedder)
+    return _state
+
+
+def main() -> None:
+    """Initialize shared state and run the brain-mcp server over stdio."""
+    # RM-46: MCP clients spawn this with no arguments and own its stdout; a
+    # stray flag (``brain-mcp --http``) used to start stdio silently. HTTP is
+    # ``brain mcp serve``. Checked before the config loads, so a broken config
+    # cannot hide the refusal (rev-118 #8).
+    if sys.argv[1:]:
+        print(_ARGV_REFUSAL, file=sys.stderr)
+        raise SystemExit(2)
+    cfg = _load_config()
+    start_state(cfg)
     logger.info("brain-mcp starting (stdio transport)")
     mcp_app.run(transport="stdio")
 

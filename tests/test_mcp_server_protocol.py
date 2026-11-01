@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -232,8 +233,10 @@ def test_served_module_registers_extensions_once_and_reads_main_state(
     # Assert
     call_result = tools.pop("__call_result__")
     assert set(tools) == _in_process_tool_names() | {"brain_probe_state"}
+    # ``McpState``: the class moved to ``brain.mcp_state`` at RM-46, and
+    # ``mcp_server._State`` is an alias of it.
     assert call_result == {
-        "state_type": "_State",
+        "state_type": "McpState",
         "context": SERVER_CONTEXT_HELPERS,
     }
 
@@ -308,3 +311,59 @@ def test_brain_mcp_tools_list_advertises_all_tools() -> None:
         "replace_metadata",
     ):
         assert arg in edit_props, f"brain_edit missing {arg}"
+
+
+#: Every tool the server registers at RM-46: 42 in ``mcp_server`` plus 9
+#: extension tools. The HTTP transport's read-only mode withholds 23 of them;
+#: stdio must keep serving all of them.
+RM46_TOOL_COUNT = 51
+
+
+@pytest.mark.skipif(
+    shutil.which(sys.executable) is None,
+    reason="python interpreter not on PATH",
+)
+def test_stdio_still_serves_every_tool() -> None:
+    """RM-46 AC4: read-only filtering is the HTTP transport's alone."""
+    tools = anyio.run(_list_tools_via_stdio)
+
+    assert len(tools) == RM46_TOOL_COUNT
+    assert {"brain_edit", "brain_rm", "brain_graphrag_build"} <= set(tools)
+
+
+def test_brain_mcp_refuses_arguments() -> None:
+    """RM-46: ``brain-mcp --http`` used to start stdio silently; now it exits 2."""
+    env = {**os.environ, "DATABASE_URL": TEST_DATABASE_URL, "OLLAMA_HOST": "http://127.0.0.1:1"}
+    proc = subprocess.run(
+        [sys.executable, "-m", "brain.mcp_server", "--http"],
+        capture_output=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode == 2
+    assert b"brain mcp serve" in proc.stderr
+    assert proc.stdout == b""
+
+
+def test_brain_mcp_refuses_arguments_even_with_a_broken_config(tmp_path: Path) -> None:
+    """rev-118 #8: the refusal comes before config loading, so it never hides behind it."""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"DATABASE_URL", "TEST_DATABASE_URL"}
+    }
+    env.update({"BRAIN_HOME": str(tmp_path), "BRAIN_IGNORE_CWD_DOTENV": "1"})
+    proc = subprocess.run(
+        [sys.executable, "-m", "brain.mcp_server", "--http"],
+        capture_output=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode == 2
+    assert b"brain mcp serve" in proc.stderr
+    assert b"DATABASE_URL" not in proc.stderr

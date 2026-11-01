@@ -189,6 +189,8 @@ claude mcp add brain -- brain-mcp
 
 `uvx secondbrain-py` also launches the MCP server. Full walkthrough (symlink, smoke-test, troubleshooting): [docs/guides/claude-desktop-setup.md](docs/guides/claude-desktop-setup.md).
 
+To reach the tools from another machine on a private network, `brain mcp serve` serves them over streamable HTTP: loopback by default, bearer-authenticated, read-only, with confidential documents refused. See [docs/guides/mcp-http-transport.md](docs/guides/mcp-http-transport.md).
+
 `search`, `recall`, `rate` and `ingest-stdin` accept `--agent <id>` (or an ambient `BRAIN_AGENT_ID`), so when several agents share one brain, `brain usage` can report which of them has been reading what.
 
 **Payload ceilings.** So no single tool call can eat an agent's context window, six env vars bound what the MCP server returns: `BRAIN_SHOW_MAX_CONTENT_TOKENS` (`25000` — the only one where `0` means unlimited, and it bounds the body *and* the summary, each separately), `BRAIN_SEARCH_MAX_LIMIT` (`50`), `BRAIN_RECALL_MAX_BUDGET_TOKENS` (`13000`), `BRAIN_GRAPH_ENTITIES_MAX_LIMIT` (`500`), `BRAIN_MCP_ROWS_MAX_LIMIT` (`200`) and `BRAIN_GRAPH_COMMUNITIES_LIST_LIMIT` (`25`). An over-ceiling request is refused naming the ceiling that stopped it, and a trimmed body or list flags itself — never a silent cut. `BRAIN_SNIPPET_MAX_CHARS` (`1600`) caps a stitched search snippet on both the CLI and MCP paths. Every default is sized off live-corpus percentiles rather than picked, which is why every one is a knob: [the table](docs/configuration.md#feature-config-knobs) and [the reasoning behind each number](docs/configuration.md#mcp-payload-ceilings--every-default-is-a-judgement-call).

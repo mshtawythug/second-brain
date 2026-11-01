@@ -36,10 +36,10 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import psycopg
 
+from ..ask_deadline import AskTimedOut, Deadline
 from ..ask_errors import describe_ask_failure
 from ..ask_history import AskTurn
 from ..errors import (
-    BrainError,
     ChatOutputTruncated,
     EmbedError,
     EnrichmentError,
@@ -82,10 +82,6 @@ _TIMEOUT_MESSAGE = (
 )
 
 
-class AskTimedOut(BrainError):
-    """The ask passed its job deadline. Maps to the ``timeout`` code."""
-
-
 @dataclass(frozen=True)
 class AskSpec:
     """A validated ask request."""
@@ -112,18 +108,6 @@ class AskRuntime:
 def deadline_seconds(cfg: Config) -> float:
     """The whole job's budget: every iteration's three chat calls at their timeout."""
     return cfg.ask_max_iterations * _CHAT_CALLS_PER_ITERATION * cfg.ask_timeout_seconds
-
-
-class Deadline:
-    """A point on ``clock`` the job may not pass. Reaching it exactly is not late."""
-
-    def __init__(self, clock: Callable[[], float], seconds: float) -> None:
-        self._clock = clock
-        self._ends = clock() + seconds
-
-    def check(self) -> None:
-        if self._clock() > self._ends:
-            raise AskTimedOut("the ask job passed its deadline")
 
 
 class _Cancellable(Protocol):

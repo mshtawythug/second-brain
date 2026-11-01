@@ -106,9 +106,14 @@ def brain_related(
             if not include_confidential:
                 root = fetch_document(conn, document_id)
                 if root is not None and is_confidential(root.sensitivity):
+                    # Over HTTP (RM-46 sec-118 #2b) the document answers as an
+                    # unknown prefix does: no hint that it exists.
+                    hidden = getattr(state, "hide_confidential", False)
                     raise ctx.error(
                         INVALID_PARAMS,
-                        "document is confidential; pass include_confidential=true",
+                        str(IdPrefixNotFound(id))
+                        if hidden
+                        else "document is confidential; pass include_confidential=true",
                     )
             related = compute_related(
                 conn,

@@ -21,8 +21,12 @@ entity whose row passes the prefilter, i.e. one re-created inside the window: ga
 listed (its first visible mention is new). In the common case the old confidential document is
 the one that CREATED the row, so ``created_at`` is before ``since`` and the prefilter drops the
 entity from BOTH payloads, though its first visible mention is new. That is the prefilter's
-accepted cost again: a name withheld from the gated audience, never one disclosed, and since
-both lenses drop it, its absence says nothing about a confidential mention.
+accepted cost again: a name withheld from the gated audience, never one disclosed. Both lenses
+drop it, but the absence is still one bit (RM-46 sec-118e INFO-1): a caller who knows a
+non-confidential document this week names the entity, and does not see it listed, learns its
+row was created before the window by a document it cannot see, whether confidential, a draft
+or since deleted. It learns no name, content or which of the three; the HTTP guide lists it as
+a residual.
 
 **Drafts never count**, in either lens: a draft-only entity is in neither payload, so
 ``brief_delivery.without_drafts`` has nothing of this section's to remove.
@@ -42,7 +46,7 @@ from typing import Any
 import psycopg
 
 from .config import Config
-from .sensitivity import not_confidential_sql
+from .sensitivity import name_in_public_record_sql, not_confidential_sql
 
 #: "New this week": the window the brief reports on.
 WINDOW_DAYS = 7
@@ -73,7 +77,12 @@ _NEW_ENTITIES_SQL = """
     ORDER  BY document_count DESC, first_ingested_at DESC, e.name, e.id
     LIMIT  %s
 """
-_GATED_SQL = _NEW_ENTITIES_SQL.format(lens=f"AND  {not_confidential_sql('d')}")
+# The gated lens also asks that a non-confidential record NAME the entity, not just mention
+# it: an alias can re-point a public mention onto a target named only in confidential mail
+# (RM-46 sec-118f LOW-1).
+_GATED_SQL = _NEW_ENTITIES_SQL.format(
+    lens=f"AND  {not_confidential_sql('d')} AND {name_in_public_record_sql('e')}"
+)
 _PERMISSIVE_SQL = _NEW_ENTITIES_SQL.format(lens="")
 
 

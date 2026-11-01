@@ -72,6 +72,7 @@ from .config import (
 from .graph_rag.tenancy import resolve_tenant
 from .queries import resolve_person_to_keys
 from .sensitivity import not_confidential_sql
+from .timeline_entities import resolve_entities, top_cotopics
 from .token_budget import pack_greedy
 
 if TYPE_CHECKING:
@@ -79,12 +80,6 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# Number of co-topic entities surfaced per bucket (spec §3f step 3).
-_COTOPIC_LIMIT = 3
-# Entity-resolution fan-out cap — a free-text query that ILIKE-matches more than
-# this many entities is almost certainly too broad; mirrors the
-# ``relational.list_entities`` default LIMIT (spec §3f).
-_ENTITY_RESOLVE_LIMIT = 50
 # Auto-granularity: the coarsest of {year, quarter, month} that yields at least
 # this many non-empty buckets wins; if none clears the bar, fall back to month
 # (so a young/sparse corpus still shows the finest-grained view available).
@@ -93,22 +88,6 @@ _AUTO_MIN_BUCKETS = 3
 # LLM. Caps the prompt so it stays fast on a local 8B model; the bundle is the
 # grounding evidence, so a few hundred tokens of summaries is plenty.
 _SYNTH_DOC_SUMMARY_BUDGET_TOKENS = 1200
-
-
-@dataclass(frozen=True)
-class EntityRow:
-    """A resolved ``graph_entities`` row for the timeline seed set.
-
-    Projected from ``graph_entities`` by :func:`_resolve_entities`. ``id`` is the
-    UUID (as text); ``name`` / ``canonical_key`` / ``entity_type`` mirror the
-    catalog row. Not the full :class:`brain.graph_rag.schema.GraphEntity` — the
-    timeline only needs the identity + display name.
-    """
-
-    id: str
-    name: str
-    canonical_key: str
-    entity_type: str
 
 
 @dataclass(frozen=True)
@@ -322,34 +301,6 @@ def _doc_date_expr(conn: psycopg.Connection[Any]) -> str:
     return "COALESCE(d.sent_at, d.ingested_at)"
 
 
-def _resolve_entities(
-    conn: psycopg.Connection[Any], tenant_id: str, query: str
-) -> list[EntityRow]:
-    """Resolve a free-text query to ``graph_entities`` via ILIKE (spec §3f step 1).
-
-    A dedicated parameterized ILIKE against ``name`` / ``canonical_key`` (NOT
-    ``relational.list_entities``, which has no name filter). Both placeholders
-    receive ``f"%{query}%"`` — never f-stringed into the SQL. Returns up to
-    :data:`_ENTITY_RESOLVE_LIMIT` matches ordered by name; an empty result is a
-    normal "no entities found" outcome, not an error.
-    """
-    needle = f"%{query.strip()}%"
-    rows = conn.execute(
-        "SELECT id::text, name, canonical_key, entity_type "
-        "FROM graph_entities "
-        "WHERE tenant_id = %s AND (canonical_key ILIKE %s OR name ILIKE %s) "
-        "ORDER BY name ASC, id ASC "
-        "LIMIT %s",
-        (tenant_id, needle, needle, _ENTITY_RESOLVE_LIMIT),
-    ).fetchall()
-    return [
-        EntityRow(
-            id=str(r[0]), name=str(r[1]), canonical_key=str(r[2]), entity_type=str(r[3])
-        )
-        for r in rows
-    ]
-
-
 def _owner_entity_ids(
     conn: psycopg.Connection[Any], tenant_id: str, owner_participants: frozenset[str]
 ) -> list[str]:
@@ -556,51 +507,6 @@ def _query_buckets(
     ]
 
 
-def _top_cotopics(
-    conn: psycopg.Connection[Any],
-    tenant_id: str,
-    doc_ids: list[str],
-    seed_entity_ids: list[str],
-    owner_entity_ids: list[str],
-) -> list[str]:
-    """Top co-occurring entity names for a bucket's docs (spec §3f step 3).
-
-    Aggregates ``graph_edge_contributions`` restricted to the bucket's docs and
-    edges touching a seed entity; the non-seed endpoint is the co-topic. Excludes
-    the seed entities and the corpus owner (same suppression as themes mode).
-    Returns up to :data:`_COTOPIC_LIMIT` names by descending co-occurrence.
-    """
-    if not doc_ids or not seed_entity_ids:
-        return []
-    excluded = seed_entity_ids + owner_entity_ids
-    rows = conn.execute(
-        "SELECT ge.name, SUM(sub.cooccur) AS total FROM ("
-        "    SELECT CASE WHEN gec.src_id = ANY(%s) THEN gec.dst_id "
-        "                ELSE gec.src_id END AS co_id, "
-        "           gec.cooccur_count AS cooccur "
-        "    FROM graph_edge_contributions gec "
-        "    WHERE gec.tenant_id = %s AND gec.document_id = ANY(%s) "
-        "      AND (gec.src_id = ANY(%s) OR gec.dst_id = ANY(%s)) "
-        ") sub "
-        "JOIN graph_entities ge ON ge.id = sub.co_id AND ge.tenant_id = %s "
-        "WHERE sub.co_id::text <> ALL(%s) "
-        "GROUP BY ge.name "
-        "ORDER BY total DESC, ge.name ASC "
-        "LIMIT %s",
-        (
-            seed_entity_ids,
-            tenant_id,
-            doc_ids,
-            seed_entity_ids,
-            seed_entity_ids,
-            tenant_id,
-            excluded,
-            _COTOPIC_LIMIT,
-        ),
-    ).fetchall()
-    return [str(r[0]) for r in rows]
-
-
 def _bucket_doc_titles(
     conn: psycopg.Connection[Any], doc_ids: list[str]
 ) -> list[str]:
@@ -745,6 +651,7 @@ def build_timeline(
     enricher: OllamaEnricher | None = None,
     tenant: str | None = None,
     exclude_confidential: bool = False,
+    public_entities_only: bool = False,
 ) -> TimelineContext:
     """Build the temporal timeline for ``query`` (spec §3f — the orchestrator).
 
@@ -789,7 +696,7 @@ def build_timeline(
         _add_one_month(_parse_month(until, field_name="until")) if until else None
     )
 
-    entities = _resolve_entities(conn, tenant_id, query)
+    entities = resolve_entities(conn, tenant_id, query, public_only=public_entities_only)
     if not entities:
         return TimelineContext(
             query=query,
@@ -804,7 +711,7 @@ def build_timeline(
     person_display: str | None = None
     doc_scope: list[str] | None = None
     if person is not None:
-        match = resolve_person_to_keys(conn, person)
+        match = resolve_person_to_keys(conn, person, public_only=public_entities_only)
         person_display = match.display_name
         doc_scope = _scope_to_person(conn, tenant_id, entity_ids, match.keys)
         if not doc_scope:
@@ -863,7 +770,9 @@ def build_timeline(
     owner_ids = _owner_entity_ids(conn, tenant_id, cfg.owner_participants)
     enriched: list[TimelineBucket] = []
     for raw in raw_buckets:
-        cotopics = _top_cotopics(conn, tenant_id, raw.doc_ids, entity_ids, owner_ids)
+        cotopics = top_cotopics(
+            conn, tenant_id, raw.doc_ids, entity_ids, owner_ids, public_only=public_entities_only
+        )
         titles = _bucket_doc_titles(conn, raw.doc_ids)
         enriched.append(
             TimelineBucket(

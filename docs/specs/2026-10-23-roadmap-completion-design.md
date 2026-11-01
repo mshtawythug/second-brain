@@ -3665,7 +3665,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-43 | Code-repository ingestion | M | 8 | RM-06, RM-42 | DONE (#113) |
 | RM-44 | Social bookmarks | S | 8 | RM-06, RM-07 | DONE (#116) |
 | RM-45 | Receipts (Gmail attachments) | M | 8 | RM-32 | DONE (#117) |
-| RM-46 | MCP over HTTP | L | 9 | RM-06 | TODO |
+| RM-46 | MCP over HTTP | L | 9 | RM-06 | DONE (#118) |
 | RM-47 | Multi-host via one brain + read replica | S | 9 | RM-46 | TODO |
 | RM-48 | Split `cli.py` / `mcp_server.py` (NEEDS USER CONFIRMATION) | XL | 9 | RM-06 | TODO |
 | RM-49 | Hermetic CI eval gate (NEEDS USER CONFIRMATION) | M | 9 | — | TODO |

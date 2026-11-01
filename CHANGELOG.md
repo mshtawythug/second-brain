@@ -22,6 +22,103 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — MCP over HTTP: `brain mcp serve` and `brain mcp token` (RM-46, PR #118)
+
+- `brain mcp serve` serves the MCP tools over streamable HTTP, for another device on a
+  private network. Off until run. Loopback by default (`127.0.0.1:8787`). A non-loopback
+  bind needs `--allow-remote` **and** a bearer token, and the host is judged by the address
+  it resolves to, once, with `brain ui`'s bind code. The bound sockets are handed to uvicorn.
+- **Read-only by default.** The 23 write tools are removed from the server unless
+  `--allow-writes`. The read list is an allowlist, so a new tool is withheld until it is
+  classified. `brain_gaps` counts as a write tool, because `push=true` writes to the
+  elicitation queue.
+- **Confidential documents refused by default.** A `tools/call` asking for
+  `include_confidential` gets a JSON-RPC error unless the server was started with
+  `--include-confidential`. The gate parses strictly: UTF-8, no duplicate keys, no `NaN`,
+  no batches, bounded nesting, no content encoding. It replays the bytes unchanged.
+- Bearer token in `<brain_home>/mcp_token` (0600, `O_EXCL | O_NOFOLLOW`, atomic rotation),
+  read refusing symlinks, FIFOs, other owners and oversized or malformed files. It is
+  compared as bytes in constant time, and every auth failure gets the same 401.
+  `BRAIN_MCP_TOKEN` and `BRAIN_MCP_TOKEN_PATH` live in the new settings leaf
+  `brain/settings/mcp_http.py`. `brain mcp token [--rotate] [--show] [--json] [--path]`
+  manages the token.
+- `Host` is checked on every path (DNS rebinding), and the SDK gets an explicit
+  `TransportSecuritySettings` with no allowed browser origin (403). Limits: a 1 MiB body
+  cap (`--max-body-bytes`), an 8 MiB result cap (502), a per-call deadline
+  (`--call-timeout`, default 300 s, 504), and at most 16 concurrent requests. Sessions are
+  stateless, responses are JSON, and uvicorn runs with no proxy headers, no server header
+  and no access log. The request log names a route label, never a path, header, body or
+  token. `/healthz` is open; `/readyz` needs the token and carries no corpus statistics.
+- HTTP tool calls each open their own database connection, because they run concurrently
+  on worker threads. stdio keeps its single persistent connection.
+- `brain-mcp` now exits 2 when given arguments, instead of silently starting stdio.
+- The `mcp_server` state builder moves to the new leaf `brain/mcp_state.py`
+  (`mcp_server._State` stays as an alias); `start_state` is the one startup path.
+  `mcp_server.py` shrinks.
+- Security round (sec-118), at the PR head after review:
+  - only the exact endpoint, `/healthz` and `/readyz` paths are served (404 otherwise), so
+    `/mcp%0A`, which starlette's `^/mcp$` route also matches, cannot get past the
+    confidential gate; the gate and the result/deadline guard now cover every POST;
+  - a connection with no request in flight is closed after 10 s whatever bytes arrive
+    (slowloris);
+  - work is capped in the app (16 calls, 16 worker threads, orphaned workers counted; 503
+    beyond), and every per-call connection carries `statement_timeout` = the call deadline;
+  - unexpected tool failures answer `tool <name> failed (<Class>)`, on mcp 2.0 as on 2.3;
+  - without `--include-confidential`, a confidential document answers every by-prefix
+    lookup as an unknown prefix;
+  - `brain_link_proposal` takes `include_confidential` and no longer resolves a
+    confidential destination by default, on stdio too (F6).
+- Review round (rev-118):
+  - `brain mcp token --rotate` says a running server must be restarted, and
+    `brain mcp token` says when `BRAIN_MCP_TOKEN` overrides the file;
+  - `--no-auth` is refused with `--allow-remote` or `--allowed-host`;
+  - a wildcard bind's refusal names `--allowed-host` or the private address;
+  - `brain-mcp` checks its arguments before loading config;
+  - `--log-level` defaults to `BRAIN_MCP_LOG_LEVEL`;
+  - a `brain-maintenance` skill reference (`reference/mcp-http.md`) carries the serve
+    and token recipe;
+  - global graph search (stdio too) never returns a community with a confidential
+    member, as `brain_graphrag_communities` already withheld it;
+  - `brain mcp serve` exits 2 if uvicorn lacks the internals its idle deadline uses.
+- Security re-check (sec-118b):
+  - over HTTP a `person` argument resolves public people only, and `person_keys` (email
+    addresses) are dropped from results;
+  - `brain_timeline` names only public entities over HTTP;
+  - a 504 no longer leaks SDK tasks (the call finishes, discarded, and stays counted);
+  - the endpoint answers POST only (405 otherwise);
+  - every refusal sends `Connection: close`;
+  - the statement-timeout URL rewrite keeps `+` literally.
+- Security re-check (sec-118c):
+  - over HTTP, `brain_ask` refuses `max_iterations` above `BRAIN_ASK_MAX_ITERATIONS` and
+    `limit` above `BRAIN_ASK_DOCS_PER_ITER`, and stops at its next step once
+    `--call-timeout` has passed; graph tools refuse `depth` above `BRAIN_GRAPH_DEPTH`;
+  - a tool result holding a NamedTuple no longer fails the HTTP result filter.
+- Round 5 (sec-118d): without `--include-confidential`, `brain mcp serve` withholds every
+  `brain_graphrag_*` tool (they answer "Unknown tool"; read-only serves 22 of 51), and
+  `brain_ask` answers in `hybrid` mode only. The entity graph is built from every document,
+  confidential ones included, so per-output filtering did not converge. With the flag the
+  graph is served as before. `brain_timeline` and `brain_explain` stay served.
+- Round 6 (sec-118e):
+  - the weekly review's graph themes (CLI, MCP and the emitted page; stdio too) skip a
+    community any of whose members a confidential document mentions, as
+    `brain_graphrag_communities` and global search already did;
+  - over HTTP without `--include-confidential`, `brain_review_weekly` is withheld with the
+    graph family, and a test fails on any tool that reads graph tables without a
+    recorded keep-or-withhold judgement.
+- Round 7 (sec-118f, rev-118 round 6):
+  - a gated lens names an entity only if a non-confidential record names it, not merely
+    mentions it: the brief's new entities, the review findings and conflict scan (stdio's
+    default lens too), and the timeline over HTTP. A curated alias could otherwise carry a
+    name found only in confidential mail. The findings gate fails closed: a contradiction
+    is served only when its entity, found by key or by id, still exists and passes;
+  - `brain_gaps` is withheld too over HTTP without `--include-confidential` (it clusters
+    search terms typed under every lens), so `--allow-writes` serves 37 of 51 there;
+  - the graph-reach test reads code only (never prose), module SQL constants, every
+    `graph_*` table the migrations create, `ag_catalog` and `cypher(`.
+- New `http` extra (`pip install 'secondbrain-py[http]'`) pins `mcp>=2.0,<3.0`. The base pin
+  still admits 1.x for stdio, and `brain mcp serve` on 1.x exits 2 naming the extra. Guide:
+  `docs/guides/mcp-http-transport.md`.
+
 ### Added — receipts: Gmail PDF and image attachments (RM-45, PR #117)
 
 - `brain ingest-gmail --with-attachments` appends the text of each thread's PDF, PNG and JPEG

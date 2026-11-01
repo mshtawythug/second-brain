@@ -66,3 +66,72 @@ users who have no confidential document at all. Recorded here rather than in
 and its own docstring said extract before the next addition. The 2026-10-15
 extraction brought it back under; the note stays here, where readers of this
 audit already look.
+
+
+**RM-46 (sec-118 #2), 2026-10-31: three statements gated, one exemption narrowed.**
+
+- `mcp_server._resolve_proposal_dst` (both statements: the id-prefix `LIKE` and the
+  title match) now carry `not_confidential_sql('d')` unless the caller passes
+  `brain_link_proposal(include_confidential=true)`. Before, a 6-hex prefix or a guessed
+  title named a confidential document's id and title back: an enumeration oracle, on
+  stdio as well as HTTP. Neither statement filters `draft`, so the grep above does not
+  list them; they are recorded here because they are the same egress class.
+- `brain_graphrag_entities` keeps its stdio exemption (entity names are a separate tier;
+  see its docstring). Over HTTP without `--include-confidential` it, and every other
+  graph tool, is **not served at all** (RM-46 round 5, below). Every by-prefix lookup
+  answers a confidential document as an unknown prefix (`McpState.hide_confidential`).
+- **Global graph retrieval, stdio and HTTP (rev-118 round 2):** `graph_rag/global_.py`
+  returned stored community SUMMARIES, which are generated from member names and
+  representative titles, for communities that `list_communities` withholds whole. Only
+  their `doc_ids` were gated. `_retrieve_global` now drops, before the ranking cut, every
+  community `communities_with_confidential_members` names. That is `list_communities`'
+  own predicate (`confidential_member_sql`), now shared.
+- **People and timeline names over HTTP (sec-118b):** `queries.resolve_person_to_keys`
+  gains `public_only`. In HTTP hide mode, a person no non-confidential document names is
+  unknown (search, recall and timeline), and `person_keys` is dropped from results.
+  `timeline_entities.resolve_entities` (moved out of `timeline.py`) gains a
+  public-mention filter on its substring match (`_PUBLIC_MENTION_SQL`). The resolver's own docstring explains why
+  stdio stays permissive: identities come from the directory, which the local owner
+  already holds.
+- **RM-46 round 5: the graph family is withheld over HTTP without
+  `--include-confidential`.** The entity graph is derived from every document: names,
+  co-occurrence edges and weights, themes and communities. sec-118 through sec-118d each
+  found one more graph output carrying confidential-derived data (names, summaries,
+  routing, seed counts, associations), so the per-output HTTP filters
+  (`graph_rag/public_entities`, `list_entities(public_only)`, `graph_stats(public_only)`,
+  the router's public person scan, the themes resolver's `public_only`) were removed, and
+  `brain mcp serve` withholds every `brain_graphrag_*` tool in that mode
+  (`mcp_tool_classes.apply_hide_mode`); `brain_ask` answers in `hybrid` only. The
+  global-mode community exclusion above stays: stdio uses it.
+- **The weekly review's graph themes, stdio and HTTP (sec-118e).**
+  `review/weekly.weekly_active_communities` ranked communities by in-window edge weight
+  with no sensitivity predicate, and each theme carried its members' names and the stored
+  community summary (written from member names and titles). Only the theme's `docs` were
+  gated, so the default lens, the "always gated" vault page and a remote caller received
+  confidential-derived names and summaries. Under `exclude_confidential` the statement now
+  carries `NOT confidential_member_sql('gcm')` before its `LIMIT`: the same rule as
+  `list_communities` and global retrieval. The predicate moved to `brain.sensitivity` so
+  review code shares it without importing the graph package. Over HTTP without
+  `--include-confidential`, `brain_review_weekly` is also withheld
+  (`mcp_tool_classes.HIDE_MODE_WITHHELD_EXTRA`), and `tests/test_mcp_http_graph_reach.py` fails
+  on any served tool that reads graph tables without a recorded judgement.
+- **The search log over HTTP (sec-118f LOW-3).** `brain_gaps` clusters `search_queries`
+  rows (zero results, no click) from every lens, so a term typed while searching
+  confidential documents became a label. Not graph data, and the raw query never left
+  (Plan 08 §6), but confidential-tier vocabulary did. It is withheld in HTTP hide mode
+  with the other pinned extras. stdio is unchanged: the owner's own log, on the owner's
+  machine.
+- **Name provenance, stdio and HTTP (sec-118f LOW-1).** An owner-written alias rule
+  re-points a public document's mention onto its target, so a target named only in
+  confidential mail passed every public-MENTION test. `sensitivity.name_in_public_record_sql`
+  now asks that a non-confidential, non-draft document mentioning the entity carry its
+  name (title, content or metadata, case-insensitively). It is the one predicate on every
+  gated statement that names entities: the brief's `_GATED_SQL` (stdio's default lens and
+  HTTP), `review/queries.iter_entities_for_conflict_scan` and `list_review_queue`'s
+  contradiction findings (both under `exclude_confidential`, so stdio's default lens too;
+  the findings gate fails closed: it serves a contradiction only when its entity still
+  exists, matched by canonical key from a review scan or by id from `brain elicit`, and
+  passes the predicate, sec-118g LOW-A),
+  and the timeline's entity match and co-topics (`timeline_entities`, HTTP hide mode, where
+  the timeline's other public filter already lives). Measured worst case: 50 entities each
+  mentioned by 40 documents of 20 KB with the name only in the last, 162 ms against 1 ms.

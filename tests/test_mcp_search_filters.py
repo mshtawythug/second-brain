@@ -89,7 +89,7 @@ def test_brain_search_person_ambiguous_raises_invalid_params(
     """``PersonAmbiguous`` surfaces as ``INVALID_PARAMS`` with the
     candidate list embedded in the message so the MCP caller can show
     the user disambiguation hints."""
-    def _raise(_conn: object, name: str) -> Any:
+    def _raise(_conn: object, name: str, *, public_only: bool = False) -> Any:
         raise PersonAmbiguous(name, ["Alice Doe", "Alice Xanthus"])
 
     monkeypatch.setattr(mcp_server, "resolve_person_to_keys", _raise)
@@ -106,7 +106,7 @@ def test_brain_search_person_not_found_raises_invalid_params(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     """``PersonNotFound`` surfaces as ``INVALID_PARAMS``."""
-    def _raise(_conn: object, name: str) -> Any:
+    def _raise(_conn: object, name: str, *, public_only: bool = False) -> Any:
         raise PersonNotFound(name)
 
     monkeypatch.setattr(mcp_server, "resolve_person_to_keys", _raise)
@@ -201,7 +201,7 @@ def test_brain_search_person_success_threads_keys_and_display_name(
     is populated end-to-end."""
     captured: dict[str, Any] = {}
 
-    def _resolve(_conn: object, _name: str) -> PersonMatch:
+    def _resolve(_conn: object, _name: str, *, public_only: bool = False) -> PersonMatch:
         return PersonMatch(
             display_name="Alice", keys=["alice@example.com", "alice"]
         )

@@ -13,7 +13,7 @@ from typing import Any
 
 import psycopg
 
-from ..sensitivity import not_confidential_sql
+from ..sensitivity import name_in_public_record_sql, not_confidential_sql
 
 # Review-finding signal kinds owned by this surface. ``brain review list`` /
 # ``dismiss`` only ever touch these two; the other ``elicitation_gaps`` kinds
@@ -97,6 +97,8 @@ def iter_entities_for_conflict_scan(
     ]
     if exclude_confidential:
         where.append(not_confidential_sql("d"))
+        # sec-118f LOW-1: and only an entity a non-confidential record names.
+        where.append(name_in_public_record_sql("ge"))
     rows = conn.execute(
         f"""
         SELECT ge.canonical_key, ge.name, ge.entity_type,
@@ -571,7 +573,18 @@ def list_review_queue(
         else (
             "AND NOT EXISTS (SELECT 1 FROM documents d "
             "WHERE d.id::text = ANY(elicitation_gaps.evidence_ids) "
-            f"AND NOT ({not_confidential_sql('d')}))"
+            f"AND NOT ({not_confidential_sql('d')})) "
+            # sec-118f LOW-1, sec-118g LOW-A: a contradiction's target and rationale
+            # name an entity. Serve it only when that entity still exists and a
+            # non-confidential record names it, matched by canonical key (review
+            # scan) or by id (brain elicit). A missing entity withholds the row.
+            "AND (elicitation_gaps.signal_kind <> 'contradiction' "
+            "OR EXISTS (SELECT 1 FROM graph_entities ge "
+            "WHERE ge.tenant_id = elicitation_gaps.tenant_id "
+            "AND ge.entity_type = elicitation_gaps.target_type "
+            "AND (ge.canonical_key = elicitation_gaps.target_id "
+            "OR ge.id::text = elicitation_gaps.target_id) "
+            f"AND {name_in_public_record_sql('ge')}))"
         )
     )
     rows = conn.execute(

@@ -37,7 +37,7 @@ from ..activity import (
 from ..config import Config
 from ..enrichment import OllamaEnricher
 from ..people import _doc_participant_keys
-from ..sensitivity import not_confidential_sql
+from ..sensitivity import confidential_member_sql, not_confidential_sql
 from ..todo import TodoRow, iter_action_item_docs
 
 # Top entity names / representative doc titles attached per graph theme block.
@@ -201,6 +201,7 @@ def weekly_active_communities(
     after: datetime,
     before: datetime,
     theme_limit: int,
+    exclude_confidential: bool = False,
 ) -> list[tuple[str, int]]:
     """Return ``(community_key, weekly_weight)`` for in-window-active communities.
 
@@ -217,9 +218,17 @@ def weekly_active_communities(
     ``(community, edge)`` pair to one row before the ``SUM`` so an intra-community
     edge contributes its weight once; a cross-community edge still attributes its
     weight to each endpoint's distinct community exactly once.
+
+    ``exclude_confidential`` (F6, RM-46 sec-118e) drops, BEFORE the ``LIMIT``, every
+    community any of whose members a confidential document mentions
+    (:func:`brain.sensitivity.confidential_member_sql`, the rule
+    ``list_communities`` and global graph retrieval apply). The theme block carries
+    its members' names and its stored summary, both drawn from every member's
+    documents, so a filter on the block's ``docs`` alone was not enough.
     """
+    gate = f"AND NOT {confidential_member_sql('gcm')}" if exclude_confidential else ""
     rows = conn.execute(
-        """
+        f"""
         SELECT community_key, SUM(cooccur_count) AS weekly_weight
         FROM (
             SELECT DISTINCT
@@ -235,6 +244,7 @@ def weekly_active_communities(
             JOIN   documents d ON d.id = gec.document_id
             WHERE  gec.tenant_id = %s
               AND  d.ingested_at BETWEEN %s AND %s
+              {gate}
         ) AS edge_community
         GROUP  BY community_key
         ORDER  BY weekly_weight DESC, community_key
@@ -257,9 +267,11 @@ def _graph_themes(
 ) -> list[ThemeBlock]:
     """Build theme blocks from the in-window-active communities (graph path).
 
-    ``exclude_confidential`` reaches :func:`_community_window_docs`, which closes
-    BOTH the ``docs`` list on each block AND the ``doc_titles`` handed to the
-    enricher below — one gate, because the second is built from the first.
+    ``exclude_confidential`` reaches :func:`weekly_active_communities`, which drops
+    every community with a confidential member (so its names and stored summary
+    never reach a block), and :func:`_community_window_docs`, which closes BOTH
+    the ``docs`` list on each block AND the ``doc_titles`` handed to the enricher
+    below — one gate, because the second is built from the first.
     """
     blocks: list[ThemeBlock] = []
     for community_key, _weight in weekly_active_communities(
@@ -268,6 +280,7 @@ def _graph_themes(
         after=after,
         before=before,
         theme_limit=theme_limit,
+        exclude_confidential=exclude_confidential,
     ):
         entity_names = _community_entity_names(
             conn, tenant_id=tenant_id, community_key=community_key

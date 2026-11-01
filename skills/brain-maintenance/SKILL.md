@@ -217,7 +217,7 @@ full relink. Soft-fails on missing `gws` and exits 0.
 
 ## Vault-sync daemons and full rebuild — `bin/` scripts
 
-The user reads in `brain ui`. The Quartz wiki was retired at R3: nothing to build.
+The user reads in `brain ui` (Quartz retired at R3). Serving tools to another machine: [reference/mcp-http.md](reference/mcp-http.md).
 
 ```bash
 bin/brain-up                        # start the vault-sync watcher + 07:00 brief job (launchd)
