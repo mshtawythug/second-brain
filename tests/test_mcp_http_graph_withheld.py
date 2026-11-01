@@ -30,6 +30,7 @@ from brain.mcp_tool_classes import (
     ASK_GRAPH_MODES_REFUSAL,
     GRAPH_TOOL_PREFIX,
     READ_ONLY_TOOLS,
+    hide_mode_withheld,
     registered_tool_names,
 )
 
@@ -60,6 +61,8 @@ def test_the_registry_graph_family_is_the_pinned_one() -> None:
     graph = tuple(name for name in names if name.startswith(GRAPH_TOOL_PREFIX))
 
     assert graph == GRAPH_TOOLS
+    # sec-118e: plus the pinned tools built from graph communities or edges.
+    assert hide_mode_withheld(names) == tuple(sorted((*GRAPH_TOOLS, "brain_review_weekly")))
     assert len(names) == 51
     # Read-only and confidential-excluded (the default) serves 28 - 6 = 22 tools.
     assert len(READ_ONLY_TOOLS - set(GRAPH_TOOLS)) == 22

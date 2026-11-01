@@ -23,10 +23,17 @@ graph is derived from EVERY document: entity names, co-occurrence edges and
 weights, themes and communities are all computed over confidential documents
 too. Four security rounds each found one more way a graph output carried that,
 so filtering outputs field by field did not converge. Without
-``--include-confidential`` every ``brain_graphrag_*`` tool is withheld
-(:func:`apply_graph_hide`, matched by prefix so a graph tool added later is
-withheld too), and ``brain_ask`` answers only in ``hybrid`` mode
-(:data:`ASK_GRAPH_MODES_REFUSAL`).
+``--include-confidential`` the graph family is withheld (:func:`apply_graph_hide`),
+and ``brain_ask`` answers only in ``hybrid`` mode (:data:`ASK_GRAPH_MODES_REFUSAL`).
+
+The family is the ``brain_graphrag_`` prefix PLUS :data:`GRAPH_DERIVED_TOOLS`,
+pinned tools whose output is built from graph communities or edges under another
+name (sec-118e: ``brain_review_weekly``). The prefix alone does not catch a future
+graph tool named otherwise. ``tests/test_mcp_http_graph_reach.py`` walks every
+registered tool's calls for graph SQL and ``brain.graph_rag``, and fails on one
+that is in neither this family nor :data:`GRAPH_TOUCHING_KEPT`, where each served
+tool that reads graph tables carries the reason its output is built from gated
+documents only. A new tool that reads graph tables needs its own judgement there.
 """
 from __future__ import annotations
 
@@ -105,9 +112,60 @@ ASK_GRAPH_MODES_REFUSAL = (
 )
 
 
+#: Tools without the prefix whose output is built from graph communities or edges.
+GRAPH_DERIVED_TOOLS: frozenset[str] = frozenset(
+    {
+        # Its graph themes are communities: member names and stored summaries
+        # (sec-118e). Gated on stdio too now, and withheld here regardless.
+        "brain_review_weekly",
+    }
+)
+
+#: Served tools that read graph tables, and why their output is built from gated
+#: documents only. Judged per tool; the reach test holds every graph-touching
+#: tool to this list or the family.
+GRAPH_TOUCHING_KEPT: dict[str, str] = {
+    "brain_ask": "hybrid mode only in hide mode; its graph modes are refused",
+    "brain_timeline": (
+        "entities match only with a non-confidential mention; buckets are lensed "
+        "documents; co-topics count edge contributions of those documents only"
+    ),
+    "brain_brief": (
+        "new entities are named, counted and dated from non-confidential, non-draft "
+        "documents only (one absence bit is a documented residual)"
+    ),
+    "brain_search": "the entity filter is an exact match that returns lensed documents only",
+    "brain_explain": "brain_search's ranking, with the same entity filter",
+    "brain_recall": "the same search predicate as brain_search",
+    "brain_watch_check": "runs a saved search through the same predicate",
+    "brain_watch_add": "validates a saved search through the same predicate",
+    "brain_review_findings_list": (
+        "a finding is withheld whole unless every evidence document is non-confidential"
+    ),
+    "brain_review_scan": (
+        "scans entities and documents through the confidential lens; writes findings"
+    ),
+    "brain_connect_list": (
+        "graph_score is the pair's own shared mentions; both documents are lensed"
+    ),
+    "brain_gaps": "purges gaps whose entity is gone; returns search-failure clusters",
+}
+
+
+def hide_mode_withheld(registered: Iterable[str]) -> tuple[str, ...]:
+    """The graph family among ``registered``: the prefix and :data:`GRAPH_DERIVED_TOOLS`."""
+    return tuple(
+        sorted(
+            name
+            for name in set(registered)
+            if name.startswith(GRAPH_TOOL_PREFIX) or name in GRAPH_DERIVED_TOOLS
+        )
+    )
+
+
 def apply_graph_hide(server: ToolRegistry, registered: Iterable[str]) -> tuple[str, ...]:
-    """Remove every graph tool in ``registered``; return them, sorted."""
-    withheld = tuple(sorted({name for name in registered if name.startswith(GRAPH_TOOL_PREFIX)}))
+    """Remove the graph family (:func:`hide_mode_withheld`) from ``server``; return it."""
+    withheld = hide_mode_withheld(registered)
     for name in withheld:
         server.remove_tool(name)
     return withheld

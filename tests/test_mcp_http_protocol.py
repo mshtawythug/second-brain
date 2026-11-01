@@ -38,10 +38,11 @@ TEST_DATABASE_URL = os.environ.get(
 #: The registry at RM-46 and its read-only slice.
 ALL_TOOLS = 51
 READ_TOOLS = 28
-#: Round 5: without --include-confidential the graph family (6 read tools, 12 in
-#: all) is withheld, so the default serves 22 and --allow-writes serves 39.
+#: Round 5: without --include-confidential the graph family (6 read tools; 12
+#: prefixed plus brain_review_weekly, sec-118e) is withheld, so the default serves
+#: 22 and --allow-writes serves 38.
 GRAPH_READ_TOOLS = 6
-GRAPH_TOOLS = 12
+GRAPH_TOOLS = 13
 STARTUP_DEADLINE_S = 60.0
 
 
