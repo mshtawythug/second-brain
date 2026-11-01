@@ -142,12 +142,11 @@ def _read_capped(dir_fd: int) -> bytes | None:
         return None
     except OSError as exc:
         raise ReplicaMarkerError(_UNREADABLE) from exc
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_size > MARKER_MAX_BYTES:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
         raise ReplicaMarkerError(_UNREADABLE)
     with os.fdopen(fd, "rb") as handle:
-        raw = handle.read(MARKER_MAX_BYTES + 1)
+        raw = handle.read(MARKER_MAX_BYTES + 1)  # one byte over proves "too big"
     if len(raw) > MARKER_MAX_BYTES:
         raise ReplicaMarkerError(_UNREADABLE)
     return raw
