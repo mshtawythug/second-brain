@@ -353,6 +353,19 @@ dependencies = [
   # `starlette>=0.27` and sse-starlette for `>=0.49.1`, so 1.7 narrows nothing
   # they need.
   "starlette>=1.7,<2",
+  # `brain mcp serve` (RM-46) leans on uvicorn INTERNALS, not just its public
+  # API: `brain.mcp_http_conn.IdleDeadlineProtocol` subclasses
+  # `uvicorn.protocols.http.h11_impl.H11Protocol` (overrides connection_made /
+  # connection_lost / on_response_complete; reads self.cycle,
+  # self.cycle.response_complete, self.loop, self.transport) and is passed as
+  # `uvicorn.Config(http=...)`, with limit_concurrency / timeout_keep_alive /
+  # timeout_graceful_shutdown / proxy_headers / server_header. MEASURED
+  # 2026-10-31: 0.54.0 is the ONLY uvicorn the HTTP transport has run on (with
+  # mcp 2.0.0 and 2.3.0). The floor below is `brain ui`'s, not a claim about
+  # HTTP: `check_uvicorn_internals` verifies every internal above at startup and
+  # makes `brain mcp serve` exit 2 naming what is missing, so an older or newer
+  # uvicorn that moved them fails closed rather than serving without the idle
+  # deadline.
   "uvicorn>=0.30",
   # Same shape as starlette/uvicorn above: `brain ui`'s markdown renderer
   # imports pygments directly to tokenise fenced code (212 corpus documents

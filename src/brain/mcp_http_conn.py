@@ -24,11 +24,14 @@ once instead of waiting into its own 504.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
 
 import anyio
+
+from .errors import McpTransportError
 
 logger = logging.getLogger("brain.mcp.http")
 
@@ -47,6 +50,73 @@ MAX_CONNECTIONS = 256
 #: POSTs in flight, and worker threads for sync tools (each holds a database
 #: connection while it runs).
 MAX_CALLS = 16
+
+
+#: The lowest uvicorn the HTTP transport has run on (pyproject's evidence block).
+TESTED_UVICORN = "0.54.0"
+#: What IdleDeadlineProtocol overrides or reads on uvicorn's h11 protocol.
+_PROTOCOL_METHODS = ("connection_made", "connection_lost", "on_response_complete")
+_PROTOCOL_FIELDS = ("cycle", "loop", "transport")
+#: The uvicorn.Config options serve passes (``uvicorn_config_kwargs``).
+_CONFIG_OPTIONS = (
+    "http",
+    "limit_concurrency",
+    "timeout_keep_alive",
+    "timeout_graceful_shutdown",
+    "proxy_headers",
+    "server_header",
+)
+_INSTALLED: Any = object()
+
+
+def _init_assigns(cls: Any, field: str) -> bool:
+    try:
+        return f"self.{field}" in inspect.getsource(cls.__init__)
+    except (OSError, TypeError):
+        return False
+
+
+def check_uvicorn_internals(
+    *, protocol: Any = _INSTALLED, cycle: Any = _INSTALLED, config: Any = _INSTALLED
+) -> None:
+    """Refuse to serve when uvicorn lacks an internal the idle deadline relies on.
+
+    :func:`idle_deadline_protocol` subclasses uvicorn's ``H11Protocol`` and reads
+    its ``cycle`` / ``cycle.response_complete`` / ``loop`` / ``transport``; none
+    of that is public API (rev-118 round 2). A uvicorn that moved them would
+    leave the slowloris guard silently off, so ``brain mcp serve`` fails closed,
+    as :func:`brain.mcp_http_tools.sanitize_tool_errors` does for the SDK.
+    The arguments stand in for the installed classes in tests.
+    """
+    if protocol is _INSTALLED or cycle is _INSTALLED or config is _INSTALLED:
+        from uvicorn import Config
+        from uvicorn.protocols.http import h11_impl
+
+        protocol = h11_impl.H11Protocol if protocol is _INSTALLED else protocol
+        cycle = getattr(h11_impl, "RequestResponseCycle", None) if cycle is _INSTALLED else cycle
+        config = Config if config is _INSTALLED else config
+    missing: list[str] = []
+    if protocol is None:
+        missing.append("H11Protocol")
+    else:
+        missing += [
+            name for name in _PROTOCOL_METHODS if not callable(getattr(protocol, name, None))
+        ]
+        missing += [name for name in _PROTOCOL_FIELDS if not _init_assigns(protocol, name)]
+    if cycle is None or not _init_assigns(cycle, "response_complete"):
+        missing.append("RequestResponseCycle.response_complete")
+    try:
+        options: set[str] = set(inspect.signature(config).parameters)
+    except (TypeError, ValueError):
+        options = set()
+    missing += [f"Config({name}=)" for name in _CONFIG_OPTIONS if name not in options]
+    if missing:
+        raise McpTransportError(
+            "brain mcp serve needs uvicorn internals it cannot find ("
+            + ", ".join(missing)
+            + f"); it was tested on uvicorn {TESTED_UVICORN}. Install that or a "
+            "compatible release."
+        )
 
 
 def idle_deadline_protocol(idle_timeout_s: float) -> type[asyncio.Protocol]:

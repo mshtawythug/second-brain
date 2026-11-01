@@ -195,3 +195,20 @@ def test_the_log_level_is_flag_then_env_then_info(
 
     assert result.exit_code == 0, result.output
     assert recorded[0].log_level == expected
+
+
+def test_serve_exits_2_when_uvicorn_lacks_the_internals(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from brain import mcp_http_conn
+    from brain.errors import McpTransportError
+
+    def broken() -> None:
+        raise McpTransportError("brain mcp serve needs uvicorn internals it cannot find")
+
+    monkeypatch.setattr(mcp_http_conn, "check_uvicorn_internals", broken)
+
+    result = runner.invoke(app, ["mcp", "serve", "--no-auth"])
+
+    assert result.exit_code == 2
+    assert "uvicorn internals" in result.output

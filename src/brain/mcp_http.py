@@ -42,7 +42,7 @@ import psycopg
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import mcp_server
+from . import mcp_http_conn, mcp_server
 from .config import Config
 from .errors import BrainError, McpTransportError
 from .mcp_auth import BearerAuthMiddleware, TokenInfo
@@ -485,6 +485,8 @@ def serve_http(
             f"brain mcp serve needs mcp 2.x (installed: {distribution_version('mcp')}); "
             f"run {HTTP_EXTRA_HINT}"
         )
+    # Fail closed before binding if uvicorn moved what the idle deadline reads.
+    mcp_http_conn.check_uvicorn_internals()
     plan = validate_options(opts, resolver=resolver)
     target = server if server is not None else cast(HttpServer, mcp_server.mcp_app)
     try:

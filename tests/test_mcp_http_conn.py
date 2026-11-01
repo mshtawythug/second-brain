@@ -282,3 +282,72 @@ def test_the_deadline_closes_an_idle_connection_once(closing: bool, closes: int)
     protocol._idle_deadline_expired()
 
     assert protocol.transport.closed == closes  # type: ignore[attr-defined]
+
+
+# ------------------------------------------- rev-118 round 2: uvicorn internals
+
+
+def test_the_installed_uvicorn_has_every_internal_the_deadline_needs() -> None:
+    from brain.mcp_http_conn import check_uvicorn_internals
+
+    check_uvicorn_internals()  # no exception on the version the tests run on
+
+
+class _NoCycleProtocol:
+    def __init__(self) -> None:
+        self.loop = None
+        self.transport = None
+
+    def connection_made(self, transport: Any) -> None: ...
+
+    def connection_lost(self, exc: Any) -> None: ...
+
+    def on_response_complete(self) -> None: ...
+
+
+class _Cycle:
+    def __init__(self) -> None:
+        self.response_complete = False
+
+
+class _ConfigWithoutHttp:
+    def __init__(self, app: Any, host: str = "", limit_concurrency: int = 0) -> None: ...
+
+
+@pytest.mark.parametrize(
+    ("protocol", "cycle", "config", "missing"),
+    [
+        (_NoCycleProtocol, _Cycle, uvicorn.Config, "cycle"),
+        (object, _Cycle, uvicorn.Config, "on_response_complete"),
+        (None, _Cycle, uvicorn.Config, "H11Protocol"),
+        ("real", object, uvicorn.Config, "response_complete"),
+        ("real", _Cycle, _ConfigWithoutHttp, "http"),
+    ],
+)
+def test_missing_internals_fail_closed_naming_what_is_missing(
+    protocol: Any, cycle: Any, config: Any, missing: str
+) -> None:
+    from uvicorn.protocols.http import h11_impl
+
+    from brain.errors import McpTransportError
+    from brain.mcp_http_conn import check_uvicorn_internals
+
+    real = h11_impl.H11Protocol if protocol == "real" else protocol
+
+    with pytest.raises(McpTransportError) as excinfo:
+        check_uvicorn_internals(protocol=real, cycle=cycle, config=config)
+
+    assert missing in str(excinfo.value)
+    assert "0.54.0" in str(excinfo.value)
+
+
+def test_an_uninspectable_config_counts_as_missing_every_option() -> None:
+    from uvicorn.protocols.http import h11_impl
+
+    from brain.errors import McpTransportError
+    from brain.mcp_http_conn import check_uvicorn_internals
+
+    with pytest.raises(McpTransportError, match=r"Config\(http=\)"):
+        check_uvicorn_internals(
+            protocol=h11_impl.H11Protocol, cycle=h11_impl.RequestResponseCycle, config=42
+        )
