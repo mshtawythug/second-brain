@@ -13,7 +13,8 @@ review queue, link decisions. Telemetry rows (``search_queries``, the
 withholding ``brain_search`` would make the transport pointless.
 
 Each entry was judged against its tool's docstring and, for the six that were
-not obvious, its code (plan ``docs/plans/2026-10-31-rm-46-mcp-http.md``);
+not obvious, its code; a scan of the read tools' parameters then moved
+``brain_gaps`` to write (plan ``docs/plans/2026-10-31-rm-46-mcp-http.md``).
 ``tests/test_mcp_http_readonly.py`` pins the judgement calls to the docstring
 phrases they rest on. stdio never calls :func:`apply_read_only`.
 """
@@ -24,6 +25,8 @@ from typing import Any, Protocol
 
 READ_ONLY_TOOLS: frozenset[str] = frozenset(
     {
+        # NOT here: ``brain_gaps``. It reads the search log, but ``push=true`` upserts
+        # the ``elicitation_gaps`` queue (``brain gaps push``), so it is a write.
         # Retrieval: they log a ``search_queries`` / ``interactions`` row only.
         "brain_search",
         "brain_recall",
@@ -34,7 +37,6 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         # Listings and counts.
         "brain_list",
         "brain_status",
-        "brain_gaps",  # mines the search log
         "brain_resurface",  # scores; records no access
         "brain_backlinks",
         "brain_links",

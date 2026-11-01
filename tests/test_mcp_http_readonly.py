@@ -26,8 +26,8 @@ pytestmark = pytest.mark.nodb
 
 #: The registry at RM-46: 42 tools in ``mcp_server`` plus 9 extension tools.
 REGISTERED = 51
-READS = 29
-WRITES = 22
+READS = 28
+WRITES = 23
 
 
 def _registered() -> tuple[str, ...]:
@@ -91,6 +91,8 @@ def test_known_write_tools_are_withheld(name: str) -> None:
         (mcp_server.brain_review_scan, "surfacing findings into the queue", False),
         (mcp_server.brain_daily, "writes the file", False),
         (mcp_server.brain_rate, "Record a thumbs-up", False),
+        # Reads the search log, but ``push=true`` upserts the elicitation queue.
+        (mcp_server.brain_gaps, "upserts", False),
     ],
 )
 def test_judgement_calls_are_pinned_to_their_docstrings(
@@ -136,3 +138,35 @@ def test_listing_the_real_registry_does_not_change_it() -> None:
     _registered()
     assert _registered() == before
     assert len(before) == REGISTERED
+
+
+#: Parameter names that would let a caller point the server at a network
+#: address or a file. No read tool may take one (no SSRF through tool args).
+_ADDRESS_LIKE = ("url", "uri", "endpoint", "host", "webhook", "href", "callback", "path", "file")
+
+
+def test_no_read_tool_takes_an_address_or_a_path() -> None:
+    tools = asyncio.run(mcp_server.mcp_app.list_tools())
+    offending = {
+        (tool.name, prop)
+        for tool in tools
+        if tool.name in READ_ONLY_TOOLS
+        for prop in tool.model_dump(by_alias=True)["inputSchema"].get("properties", {})
+        if any(word in prop.lower() for word in _ADDRESS_LIKE)
+    }
+
+    assert offending == set()
+
+
+def test_the_address_scan_would_catch_one() -> None:
+    server = make_server("throwaway")
+
+    def brain_fetch(url: str) -> str:
+        """A tool that would be an SSRF vector."""
+        return url
+
+    server.tool()(brain_fetch)
+    (tool,) = asyncio.run(server.list_tools())
+    properties = tool.model_dump(by_alias=True)["inputSchema"]["properties"]
+
+    assert any(word in prop for prop in properties for word in _ADDRESS_LIKE)
