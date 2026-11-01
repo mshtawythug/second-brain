@@ -21,6 +21,7 @@ brain mcp serve --host <tailnet address> --allow-remote --allowed-host <tailnet 
 | Bearer token required | `--no-auth` | Loopback only; it is refused anywhere else. |
 | Read-only (write tools removed) | `--allow-writes` | A leaked token could then edit, delete or rebuild. |
 | Confidential documents refused | `--include-confidential` | Confidential bodies and titles would leave the machine. |
+| Graph tools withheld, `brain_ask` hybrid only | `--include-confidential` | The entity graph is built from every document, so its names, links, themes and communities carry confidential content. |
 
 ## The token
 

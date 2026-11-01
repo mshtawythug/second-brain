@@ -77,25 +77,29 @@ audit already look.
   stdio as well as HTTP. Neither statement filters `draft`, so the grep above does not
   list them; they are recorded here because they are the same egress class.
 - `brain_graphrag_entities` keeps its stdio exemption (entity names are a separate tier;
-  see its docstring), but **over HTTP without `--include-confidential` it is gated**:
-  `list_entities(public_only=True)` keeps only entities with at least one
-  non-confidential mention (`graph_rag/public_entities.public_mention_sql`). The same
-  rule filters every entity list a graph retrieval returns
-  (`withhold_confidential_entities`), and every by-prefix lookup answers a confidential
-  document as an unknown prefix (`McpState.hide_confidential`). `brain_graphrag_stats`'
-  top-10 entity names go through the same filter (`graph_stats(public_only=…)`, rev-118
-  #10); its counts stay corpus-wide, a documented residual.
+  see its docstring). Over HTTP without `--include-confidential` it, and every other
+  graph tool, is **not served at all** (RM-46 round 5, below). Every by-prefix lookup
+  answers a confidential document as an unknown prefix (`McpState.hide_confidential`).
 - **Global graph retrieval, stdio and HTTP (rev-118 round 2):** `graph_rag/global_.py`
   returned stored community SUMMARIES, which are generated from member names and
   representative titles, for communities that `list_communities` withholds whole. Only
   their `doc_ids` were gated. `_retrieve_global` now drops, before the ranking cut, every
   community `communities_with_confidential_members` names. That is `list_communities`'
-  own predicate (`confidential_member_sql`), now shared. Over HTTP, theme summaries drawn
-  from a withheld entity name are dropped too (`public_entities._public_themes`).
+  own predicate (`confidential_member_sql`), now shared.
 - **People and timeline names over HTTP (sec-118b):** `queries.resolve_person_to_keys`
   gains `public_only`. In HTTP hide mode, a person no non-confidential document names is
-  unknown (search, recall, timeline and themes), and `person_keys` is dropped from results.
-  `timeline_entities.resolve_entities` (moved out of `timeline.py`) gains the same
-  public-mention filter on its substring match. The resolver's own docstring explains why
+  unknown (search, recall and timeline), and `person_keys` is dropped from results.
+  `timeline_entities.resolve_entities` (moved out of `timeline.py`) gains a
+  public-mention filter on its substring match (`_PUBLIC_MENTION_SQL`). The resolver's own docstring explains why
   stdio stays permissive: identities come from the directory, which the local owner
   already holds.
+- **RM-46 round 5: the graph family is withheld over HTTP without
+  `--include-confidential`.** The entity graph is derived from every document: names,
+  co-occurrence edges and weights, themes and communities. sec-118 through sec-118d each
+  found one more graph output carrying confidential-derived data (names, summaries,
+  routing, seed counts, associations), so the per-output HTTP filters
+  (`graph_rag/public_entities`, `list_entities(public_only)`, `graph_stats(public_only)`,
+  the router's public person scan, the themes resolver's `public_only`) were removed, and
+  `brain mcp serve` withholds every `brain_graphrag_*` tool in that mode
+  (`mcp_tool_classes.apply_graph_hide`); `brain_ask` answers in `hybrid` only. The
+  global-mode community exclusion above stays: stdio uses it.

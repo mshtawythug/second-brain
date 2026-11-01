@@ -42,7 +42,7 @@ in front of it on the private network.
 brain mcp serve — streamable HTTP
   endpoint      http://127.0.0.1:8787/mcp
   health        http://127.0.0.1:8787/healthz
-  mode          READ-ONLY (28 of 51 tools; 23 write tools withheld)
+  mode          READ-ONLY (22 of 51 tools; 23 write tools withheld; 6 graph tools withheld)
   confidential  EXCLUDED (pass --include-confidential to serve)
   auth          bearer token from /Users/you/.brain/mcp_token (fp 4f9a2c71)
   allow-host    127.0.0.1, ::1, [::1], localhost
@@ -81,50 +81,49 @@ Without the flag, confidential METADATA stays home too:
   and source path never leave the machine.
 - `brain_link_proposal` never resolves a confidential destination. This one applies on
   stdio too, unless the caller passes `include_confidential`.
-- Graph tools name an entity (a person, project, organisation or topic) only if at least
-  one non-confidential document mentions it. The same goes for text written from names:
-  a synthesized theme summary that drew on a withheld name is dropped, and a theme with no
-  public entity is not returned. `brain_ask`'s graph modes write their answer from the
-  same filtered labels.
-- Global graph search never returns a community any of whose members a confidential
-  document mentions, so its stored summary (written from member names and titles) stays
-  home. This holds over stdio too, matching `brain_graphrag_communities`.
+- **The graph tools are not served** (every `brain_graphrag_*` tool: 6 read, 6 write), and
+  `brain_ask` answers in `mode="hybrid"` only; any other mode is refused with a fixed
+  message. The entity graph is built from every document, confidential ones included:
+  entity names, which entities occur together and how strongly, themes and communities.
+  Four security reviews in a row each found one more graph output carrying that, so the
+  server withholds the family rather than filtering it. Start the server with
+  `--include-confidential` to use the graph remotely.
+- `brain_timeline` stays. It returns only entities a non-confidential document mentions,
+  and its buckets, co-topics and titles come from non-confidential documents only.
+  `brain_explain` stays too: it is `brain_search`'s ranking, with no graph.
 
-Three small things remain visible, and are accepted:
+Global graph search never returns a community any of whose members a confidential
+document mentions, so its stored summary (written from member names and titles) stays
+home. That holds over stdio too, matching `brain_graphrag_communities`.
 
-- `brain_status` and `brain_graphrag_stats` counts cover every document and entity,
-  confidential ones included. These are numbers only: `brain_graphrag_stats`' top-10 entity
-  NAMES are filtered like the entity listing.
+A few small things remain visible, and are accepted:
+
+- `brain_status` counts cover every document, confidential ones included. These are
+  numbers only.
 - An id prefix shared by a normal and a confidential document answers "ambiguous".
 - Guessing an exact entity name for `brain_search`'s `entity` filter confirms that some
-  document mentions it, but returns no content. (`brain_timeline` matches names by
-  substring, so over HTTP it returns only entities a non-confidential document mentions.)
-- Some counts include confidential documents: a graph explanation's `seed_count` and a
-  theme's `scope_doc_count`.
+  document mentions it, but returns no content.
 - Guessing a public person's exact email address resolves that person even when the
   address itself appears only in confidential mail. It returns their display name, which
   is public, and nothing else.
 
 People follow the same rule. A `person` argument (`brain_search`, `brain_recall`,
-`brain_timeline`, graph themes) resolves only people named as a participant in at least one
+`brain_timeline`) resolves only people named as a participant in at least one
 non-confidential email or call transcript (a `gmail` or `krisp` document that is not a
 draft). Anyone else "matched no one" over HTTP, including someone who appears only in other
 kinds of documents (calendar, Slack, notes) or only in your curated people file, whom stdio
 still resolves. An ambiguous match lists public people only. A person filter's
 `person_keys` (their email addresses) are dropped from every result.
 
-`mode="auto"` (the graph tools and `brain_ask`) picks themes when the question names a
-person. Over HTTP its name scan knows only people a non-confidential document mentions, so
-a name that only confidential documents carry is routed exactly as an unknown name is.
-
 "Read-only" means no tool that changes your knowledge is served. It does not mean the
 server never writes to the database:
 
 - Read tools still log telemetry (`search_queries`, citation `interactions`).
-- `brain_graphrag_search`, `brain_graphrag_themes`, `brain_graphrag_entity` and
-  `brain_ask`'s graph modes run the graph backend's bootstrap on each call. That is idempotent DDL: it creates the AGE graph, its labels and
-  their indexes only if they are missing, exactly as over stdio. On a built graph it
-  changes nothing.
+- With `--include-confidential`, `brain_graphrag_search`, `brain_graphrag_themes`,
+  `brain_graphrag_entity` and `brain_ask`'s graph modes run the graph backend's bootstrap
+  on each call. That is idempotent DDL: it creates the AGE graph, its labels and their
+  indexes only if they are missing, exactly as over stdio. On a built graph it changes
+  nothing.
 
 ## Requests the server refuses
 
@@ -136,6 +135,7 @@ server never writes to the database:
 | `413 {"error": "request too large"}` | The body is over `--max-body-bytes` (default 1 MiB, streamed bodies included). | Raise the cap (16 MiB at most) or send less. |
 | `415` | The body is compressed (`Content-Encoding`). | Send it uncompressed. |
 | JSON-RPC error naming `--include-confidential` | The call asked for `include_confidential`. | Restart with `--include-confidential` if you mean it. |
+| JSON-RPC error `Unknown tool: brain_graphrag_…`, or `this server runs brain_ask in mode='hybrid' only` | A graph tool, or a `brain_ask` graph mode, on a server without `--include-confidential`. | Restart with `--include-confidential` if you mean it. |
 | `502 {"error": "result too large"}` | A tool's result was over 8 MiB. | Narrow the call (smaller `limit`, `brain_show` caps). |
 | `504 {"error": "timed out"}` | The call took longer than `--call-timeout` (default 300 s). | Raise it, or ask for less. |
 | `405 {"error": "method not allowed"}` | Any method but POST on the endpoint. The server is stateless and never streams. | Use POST. |
@@ -157,16 +157,24 @@ is discarded, and it keeps its slot until then. Its database statements are canc
 same deadline (`statement_timeout`). New calls get 503 while all 16 slots are held, rather
 than waiting behind it. So that a timed-out call cannot hold its slot for long, `brain_ask`
 stops at its next step once `--call-timeout` has passed (at most one more model call or
-retrieval), and its loop and the graph tools' `depth` are held to the configured values
-above. Every other tool's loops are bounded by the server's configuration, not by the
+retrieval), and its loop and the graph tools' `depth` (with `--include-confidential`) are
+held to the configured values above. Every other tool's loops are bounded by the server's configuration, not by the
 caller (timeline synthesis by `timeline_synth_limit`, for example).
 
 The worst case a timed-out `brain_ask` holds its slot is `--call-timeout` plus the one step
-it was in. That step is either one model call, at most twice `BRAIN_ASK_TIMEOUT_SECONDS`
-(90 s by default, plus one retry on an unparseable reply, so 180 s), or one retrieval of at
-most three sub-queries, each of whose statements stops at `--call-timeout`. With the
-defaults, a model step ends the hold by 300 + 180 s. The endpoint answers
-POST only: a `GET` (an event stream) or any other method gets 405.
+it was in. That step is one of two things:
+
+- one model call: at most twice `BRAIN_ASK_TIMEOUT_SECONDS` (90 s by default, plus one
+  retry on an unparseable reply, so 180 s). With the defaults, a model step ends the hold by
+  300 + 180 s.
+- one retrieval of at most three sub-queries. In `hybrid` mode, the only mode served
+  without `--include-confidential`, each sub-query is one query embedding (at most 60 s on
+  a local Ollama; a failed embed falls back to text search) and a few statements, each of
+  which stops at `--call-timeout`. With `--include-confidential` a graph mode's step also
+  runs the graph legs: up to ten traversals per sub-query, each statement again stopping at
+  `--call-timeout`. That bound is larger on paper, and only a pathological graph reaches it.
+
+The endpoint answers POST only: a `GET` (an event stream) or any other method gets 405.
 
 If the request handler itself crashes (not a tool, whose failures are the JSON-RPC error
 above), uvicorn answers its own plain `500 Internal Server Error` with no detail. The

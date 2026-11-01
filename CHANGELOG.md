@@ -65,8 +65,7 @@ git tag scheme:
     beyond), and every per-call connection carries `statement_timeout` = the call deadline;
   - unexpected tool failures answer `tool <name> failed (<Class>)`, on mcp 2.0 as on 2.3;
   - without `--include-confidential`, a confidential document answers every by-prefix
-    lookup as an unknown prefix, and graph tools name only entities a non-confidential
-    document mentions;
+    lookup as an unknown prefix;
   - `brain_link_proposal` takes `include_confidential` and no longer resolves a
     confidential destination by default, on stdio too (F6).
 - Review round (rev-118):
@@ -76,13 +75,10 @@ git tag scheme:
   - a wildcard bind's refusal names `--allowed-host` or the private address;
   - `brain-mcp` checks its arguments before loading config;
   - `--log-level` defaults to `BRAIN_MCP_LOG_LEVEL`;
-  - `brain_graphrag_stats`' top entity names are filtered over HTTP like the listing;
   - a `brain-maintenance` skill reference (`reference/mcp-http.md`) carries the serve
     and token recipe;
-  - over HTTP, theme summaries drawn from a withheld entity name are dropped, and
-    `brain_ask`'s graph modes write from the filtered labels; global graph search (stdio
-    too) never returns a community with a confidential member, as
-    `brain_graphrag_communities` already withheld it;
+  - global graph search (stdio too) never returns a community with a confidential
+    member, as `brain_graphrag_communities` already withheld it;
   - `brain mcp serve` exits 2 if uvicorn lacks the internals its idle deadline uses.
 - Security re-check (sec-118b):
   - over HTTP a `person` argument resolves public people only, and `person_keys` (email
@@ -93,12 +89,15 @@ git tag scheme:
   - every refusal sends `Connection: close`;
   - the statement-timeout URL rewrite keeps `+` literally.
 - Security re-check (sec-118c):
-  - over HTTP, `mode="auto"`'s person scan knows public people only, so a name only
-    confidential documents carry routes as an unknown name does;
   - over HTTP, `brain_ask` refuses `max_iterations` above `BRAIN_ASK_MAX_ITERATIONS` and
     `limit` above `BRAIN_ASK_DOCS_PER_ITER`, and stops at its next step once
     `--call-timeout` has passed; graph tools refuse `depth` above `BRAIN_GRAPH_DEPTH`;
   - a tool result holding a NamedTuple no longer fails the HTTP result filter.
+- Round 5 (sec-118d): without `--include-confidential`, `brain mcp serve` withholds every
+  `brain_graphrag_*` tool (they answer "Unknown tool"; read-only serves 22 of 51), and
+  `brain_ask` answers in `hybrid` mode only. The entity graph is built from every document,
+  confidential ones included, so per-output filtering did not converge. With the flag the
+  graph is served as before. `brain_timeline` and `brain_explain` stay served.
 - New `http` extra (`pip install 'secondbrain-py[http]'`) pins `mcp>=2.0,<3.0`. The base pin
   still admits 1.x for stdio, and `brain mcp serve` on 1.x exits 2 naming the extra. Guide:
   `docs/guides/mcp-http-transport.md`.
