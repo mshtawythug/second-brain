@@ -9,9 +9,12 @@ imports ``brain.graph_rag``. Each flagged tool must be in the withheld family
 (``hide_mode_withheld``) or in ``GRAPH_TOUCHING_KEPT``, with the reason its output
 is built from gated documents only.
 
-The walk is a static over-approximation within a function's own names. It does
-not follow dynamic dispatch, so ``GRAPH_TOUCHING_KEPT`` may also list tools
-sec-118e judged by reading their queries.
+The walk is static, over the names a function's own code uses (docstrings and
+comments are never read; module-level string constants are). It does NOT follow a
+method called on an instance or an injected callable: ``state.graph_syncer.*``,
+``state.enricher.*``, ``ctx.*``. The write tools that reach the graph syncer that
+way discard what it returns, so they return no graph data today; a tool that
+starts returning it needs a judgement by hand (``brain.mcp_tool_classes``).
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ import sys
 import textwrap
 import types
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -38,12 +42,29 @@ from brain.mcp_tool_classes import (
 
 pytestmark = pytest.mark.nodb
 
-#: The entity graph's tables, and the graph-derived columns and tables other code
-#: stores: contradiction gaps name an entity, and a link suggestion's score is a
-#: shared-mention count (sec-118f LOW-2).
+MIGRATIONS = Path(mcp_server.__file__).parent / "migrations"
+
+#: The graph's tables, read from the migrations (every ``CREATE TABLE graph_*``),
+#: so a new graph table is covered without editing this test.
+GRAPH_TABLES = tuple(
+    sorted(
+        {
+            match.group(1).lower()
+            for path in MIGRATIONS.glob("*.sql")
+            for match in re.finditer(
+                r"CREATE TABLE (?:IF NOT EXISTS )?(?:\w+\.)?(graph_\w+)",
+                path.read_text(encoding="utf-8"),
+                re.IGNORECASE,
+            )
+        }
+    )
+)
+#: The tables, plus graph-derived data stored elsewhere (contradiction gaps name an
+#: entity; a link suggestion's score is a shared-mention count) and the AGE graph
+#: itself (sec-118f LOW-2). Matched in code only, never in prose.
 GRAPH_SQL = re.compile(
-    r"\bgraph_(entities|entity_mentions|edge_contributions|communities|community_members"
-    r"|relationships|index_state)\b|\belicitation_gaps\b|\bgraph_score\b"
+    r"\b(?:" + "|".join(GRAPH_TABLES) + r")\b"
+    r"|\belicitation_gaps\b|\bgraph_score\b|\bag_catalog\b|\bcypher\s*\("
 )
 #: Calls followed from a tool function. Every flagged path at this commit is
 #: at most four deep; eight leaves room without walking the whole package.
@@ -96,7 +117,9 @@ def _lazy_bindings(tree: ast.AST, package: str) -> tuple[bool, dict[str, Any]]:
     return graph, bound
 
 
-def _step(fn: Callable[..., Any]) -> tuple[bool, set[Callable[..., Any]]]:
+def _step(
+    fn: Callable[..., Any], *, read_prose: bool = False
+) -> tuple[bool, set[Callable[..., Any]]]:
     """Whether ``fn`` itself touches the graph, and the ``brain`` functions it names."""
     try:
         source = textwrap.dedent(inspect.getsource(fn))
@@ -105,7 +128,8 @@ def _step(fn: Callable[..., Any]) -> tuple[bool, set[Callable[..., Any]]]:
     tree = ast.parse(source)
     package = sys.modules[fn.__module__].__package__ or ""
     graph, bound = _lazy_bindings(tree, package)
-    graph = graph or bool(GRAPH_SQL.search(_code(ast.parse(source))))
+    text = source if read_prose else _code(ast.parse(source))
+    graph = graph or bool(GRAPH_SQL.search(text))
     names = {**getattr(fn, "__globals__", {}), **bound}
     callees: set[Callable[..., Any]] = set()
     for node in ast.walk(tree):
@@ -130,13 +154,16 @@ def _step(fn: Callable[..., Any]) -> tuple[bool, set[Callable[..., Any]]]:
     return graph, {c for c in callees if _is_brain(c)}
 
 
-def touches_graph(fn: Callable[..., Any]) -> bool:
-    """Whether any function reachable from ``fn`` within :data:`MAX_DEPTH` touches the graph."""
+def touches_graph(fn: Callable[..., Any], *, read_prose: bool = False) -> bool:
+    """Whether any function reachable from ``fn`` within :data:`MAX_DEPTH` touches the graph.
+
+    ``read_prose`` matches docstrings and comments too; only the invariance test uses it.
+    """
     seen, frontier = {fn}, [fn]
     for _ in range(MAX_DEPTH):
         reached: list[Callable[..., Any]] = []
         for current in frontier:
-            graph, callees = _step(current)
+            graph, callees = _step(current, read_prose=read_prose)
             if graph:
                 return True
             reached += [c for c in callees if c not in seen]
@@ -145,11 +172,23 @@ def touches_graph(fn: Callable[..., Any]) -> bool:
     return False
 
 
-@pytest.fixture(scope="module")
-def flagged() -> set[str]:
+def _flag_registry(*, read_prose: bool = False) -> set[str]:
     names = anyio.run(registered_tool_names, mcp_server.mcp_app)
     manager = mcp_server.mcp_app._tool_manager
-    return {name for name in names if touches_graph(manager.get_tool(name).fn)}
+    return {
+        name for name in names if touches_graph(manager.get_tool(name).fn, read_prose=read_prose)
+    }
+
+
+@pytest.fixture(scope="module")
+def flagged() -> set[str]:
+    return _flag_registry()
+
+
+def test_docstrings_change_nothing_the_walk_flags(flagged: set[str]) -> None:
+    # sec-118f LOW-2: the flagged set is the same whether prose is read or not, so
+    # deleting or rewording a docstring can neither hide a tool nor flag one.
+    assert _flag_registry(read_prose=True) == flagged
 
 
 def test_every_graph_touching_tool_is_withheld_or_judged(flagged: set[str]) -> None:
@@ -184,6 +223,43 @@ def _prose_only() -> int:
 
 def _names_a_constant() -> str:
     return _GRAPH_CONSTANT
+
+
+def test_the_graph_tables_come_from_the_migrations() -> None:
+    assert {
+        "graph_entities", "graph_entity_mentions", "graph_edge_contributions",
+        "graph_communities", "graph_community_members", "graph_relationships",
+        "graph_index_state",
+    } <= set(GRAPH_TABLES)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        *(f"SELECT 1 FROM {table}" for table in GRAPH_TABLES),
+        "SELECT target_id FROM elicitation_gaps",
+        "SELECT graph_score FROM link_suggestions",
+        "LOAD 'age'; SET search_path = ag_catalog",
+        "SELECT * FROM cypher('brain', $$ MATCH (n) RETURN n $$) AS (n agtype)",
+    ],
+)
+def test_each_graph_pattern_flags_code_that_names_it(
+    sql: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "_PATTERN_CONSTANT", sql)
+
+    assert touches_graph(_returns_pattern_constant) is True
+
+
+_PATTERN_CONSTANT = "SELECT 1"
+
+
+def _returns_pattern_constant() -> str:
+    return _PATTERN_CONSTANT
+
+
+def test_a_constant_with_no_graph_pattern_does_not_flag() -> None:
+    assert touches_graph(_returns_pattern_constant) is False
 
 
 def test_prose_never_flags_a_function_and_a_named_sql_constant_does() -> None:

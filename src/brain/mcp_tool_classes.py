@@ -35,6 +35,10 @@ registered tool's calls for graph SQL and ``brain.graph_rag``, and fails on one
 that is in neither this family nor :data:`GRAPH_TOUCHING_KEPT`, where each served
 tool that reads graph tables carries the reason its output is built from gated
 documents only. A new tool that reads graph tables needs its own judgement there.
+The walk follows the functions a tool's own code names, not a method on an
+instance or an injected callable (``state.graph_syncer``, ``state.enricher``,
+``ctx``): a tool that starts returning graph data that way needs a judgement by
+hand.
 """
 from __future__ import annotations
 
@@ -133,12 +137,12 @@ HIDE_MODE_WITHHELD_EXTRA: frozenset[str] = frozenset(
 GRAPH_TOUCHING_KEPT: dict[str, str] = {
     "brain_ask": "hybrid mode only in hide mode; its graph modes are refused",
     "brain_timeline": (
-        "entities match only with a non-confidential mention; buckets are lensed "
-        "documents; co-topics count edge contributions of those documents only"
+        "entities and co-topics are named only when a non-confidential record names "
+        "them; buckets are lensed documents; co-topics count those documents only"
     ),
     "brain_brief": (
         "new entities are named, counted and dated from non-confidential, non-draft "
-        "documents only (one absence bit is a documented residual)"
+        "documents that name them (one absence bit is a documented residual)"
     ),
     "brain_search": "the entity filter is an exact match that returns lensed documents only",
     "brain_explain": "brain_search's ranking, with the same entity filter",
@@ -146,10 +150,11 @@ GRAPH_TOUCHING_KEPT: dict[str, str] = {
     "brain_watch_check": "runs a saved search through the same predicate",
     "brain_watch_add": "validates a saved search through the same predicate",
     "brain_review_findings_list": (
-        "a finding is withheld whole unless every evidence document is non-confidential"
+        "a finding is withheld whole unless every evidence document is non-confidential "
+        "and a non-confidential record names its target"
     ),
     "brain_review_scan": (
-        "scans entities and documents through the confidential lens; writes findings"
+        "scans only entities a non-confidential record names, through the lens; writes findings"
     ),
     "brain_connect_list": (
         "graph_score is the pair's own shared mentions; both documents are lensed"
