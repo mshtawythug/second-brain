@@ -283,6 +283,25 @@ def test_read_refuses_an_oversized_marker(tmp_path: Path) -> None:
         read_marker(tmp_path)
 
 
+def test_read_refuses_an_oversized_marker_even_when_its_head_parses(tmp_path: Path) -> None:
+    """Trailing whitespace keeps a truncated read valid JSON, so only the cap refuses it."""
+    path = marker_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(_valid_payload()) + " " * MARKER_MAX_BYTES, encoding="utf-8")
+
+    with pytest.raises(ReplicaMarkerError):
+        read_marker(tmp_path)
+
+
+def test_read_accepts_a_marker_at_exactly_the_cap(tmp_path: Path) -> None:
+    body = json.dumps(_valid_payload())
+    path = marker_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(body + " " * (MARKER_MAX_BYTES - len(body)), encoding="utf-8")
+
+    assert read_marker(tmp_path) is not None
+
+
 def test_read_ignores_unknown_extra_keys(tmp_path: Path) -> None:
     _put(tmp_path, _valid_payload(future_field="kept for later"))
 
