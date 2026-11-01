@@ -217,7 +217,7 @@ full relink. Soft-fails on missing `gws` and exits 0.
 
 ## Vault-sync daemons and full rebuild — `bin/` scripts
 
-The user reads in `brain ui` (Quartz retired at R3). Serving tools to another machine: [reference/mcp-http.md](reference/mcp-http.md).
+The user reads in `brain ui` (Quartz retired at R3). Another machine: [reference/mcp-http.md](reference/mcp-http.md) (serving tools), [reference/second-machine.md](reference/second-machine.md) (a read replica).
 
 ```bash
 bin/brain-up                        # start the vault-sync watcher + 07:00 brief job (launchd)

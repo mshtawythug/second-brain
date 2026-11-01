@@ -22,6 +22,19 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — a read replica on a second machine, and the `replica` doctor row (RM-47)
+
+- `brain restore` now writes `$BRAIN_HOME/state/restored-from.json` after a successful restore:
+  the backup's `created_at`, the archive's file name (never its path) and the restore time. The
+  file is written atomically, mode 0600, without following symlinks. A failure to write it is
+  reported (`restored-from marker NOT recorded`) and never fails a restore that completed.
+- `brain doctor` gains a `replica` row that names the backup the machine holds and warns that
+  writes there are lost at the next restore. It is absent when the file is. An unreadable file is
+  a WARN that never echoes its contents.
+- New guide, [docs/guides/second-machine.md](docs/guides/second-machine.md): one brain reached
+  from elsewhere (`brain mcp serve`, `brain ui --lan`), or a one-way read replica refreshed by
+  `brain backup` plus `brain restore`. Two-way sync is not supported (RM-47.D1).
+
 ### Added — MCP over HTTP: `brain mcp serve` and `brain mcp token` (RM-46, PR #118)
 
 - `brain mcp serve` serves the MCP tools over streamable HTTP, for another device on a
