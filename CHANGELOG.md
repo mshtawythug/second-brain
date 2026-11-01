@@ -103,8 +103,13 @@ git tag scheme:
     community any of whose members a confidential document mentions, as
     `brain_graphrag_communities` and global search already did;
   - over HTTP without `--include-confidential`, `brain_review_weekly` is withheld with the
-    graph family (`--allow-writes` serves 38 of 51), and a test fails on any tool that
-    reads graph tables without a recorded keep-or-withhold judgement.
+    graph family, and a test fails on any tool that reads graph tables without a
+    recorded keep-or-withhold judgement.
+- Round 7 (sec-118f): `brain_gaps` is withheld too over HTTP without
+  `--include-confidential` (it clusters search terms typed under every lens), so
+  `--allow-writes` serves 37 of 51 there; the graph-reach test ignores docstrings and reads
+  module SQL constants; the guide names every tool a curated alias target can reach
+  (backlog BL-42).
 - New `http` extra (`pip install 'secondbrain-py[http]'`) pins `mcp>=2.0,<3.0`. The base pin
   still admits 1.x for stdio, and `brain mcp serve` on 1.x exits 2 naming the extra. Guide:
   `docs/guides/mcp-http-transport.md`.

@@ -101,7 +101,7 @@ audit already look.
   (`graph_rag/public_entities`, `list_entities(public_only)`, `graph_stats(public_only)`,
   the router's public person scan, the themes resolver's `public_only`) were removed, and
   `brain mcp serve` withholds every `brain_graphrag_*` tool in that mode
-  (`mcp_tool_classes.apply_graph_hide`); `brain_ask` answers in `hybrid` only. The
+  (`mcp_tool_classes.apply_hide_mode`); `brain_ask` answers in `hybrid` only. The
   global-mode community exclusion above stays: stdio uses it.
 - **The weekly review's graph themes, stdio and HTTP (sec-118e).**
   `review/weekly.weekly_active_communities` ranked communities by in-window edge weight
@@ -113,5 +113,12 @@ audit already look.
   `list_communities` and global retrieval. The predicate moved to `brain.sensitivity` so
   review code shares it without importing the graph package. Over HTTP without
   `--include-confidential`, `brain_review_weekly` is also withheld
-  (`mcp_tool_classes.GRAPH_DERIVED_TOOLS`), and `tests/test_mcp_http_graph_reach.py` fails
+  (`mcp_tool_classes.HIDE_MODE_WITHHELD_EXTRA`), and `tests/test_mcp_http_graph_reach.py` fails
   on any served tool that reads graph tables without a recorded judgement.
+- **The search log over HTTP (sec-118f LOW-3).** `brain_gaps` clusters `search_queries`
+  rows (zero results, no click) from every lens, so a term typed while searching
+  confidential documents became a label. Not graph data, and the raw query never left
+  (Plan 08 §6), but confidential-tier vocabulary did. It is withheld in HTTP hide mode
+  with the other pinned extras. stdio is unchanged: the owner's own log, on the owner's
+  machine. The alias-target residual (an owner-written rule can make a confidential-only
+  target name pass the public-mention tests) is backlog BL-42.

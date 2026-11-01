@@ -42,7 +42,7 @@ in front of it on the private network.
 brain mcp serve — streamable HTTP
   endpoint      http://127.0.0.1:8787/mcp
   health        http://127.0.0.1:8787/healthz
-  mode          READ-ONLY (22 of 51 tools; 23 write tools withheld; 6 graph tools withheld)
+  mode          READ-ONLY (22 of 51 tools; 23 write tools withheld; 6 graph and search-log tools withheld)
   confidential  EXCLUDED (pass --include-confidential to serve)
   auth          bearer token from /Users/you/.brain/mcp_token (fp 4f9a2c71)
   allow-host    127.0.0.1, ::1, [::1], localhost
@@ -87,12 +87,14 @@ Without the flag, confidential METADATA stays home too:
   strongly, themes and communities. Five security reviews in a row each found one more
   graph output carrying that, so the server withholds the family rather than filtering it.
   Start the server with `--include-confidential` to use the graph remotely.
-- The withheld family is every `brain_graphrag_*` tool (6 read, 6 write) plus
-  `brain_review_weekly`, whose themes are graph communities under another name (a write
-  tool, so it only matters with `--allow-writes`). The name prefix alone would not catch a
-  future graph tool named otherwise, so the family is the prefix, plus that pinned list,
-  plus a test that walks every tool's code for graph reads and fails on one nobody has
-  judged (`src/brain/mcp_tool_classes.py`).
+- The withheld set is every `brain_graphrag_*` tool (6 read, 6 write) plus two pinned
+  write tools, which matter only with `--allow-writes` (it then serves 37 of 51):
+  `brain_review_weekly`, whose themes are graph communities under another name, and
+  `brain_gaps`, which clusters the terms of your logged searches, including searches made
+  while reading confidential documents. The name prefix alone would not catch a future
+  graph tool named otherwise, so the set is the prefix, plus that pinned list, plus a test
+  that walks every tool's code for graph reads (SQL constants included, docstrings
+  ignored) and fails on one nobody has judged (`src/brain/mcp_tool_classes.py`).
 - These tools still touch the graph and stay served, each because its output is built from
   non-confidential documents only:
 
@@ -104,7 +106,7 @@ Without the flag, confidential METADATA stays home too:
   | `brain_review_findings_list` | A finding is withheld whole unless every evidence document is non-confidential. |
   | `brain_connect_list` | Its `graph_score` counts the two documents' own shared mentions, and both documents pass the lens. |
   | `brain_ask` | `hybrid` only; no graph leg runs. |
-  | With `--allow-writes`: `brain_review_scan`, `brain_watch_add`, `brain_gaps` | Scan through the lens; validate a saved search; purge gaps whose entity is gone. |
+  | With `--allow-writes`: `brain_review_scan`, `brain_watch_add` | Scan through the lens; validate a saved search. |
 
 Global graph search never returns a community any of whose members a confidential
 document mentions, so its stored summary (written from member names and titles) stays
@@ -126,7 +128,11 @@ A few small things remain visible, and are accepted:
   name, no content, and not which of the three.
 - An entity alias you curate re-points mentions onto its target. A target whose own name
   appears only in confidential documents then counts as mentioned by the alias's
-  non-confidential documents, so `brain_timeline` and `brain_brief` can name it.
+  non-confidential documents, so its name can come back from `brain_timeline` (entity names
+  and co-topics), `brain_brief`, `brain_review_findings_list` (a finding's target key and
+  rationale) and, with `--allow-writes`, `brain_review_scan`. The same holds on stdio's
+  default lens. Write alias rules from the confidential name to the public one (the public
+  name as the target), never the other way. Closing it in code is backlog BL-42.
 
 People follow the same rule. A `person` argument (`brain_search`, `brain_recall`,
 `brain_timeline`) resolves only people named as a participant in at least one
