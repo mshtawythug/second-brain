@@ -51,6 +51,7 @@ from ..errors import describe_failure
 from ..rank_fusion import rrf_contribution
 from ..sensitivity import not_confidential_sql
 from ._retrieval_common import _build_doc_results, _row_to_entity
+from .communities import communities_with_confidential_members
 from .router import GLOBAL_MODE
 from .schema import CommunityGroup, GraphContext, GraphEntity, GraphExplanation
 
@@ -118,6 +119,13 @@ def _retrieve_global(
     )
 
     fused = _fuse_rrf(fts_keys, vector_keys)
+    if exclude_confidential:
+        # F6 (RM-46 rev-118): the SAME rule as list_communities, BEFORE the cut,
+        # so a community whose stored summary was written from confidential
+        # members or titles never reaches the caller, and the limit fills from
+        # eligible ones.
+        tainted = communities_with_confidential_members(conn, tenant, [k for k, _ in fused])
+        fused = [(key, score) for key, score in fused if key not in tainted]
     top = fused[:resolved_limit] if resolved_limit > 0 else []
 
     communities, docs = _build_communities(

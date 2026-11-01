@@ -3209,6 +3209,7 @@ def brain_ask(
                     max_iterations=resolved_max_iter,
                     backend=backend,
                     exclude_confidential=not include_confidential,
+                    public_entities_only=state.hide_confidential,
                 )
                 _log_ask_interactions_mcp(conn, result)
     except ASK_FAILURES as exc:
@@ -3440,7 +3441,6 @@ def _graphrag_search_or_mcp_error(
     """
     from .graph_rag import graph_rag_search
     from .graph_rag.backends import AgeBackend
-    from .graph_rag.public_entities import withhold_confidential_entities
 
     try:
         with connect_age(cfg.database_url) as conn:
@@ -3448,7 +3448,7 @@ def _graphrag_search_or_mcp_error(
             _require_age_or_mcp_error(conn)
             backend = AgeBackend()
             backend.bootstrap(conn)
-            ctx = graph_rag_search(
+            return graph_rag_search(
                 conn,
                 cfg,
                 query,
@@ -3465,12 +3465,10 @@ def _graphrag_search_or_mcp_error(
                 # single seam so all three graphrag retrieval tools inherit it
                 # and none can be gated by accident or forgotten individually.
                 exclude_confidential=not include_confidential,
+                # Grew (RM-46, sec-118 #2c): over HTTP, no confidential-only
+                # entity name or summary. stdio: never set.
+                public_entities_only=_state is not None and _state.hide_confidential,
             )
-            # Grew (RM-46, sec-118 #2c): over HTTP, drop entity names only
-            # confidential documents mention. stdio: never set.
-            if _state is not None and _state.hide_confidential:
-                ctx = withhold_confidential_entities(conn, ctx)
-            return ctx
     except (PersonNotFound, PersonAmbiguous) as exc:
         raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
     except GraphTenantError as exc:

@@ -17,7 +17,7 @@ from typing import Any
 import psycopg
 
 from ..sensitivity import not_confidential_sql
-from .schema import GraphContext, GraphEntity
+from .schema import GraphContext, GraphEntity, ThemeGroup
 
 
 def public_mention_sql(alias: str) -> str:
@@ -51,13 +51,33 @@ def _kept(entities: list[GraphEntity], public: set[str]) -> list[GraphEntity]:
     return [entity for entity in entities if entity.id in public]
 
 
+def _public_themes(themes: list[ThemeGroup], public: set[str]) -> list[ThemeGroup]:
+    """Each theme with its withheld entities removed; a summary written from one dropped.
+
+    A synthesized summary is written from ALL the theme's entity names, so a
+    theme that lost any of them loses its summary too, and a theme left with no
+    public entity is dropped (RM-46 rev-118 round 2).
+    """
+    kept: list[ThemeGroup] = []
+    for theme in themes:
+        entities = _kept(theme.entities, public)
+        if not entities:
+            continue
+        lost = len(entities) != len(theme.entities)
+        kept.append(replace(theme, entities=entities, summary=None if lost else theme.summary))
+    return kept
+
+
 def withhold_confidential_entities(
     conn: psycopg.Connection[Any], ctx: GraphContext
 ) -> GraphContext:
     """``ctx`` without the entities only confidential documents mention.
 
     Covers the top-level entities, every theme's and community's, and the
-    explanation's seed ids. Returns a new context; ``ctx`` is not changed.
+    explanation's seed ids; a theme summary written from a withheld name is
+    dropped (:func:`_public_themes`), and a community that lost a member is
+    dropped whole, as ``list_communities`` withholds one. Returns a new context;
+    ``ctx`` is not changed.
     """
     every = [
         *ctx.entities,
@@ -79,9 +99,10 @@ def withhold_confidential_entities(
         ctx,
         explanation=explanation,
         entities=_kept(ctx.entities, public),
-        themes=[replace(theme, entities=_kept(theme.entities, public)) for theme in ctx.themes],
+        themes=_public_themes(ctx.themes, public),
         communities=[
-            replace(community, entities=_kept(community.entities, public))
+            community
             for community in ctx.communities
+            if all(entity.id in public for entity in community.entities)
         ],
     )

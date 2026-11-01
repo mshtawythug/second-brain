@@ -240,7 +240,9 @@ def test_graph_context_entities_are_filtered_everywhere(
 
     assert [e.name for e in filtered.entities] == ["Project Harbor"]
     assert [e.name for e in filtered.themes[0].entities] == ["Project Harbor"]
-    assert [e.name for e in filtered.communities[0].entities] == ["Project Harbor"]
+    # A community that lost a member is dropped whole, as list_communities
+    # withholds one (rev-118 round 2): its summary was written from all of them.
+    assert filtered.communities == []
     assert filtered.explanation is not None
     assert filtered.explanation.seed_entity_ids == [mixed.id]
     assert [e.name for e in ctx.entities] == ["Codename Zephyr", "Project Harbor"]  # not mutated
@@ -273,29 +275,32 @@ def test_brain_graphrag_entities_follows_the_mode(
     assert {row["name"] for row in payload["entities"]} == expected
 
 
-def test_graph_retrieval_in_http_mode_names_no_confidential_only_entity(
+def test_graph_retrieval_seam_passes_the_mode_to_graph_rag_search(
     monkeypatch: pytest.MonkeyPatch, corpus: Path, entities: dict[str, str]
 ) -> None:
+    """The MCP graph tools' seam asks ``graph_rag_search`` for public entities in HTTP mode.
+
+    The filtering itself happens inside ``graph_rag_search`` (rev-118 round 2), so
+    one switch covers every mode and ``brain_ask``'s graph legs too; it is tested in
+    ``tests/test_mcp_http_graph_text.py``.
+    """
     import brain.graph_rag as graph_rag_pkg
 
-    secret = _entity(entities["only_secret"], "Codename Zephyr")
-    mixed = _entity(entities["mixed"], "Project Harbor")
+    seen: dict[bool, bool] = {}
 
-    def fake_search(*_: Any, **__: Any) -> GraphContext:
-        return GraphContext(session_id="s", mode="local", query="q", entities=[secret, mixed])
+    def fake_search(*_: Any, **kwargs: Any) -> GraphContext:
+        seen[current] = kwargs["public_entities_only"]
+        return GraphContext(session_id="s", mode="local", query="q")
 
     monkeypatch.setattr(graph_rag_pkg, "graph_rag_search", fake_search)
-    names = {}
-    for hide in (True, False):
-        state = _state(monkeypatch, corpus, hide=hide)
-        ctx = mcp_server._graphrag_search_or_mcp_error(
+    for current in (True, False):
+        state = _state(monkeypatch, corpus, hide=current)
+        mcp_server._graphrag_search_or_mcp_error(
             state.cfg, "q", mode="local", tenant=None, person=None, depth=None, limit=None,
             synthesize=False, enricher=None,
         )
-        names[hide] = [e.name for e in ctx.entities]
 
-    assert names[True] == ["Project Harbor"]
-    assert names[False] == ["Codename Zephyr", "Project Harbor"]
+    assert seen == {True: True, False: False}
 
 
 def test_mcp_state_defaults_to_stdio_behaviour(corpus: Path) -> None:

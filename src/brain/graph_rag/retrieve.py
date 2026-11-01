@@ -70,6 +70,7 @@ import psycopg
 from ._retrieval_common import _build_doc_results, _fetch_entities, _row_to_entity
 from .fuse import _retrieve_fuse
 from .global_ import _retrieve_global
+from .public_entities import withhold_confidential_entities
 from .router import (
     AUTO_MODE,
     FUSE_MODE,
@@ -136,6 +137,7 @@ def graph_rag_search(
     enricher: _GroupSummarizer | None = None,
     embedder: Embedder | None = None,
     exclude_confidential: bool = False,
+    public_entities_only: bool = False,
 ) -> GraphContext:
     """Graph retrieval (spec §6; ``local`` G2-d, ``themes`` G2-f, router G2-g).
 
@@ -237,8 +239,9 @@ def graph_rag_search(
     # ``cfg.graph_community_limit`` (resolved inside ``_retrieve_global``), not
     # the doc ``limit``. The G3-e flip routes BOTH global cases here; the G2
     # ``global→local`` degradation is gone (spec §17c Q6).
+    ctx: GraphContext
     if decision.executed_mode == GLOBAL_MODE:
-        return _retrieve_global(
+        ctx = _retrieve_global(
             conn,
             cfg,
             query,
@@ -255,8 +258,8 @@ def graph_rag_search(
     # and RRF-merges their doc-id rankings; the pre-warmed ``embedder`` feeds the
     # hybrid leg's vector arm (a missing/failed embedder degrades it to FTS-only
     # — never-raise). Local/themes/global/auto are unchanged.
-    if decision.executed_mode == FUSE_MODE:
-        return _retrieve_fuse(
+    elif decision.executed_mode == FUSE_MODE:
+        ctx = _retrieve_fuse(
             conn,
             cfg,
             query,
@@ -271,7 +274,7 @@ def graph_rag_search(
             exclude_confidential=exclude_confidential,
         )
 
-    if decision.executed_mode == THEMES_MODE:
+    elif decision.executed_mode == THEMES_MODE:
         resolved_person = (
             decision.resolved_person.display_name
             if decision.resolved_person is not None
@@ -284,7 +287,7 @@ def graph_rag_search(
         resolved_theme_limit = (
             cfg.graph_theme_limit if theme_limit is None else theme_limit
         )
-        return _retrieve_themes(
+        ctx = _retrieve_themes(
             conn,
             person=resolved_person,
             query=query,
@@ -306,18 +309,26 @@ def graph_rag_search(
     # G3-e flip the thematic-no-person case routes to ``global`` above, so no
     # path reaching here ever degrades — the G2 degradation signals stay dormant
     # (``None``) on the returned context (spec §17c Q6).
-    return _retrieve_local(
-        conn,
-        query,
-        backend=backend,
-        tenant_id=tenant_id,
-        depth=resolved_depth,
-        frontier_cap=resolved_frontier,
-        min_edge_weight=resolved_min_weight,
-        limit=resolved_limit,
-        session_id=resolved_session,
-        exclude_confidential=exclude_confidential,
-    )
+    else:
+        ctx = _retrieve_local(
+            conn,
+            query,
+            backend=backend,
+            tenant_id=tenant_id,
+            depth=resolved_depth,
+            frontier_cap=resolved_frontier,
+            min_edge_weight=resolved_min_weight,
+            limit=resolved_limit,
+            session_id=resolved_session,
+            exclude_confidential=exclude_confidential,
+        )
+    # RM-46 (sec-118 #2c, rev-118 round 2): ``brain mcp serve`` without
+    # --include-confidential names no entity, and returns no summary written from
+    # one, that only confidential documents mention. One switch for every mode,
+    # used by the MCP graph tools and by ``brain_ask``'s graph modes.
+    if public_entities_only:
+        ctx = withhold_confidential_entities(conn, ctx)
+    return ctx
 
 
 # --------------------------------------------------------------------------- #
