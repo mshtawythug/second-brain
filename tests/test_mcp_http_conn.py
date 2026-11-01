@@ -360,14 +360,16 @@ SECRET = "A" * 43
 
 
 @contextmanager
-def _mcp_server(server: Any, *, timeout: float = 1.0, max_calls: int = 16) -> Iterator[str]:
+def _mcp_server(
+    server: Any, *, timeout: float = 1.0, max_calls: int = 16, max_body_bytes: int = 1024 * 1024
+) -> Iterator[str]:
     """The full HTTP app around ``server`` on a loopback port, under the real protocol."""
     from brain.mcp_auth import TokenInfo, fingerprint
     from brain.mcp_http import HttpServeOptions, build_http_app, validate_options
 
     token = TokenInfo(path=None, secret=SECRET, mode_octal="", mode_ok=True,
                       fingerprint=fingerprint(SECRET))
-    opts = HttpServeOptions(token=token, call_timeout_s=timeout)
+    opts = HttpServeOptions(token=token, call_timeout_s=timeout, max_body_bytes=max_body_bytes)
 
     async def probe() -> dict[str, Any]:
         return {"status": "ok"}
@@ -484,7 +486,10 @@ def test_every_non_post_method_on_the_endpoint_is_405(method: str) -> None:
 
 
 def test_every_refusal_closes_its_connection() -> None:
-    with _mcp_server(_slow_server(0.0)) as base:
+    # The 413 body is small enough to sit in the socket buffers: a server that
+    # closes with a MiB of request unread can reset the connection before the
+    # client reads the 413 (rev-118 round 6; the guide's 413 row says so).
+    with _mcp_server(_slow_server(0.0), max_body_bytes=1024) as base:
         refusals = {
             "401": httpx.post(f"{base}/mcp", json={}, timeout=5),
             "400": httpx.get(f"{base}/healthz", headers={"Host": "evil.example.com"}, timeout=5),
@@ -494,8 +499,7 @@ def test_every_refusal_closes_its_connection() -> None:
                               timeout=5),
             "404": httpx.get(f"{base}/nope", timeout=5),
             "405": httpx.get(f"{base}/mcp", headers=_HEADERS, timeout=5),
-            "413": httpx.post(f"{base}/mcp", content=b"x" * (2 * 1024 * 1024),
-                              headers=_HEADERS, timeout=5),
+            "413": httpx.post(f"{base}/mcp", content=b"x" * 2048, headers=_HEADERS, timeout=5),
         }
         ordinary = _tool_call(base, "brain_search", {"query": "q"})
 
