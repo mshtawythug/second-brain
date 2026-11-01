@@ -105,11 +105,15 @@ git tag scheme:
   - over HTTP without `--include-confidential`, `brain_review_weekly` is withheld with the
     graph family, and a test fails on any tool that reads graph tables without a
     recorded keep-or-withhold judgement.
-- Round 7 (sec-118f): `brain_gaps` is withheld too over HTTP without
-  `--include-confidential` (it clusters search terms typed under every lens), so
-  `--allow-writes` serves 37 of 51 there; the graph-reach test ignores docstrings and reads
-  module SQL constants; the guide names every tool a curated alias target can reach
-  (backlog BL-42).
+- Round 7 (sec-118f, rev-118 round 6):
+  - a gated lens names an entity only if a non-confidential record names it, not merely
+    mentions it: the brief's new entities, the review findings and conflict scan (stdio's
+    default lens too), and the timeline over HTTP. A curated alias could otherwise carry a
+    name found only in confidential mail;
+  - `brain_gaps` is withheld too over HTTP without `--include-confidential` (it clusters
+    search terms typed under every lens), so `--allow-writes` serves 37 of 51 there;
+  - the graph-reach test reads code only (never prose), module SQL constants, every
+    `graph_*` table the migrations create, `ag_catalog` and `cypher(`.
 - New `http` extra (`pip install 'secondbrain-py[http]'`) pins `mcp>=2.0,<3.0`. The base pin
   still admits 1.x for stdio, and `brain mcp serve` on 1.x exits 2 naming the extra. Guide:
   `docs/guides/mcp-http-transport.md`.

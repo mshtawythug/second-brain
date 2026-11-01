@@ -126,13 +126,12 @@ A few small things remain visible, and are accepted:
   week names an entity and the brief does not list it, the entity's record was created
   before the week by a document you cannot see: confidential, a draft, or since deleted. No
   name, no content, and not which of the three.
-- An entity alias you curate re-points mentions onto its target. A target whose own name
-  appears only in confidential documents then counts as mentioned by the alias's
-  non-confidential documents, so its name can come back from `brain_timeline` (entity names
-  and co-topics), `brain_brief`, `brain_review_findings_list` (a finding's target key and
-  rationale) and, with `--allow-writes`, `brain_review_scan`. The same holds on stdio's
-  default lens. Write alias rules from the confidential name to the public one (the public
-  name as the target), never the other way. Closing it in code is backlog BL-42.
+- These surfaces name an entity only if a non-confidential document that mentions it
+  carries the name in its title, text or metadata: the timeline (names and co-topics), the
+  brief's new entities, and the review findings and scan. A mention alone is not enough,
+  because an alias you curate re-points a public "ZC" onto a target such as "Zephyrcode"
+  that may appear only in confidential mail. The cost: a person known only by a bare email
+  address, whose display name no public record spells out, is not named there.
 
 People follow the same rule. A `person` argument (`brain_search`, `brain_recall`,
 `brain_timeline`) resolves only people named as a participant in at least one
@@ -159,7 +158,7 @@ server never writes to the database:
 | `401 {"error": "unauthorized"}` | No token, a malformed header, or a wrong token. All three get the same response. | Check the `Authorization: Bearer` header. Compare `fp` with `brain mcp token`. |
 | `400 Invalid host header` | The request's `Host` is not one this server answers to. This is the DNS-rebinding defence. | Pass `--allowed-host <the name the client uses>`. It covers the bare name and any port. |
 | `403 Invalid Origin header` | The request came from a browser page. | None: MCP clients send no `Origin`. |
-| `413 {"error": "request too large"}` | The body is over `--max-body-bytes` (default 1 MiB, streamed bodies included). | Raise the cap (16 MiB at most) or send less. |
+| `413 {"error": "request too large"}` | The body is over `--max-body-bytes` (default 1 MiB, streamed bodies included). A client still sending a large body may see the connection reset instead, because the server closes without reading the rest. | Raise the cap (16 MiB at most) or send less. |
 | `415` | The body is compressed (`Content-Encoding`). | Send it uncompressed. |
 | JSON-RPC error naming `--include-confidential` | The call asked for `include_confidential`. | Restart with `--include-confidential` if you mean it. |
 | JSON-RPC error `Unknown tool: brain_graphrag_…`, or `this server runs brain_ask in mode='hybrid' only` | A graph tool, or a `brain_ask` graph mode, on a server without `--include-confidential`. | Restart with `--include-confidential` if you mean it. |

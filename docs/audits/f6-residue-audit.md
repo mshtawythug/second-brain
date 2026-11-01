@@ -120,5 +120,15 @@ audit already look.
   confidential documents became a label. Not graph data, and the raw query never left
   (Plan 08 §6), but confidential-tier vocabulary did. It is withheld in HTTP hide mode
   with the other pinned extras. stdio is unchanged: the owner's own log, on the owner's
-  machine. The alias-target residual (an owner-written rule can make a confidential-only
-  target name pass the public-mention tests) is backlog BL-42.
+  machine.
+- **Name provenance, stdio and HTTP (sec-118f LOW-1).** An owner-written alias rule
+  re-points a public document's mention onto its target, so a target named only in
+  confidential mail passed every public-MENTION test. `sensitivity.name_in_public_record_sql`
+  now asks that a non-confidential, non-draft document mentioning the entity carry its
+  name (title, content or metadata, case-insensitively). It is the one predicate on every
+  gated statement that names entities: the brief's `_GATED_SQL` (stdio's default lens and
+  HTTP), `review/queries.iter_entities_for_conflict_scan` and `list_review_queue`'s
+  contradiction findings (both under `exclude_confidential`, so stdio's default lens too),
+  and the timeline's entity match and co-topics (`timeline_entities`, HTTP hide mode, where
+  the timeline's other public filter already lives). Measured worst case: 50 entities each
+  mentioned by 40 documents of 20 KB with the name only in the last, 162 ms against 1 ms.
