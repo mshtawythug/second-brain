@@ -22,6 +22,44 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — a read replica on a second machine, and the `replica` doctor row (RM-47)
+
+- `brain restore` now writes `$BRAIN_HOME/state/restored-from.json` after a successful restore:
+  the backup's `created_at`, the archive's file name (never its path) and the restore time. The
+  file is written atomically, mode 0600, without following symlinks. A failure to write it is
+  reported (`restored-from marker NOT recorded`) and never fails a restore that completed.
+- `brain doctor` gains a `replica` row that names the backup the machine holds and warns that
+  writes there are lost at the next restore. It is absent when the file is. A file that cannot be
+  read is a WARN that never echoes its contents and never crashes `brain doctor`. That covers a
+  symlink, an oversized file, deep nesting, an out-of-range time and an unknown schema.
+- `state/` is gitignored: in a dev checkout `$BRAIN_HOME` is the repository root.
+- New guide, [docs/guides/second-machine.md](docs/guides/second-machine.md): one brain reached
+  from elsewhere (`brain mcp serve`, `brain ui --lan`), or a one-way read replica refreshed by
+  `brain backup` plus `brain restore`. Two-way sync is not supported (RM-47.D1).
+
+### Fixed — `brain restore` of an AGE-enabled brain (found by RM-47's end-to-end run)
+
+- **Restoring an AGE-enabled brain failed at `pg_restore`, and now works.** The dump excludes the
+  `ag_catalog` schema but keeps the `age` extension entry. That entry replays as `CREATE EXTENSION
+  IF NOT EXISTS age WITH SCHEMA ag_catalog`, which fails on a fresh staging database with `schema
+  "ag_catalog" does not exist`.
+  - The restore now creates `age` in the staging database first, so the dump's statement is a
+    no-op. It does this only when the archive itself carries the `age` extension, which it reads
+    from the dump's table of contents (`pg_restore -l`). So an archive without AGE, restored onto
+    an AGE-capable server, does not newly need a superuser.
+  - Nothing was ever damaged: the failure came before any swap, and the staging database was
+    dropped.
+  - The restore tests had faked `pg_restore`, which is why they missed it. A new test runs a real
+    `pg_dump`→`pg_restore` round trip, both with and without AGE.
+- **Existing archives are restorable as they are; no re-backup is needed.** The fix is on the
+  restore side only, and `brain backup` is unchanged. It was verified with an archive taken by the
+  previous code: the old restore failed on it and the new one restored it.
+- **The AGE graph mirror is still not in the archive (by design, F3 §5.2).** The relational graph
+  tables restore exactly. Run `brain graphrag build --force` after a restore to rebuild the mirror,
+  as `brain restore` prints. Until then `brain doctor` reports graph drift.
+- The restore summary's "WILL BE OVERWRITTEN" line now names the database being replaced. It
+  used to name the database the archive was taken from, which differs on a read replica.
+
 ### Added — MCP over HTTP: `brain mcp serve` and `brain mcp token` (RM-46, PR #118)
 
 - `brain mcp serve` serves the MCP tools over streamable HTTP, for another device on a

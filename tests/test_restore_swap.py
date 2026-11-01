@@ -17,6 +17,9 @@ import pytest
 from psycopg import sql
 
 from brain.backup import create_backup, read_manifest, restore_backup
+from brain.backup.replica_marker import marker_path, read_marker
+from brain.backup.restore import RESTORED_FROM_NOT_RECORDED
+from brain.backup.staging_prep import prepare_staging_extensions
 from brain.config import Config
 from brain.errors import BackupError, RestoreAborted
 from tests.backup_fakes import (
@@ -36,6 +39,7 @@ from tests.backup_fakes import restore_sandbox_dsn as _restore_sandbox_dsn
 from tests.conftest import TEST_DATABASE_URL as _SUITE_DATABASE_URL
 from tests.conftest import FakeEmbedder
 from tests.test_backup_manifest import EMBEDDER_NAME, EMBEDDING_DIM
+from tests.test_restore_toc import AGE_TOC, PLAIN_TOC
 
 # C22 (2026-08-07): these tests exercise a REAL restore swap — the live database
 # is parked aside and a fresh one takes its name, then teardown reclaims it with
@@ -393,3 +397,184 @@ def test_follow_up_names_the_graph_rebuild(
     report = _restore(archive, cfg, runner)
 
     assert "brain graphrag build --force" in report.follow_up
+
+
+# --- RM-47: the restored-from marker -------------------------------------------------
+
+
+def test_successful_restore_records_the_restored_from_marker(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+    runner: StubAndRestoreRunner,
+) -> None:
+    """AC1: after a restore the marker holds the manifest's ``created_at``."""
+    _restore(archive, cfg, runner)
+
+    marker = read_marker(cfg.brain_home)
+    assert marker is not None
+    assert marker.created_at == read_manifest(archive).created_at
+    assert marker.archive_name == archive.name
+    assert marker.restored_at == NOW
+
+
+def test_failed_restore_leaves_an_earlier_marker_untouched(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+) -> None:
+    """Only a restore that completed may claim this machine holds that archive."""
+    earlier = marker_path(cfg.brain_home)
+    earlier.parent.mkdir(parents=True)
+    earlier.write_text('{"synthetic": "earlier marker"}', encoding="utf-8")
+    before = earlier.read_bytes()
+    inert = StubAndRestoreRunner(
+        base_dsn=TEST_DATABASE_URL, responses={"--version": CONTAINER_VERSION}
+    )
+    inert.migrate_enabled = False
+
+    with pytest.raises(BackupError, match="Nothing was changed"):
+        _restore(archive, cfg, inert)
+
+    assert earlier.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("legs", "expect_db", "expect_vault"),
+    [
+        ({"vault_leg": False}, True, False),
+        ({"db_leg": False}, False, True),
+    ],
+    ids=["db-only", "vault-only"],
+)
+def test_a_single_leg_restore_also_records_the_marker(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+    runner: StubAndRestoreRunner,
+    legs: dict[str, bool],
+    expect_db: bool,
+    expect_vault: bool,
+) -> None:
+    """RM-47.D3: either leg makes this machine a copy of the archive."""
+    report = _restore(archive, cfg, runner, **legs)
+
+    assert (report.db_restored, report.vault_restored) == (expect_db, expect_vault)
+    marker = read_marker(cfg.brain_home)
+    assert marker is not None
+    assert marker.archive_name == archive.name
+
+
+def test_a_marker_write_failure_is_reported_and_the_restore_still_succeeds(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+    runner: StubAndRestoreRunner,
+) -> None:
+    """RM-47.D4: the data is already swapped in, so failing now would misreport it."""
+    cfg.brain_home.mkdir(parents=True, exist_ok=True)
+    (cfg.brain_home / "state").write_text("a file, not a directory", encoding="utf-8")
+    steps: list[str] = []
+
+    report = _restore(archive, cfg, runner, on_step=steps.append)
+
+    assert report.db_restored is True
+    assert RESTORED_FROM_NOT_RECORDED in steps
+
+
+# --- RM-47 AC3 finding: AGE's extension entry survives the ag_catalog exclusion -----
+
+
+class _ExtensionProbingRunner(StubAndRestoreRunner):
+    """Records which extensions the staging database holds when pg_restore starts.
+
+    A real dump of an AGE brain carries ``CREATE EXTENSION IF NOT EXISTS age WITH
+    SCHEMA ag_catalog`` even though ``ag_catalog`` itself is excluded, and with
+    ``--exit-on-error`` that statement fails unless ``age`` already exists.
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.extensions_at_restore: list[set[str]] = []
+
+    def run(self, argv: Any, *, timeout: float, env: Any = None) -> Any:
+        parts = list(argv)
+        if any(part.endswith("pg_restore") for part in parts) and "-d" in parts:
+            dsn = dsn_for_database(TEST_DATABASE_URL, parts[parts.index("-d") + 1])
+            with psycopg.connect(dsn) as conn:
+                rows = conn.execute("SELECT extname FROM pg_extension").fetchall()
+            self.extensions_at_restore.append({str(row[0]) for row in rows})
+        return super().run(argv, timeout=timeout, env=env)
+
+
+def test_staging_has_age_before_pg_restore_runs(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+) -> None:
+    """Regression: every real restore of an AGE brain failed at ``CREATE EXTENSION``."""
+    probing = _ExtensionProbingRunner(
+        base_dsn=TEST_DATABASE_URL,
+        responses={"--version": CONTAINER_VERSION, "pg_restore -l": AGE_TOC},
+    )
+
+    report = _restore(archive, cfg, probing)
+
+    assert report.db_restored is True
+    assert len(probing.extensions_at_restore) == 1
+    assert "age" in probing.extensions_at_restore[0]
+    listing = [i for i, call in enumerate(probing.flat_calls) if "pg_restore -l" in call]
+    data = [i for i, c in enumerate(probing.flat_calls) if "pg_restore" in c and " -d " in c]
+    assert listing and data and listing[0] < data[0]  # the TOC is read before restoring
+
+
+def test_a_non_age_archive_on_an_age_capable_server_creates_no_extension(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+) -> None:
+    """sec-119 I4: ``CREATE EXTENSION age`` needs superuser, so only an AGE archive gets it."""
+    probing = _ExtensionProbingRunner(
+        base_dsn=TEST_DATABASE_URL,
+        responses={"--version": CONTAINER_VERSION, "pg_restore -l": PLAIN_TOC},
+    )
+
+    report = _restore(archive, cfg, probing)
+
+    assert report.db_restored is True
+    assert probing.extensions_at_restore == [{"plpgsql"}]
+
+
+def test_staging_prep_skips_an_extension_the_server_does_not_offer(
+    test_db: psycopg.Connection,
+) -> None:
+    """A stock pgvector server has no ``age``; preparing staging must not fail there."""
+    test_db.commit()
+    test_db.autocommit = True
+    try:
+        created = prepare_staging_extensions(test_db, names=("rm47_no_such_extension",))
+    finally:
+        test_db.autocommit = False
+
+    assert created == ()
+    row = test_db.execute(
+        "SELECT count(*) FROM pg_extension WHERE extname = 'rm47_no_such_extension'"
+    ).fetchone()
+    assert row is not None and row[0] == 0
+
+
+def test_staging_prep_failure_is_a_backup_error_with_a_fixed_message(
+    test_db: psycopg.Connection,
+) -> None:
+    """A refused ``CREATE EXTENSION`` surfaces as a BrainError the CLI prints, not a raw one."""
+    test_db.commit()
+    test_db.autocommit = True
+    test_db.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+    try:
+        with pytest.raises(BackupError, match="Nothing was changed") as excinfo:
+            prepare_staging_extensions(test_db, names=("age",))
+    finally:
+        test_db.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE")
+        test_db.autocommit = False
+
+    assert TEST_DATABASE_URL not in str(excinfo.value)

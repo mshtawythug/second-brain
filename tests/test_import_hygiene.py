@@ -75,3 +75,19 @@ def test_the_token_module_needs_no_sdk_or_cli() -> None:
         "sys.exit(1 if bad else 0)"
     )
     assert proc.returncode == 0, "brain.mcp_auth must not import the SDK, starlette or typer"
+
+
+@pytest.mark.parametrize("module", ["brain.doctor_replica", "brain.backup.replica_marker"])
+def test_each_rm47_module_imports_cold(module: str) -> None:
+    """RM-47: the doctor leaf and the marker leaf import cold, closing no cycle."""
+    proc = _fresh(f"import {module}")
+    assert proc.returncode == 0, proc.stderr.decode()
+
+
+def test_doctor_replica_defers_the_backup_package() -> None:
+    """``brain doctor``'s ``replica`` row loads ``brain.backup`` only when it runs."""
+    proc = _fresh(
+        "import sys, brain.doctor_replica; "
+        "sys.exit(1 if 'brain.backup' in sys.modules else 0)"
+    )
+    assert proc.returncode == 0, "importing brain.doctor_replica must not import brain.backup"

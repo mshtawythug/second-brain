@@ -242,3 +242,55 @@ def test_doctor_check_warns_when_the_newest_backup_is_stale(
 def test_doctor_check_never_fails(test_db: psycopg.Connection, cfg: Config) -> None:
     """It is a nudge, not a gate — it must never flip doctor's exit code."""
     assert backup_doctor_checks(cfg)[0].status in {"ok", "warn"}
+
+
+def _preflight_for(source_database: str) -> Any:
+    from brain.backup.restore import Preflight
+    from tests.test_backup_manifest import _manifest
+
+    return Preflight(
+        manifest=_manifest(database_name=source_database),
+        target_documents=3,
+        target_chunks=7,
+        target_sources=1,
+        target_vault_files=0,
+        required_bytes=1024,
+        free_bytes=1024 * 1024,
+        issues=(),
+    )
+
+
+@pytest.mark.nodb
+def test_restore_preflight_names_the_target_database_not_the_archive_source(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """RM-47: on a read replica the archive came from another database name."""
+    from brain.cli_backup import _print_preflight
+
+    _print_preflight(
+        _preflight_for("synthetic_primary"),
+        tmp_path / "brain-backup-20261030-181500.tar.gz",
+        vault_path=tmp_path / "vault",
+        target_database="synthetic_replica",
+    )
+
+    out = capsys.readouterr().out
+    assert "• database synthetic_replica" in out
+    assert "• database synthetic_primary" not in out
+    assert "currently holds 3 documents" in out
+
+
+@pytest.mark.nodb
+def test_restore_preflight_on_the_same_machine_still_names_its_database(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from brain.cli_backup import _print_preflight
+
+    _print_preflight(
+        _preflight_for("synthetic_brain"),
+        tmp_path / "brain-backup-20261030-181500.tar.gz",
+        vault_path=tmp_path / "vault",
+        target_database="synthetic_brain",
+    )
+
+    assert "• database synthetic_brain" in capsys.readouterr().out

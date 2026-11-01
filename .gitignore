@@ -36,6 +36,11 @@ logs/
 # Never tracked.
 run/
 
+# Runtime state (RM-47's restored-from.json, voice-failures.json, watcher-owed.jsonl).
+# The CLI writes `$BRAIN_HOME/state/`, and in a dev checkout $BRAIN_HOME is the repo
+# root, so `state/` lands in the tree. Local machine state. Never tracked.
+state/
+
 # Playwright MCP server scratch dir (browser-automation traces/screenshots/session
 # state from MCP browser tool runs). Transient local artifact — never tracked.
 .playwright-mcp/
