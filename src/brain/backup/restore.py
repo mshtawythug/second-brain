@@ -10,11 +10,8 @@ The three byte constants are re-exported under their original names because
 """
 from __future__ import annotations
 
-import contextlib
 import shutil
-import subprocess
 import tarfile
-import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -46,7 +43,7 @@ from .archive import (
     sha256_file,
     verify_sidecar,
 )
-from .create import TIMESTAMP_FORMAT, create_backup, dsn_parts, run_tool
+from .create import TIMESTAMP_FORMAT, create_backup, dsn_parts
 from .db_names import (  # noqa: F401 — re-exported for the two byte-budget test modules
     MAX_RESTORABLE_DB_NAME_BYTES,
     PG_IDENTIFIER_MAX_BYTES,
@@ -56,16 +53,13 @@ from .db_names import (  # noqa: F401 — re-exported for the two byte-budget te
 )
 from .manifest import BackupManifest
 from .pgtool import (
-    RESTORE_TIMEOUT_S,
     CommandRunner,
-    PgToolPlan,
     SubprocessRunner,
-    password_env_file,
     resolve_pg_tool,
     server_version,
 )
 from .replica_marker import ReplicaMarkerError, write_marker
-from .staging_prep import prepare_staging_extensions
+from .restore_run import restore_into
 
 #: The phrase a user must type when the target is not empty. No flag can supply
 #: it — see §5.9 and `uninstall.py:103-109`, which exists for the same reason.
@@ -406,75 +400,6 @@ def _maintenance_dsn(database_url: str) -> str:
     return psycopg.conninfo.make_conninfo(**parts)
 
 
-def _restore_into(
-    plan: PgToolPlan,
-    parts: dict[str, str],
-    dump_path: Path,
-    target_db: str,
-    runner: CommandRunner,
-) -> None:
-    """``pg_restore`` the dump into ``target_db`` with ``--exit-on-error``.
-
-    ``--exit-on-error`` is the whole reason for the custom dump format: a
-    half-applied restore fails loudly instead of printing errors and exiting 0.
-    """
-    restore_args = [
-        "-U",
-        parts.get("user", "brain"),
-        "-d",
-        target_db,
-        "--no-owner",
-        "--no-privileges",
-        "--exit-on-error",
-    ]
-    password = parts.get("password")
-
-    if plan.source != "container":
-        run_tool(
-            runner,
-            plan.argv(
-                *restore_args,
-                "-h",
-                parts.get("host", "localhost"),
-                "-p",
-                parts.get("port", "5432"),
-                str(dump_path),
-            ),
-            timeout=RESTORE_TIMEOUT_S,
-            env=plan.env(password),
-            what="pg_restore",
-        )
-        return
-
-    remote = f"/tmp/brain-restore-{uuid.uuid4().hex}.dump"  # noqa: S108 — in-container
-    try:
-        run_tool(
-            runner,
-            ["docker", "cp", str(dump_path), f"{plan.container}:{remote}"],
-            timeout=RESTORE_TIMEOUT_S,
-            what="docker cp of the dump",
-        )
-        with password_env_file(password) as env_file:
-            run_tool(
-                runner,
-                plan.argv(*restore_args, remote, env_file=env_file),
-                timeout=RESTORE_TIMEOUT_S,
-                what="pg_restore",
-            )
-    finally:
-        # Best-effort cleanup: a leftover temp file inside the container is
-        # untidy, not dangerous, and must never mask the original failure.
-        with contextlib.suppress(
-            FileNotFoundError,
-            subprocess.CalledProcessError,
-            subprocess.TimeoutExpired,
-        ):
-            runner.run(
-                ["docker", "exec", str(plan.container), "rm", "-f", remote],
-                timeout=RESTORE_TIMEOUT_S,
-            )
-
-
 def _terminate_other_sessions(conn: psycopg.Connection[Any], live_db: str) -> list[str]:
     """Terminate every other backend on ``live_db``; return their app names.
 
@@ -622,9 +547,7 @@ def _restore_database(
         try:
             staging_parts = dict(parts)
             staging_parts["dbname"] = staging_db
-            with connect(psycopg.conninfo.make_conninfo(**staging_parts)) as staged:
-                prepare_staging_extensions(staged)  # AGE's dump entry (staging_prep.py)
-            _restore_into(
+            restore_into(
                 plan, staging_parts, state.staging_dir / DUMP_MEMBER, staging_db, runner
             )
             with connect(psycopg.conninfo.make_conninfo(**staging_parts)) as staged:

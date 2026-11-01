@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Iterator
+import subprocess
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 import psycopg
@@ -135,17 +136,40 @@ def _sandbox_and_sources() -> Iterator[None]:
     _drop_exact(SOURCE_PLAIN_DB)
 
 
-def _round_trip(source_dsn: str, tmp_path: Path) -> RestoreReport:
+class _StagingProbe(SubprocessRunner):
+    """The real runner, recording staging's extensions just before the data restore.
+
+    Proves with the real tools what ``test_restore_swap.py`` proves with a fake:
+    ``age`` is created in staging for an AGE archive and only then (sec-119 I4).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.staging_extensions: list[set[str]] = []
+
+    def run(
+        self, argv: Sequence[str], *, timeout: float, env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        parts = list(argv)
+        if any(p.endswith("pg_restore") for p in parts) and "-d" in parts:
+            staging = parts[parts.index("-d") + 1]
+            assert staging.startswith(f"{dsn_database(SANDBOX_DSN)}_restore_"), staging
+            with psycopg.connect(dsn_for_database(_SUITE_DATABASE_URL, staging)) as conn:
+                rows = conn.execute("SELECT extname FROM pg_extension").fetchall()
+            self.staging_extensions.append({str(row[0]) for row in rows})
+        return super().run(argv, timeout=timeout, env=env)
+
+
+def _round_trip(source_dsn: str, tmp_path: Path) -> tuple[RestoreReport, _StagingProbe]:
     embedder = FakeEmbedder(dim=EMBEDDING_DIM)
     archive = create_backup(
         _cfg(source_dsn, tmp_path / "source"), runner=SubprocessRunner(), embedder=embedder
     ).archive_path
-    return restore_backup(
-        archive,
-        _cfg(SANDBOX_DSN, tmp_path / "target"),
-        runner=SubprocessRunner(),
-        embedder=embedder,
+    probe = _StagingProbe()
+    report = restore_backup(
+        archive, _cfg(SANDBOX_DSN, tmp_path / "target"), runner=probe, embedder=embedder
     )
+    return report, probe
 
 
 def test_a_real_dump_of_an_age_brain_restores(tmp_path: Path) -> None:
@@ -153,10 +177,12 @@ def test_a_real_dump_of_an_age_brain_restores(tmp_path: Path) -> None:
     source = _make_source(SOURCE_AGE_DB, with_age=True)
     assert _has_age(source)  # precondition: the dump carries the age EXTENSION entry
 
-    report = _round_trip(source, tmp_path)
+    report, probe = _round_trip(source, tmp_path)
 
     assert report.db_restored is True
     assert live_document_count(SANDBOX_DSN) == 1
+    assert len(probe.staging_extensions) == 1
+    assert "age" in probe.staging_extensions[0]
 
 
 def test_a_real_dump_without_age_still_restores(tmp_path: Path) -> None:
@@ -164,7 +190,10 @@ def test_a_real_dump_without_age_still_restores(tmp_path: Path) -> None:
     source = _make_source(SOURCE_PLAIN_DB, with_age=False)
     assert not _has_age(source)  # precondition: no age entry in this dump
 
-    report = _round_trip(source, tmp_path)
+    report, probe = _round_trip(source, tmp_path)
 
     assert report.db_restored is True
     assert live_document_count(SANDBOX_DSN) == 1
+    # sec-119 I4: no CREATE EXTENSION (superuser) for an archive that has no AGE.
+    assert len(probe.staging_extensions) == 1
+    assert "age" not in probe.staging_extensions[0]

@@ -39,6 +39,7 @@ from tests.backup_fakes import restore_sandbox_dsn as _restore_sandbox_dsn
 from tests.conftest import TEST_DATABASE_URL as _SUITE_DATABASE_URL
 from tests.conftest import FakeEmbedder
 from tests.test_backup_manifest import EMBEDDER_NAME, EMBEDDING_DIM
+from tests.test_restore_toc import AGE_TOC, PLAIN_TOC
 
 # C22 (2026-08-07): these tests exercise a REAL restore swap — the live database
 # is parked aside and a fresh one takes its name, then teardown reclaims it with
@@ -513,7 +514,8 @@ def test_staging_has_age_before_pg_restore_runs(
 ) -> None:
     """Regression: every real restore of an AGE brain failed at ``CREATE EXTENSION``."""
     probing = _ExtensionProbingRunner(
-        base_dsn=TEST_DATABASE_URL, responses={"--version": CONTAINER_VERSION}
+        base_dsn=TEST_DATABASE_URL,
+        responses={"--version": CONTAINER_VERSION, "pg_restore -l": AGE_TOC},
     )
 
     report = _restore(archive, cfg, probing)
@@ -521,6 +523,26 @@ def test_staging_has_age_before_pg_restore_runs(
     assert report.db_restored is True
     assert len(probing.extensions_at_restore) == 1
     assert "age" in probing.extensions_at_restore[0]
+    listing = [i for i, call in enumerate(probing.flat_calls) if "pg_restore -l" in call]
+    data = [i for i, c in enumerate(probing.flat_calls) if "pg_restore" in c and " -d " in c]
+    assert listing and data and listing[0] < data[0]  # the TOC is read before restoring
+
+
+def test_a_non_age_archive_on_an_age_capable_server_creates_no_extension(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+) -> None:
+    """sec-119 I4: ``CREATE EXTENSION age`` needs superuser, so only an AGE archive gets it."""
+    probing = _ExtensionProbingRunner(
+        base_dsn=TEST_DATABASE_URL,
+        responses={"--version": CONTAINER_VERSION, "pg_restore -l": PLAIN_TOC},
+    )
+
+    report = _restore(archive, cfg, probing)
+
+    assert report.db_restored is True
+    assert probing.extensions_at_restore == [{"plpgsql"}]
 
 
 def test_staging_prep_skips_an_extension_the_server_does_not_offer(
