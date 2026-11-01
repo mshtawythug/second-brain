@@ -42,6 +42,7 @@ from brain.mcp_http_conn import MAX_CONNECTIONS
 from brain.mcp_http_guard import CONFIDENTIAL_REFUSAL
 from brain.mcp_tool_classes import registered_tool_names
 from tests.conftest import isolate_config_dotenv
+from tests.serve_guard import never_listens  # noqa: F401 — autouse: never listen
 
 pytestmark = pytest.mark.nodb
 

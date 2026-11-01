@@ -19,6 +19,7 @@ from brain.cli import app
 from brain.config import Config
 from brain.mcp_auth import generate_token, write_token
 from tests.conftest import isolate_config_dotenv
+from tests.serve_guard import never_listens  # noqa: F401 — autouse: never listen
 
 pytestmark = pytest.mark.nodb
 
