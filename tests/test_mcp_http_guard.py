@@ -462,3 +462,25 @@ def test_a_client_that_disconnects_mid_body_gets_no_response() -> None:
 
     assert sent == []
     assert echo.calls == 0
+
+
+def test_nesting_past_the_limit_is_refused_even_when_python_could_parse_it() -> None:
+    # 200 levels parse fine in Python; only the depth pre-check refuses them.
+    echo = _Echo()
+    head = b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":'
+    body = head + b"[" * 200 + b"]" * 200 + b"}"
+
+    response = _gate(echo).post(ENDPOINT, content=body)
+
+    assert response.status_code == 400
+    assert echo.calls == 0
+
+
+def test_nesting_within_the_limit_passes() -> None:
+    echo = _Echo()
+    arguments: dict[str, object] = {"query": "q", "filters": [[[["a"]]]]}
+
+    response = _gate(echo).post(ENDPOINT, content=_call(arguments))
+
+    assert response.status_code == 200
+    assert echo.calls == 1
