@@ -73,6 +73,24 @@ Several tools say "re-call with include_confidential=true" in their errors, so a
 the remote device would follow that advice. Without the flag the server refuses such a
 call.
 
+Without the flag, confidential METADATA stays home too:
+
+- A confidential document answers every lookup by id prefix (`brain_show`,
+  `brain_backlinks`, `brain_links`, `brain_related`, `brain_link_proposal`'s source)
+  exactly as an unknown prefix does: `document not found: <prefix>`. So its title, tags
+  and source path never leave the machine.
+- `brain_link_proposal` never resolves a confidential destination. This one applies on
+  stdio too, unless the caller passes `include_confidential`.
+- Graph tools name an entity (a person, project, organisation or topic) only if at least
+  one non-confidential document mentions it.
+
+Three small things remain visible, and are accepted:
+
+- `brain_status` and `brain_graphrag_stats` count every document and entity.
+- An id prefix shared by a normal and a confidential document answers "ambiguous".
+- Guessing an exact entity name for a search filter or a timeline confirms that some
+  document mentions it, but returns no content.
+
 ## Requests the server refuses
 
 | Response | When | What to do |
@@ -85,7 +103,16 @@ call.
 | JSON-RPC error naming `--include-confidential` | The call asked for `include_confidential`. | Restart with `--include-confidential` if you mean it. |
 | `502 {"error": "result too large"}` | A tool's result was over 8 MiB. | Narrow the call (smaller `limit`, `brain_show` caps). |
 | `504 {"error": "timed out"}` | The call took longer than `--call-timeout` (default 300 s). | Raise it, or ask for less. |
-| `503` | More than 16 requests at once. | Retry. |
+| `404 {"error": "not found"}` | Any path but the endpoint, `/healthz` and `/readyz`, compared exactly (`/mcp/`, `//mcp` and `/mcp%0A` included). | Use the endpoint URL from the banner. |
+| `503 {"error": "busy"}` | 16 calls are already in flight, or every worker thread is still finishing a call that already timed out. | Retry shortly. |
+| `503` (uvicorn) | 256 open connections. | Retry. Idle connections are closed after 10 s. |
+| JSON-RPC error `tool <name> failed (<Class>)` | A tool failed unexpectedly. The class is logged on the server; the message never leaves it. | Read the server log. |
+
+A connection with no request in flight is closed after 10 seconds, whether or not bytes
+arrive, so silent or slowly dribbling clients cannot hold connections open. A call that
+times out (504) stops waiting, but a tool already running on a worker thread finishes in the
+background. Its database statements are cancelled at the same deadline
+(`statement_timeout`), and its worker stays counted until it returns.
 
 `GET /healthz` answers `{"status": "ok"}` without a token, for a process supervisor.
 `GET /readyz` needs the token. It reports whether the database answers, plus the embedder,

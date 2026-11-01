@@ -1734,6 +1734,11 @@ entry point MCP clients spawn, takes no arguments, and exits 2 if given any.
 | `--call-timeout` | `300` | Seconds per tool call before a 504 (1 to 3600). |
 | `--log-level` | `INFO` | One line per request: client address, method, route label, status, time. Never a path, header, body or token. |
 
+Only the endpoint, `/healthz` and `/readyz` are served (404 otherwise). A connection with no
+request in flight closes after 10 s, at most 16 calls run at once (503 beyond), and a call's
+database statements are cancelled at its deadline. Without `--include-confidential`, a
+confidential document answers as an unknown id prefix.
+
 Exit codes: `2` for a refused option, an unsafe token file, a port in use, or mcp 1.x
 (the message names `pip install 'secondbrain-py[http]'`); `1` for a broken config.
 `brain mcp token` exits `1` when no token exists yet and `2` for an unsafe file. The JSON

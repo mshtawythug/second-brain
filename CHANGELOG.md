@@ -55,6 +55,20 @@ git tag scheme:
 - The `mcp_server` state builder moves to the new leaf `brain/mcp_state.py`
   (`mcp_server._State` stays as an alias); `start_state` is the one startup path.
   `mcp_server.py` shrinks.
+- Security round (sec-118), at the PR head after review:
+  - only the exact endpoint, `/healthz` and `/readyz` paths are served (404 otherwise), so
+    `/mcp%0A`, which starlette's `^/mcp$` route also matches, cannot get past the
+    confidential gate; the gate and the result/deadline guard now cover every POST;
+  - a connection with no request in flight is closed after 10 s whatever bytes arrive
+    (slowloris);
+  - work is capped in the app (16 calls, 16 worker threads, orphaned workers counted; 503
+    beyond), and every per-call connection carries `statement_timeout` = the call deadline;
+  - unexpected tool failures answer `tool <name> failed (<Class>)`, on mcp 2.0 as on 2.3;
+  - without `--include-confidential`, a confidential document answers every by-prefix
+    lookup as an unknown prefix, and graph tools name only entities a non-confidential
+    document mentions;
+  - `brain_link_proposal` takes `include_confidential` and no longer resolves a
+    confidential destination by default, on stdio too (F6).
 - New `http` extra (`pip install 'secondbrain-py[http]'`) pins `mcp>=2.0,<3.0`. The base pin
   still admits 1.x for stdio, and `brain mcp serve` on 1.x exits 2 naming the extra. Guide:
   `docs/guides/mcp-http-transport.md`.
