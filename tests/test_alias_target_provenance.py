@@ -230,6 +230,43 @@ def test_the_findings_list_withholds_a_finding_about_a_confidentially_named_targ
     assert targets(False) == {SECRET.lower(), PUBLIC.lower()}
 
 
+def test_the_findings_list_holds_an_elicit_row_keyed_by_entity_id(
+    test_db: psycopg.Connection[Any], corpus: dict[str, str]
+) -> None:
+    # sec-118g LOW-A: `brain elicit` keys a contradiction by the entity's UUID.
+    _finding(test_db, corpus["secret"], [corpus["public_note"]])
+    _finding(test_db, corpus["control"], [corpus["public_note"]])
+
+    rows = list_review_queue(
+        test_db, tenant_id=TENANT, signal_kinds=["contradiction"], limit=10,
+        exclude_confidential=True,
+    )
+
+    assert {row.target_id for row in rows} == {corpus["control"]}
+    assert all(SECRET not in row.rationale for row in rows)
+
+
+def test_the_findings_list_withholds_a_finding_whose_entity_is_gone(
+    test_db: psycopg.Connection[Any], corpus: dict[str, str]
+) -> None:
+    # sec-118g LOW-A: removing or reversing the alias deletes the target entity; the
+    # gate must not then fail open on the row a scan already wrote.
+    _finding(test_db, "vanishedcode", [corpus["public_note"]])
+    _finding(test_db, PUBLIC.lower(), [corpus["public_note"]])
+
+    def targets(exclude: bool) -> set[str]:
+        return {
+            row.target_id
+            for row in list_review_queue(
+                test_db, tenant_id=TENANT, signal_kinds=["contradiction"], limit=10,
+                exclude_confidential=exclude,
+            )
+        }
+
+    assert targets(True) == {PUBLIC.lower()}
+    assert targets(False) == {"vanishedcode", PUBLIC.lower()}
+
+
 def test_the_provenance_predicate_refuses_a_non_identifier_alias() -> None:
     with pytest.raises(ValueError, match="plain identifier"):
         name_in_public_record_sql("e; DROP TABLE documents")
