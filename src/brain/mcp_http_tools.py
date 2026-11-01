@@ -41,8 +41,12 @@ def _without(value: Any, keys: frozenset[str]) -> Any:
         return value
     if isinstance(value, dict):
         return {k: _without(v, keys) for k, v in value.items() if k not in keys}
-    if isinstance(value, list | tuple):
-        return type(value)(_without(item, keys) for item in value)
+    if isinstance(value, list):
+        return [_without(item, keys) for item in value]
+    if isinstance(value, tuple):
+        # A plain tuple even for a NamedTuple, whose constructor takes fields, not
+        # one iterable (sec-118c INFO-3); either serializes as a JSON array.
+        return tuple(_without(item, keys) for item in value)
     return value
 
 

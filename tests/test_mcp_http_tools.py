@@ -10,7 +10,7 @@ tools here are throwaway ones on a throwaway server; paths are synthetic.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, NamedTuple
 
 import anyio
 import pytest
@@ -182,3 +182,27 @@ def test_without_drop_keys_a_result_is_unchanged() -> None:
     assert result.model_dump(by_alias=True)["structuredContent"]["person_keys"] == [
         "a@example.com"
     ]
+
+
+class _Pair(NamedTuple):
+    first: Any
+    second: int
+
+
+def test_a_named_tuple_in_a_result_is_walked_not_failed() -> None:
+    # sec-118c INFO-3: rebuilding a NamedTuple from one iterable raised TypeError,
+    # which the guard then reported as a failed tool.
+    server = make_server("throwaway")
+
+    def brain_search(query: str) -> dict[str, Any]:
+        """Returns a NamedTuple holding person_keys."""
+        return {"pair": _Pair({"person_keys": ["a@example.com"], "q": query}, 1)}
+
+    server.tool()(brain_search)
+    sanitize_tool_errors(server, ["brain_search"], drop_keys=frozenset({"person_keys"}))
+
+    result = _call(server, "brain_search", {"query": "synthetic"})
+    content = result.model_dump(by_alias=True)["structuredContent"]
+
+    assert not result.model_dump(by_alias=True)["isError"]
+    assert content["pair"] == [{"q": "synthetic"}, 1]

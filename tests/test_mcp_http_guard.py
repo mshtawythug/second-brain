@@ -292,6 +292,30 @@ def test_a_slow_call_times_out_with_504() -> None:
     assert response.json() == {"error": "timed out"}
 
 
+def test_a_crash_leaves_the_guard_as_a_group_of_just_that_exception() -> None:
+    # sec-118c INFO-3: the shape be064a05 introduced; nothing is sent first, so
+    # the server's own 500 is the answer (tests/test_mcp_http_conn.py).
+    sent: list[Any] = []
+
+    async def crashes(scope: Any, receive: Any, send: Any) -> None:
+        raise KeyError("synthetic-detail")
+
+    async def record(message: Any) -> None:
+        sent.append(message)
+
+    async def receive() -> Any:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    guard = ResponseGuardMiddleware(crashes, max_response_bytes=10, timeout_s=1.0)
+    scope = {"type": "http", "method": "POST", "path": ENDPOINT, "headers": []}
+
+    with pytest.raises(ExceptionGroup) as excinfo:
+        anyio.run(guard, scope, receive, record)
+
+    assert [type(exc) for exc in excinfo.value.exceptions] == [KeyError]
+    assert sent == []
+
+
 def test_a_prompt_call_is_not_timed_out() -> None:
     response = _guarded(_Answer(b"{}", delay=0.05), timeout=2.0).post(ENDPOINT)
 

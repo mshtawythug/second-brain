@@ -45,13 +45,13 @@ async def _slow_or_fast(scope: dict[str, Any], receive: Any, send: Any) -> None:
 
 
 @contextmanager
-def _server(*, limit: int = 4) -> Iterator[int]:
+def _server(*, limit: int = 4, app: Any = None) -> Iterator[int]:
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     sock.listen(16)
     port = sock.getsockname()[1]
     config = uvicorn.Config(
-        HealthzRoute(_slow_or_fast),
+        HealthzRoute(_slow_or_fast) if app is None else app,
         http=idle_deadline_protocol(IDLE_S),
         limit_concurrency=limit,
         log_level="warning",
@@ -503,3 +503,30 @@ def test_every_refusal_closes_its_connection() -> None:
         assert str(response.status_code) == status
         assert response.headers.get("connection") == "close", status
     assert ordinary.headers.get("connection") != "close"
+
+
+# -------------------------------------------- sec-118c INFO-3: a crash's shape
+
+
+async def _crashes(scope: dict[str, Any], receive: Any, send: Any) -> None:
+    """Fails before answering, with a message that must not reach the client."""
+    if scope["type"] != "http":
+        return
+    raise KeyError("synthetic-detail /synthetic/vault/private-note.md")
+
+
+def test_a_crash_behind_the_response_guard_answers_as_a_bare_crash_does() -> None:
+    # Since be064a05 the guard runs the app in a task group, so a crash leaves it
+    # as an ExceptionGroup. uvicorn answers that exactly as it answers the bare
+    # exception: the same status, the same fixed body, no detail.
+    from brain.mcp_http_guard import ResponseGuardMiddleware
+
+    guarded = ResponseGuardMiddleware(_crashes, max_response_bytes=100, timeout_s=1.0)
+    responses = {}
+    for name, app in (("guarded", guarded), ("bare", _crashes)):
+        with _server(app=app) as port:
+            responses[name] = httpx.post(f"http://127.0.0.1:{port}/mcp", timeout=10)
+
+    assert responses["guarded"].status_code == responses["bare"].status_code == 500
+    assert responses["guarded"].content == responses["bare"].content
+    assert b"synthetic" not in responses["guarded"].content
