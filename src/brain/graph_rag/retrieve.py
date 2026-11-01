@@ -70,7 +70,7 @@ import psycopg
 from ._retrieval_common import _build_doc_results, _fetch_entities, _row_to_entity
 from .fuse import _retrieve_fuse
 from .global_ import _retrieve_global
-from .public_entities import withhold_confidential_entities
+from .public_entities import public_mention_sql, withhold_confidential_entities
 from .router import (
     AUTO_MODE,
     FUSE_MODE,
@@ -227,7 +227,9 @@ def graph_rag_search(
     # decides the auto branches purely; the DB-derived person list is injected so
     # the router itself stays DB-free (dependency inversion).
     known_persons = (
-        _fetch_known_persons(conn, tenant_id) if mode == AUTO_MODE else []
+        _fetch_known_persons(conn, tenant_id, public_only=public_entities_only)
+        if mode == AUTO_MODE
+        else []
     )
     decision = route(query, mode=mode, person=person, known_persons=known_persons)
 
@@ -486,7 +488,7 @@ def _like_contains(needle: str) -> str:
 
 
 def _fetch_known_persons(
-    conn: psycopg.Connection[Any], tenant_id: str
+    conn: psycopg.Connection[Any], tenant_id: str, *, public_only: bool = False
 ) -> list[KnownPerson]:
     """Fetch tenant-scoped known person entities for the router's name scan.
 
@@ -497,10 +499,15 @@ def _fetch_known_persons(
     is injected). Ordered by ``canonical_key`` for a reproducible input; the
     router's tie-break is order-independent, but a stable order keeps the call
     deterministic regardless of physical row order.
+
+    ``public_only`` (RM-46 sec-118c LOW-1, HTTP without --include-confidential):
+    only people a non-confidential document mentions, so a name only confidential
+    documents carry routes exactly as an unknown name does.
     """
+    public = f"AND {public_mention_sql('graph_entities')} " if public_only else ""
     rows = conn.execute(
         "SELECT canonical_key, name, doc_count FROM graph_entities "
-        "WHERE tenant_id = %s AND entity_type = 'person' "
+        f"WHERE tenant_id = %s AND entity_type = 'person' {public}"
         "ORDER BY canonical_key",
         (tenant_id,),
     ).fetchall()

@@ -193,3 +193,81 @@ def test_timeline_person_is_resolved_publicly_in_http_mode(
         mcp_server.brain_timeline(query="zephyr", person="person-abner-secret")
 
     assert "matched no one" in str(excinfo.value)
+
+
+# ------------------------------------------------- the auto router (sec-118c LOW-1)
+
+
+@pytest.fixture
+def routed_people(test_db: psycopg.Connection[Any], people: dict[str, str]) -> None:
+    public = seed_entity(
+        test_db, name="Ann Vale", canonical_key="ann vale", entity_type="person"
+    )
+    secret = seed_entity(
+        test_db, name="Zed Quill", canonical_key="zed quill", entity_type="person"
+    )
+    seed_mention(test_db, public, people["alice"])
+    seed_mention(test_db, secret, people["abner"])
+
+
+def _routed_mode(
+    conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+    query: str,
+    *,
+    public_only: bool,
+) -> tuple[str, str | None]:
+    """The mode ``graph_rag_search`` executes for ``query`` in auto mode, and its person."""
+    from brain.graph_rag.schema import GraphContext
+
+    def fake_global(*_: Any, **__: Any) -> GraphContext:
+        return GraphContext(session_id="s", mode="global", query=query)
+
+    def fake_themes(*_: Any, person: str, **__: Any) -> GraphContext:
+        return GraphContext(session_id="s", mode="themes", query=person)
+
+    monkeypatch.setattr(retrieve, "_retrieve_global", fake_global)
+    monkeypatch.setattr(retrieve, "_retrieve_themes", fake_themes)
+    ctx = retrieve.graph_rag_search(
+        conn, Config(database_url=TEST_DATABASE_URL), query,
+        backend=object(), mode="auto",  # type: ignore[arg-type]
+        public_entities_only=public_only,
+    )
+    return ctx.mode, ctx.query if ctx.mode == "themes" else None
+
+
+@pytest.mark.usefixtures("routed_people")
+def test_auto_routing_treats_a_confidential_only_person_as_unknown_in_public_mode(
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = _routed_mode(
+        test_db, monkeypatch, "what themes keep coming up with zed quill", public_only=True
+    )
+    nobody = _routed_mode(
+        test_db, monkeypatch, "what themes keep coming up with nob ody", public_only=True
+    )
+
+    assert secret == nobody == ("global", None)
+
+
+@pytest.mark.usefixtures("routed_people")
+def test_auto_routing_still_scopes_a_public_person_to_themes(
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for public_only in (True, False):
+        mode = _routed_mode(
+            test_db, monkeypatch, "what themes keep coming up with ann vale",
+            public_only=public_only,
+        )
+        assert mode == ("themes", "Ann Vale")
+
+
+@pytest.mark.usefixtures("routed_people")
+def test_stdio_auto_routing_still_sees_every_person(
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mode = _routed_mode(
+        test_db, monkeypatch, "what themes keep coming up with zed quill", public_only=False
+    )
+
+    assert mode == ("themes", "Zed Quill")
