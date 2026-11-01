@@ -351,3 +351,155 @@ def test_an_uninspectable_config_counts_as_missing_every_option() -> None:
         check_uvicorn_internals(
             protocol=h11_impl.H11Protocol, cycle=h11_impl.RequestResponseCycle, config=42
         )
+
+
+# ------------------------------------- sec-118b N2/N3/N4, on a real uvicorn
+
+
+SECRET = "A" * 43
+
+
+@contextmanager
+def _mcp_server(server: Any, *, timeout: float = 1.0, max_calls: int = 16) -> Iterator[str]:
+    """The full HTTP app around ``server`` on a loopback port, under the real protocol."""
+    from brain.mcp_auth import TokenInfo, fingerprint
+    from brain.mcp_http import HttpServeOptions, build_http_app, validate_options
+
+    token = TokenInfo(path=None, secret=SECRET, mode_octal="", mode_ok=True,
+                      fingerprint=fingerprint(SECRET))
+    opts = HttpServeOptions(token=token, call_timeout_s=timeout)
+
+    async def probe() -> dict[str, Any]:
+        return {"status": "ok"}
+
+    app = build_http_app(server, opts, validate_options(opts), probe=probe, max_calls=max_calls)
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(16)
+    port = sock.getsockname()[1]
+    uv = uvicorn.Server(uvicorn.Config(
+        app, http=idle_deadline_protocol(5.0), log_level="warning", lifespan="on"
+    ))
+    thread = threading.Thread(target=uv.run, kwargs={"sockets": [sock]}, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not uv.started and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert uv.started
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        uv.should_exit = True
+        thread.join(timeout=15)
+        sock.close()
+        assert not thread.is_alive()
+
+
+_HEADERS = {
+    "Authorization": f"Bearer {SECRET}",
+    "Accept": "application/json, text/event-stream",
+    "Content-Type": "application/json",
+}
+
+
+def _tool_call(base: str, name: str, arguments: dict[str, Any] | None = None) -> httpx.Response:
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments or {}}}
+    return httpx.post(f"{base}/mcp", json=body, headers=_HEADERS, timeout=30)
+
+
+def _slow_server(seconds: float) -> Any:
+    import asyncio
+
+    from brain.mcp_compat import make_server
+
+    server = make_server("throwaway")
+
+    def brain_show(id_prefix: str) -> dict[str, Any]:
+        """Blocks its worker thread."""
+        time.sleep(seconds)
+        return {"id": id_prefix}
+
+    async def brain_status() -> dict[str, Any]:
+        """Counts the event loop's tasks."""
+        return {"tasks": len(asyncio.all_tasks())}
+
+    def brain_search(query: str) -> dict[str, Any]:
+        """Answers at once."""
+        return {"echo": query}
+
+    for tool in (brain_show, brain_status, brain_search):
+        server.tool()(tool)
+    return server
+
+
+def _tasks(base: str) -> int:
+    return int(_tool_call(base, "brain_status").json()["result"]["structuredContent"]["tasks"])
+
+
+def test_timed_out_calls_leave_no_tasks_behind() -> None:
+    with _mcp_server(_slow_server(1.5), timeout=1.0) as base:
+        baseline = _tasks(base)
+        started = time.monotonic()
+        statuses = [_tool_call(base, "brain_show", {"id_prefix": "abcdef"}).status_code
+                    for _ in range(3)]
+        elapsed = time.monotonic() - started
+        time.sleep(1.0)
+        after = _tasks(base)
+
+    assert statuses == [504, 504, 504]
+    assert elapsed < 3 * 1.4  # each 504 arrives at the deadline, not after the tool
+    assert after == baseline
+
+
+def test_a_call_behind_a_timed_out_one_is_503_until_it_returns() -> None:
+    results: dict[str, int] = {}
+    with _mcp_server(_slow_server(2.0), timeout=1.0, max_calls=1) as base:
+
+        def slow() -> None:
+            results["slow"] = _tool_call(base, "brain_show", {"id_prefix": "abcdef"}).status_code
+
+        worker = threading.Thread(target=slow)
+        worker.start()
+        time.sleep(1.3)  # past the slow call's deadline, before its tool returns
+        results["behind"] = _tool_call(base, "brain_search", {"query": "q"}).status_code
+        worker.join(timeout=10)
+        time.sleep(1.0)
+        results["after"] = _tool_call(base, "brain_search", {"query": "q"}).status_code
+
+    assert results == {"slow": 504, "behind": 503, "after": 200}
+
+
+@pytest.mark.parametrize("method", ["GET", "DELETE", "PUT", "OPTIONS"])
+def test_every_non_post_method_on_the_endpoint_is_405(method: str) -> None:
+    with _mcp_server(_slow_server(0.0)) as base:
+        response = httpx.request(
+            method, f"{base}/mcp", headers={**_HEADERS, "Accept": "text/event-stream"}, timeout=5
+        )
+        ordinary = _tool_call(base, "brain_search", {"query": "q"})
+
+    assert response.status_code == 405
+    assert response.headers["allow"] == "POST"
+    assert ordinary.status_code == 200
+
+
+def test_every_refusal_closes_its_connection() -> None:
+    with _mcp_server(_slow_server(0.0)) as base:
+        refusals = {
+            "401": httpx.post(f"{base}/mcp", json={}, timeout=5),
+            "400": httpx.get(f"{base}/healthz", headers={"Host": "evil.example.com"}, timeout=5),
+            "403": httpx.post(f"{base}/mcp", json={"jsonrpc": "2.0", "id": 1,
+                              "method": "tools/list"},
+                              headers={**_HEADERS, "Origin": "https://evil.example.com"},
+                              timeout=5),
+            "404": httpx.get(f"{base}/nope", timeout=5),
+            "405": httpx.get(f"{base}/mcp", headers=_HEADERS, timeout=5),
+            "413": httpx.post(f"{base}/mcp", content=b"x" * (2 * 1024 * 1024),
+                              headers=_HEADERS, timeout=5),
+        }
+        ordinary = _tool_call(base, "brain_search", {"query": "q"})
+
+    for status, response in refusals.items():
+        assert str(response.status_code) == status
+        assert response.headers.get("connection") == "close", status
+    assert ordinary.headers.get("connection") != "close"

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import socket
-import time
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -532,29 +531,6 @@ def test_serve_wraps_every_served_tool(cfg: Config, monkeypatch: pytest.MonkeyPa
 # ------------------------------------------- sec-118 #4: orphaned work and statements
 
 
-def test_a_call_behind_an_orphaned_worker_is_503_until_it_returns() -> None:
-    server = _server()
-
-    def brain_show(id_prefix: str) -> dict[str, Any]:
-        """A stand-in read tool that blocks its worker thread."""
-        time.sleep(2.0)
-        return {"id": id_prefix}
-
-    server.tool()(brain_show)
-    opts = HttpServeOptions(token=TOKEN, call_timeout_s=1.0)
-    app = build_http_app(server, opts, validate_options(opts), probe=_not_probed, max_calls=1)
-    show = _rpc("tools/call", {"name": "brain_show", "arguments": {"id_prefix": "abcdef"}})
-    with TestClient(app, base_url="http://127.0.0.1:8787") as test_client:
-        timed_out = _post(test_client, show)
-        behind_orphan = _call(test_client, {"query": "q"})
-        time.sleep(2.0)
-        after = _call(test_client, {"query": "q"})
-
-    assert timed_out.status_code == 504
-    assert behind_orphan.status_code == 503
-    assert after.status_code == 200
-
-
 @pytest.mark.parametrize(
     ("url", "expected"),
     [
@@ -665,3 +641,15 @@ def test_serve_drops_person_keys_unless_opted_in(
         response = _call(test_client, {"query": "q"})
 
     assert ("a@example.com" in response.text) is kept
+
+
+def test_statement_timeout_keeps_other_query_values_byte_for_byte() -> None:
+    """sec-118b tail: parse_qsl turned '+' into a space, which libpq reads literally."""
+    url = "postgresql://u@db.example.com/brain?application_name=a+b&sslmode=disable"
+
+    result = with_statement_timeout(url, 1500)
+
+    assert result.startswith(
+        "postgresql://u@db.example.com/brain?application_name=a+b&sslmode=disable&options="
+    )
+    assert result.endswith("options=-c%20statement_timeout%3D1500")

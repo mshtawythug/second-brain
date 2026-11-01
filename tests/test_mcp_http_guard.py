@@ -565,3 +565,57 @@ def test_a_decoded_control_character_path_is_404(raw: str) -> None:
 
     assert sent[0]["status"] == 404
     assert echo.calls == 0
+
+
+# ------------------------------------------------- sec-118b N3 and N4 (unit)
+
+
+def test_the_endpoint_answers_post_only() -> None:
+    from brain.mcp_http_guard import EndpointMethodMiddleware
+
+    echo = _Echo()
+    client = TestClient(EndpointMethodMiddleware(echo, endpoint=ENDPOINT))
+
+    refused = client.get(ENDPOINT)
+    ordinary = client.post(ENDPOINT, content=_call({"query": "q"}))
+    elsewhere = client.get("/healthz")
+
+    assert refused.status_code == 405
+    assert refused.headers["allow"] == "POST"
+    assert ordinary.status_code == 200
+    assert elsewhere.status_code == 200
+    assert echo.calls == 2
+
+
+def test_an_error_response_closes_and_a_success_does_not() -> None:
+    from brain.mcp_http_guard import CloseOnErrorMiddleware
+
+    async def answer(scope: Any, receive: Any, send: Any) -> None:
+        status = 404 if scope["path"] == "/missing" else 200
+        await send(
+            {"type": "http.response.start", "status": status,
+             "headers": [(b"connection", b"keep-alive")]}
+        )
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    client = TestClient(CloseOnErrorMiddleware(answer))
+
+    assert client.get("/missing").headers["connection"] == "close"
+    assert client.get("/fine").headers["connection"] == "keep-alive"
+
+
+def test_the_new_guards_pass_lifespan() -> None:
+    from brain.mcp_http_guard import CloseOnErrorMiddleware, EndpointMethodMiddleware
+
+    seen: list[str] = []
+
+    async def inner(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        seen.append(scope["type"])
+
+    async def noop(*_: Any) -> Any:
+        return {}
+
+    anyio.run(CloseOnErrorMiddleware(inner), {"type": "lifespan"}, noop, noop)
+    anyio.run(EndpointMethodMiddleware(inner, endpoint=ENDPOINT), {"type": "lifespan"}, noop, noop)
+
+    assert seen == ["lifespan", "lifespan"]

@@ -35,7 +35,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import anyio
 import psycopg
@@ -58,7 +58,9 @@ from .mcp_http_guard import (
     HEALTHZ_PATH,
     READYZ_PATH,
     ASGIApp,
+    CloseOnErrorMiddleware,
     ConfidentialGateMiddleware,
+    EndpointMethodMiddleware,
     HealthzRoute,
     PathAllowlistMiddleware,
     ReadyzRoute,
@@ -297,6 +299,9 @@ def build_http_app(
         assert opts.token is not None  # validate_options guarantees it
         app = BearerAuthMiddleware(app, token=opts.token, exempt_paths=frozenset({HEALTHZ_PATH}))
     app = HealthzRoute(app)
+    # sec-118b N3: the endpoint answers POST only (no never-ending GET stream).
+    # Inside the Host check, so a rebinding request is refused on Host first.
+    app = EndpointMethodMiddleware(app, endpoint=opts.path)
     app = cast(
         ASGIApp,
         TrustedHostMiddleware(
@@ -307,6 +312,8 @@ def build_http_app(
     app = PathAllowlistMiddleware(
         app, paths=frozenset({opts.path, HEALTHZ_PATH, READYZ_PATH})
     )
+    # sec-118b N4: every refusal closes its connection.
+    app = CloseOnErrorMiddleware(app)
     return RequestLogMiddleware(app, endpoint=opts.path)
 
 
@@ -332,11 +339,17 @@ def with_statement_timeout(database_url: str, timeout_ms: int) -> str:
         merged = f"{current} {setting}" if current else setting
         return make_conninfo(database_url, options=merged)
     parts = urlsplit(database_url)
-    query = parse_qsl(parts.query, keep_blank_values=True)
-    existing = [value for key, value in query if key == "options"]
-    kept = [(key, value) for key, value in query if key != "options"]
+    # Split by hand and keep every other parameter's raw text: parse_qsl reads
+    # '+' as a space, libpq reads it literally (sec-118b).
+    fields = [field for field in parts.query.split("&") if field]
+    existing = [
+        unquote(field.partition("=")[2])
+        for field in fields
+        if unquote(field.partition("=")[0]) == "options"
+    ]
+    kept = [field for field in fields if unquote(field.partition("=")[0]) != "options"]
     merged = " ".join([*existing, setting])
-    encoded = urlencode([*kept, ("options", merged)], quote_via=quote)
+    encoded = "&".join([*kept, "options=" + quote(merged, safe="")])
     return urlunsplit(parts._replace(query=encoded))
 
 

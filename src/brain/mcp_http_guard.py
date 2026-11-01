@@ -62,7 +62,9 @@ _PASS, _MALFORMED, _REFUSE = "pass", "malformed", "refuse"
 _BOM = "\ufeff"
 
 
-async def send_json(send: Send, status: int, payload: Any) -> None:
+async def send_json(
+    send: Send, status: int, payload: Any, *, headers: tuple[tuple[bytes, bytes], ...] = ()
+) -> None:
     """Send a complete JSON response that the app never saw."""
     body = json.dumps(payload).encode("utf-8")
     await send(
@@ -73,6 +75,7 @@ async def send_json(send: Send, status: int, payload: Any) -> None:
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode("ascii")),
                 (b"cache-control", b"no-store"),
+                *headers,
             ],
         }
     )
@@ -107,6 +110,60 @@ class PathAllowlistMiddleware:
             await self._app(scope, receive, send)
             return
         await send_json(send, 404, {"error": "not found"})
+
+
+class EndpointMethodMiddleware:
+    """Answer 405 to every method but POST on the MCP endpoint (sec-118b N3).
+
+    The server is stateless JSON: it never pushes on a GET stream, and a stateless
+    DELETE has no session to end. Left to the SDK, a token holder's
+    ``GET /mcp`` (``Accept: text/event-stream``) opened a stream that never ended,
+    outside every work and time bound. Spec-compliant clients read 405 on GET as
+    "no stream".
+    """
+
+    def __init__(self, app: ASGIApp, *, endpoint: str) -> None:
+        self._app = app
+        self._endpoint = endpoint
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        on_endpoint = scope["type"] == "http" and scope["path"] == self._endpoint
+        if on_endpoint and scope["method"] != "POST":
+            await send_json(
+                send, 405, {"error": "method not allowed"}, headers=((b"allow", b"POST"),)
+            )
+            return
+        await self._app(scope, receive, send)
+
+
+class CloseOnErrorMiddleware:
+    """Add ``Connection: close`` to every response with a status of 400 or more (sec-118b N4).
+
+    A refused client then cannot keep its connection open for reuse; with the
+    idle deadline that bounds how long a connection lingers. It does not stop a
+    peer that keeps opening new connections from filling uvicorn's connection
+    cap; that residual is recorded in the guide.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        async def closing(message: Message) -> None:
+            if message["type"] == "http.response.start" and message["status"] >= 400:
+                headers = [
+                    (name, value)
+                    for name, value in message.get("headers", [])
+                    if name.lower() != b"connection"
+                ]
+                message = {**message, "headers": [*headers, (b"connection", b"close")]}
+            await send(message)
+
+        await self._app(scope, receive, closing)
 
 
 class RequestLogMiddleware:
@@ -220,12 +277,35 @@ class ResponseGuardMiddleware:
                 else:
                     chunks.append(body)
 
-        with anyio.move_on_after(self._timeout) as deadline:
-            await self._app(scope, receive, hold)
-        if deadline.cancelled_caught:
-            logger.warning("tool call exceeded its %ss deadline", self._timeout)
-            await send_json(send, 504, {"error": "timed out"})
-        elif over:
+        # The app is NOT cancelled at the deadline (sec-118b N2): cancelling the
+        # SDK's stateless request skips its transport's terminate() on mcp 2.0
+        # and leaked two tasks per 504. The client gets its 504 on time; this
+        # request then waits for the app to finish, discarding its late answer,
+        # and keeps its work-limit slot meanwhile, so timed-out work stays counted.
+        finished = anyio.Event()
+        late = False
+
+        async def run_app() -> None:
+            try:
+                await self._app(scope, receive, discard_late)
+            finally:
+                finished.set()
+
+        async def discard_late(message: Message) -> None:
+            if not late:
+                await hold(message)
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(run_app)
+            with anyio.move_on_after(self._timeout):
+                await finished.wait()
+            if not finished.is_set():
+                late = True
+                logger.warning("tool call exceeded its %ss deadline", self._timeout)
+                await send_json(send, 504, {"error": "timed out"})
+        if late:
+            return
+        if over:
             logger.warning("tool result exceeded %d bytes", self._cap)
             await send_json(send, 502, {"error": "result too large"})
         elif start is None:
