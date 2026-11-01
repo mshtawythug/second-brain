@@ -159,7 +159,13 @@ than waiting behind it. So that a timed-out call cannot hold its slot for long, 
 stops at its next step once `--call-timeout` has passed (at most one more model call or
 retrieval), and its loop and the graph tools' `depth` are held to the configured values
 above. Every other tool's loops are bounded by the server's configuration, not by the
-caller (timeline synthesis by `timeline_synth_limit`, for example). The endpoint answers
+caller (timeline synthesis by `timeline_synth_limit`, for example).
+
+The worst case a timed-out `brain_ask` holds its slot is `--call-timeout` plus the one step
+it was in. That step is either one model call, at most twice `BRAIN_ASK_TIMEOUT_SECONDS`
+(90 s by default, plus one retry on an unparseable reply, so 180 s), or one retrieval of at
+most three sub-queries, each of whose statements stops at `--call-timeout`. With the
+defaults, a model step ends the hold by 300 + 180 s. The endpoint answers
 POST only: a `GET` (an event stream) or any other method gets 405.
 
 If the request handler itself crashes (not a tool, whose failures are the JSON-RPC error
