@@ -401,6 +401,26 @@ dependencies = [
 # the marker is still deselected from the default suite, so the job is purely
 # additive and the gate lives in CI only. A local `pytest` is unaffected.
 browser = ["playwright>=1.40"]
+# `brain mcp serve` (RM-46): the MCP server over streamable HTTP. It needs the
+# mcp 2.x server API; stdio does not, so the base pin above stays `>=1.2,<3.0`
+# and a plain install keeps a 1.x mcp. This extra narrows that to 2.x, and on
+# 1.x `brain mcp serve` exits 2 naming `pip install 'secondbrain-py[http]'`.
+# Floor 2.0 — MEASURED 2026-10-31 by reading the installed SDK, on 2.0.0 and
+# 2.3.0 (the HTTP tests run on 2.3.0):
+#   * host, port, path and `transport_security` are KEYWORD ARGUMENTS of
+#     `MCPServer.streamable_http_app(...)`; 1.x read them from `settings`, so
+#     the 1.x spelling cannot be supported from one code path;
+#   * an explicit `TransportSecuritySettings` skips the loopback auto-branch;
+#   * `MCPServer.remove_tool` is public (it raises for an unknown name);
+#   * the body cap (`max_request_body_size`) counts streamed bytes, so a
+#     chunked POST no longer bypasses it (R1 §6.10's "known gap" is closed);
+#   * `stateless_http=True` keeps no per-session state;
+#   * sync tools run in `anyio.to_thread.run_sync` — concurrently (RM-46.D5);
+#   * the client is `mcp.client.streamable_http.streamable_http_client`.
+# starlette and uvicorn are already declared above (`brain ui`): no new wheel.
+# `tests/test_mcp_http_extra.py` pins that the two pins intersect to 2.x and
+# that the base pin alone still admits 1.x.
+http = ["mcp>=2.0,<3.0"]
 # NO `click` pin here, deliberately, and it was measured rather than assumed.
 #
 # There IS a real click floor in this suite — click < 8.2's `CliRunner` merges
