@@ -14,7 +14,11 @@ tools can touch, so both directions are defensive:
   (0600) and is renamed into place. A symlink at the marker's name is replaced,
   never followed.
 * **read**: ``O_NOFOLLOW`` and ``O_NONBLOCK`` (a FIFO cannot hang ``brain
-  doctor``), a regular-file check and a 4 KiB cap, then a schema check.
+  doctor``), a regular-file check and a 4 KiB cap, then a schema check: the
+  ``schema`` field must equal ``MARKER_SCHEMA``, both timestamps must carry an
+  offset and stay in range once converted to UTC, and any parse failure
+  (including ``RecursionError`` from deep nesting on 3.11) or ``OSError`` becomes
+  :data:`MARKER_UNREADABLE`.
 * **names**: only the archive's basename is stored (a full path can carry a user
   name), with control and format characters (ANSI escapes, bidi overrides)
   stripped on write and again on read, since the doctor prints it.
@@ -29,7 +33,7 @@ import stat
 import unicodedata
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +48,8 @@ ARCHIVE_NAME_MAX = 255
 MARKER_SCHEMA = 1
 
 _STATE_DIR = "state"
-_UNREADABLE = "restored-from marker is unreadable"
+#: The one message every read failure carries (``brain doctor`` shows it verbatim).
+MARKER_UNREADABLE = "restored-from marker is unreadable"
 _UNWRITABLE = "could not write the restored-from marker"
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
@@ -121,7 +126,7 @@ def read_marker(brain_home: Path) -> RestoredFrom | None:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise ReplicaMarkerError(_UNREADABLE) from exc
+        raise ReplicaMarkerError(MARKER_UNREADABLE) from exc
     try:
         raw = _read_capped(dir_fd)
     finally:
@@ -130,8 +135,8 @@ def read_marker(brain_home: Path) -> RestoredFrom | None:
         return None
     try:
         return _parse(json.loads(raw.decode("utf-8")))
-    except (ValueError, TypeError, KeyError) as exc:
-        raise ReplicaMarkerError(_UNREADABLE) from exc
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError) as exc:
+        raise ReplicaMarkerError(MARKER_UNREADABLE) from exc
 
 
 def _read_capped(dir_fd: int) -> bytes | None:
@@ -141,15 +146,31 @@ def _read_capped(dir_fd: int) -> bytes | None:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise ReplicaMarkerError(_UNREADABLE) from exc
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise ReplicaMarkerError(MARKER_UNREADABLE) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ReplicaMarkerError(MARKER_UNREADABLE)
+        raw = _read_all(fd, MARKER_MAX_BYTES + 1)  # one byte over proves "too big"
+    except OSError as exc:
+        raise ReplicaMarkerError(MARKER_UNREADABLE) from exc
+    finally:
         os.close(fd)
-        raise ReplicaMarkerError(_UNREADABLE)
-    with os.fdopen(fd, "rb") as handle:
-        raw = handle.read(MARKER_MAX_BYTES + 1)  # one byte over proves "too big"
     if len(raw) > MARKER_MAX_BYTES:
-        raise ReplicaMarkerError(_UNREADABLE)
+        raise ReplicaMarkerError(MARKER_UNREADABLE)
     return raw
+
+
+def _read_all(fd: int, limit: int) -> bytes:
+    """Read up to ``limit`` bytes from ``fd``; the caller owns and closes it."""
+    chunks: list[bytes] = []
+    total = 0
+    while total < limit:
+        chunk = os.read(fd, limit - total)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
 
 
 def _aware(value: Any) -> datetime:
@@ -158,12 +179,16 @@ def _aware(value: Any) -> datetime:
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         raise ValueError("timestamp has no offset")
+    parsed.astimezone(UTC)  # range check: raises OverflowError (sec-119 L1)
     return parsed
 
 
 def _parse(payload: Any) -> RestoredFrom:
     if not isinstance(payload, dict):
         raise TypeError("marker is not an object")
+    schema = payload.get("schema")
+    if type(schema) is not int or schema != MARKER_SCHEMA:  # a bool is not a schema
+        raise ValueError("unknown marker schema")
     archive = payload["archive"]
     if not isinstance(archive, str):
         raise TypeError("archive is not a string")

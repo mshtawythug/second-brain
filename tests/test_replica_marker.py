@@ -11,6 +11,7 @@ import os
 import stat
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -18,6 +19,8 @@ from brain.backup.replica_marker import (
     ARCHIVE_NAME_MAX,
     MARKER_MAX_BYTES,
     MARKER_NAME,
+    MARKER_SCHEMA,
+    MARKER_UNREADABLE,
     ReplicaMarkerError,
     RestoredFrom,
     marker_path,
@@ -372,3 +375,86 @@ def test_read_does_not_hang_on_a_fifo(tmp_path: Path) -> None:
 
     with pytest.raises(ReplicaMarkerError):
         read_marker(tmp_path)
+
+
+# --- sec-119 / rev-119 fix round -----------------------------------------------------
+
+
+def test_read_refuses_deeply_nested_json_under_the_cap(tmp_path: Path) -> None:
+    """sec-119 L2: on Python 3.11 ``json.loads`` raises RecursionError, not ValueError."""
+    path = marker_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("[" * 4000, encoding="utf-8")
+
+    with pytest.raises(ReplicaMarkerError):
+        read_marker(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "field", ["created_at", "restored_at"], ids=["created_at", "restored_at"]
+)
+@pytest.mark.parametrize(
+    "stamp", ["0001-01-01T00:00:00+14:00", "9999-12-31T23:59:00-14:00"], ids=["min", "max"]
+)
+def test_read_refuses_a_timestamp_that_leaves_the_range_in_utc(
+    tmp_path: Path, field: str, stamp: str
+) -> None:
+    """sec-119 L1: ``astimezone(UTC)`` overflowed in ``brain doctor`` instead of here."""
+    _put(tmp_path, _valid_payload(**{field: stamp}))
+
+    with pytest.raises(ReplicaMarkerError):
+        read_marker(tmp_path)
+
+
+def test_read_keeps_a_timestamp_at_the_edge_of_the_range(tmp_path: Path) -> None:
+    _put(tmp_path, _valid_payload(created_at="0001-01-01T00:00:00+00:00"))
+
+    marker = read_marker(tmp_path)
+
+    assert marker is not None
+    assert marker.created_at.year == 1
+
+
+def _open_fds() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+@pytest.mark.parametrize("failing", ["fstat", "read"])
+def test_an_os_error_while_reading_is_unreadable_and_leaks_no_fd(
+    tmp_path: Path, failing: str
+) -> None:
+    """sec-119 / rev-119 #1: every OSError on the open descriptor becomes the fixed error."""
+    _put(tmp_path, _valid_payload())
+    before = _open_fds()
+    target = (
+        "brain.backup.replica_marker.os.fstat"
+        if failing == "fstat"
+        else "brain.backup.replica_marker._read_all"
+    )
+
+    with (
+        patch(target, side_effect=OSError(5, "synthetic EIO")),
+        pytest.raises(ReplicaMarkerError) as excinfo,
+    ):
+        read_marker(tmp_path)
+
+    assert str(excinfo.value) == MARKER_UNREADABLE
+    assert _open_fds() == before
+
+
+@pytest.mark.parametrize("schema", [2, 0, "1", True, None], ids=str)
+def test_read_refuses_any_schema_but_the_current_one(tmp_path: Path, schema: object) -> None:
+    """rev-119 #3: a future ``schema: 2`` marker is not silently read as schema 1."""
+    payload = _valid_payload(schema=schema)
+    if schema is None:
+        payload.pop("schema")
+    _put(tmp_path, payload)
+
+    with pytest.raises(ReplicaMarkerError):
+        read_marker(tmp_path)
+
+
+def test_read_accepts_the_current_schema(tmp_path: Path) -> None:
+    _put(tmp_path, _valid_payload(schema=MARKER_SCHEMA))
+
+    assert read_marker(tmp_path) is not None
