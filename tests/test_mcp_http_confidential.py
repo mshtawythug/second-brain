@@ -30,7 +30,13 @@ from brain import mcp_server
 from brain.config import Config
 from brain.graph_rag.public_entities import public_entity_ids, withhold_confidential_entities
 from brain.graph_rag.relational import list_entities
-from brain.graph_rag.schema import CommunityGroup, GraphContext, GraphEntity, ThemeGroup
+from brain.graph_rag.schema import (
+    CommunityGroup,
+    GraphContext,
+    GraphEntity,
+    GraphExplanation,
+    ThemeGroup,
+)
 from brain.mcp_compat import MCPError
 from brain.mcp_tools import related
 from tests.conftest import TEST_DATABASE_URL, FakeEmbedder
@@ -227,6 +233,7 @@ def test_graph_context_entities_are_filtered_everywhere(
         entities=[secret, mixed],
         themes=[ThemeGroup(group_id=1, entities=[secret, mixed])],
         communities=[CommunityGroup(community_key="c", entities=[mixed, secret])],
+        explanation=GraphExplanation(mode="local", seed_entity_ids=[secret.id, mixed.id]),
     )
 
     filtered = withhold_confidential_entities(test_db, ctx)
@@ -234,6 +241,8 @@ def test_graph_context_entities_are_filtered_everywhere(
     assert [e.name for e in filtered.entities] == ["Project Harbor"]
     assert [e.name for e in filtered.themes[0].entities] == ["Project Harbor"]
     assert [e.name for e in filtered.communities[0].entities] == ["Project Harbor"]
+    assert filtered.explanation is not None
+    assert filtered.explanation.seed_entity_ids == [mixed.id]
     assert [e.name for e in ctx.entities] == ["Codename Zephyr", "Project Harbor"]  # not mutated
 
 

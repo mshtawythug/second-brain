@@ -56,19 +56,28 @@ def withhold_confidential_entities(
 ) -> GraphContext:
     """``ctx`` without the entities only confidential documents mention.
 
-    Covers the top-level entities and every theme's and community's. Returns a
-    new context; ``ctx`` is not changed.
+    Covers the top-level entities, every theme's and community's, and the
+    explanation's seed ids. Returns a new context; ``ctx`` is not changed.
     """
     every = [
         *ctx.entities,
         *(entity for theme in ctx.themes for entity in theme.entities),
         *(entity for community in ctx.communities for entity in community.entities),
     ]
-    public = public_entity_ids(conn, ctx.tenant_id, (entity.id for entity in every))
-    if all(entity.id in public for entity in every):
+    seeds = ctx.explanation.seed_entity_ids if ctx.explanation is not None else []
+    public = public_entity_ids(
+        conn, ctx.tenant_id, [*(entity.id for entity in every), *seeds]
+    )
+    if all(entity.id in public for entity in every) and all(seed in public for seed in seeds):
         return ctx
+    explanation = (
+        replace(ctx.explanation, seed_entity_ids=[seed for seed in seeds if seed in public])
+        if ctx.explanation is not None
+        else None
+    )
     return replace(
         ctx,
+        explanation=explanation,
         entities=_kept(ctx.entities, public),
         themes=[replace(theme, entities=_kept(theme.entities, public)) for theme in ctx.themes],
         communities=[

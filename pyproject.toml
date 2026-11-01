@@ -405,8 +405,21 @@ browser = ["playwright>=1.40"]
 # mcp 2.x server API; stdio does not, so the base pin above stays `>=1.2,<3.0`
 # and a plain install keeps a 1.x mcp. This extra narrows that to 2.x, and on
 # 1.x `brain mcp serve` exits 2 naming `pip install 'secondbrain-py[http]'`.
-# Floor 2.0 — MEASURED 2026-10-31 by reading the installed SDK, on 2.0.0 and
-# 2.3.0 (the HTTP tests run on 2.3.0):
+# Floor 2.0 — MEASURED 2026-10-31. The HTTP and stdio MCP tests (409, every
+# tests/test_mcp_http_* file plus the stdio protocol, server, compat and seam
+# files) pass on BOTH ends:
+#   mcp 2.0.0 + starlette 1.8.0 + uvicorn 0.54.0 (an offline venv; 2.0.0 copied
+#     from an installed tree, because the wheel was not in the local cache)
+#   mcp 2.3.0 + starlette 1.10.0 + uvicorn 0.54.0 (the worktree venv)
+# starlette's own floor (1.7, above) was NOT re-run for HTTP: 1.7.0 is not in the
+# offline cache. 1.8.0 is the lowest starlette the HTTP transport has run on.
+# What differs between the two mcp ends, read from the installed SDKs:
+#   * 2.0's Tool.run puts str(exc) in an unexpected failure's result; 2.3 drops
+#     it. brain.mcp_http_tools wraps every served tool, so both answer the same
+#     class-only text (sec-118 #5);
+#   * 2.3 adds session_idle_timeout / max_sessions to streamable_http_app; only
+#     keyword arguments both versions take are passed.
+# What both have:
 #   * host, port, path and `transport_security` are KEYWORD ARGUMENTS of
 #     `MCPServer.streamable_http_app(...)`; 1.x read them from `settings`, so
 #     the 1.x spelling cannot be supported from one code path;
