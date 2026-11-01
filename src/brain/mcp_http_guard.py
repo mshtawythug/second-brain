@@ -58,6 +58,8 @@ CONFIDENTIAL_REFUSAL = (
 _KNOWN_METHODS = frozenset({"GET", "POST", "DELETE", "HEAD", "OPTIONS", "PUT", "PATCH"})
 _STRUCTURAL = re.compile(rb'[\[\]{}"\\]')
 _PASS, _MALFORMED, _REFUSE = "pass", "malformed", "refuse"
+#: A byte-order mark: valid UTF-8, but no JSON parser should have to agree on it.
+_BOM = "\ufeff"
 
 
 async def send_json(send: Send, status: int, payload: Any) -> None:
@@ -258,7 +260,7 @@ def inspect_request(body: bytes) -> tuple[str, Any]:
         text = body.decode("utf-8")
     except UnicodeDecodeError:
         return _MALFORMED, None
-    if text.startswith("﻿") or json_depth_exceeds(body, MAX_JSON_DEPTH):
+    if text.startswith(_BOM) or json_depth_exceeds(body, MAX_JSON_DEPTH):
         return _MALFORMED, None
     try:
         message = json.loads(

@@ -4,6 +4,7 @@ Each test installs a fresh ``_State`` (real test-DB Config + fake embedder)
 via ``monkeypatch.setattr`` and calls the tool functions directly. The
 JSON-RPC round-trip is exercised separately by the protocol integration test.
 """
+import asyncio
 import logging
 import os
 import subprocess
@@ -1502,6 +1503,20 @@ def test_main_initializes_state_and_starts_server(
     assert captured["transport"] == "stdio"
     assert isinstance(captured["state"], mcp_server._State)
     assert captured["state"].cfg.database_url == TEST_DATABASE_URL  # type: ignore[union-attr]
+
+
+def test_main_serves_every_registered_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RM-46: the HTTP transport's read-only filter must never reach stdio."""
+    _install_main_doubles(monkeypatch, embedder_cls=_RecordingEmbedder)
+    before = {tool.name for tool in asyncio.run(mcp_server.mcp_app.list_tools())}
+
+    mcp_server.main()
+
+    after = {tool.name for tool in asyncio.run(mcp_server.mcp_app.list_tools())}
+    assert after == before
+    assert {"brain_edit", "brain_rm", "brain_gaps"} <= after
 
 
 def test_main_runs_warmup_embed(
