@@ -70,7 +70,7 @@ from .mcp_http_guard import (
 from .mcp_http_tools import sanitize_tool_errors
 from .mcp_tool_classes import (
     ToolRegistry,
-    apply_graph_hide,
+    apply_hide_mode,
     apply_read_only,
     registered_tool_names,
 )
@@ -427,17 +427,17 @@ def banner_lines(
     served: int,
     total: int,
     embedder: str,
-    graph_withheld: int = 0,
+    hidden: int = 0,
 ) -> list[str]:
     """What ``brain mcp serve`` prints to stderr once it is bound. Never the token."""
     origin = bind_origin(plan.host, port, plan.addresses)
-    graph = f"; {graph_withheld} graph tools withheld" if graph_withheld else ""
+    graph = f"; {hidden} graph and search-log tools withheld" if hidden else ""
     if opts.allow_writes:
         mode = (
             f"READ-WRITE ({served} of {total} tools; --allow-writes: write tools exposed{graph})"
         )
     else:
-        writes = total - served - graph_withheld
+        writes = total - served - hidden
         mode = f"READ-ONLY ({served} of {total} tools; {writes} write tools withheld{graph})"
     confidential = (
         "SERVED (--include-confidential)"
@@ -533,11 +533,12 @@ def serve_http(
         names = anyio.run(registered_tool_names, target)
         withheld = () if opts.allow_writes else apply_read_only(target, names)
         # Round 5: the entity graph is derived from every document, confidential
-        # ones included, so the graph family needs --include-confidential.
-        graph_withheld = () if opts.include_confidential else apply_graph_hide(
+        # ones included, so the graph family needs --include-confidential; so do
+        # the pinned extras (weekly communities, the search log; sec-118e/f).
+        hidden = () if opts.include_confidential else apply_hide_mode(
             target, [name for name in names if name not in withheld]
         )
-        withheld = (*withheld, *graph_withheld)
+        withheld = (*withheld, *hidden)
         # sec-118 #5: an unexpected failure answers its class, never its text.
         sanitize_tool_errors(
             target,
@@ -551,7 +552,7 @@ def serve_http(
         say = announce or (lambda line: print(line, file=sys.stderr))
         for line in banner_lines(
             opts, plan, port, served=served, total=len(names), embedder=cfg.embedder,
-            graph_withheld=len(graph_withheld),
+            hidden=len(hidden),
         ):
             say(line)
         run(app, sockets, uvicorn_config_kwargs(plan, port, opts.log_level))

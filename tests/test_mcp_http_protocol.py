@@ -39,10 +39,10 @@ TEST_DATABASE_URL = os.environ.get(
 ALL_TOOLS = 51
 READ_TOOLS = 28
 #: Round 5: without --include-confidential the graph family (6 read tools; 12
-#: prefixed plus brain_review_weekly, sec-118e) is withheld, so the default serves
-#: 22 and --allow-writes serves 38.
+#: prefixed) plus brain_review_weekly and brain_gaps (sec-118e/f) are withheld, so
+#: the default serves 22 and --allow-writes serves 37.
 GRAPH_READ_TOOLS = 6
-GRAPH_TOOLS = 13
+GRAPH_TOOLS = 14
 STARTUP_DEADLINE_S = 60.0
 
 
@@ -186,6 +186,7 @@ def test_allow_writes_serves_every_tool(tmp_path: Path) -> None:
 
     assert len(names) == ALL_TOOLS - GRAPH_TOOLS
     assert "brain_edit" in names
+    assert not {"brain_gaps", "brain_review_weekly", "brain_graphrag_build"} & names
 
 
 def test_the_bearer_token_guards_the_endpoint(tmp_path: Path) -> None:
@@ -214,6 +215,7 @@ def test_include_confidential_serves_the_graph_family_and_it_answers(tmp_path: P
     assert "brain_graphrag_search" in names
     assert "total_entities" in payload
     assert len(every) == ALL_TOOLS
+    assert {"brain_gaps", "brain_review_weekly"} <= every
 
 
 @pytest.mark.usefixtures("corpus")

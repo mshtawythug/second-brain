@@ -23,13 +23,14 @@ graph is derived from EVERY document: entity names, co-occurrence edges and
 weights, themes and communities are all computed over confidential documents
 too. Four security rounds each found one more way a graph output carried that,
 so filtering outputs field by field did not converge. Without
-``--include-confidential`` the graph family is withheld (:func:`apply_graph_hide`),
+``--include-confidential`` the graph family is withheld (:func:`apply_hide_mode`),
 and ``brain_ask`` answers only in ``hybrid`` mode (:data:`ASK_GRAPH_MODES_REFUSAL`).
 
-The family is the ``brain_graphrag_`` prefix PLUS :data:`GRAPH_DERIVED_TOOLS`,
-pinned tools whose output is built from graph communities or edges under another
-name (sec-118e: ``brain_review_weekly``). The prefix alone does not catch a future
-graph tool named otherwise. ``tests/test_mcp_http_graph_reach.py`` walks every
+The withheld set is the ``brain_graphrag_`` prefix PLUS :data:`HIDE_MODE_WITHHELD_EXTRA`,
+pinned tools whose output carries confidential-derived data under another name:
+graph communities (sec-118e: ``brain_review_weekly``) or the owner's logged search
+terms from every lens (sec-118f: ``brain_gaps``). The prefix alone does not catch a
+future graph tool named otherwise. ``tests/test_mcp_http_graph_reach.py`` walks every
 registered tool's calls for graph SQL and ``brain.graph_rag``, and fails on one
 that is in neither this family nor :data:`GRAPH_TOUCHING_KEPT`, where each served
 tool that reads graph tables carries the reason its output is built from gated
@@ -112,12 +113,17 @@ ASK_GRAPH_MODES_REFUSAL = (
 )
 
 
-#: Tools without the prefix whose output is built from graph communities or edges.
-GRAPH_DERIVED_TOOLS: frozenset[str] = frozenset(
+#: Tools without the prefix that are withheld in hide mode too, each because its
+#: output carries confidential-derived data. Both are write tools, so they matter
+#: only with --allow-writes.
+HIDE_MODE_WITHHELD_EXTRA: frozenset[str] = frozenset(
     {
         # Its graph themes are communities: member names and stored summaries
         # (sec-118e). Gated on stdio too now, and withheld here regardless.
         "brain_review_weekly",
+        # It clusters the owner's logged search terms, typed under every lens, so
+        # a confidential-only term would leave (sec-118f LOW-3).
+        "brain_gaps",
     }
 )
 
@@ -148,23 +154,22 @@ GRAPH_TOUCHING_KEPT: dict[str, str] = {
     "brain_connect_list": (
         "graph_score is the pair's own shared mentions; both documents are lensed"
     ),
-    "brain_gaps": "purges gaps whose entity is gone; returns search-failure clusters",
 }
 
 
 def hide_mode_withheld(registered: Iterable[str]) -> tuple[str, ...]:
-    """The graph family among ``registered``: the prefix and :data:`GRAPH_DERIVED_TOOLS`."""
+    """The hide-mode withheld set among ``registered``: the prefix and the extra set."""
     return tuple(
         sorted(
             name
             for name in set(registered)
-            if name.startswith(GRAPH_TOOL_PREFIX) or name in GRAPH_DERIVED_TOOLS
+            if name.startswith(GRAPH_TOOL_PREFIX) or name in HIDE_MODE_WITHHELD_EXTRA
         )
     )
 
 
-def apply_graph_hide(server: ToolRegistry, registered: Iterable[str]) -> tuple[str, ...]:
-    """Remove the graph family (:func:`hide_mode_withheld`) from ``server``; return it."""
+def apply_hide_mode(server: ToolRegistry, registered: Iterable[str]) -> tuple[str, ...]:
+    """Remove the hide-mode withheld set (:func:`hide_mode_withheld`); return it."""
     withheld = hide_mode_withheld(registered)
     for name in withheld:
         server.remove_tool(name)

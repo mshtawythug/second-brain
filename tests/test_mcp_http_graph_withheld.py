@@ -61,8 +61,10 @@ def test_the_registry_graph_family_is_the_pinned_one() -> None:
     graph = tuple(name for name in names if name.startswith(GRAPH_TOOL_PREFIX))
 
     assert graph == GRAPH_TOOLS
-    # sec-118e: plus the pinned tools built from graph communities or edges.
-    assert hide_mode_withheld(names) == tuple(sorted((*GRAPH_TOOLS, "brain_review_weekly")))
+    # sec-118e/f: plus the pinned extras (weekly communities, the search log).
+    assert hide_mode_withheld(names) == tuple(
+        sorted((*GRAPH_TOOLS, "brain_review_weekly", "brain_gaps"))
+    )
     assert len(names) == 51
     # Read-only and confidential-excluded (the default) serves 28 - 6 = 22 tools.
     assert len(READ_ONLY_TOOLS - set(GRAPH_TOOLS)) == 22

@@ -686,9 +686,10 @@ def _graph_server() -> Any:
     ("include", "writes", "served", "banner"),
     [
         (False, False, ("brain_search",),
-         "READ-ONLY (1 of 3 tools; 1 write tools withheld; 1 graph tools withheld)"),
+         "READ-ONLY (1 of 3 tools; 1 write tools withheld; 1 graph and search-log tools withheld)"),
         (False, True, ("brain_search",),
-         "READ-WRITE (1 of 3 tools; --allow-writes: write tools exposed; 2 graph tools withheld)"),
+         "READ-WRITE (1 of 3 tools; --allow-writes: write tools exposed; "
+         "2 graph and search-log tools withheld)"),
         (True, False, ("brain_graphrag_search", "brain_search"),
          "READ-ONLY (2 of 3 tools; 1 write tools withheld)"),
         (True, True, ("brain_graphrag_build", "brain_graphrag_search", "brain_search"),
