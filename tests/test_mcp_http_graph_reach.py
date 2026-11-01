@@ -14,7 +14,9 @@ comments are never read; module-level string constants are). It does NOT follow 
 method called on an instance or an injected callable: ``state.graph_syncer.*``,
 ``state.enricher.*``, ``ctx.*``. The write tools that reach the graph syncer that
 way discard what it returns, so they return no graph data today; a tool that
-starts returning it needs a judgement by hand (``brain.mcp_tool_classes``).
+starts returning it needs a judgement by hand (``brain.mcp_tool_classes``). Nor does
+it read SQL held in a class attribute (``Cls._SQL``) or inside a tuple or dict
+constant; none exists on a served path today (sec-118g INFO-2).
 """
 from __future__ import annotations
 

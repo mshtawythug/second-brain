@@ -131,7 +131,10 @@ A few small things remain visible, and are accepted:
   brief's new entities, and the review findings and scan. A mention alone is not enough,
   because an alias you curate re-points a public "ZC" onto a target such as "Zephyrcode"
   that may appear only in confidential mail. The cost: a person known only by a bare email
-  address, whose display name no public record spells out, is not named there.
+  address, whose display name no public record spells out, is not named there. The match
+  is a substring, so an alias target with a very short name ("Ra", "Q3") passes on any
+  public record containing those letters ("rather"); only that short label can leak, never
+  document content. Give alias targets distinctive names.
 
 People follow the same rule. A `person` argument (`brain_search`, `brain_recall`,
 `brain_timeline`) resolves only people named as a participant in at least one

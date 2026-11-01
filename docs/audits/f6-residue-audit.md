@@ -128,7 +128,10 @@ audit already look.
   name (title, content or metadata, case-insensitively). It is the one predicate on every
   gated statement that names entities: the brief's `_GATED_SQL` (stdio's default lens and
   HTTP), `review/queries.iter_entities_for_conflict_scan` and `list_review_queue`'s
-  contradiction findings (both under `exclude_confidential`, so stdio's default lens too),
+  contradiction findings (both under `exclude_confidential`, so stdio's default lens too;
+  the findings gate fails closed: it serves a contradiction only when its entity still
+  exists, matched by canonical key from a review scan or by id from `brain elicit`, and
+  passes the predicate, sec-118g LOW-A),
   and the timeline's entity match and co-topics (`timeline_entities`, HTTP hide mode, where
   the timeline's other public filter already lives). Measured worst case: 50 entities each
   mentioned by 40 documents of 20 KB with the name only in the last, 162 ms against 1 ms.

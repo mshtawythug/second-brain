@@ -109,7 +109,8 @@ git tag scheme:
   - a gated lens names an entity only if a non-confidential record names it, not merely
     mentions it: the brief's new entities, the review findings and conflict scan (stdio's
     default lens too), and the timeline over HTTP. A curated alias could otherwise carry a
-    name found only in confidential mail;
+    name found only in confidential mail. The findings gate fails closed: a contradiction
+    is served only when its entity, found by key or by id, still exists and passes;
   - `brain_gaps` is withheld too over HTTP without `--include-confidential` (it clusters
     search terms typed under every lens), so `--allow-writes` serves 37 of 51 there;
   - the graph-reach test reads code only (never prose), module SQL constants, every
