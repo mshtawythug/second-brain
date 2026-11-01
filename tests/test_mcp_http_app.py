@@ -642,3 +642,26 @@ def test_calling_a_withheld_tool_names_it_unknown(
     assert "brain_edit" in withheld.text
     assert "edited" not in withheld.text
     assert ordinary.json()["result"]["structuredContent"]["echo"] == "synthetic"
+
+
+@pytest.mark.parametrize(("include", "kept"), [(False, False), (True, True)])
+def test_serve_drops_person_keys_unless_opted_in(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch, include: bool, kept: bool
+) -> None:
+    """sec-118b N1: person_keys (email addresses) are not needed by a remote caller."""
+    monkeypatch.setattr(mcp_server, "_state", None)
+    server = make_server("throwaway")
+
+    def brain_search(query: str) -> dict[str, Any]:
+        """A stand-in search that echoes the person filter's keys."""
+        return {"matched_filters": {"person_keys": ["a@example.com"]}, "query": query}
+
+    server.tool()(brain_search)
+    recorder = _Recorder()
+    opts = HttpServeOptions(token=TOKEN, port=_free_port(), include_confidential=include)
+    serve_http(opts, cfg, server=server, run=recorder.run, announce=recorder.say)
+    (app, _, _), = recorder.calls
+    with TestClient(app, base_url="http://127.0.0.1:8787") as test_client:
+        response = _call(test_client, {"query": "q"})
+
+    assert ("a@example.com" in response.text) is kept

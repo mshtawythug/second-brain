@@ -35,14 +35,27 @@ def _redacted(name: str, exc: Exception) -> Exception:
     )
 
 
-def _guarded(name: str, fn: Callable[..., Any], is_async: bool) -> Callable[..., Any]:
-    """``fn`` with every non-``MCPError`` failure replaced by :func:`_redacted`."""
+def _without(value: Any, keys: frozenset[str]) -> Any:
+    """``value`` rebuilt without any dict entry named in ``keys``, at any depth."""
+    if not keys:
+        return value
+    if isinstance(value, dict):
+        return {k: _without(v, keys) for k, v in value.items() if k not in keys}
+    if isinstance(value, list | tuple):
+        return type(value)(_without(item, keys) for item in value)
+    return value
+
+
+def _guarded(
+    name: str, fn: Callable[..., Any], is_async: bool, drop_keys: frozenset[str]
+) -> Callable[..., Any]:
+    """``fn`` with failures redacted (:func:`_redacted`) and ``drop_keys`` removed."""
     if is_async:
 
         @functools.wraps(fn)
         async def guarded_async(*args: Any, **kwargs: Any) -> Any:
             try:
-                return await fn(*args, **kwargs)
+                return _without(await fn(*args, **kwargs), drop_keys)
             except MCPError:
                 raise
             except Exception as exc:  # every unexpected failure, by design
@@ -53,7 +66,7 @@ def _guarded(name: str, fn: Callable[..., Any], is_async: bool) -> Callable[...,
     @functools.wraps(fn)
     def guarded(*args: Any, **kwargs: Any) -> Any:
         try:
-            return fn(*args, **kwargs)
+            return _without(fn(*args, **kwargs), drop_keys)
         except MCPError:
             raise
         except Exception as exc:  # every unexpected failure, by design
@@ -62,8 +75,15 @@ def _guarded(name: str, fn: Callable[..., Any], is_async: bool) -> Callable[...,
     return guarded
 
 
-def sanitize_tool_errors(server: Any, names: Iterable[str]) -> None:
+def sanitize_tool_errors(
+    server: Any, names: Iterable[str], *, drop_keys: frozenset[str] = frozenset()
+) -> None:
     """Wrap each named tool's function on ``server`` in place.
+
+    ``drop_keys`` names result keys removed at every depth: ``brain mcp serve``
+    without ``--include-confidential`` drops ``person_keys`` (a person filter's
+    email addresses; sec-118b N1). The filter has already been applied by then,
+    so a remote caller loses nothing it needs.
 
     The SDK keeps a registered tool's function on its ``Tool`` model (``fn``)
     behind the server's tool manager, the same on mcp 2.0 and 2.3. Replacing
@@ -82,4 +102,4 @@ def sanitize_tool_errors(server: Any, names: Iterable[str]) -> None:
         tool = get_tool(name)
         if tool is None:
             raise McpTransportError(f"cannot wrap tool {name}: it is not registered")
-        tool.fn = _guarded(name, tool.fn, tool.is_async)
+        tool.fn = _guarded(name, tool.fn, tool.is_async, drop_keys)

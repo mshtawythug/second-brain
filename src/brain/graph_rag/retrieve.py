@@ -303,6 +303,7 @@ def graph_rag_search(
             synthesize=synthesize,
             enricher=enricher,
             exclude_confidential=exclude_confidential,
+            public_only=public_entities_only,
         )
 
     # Local path (explicit ``local`` OR the auto non-thematic branch). After the

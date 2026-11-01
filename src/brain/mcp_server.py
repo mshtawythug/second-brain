@@ -245,8 +245,10 @@ the facet predicate, recorded inline at the mapping. Plan:
 ``McpState.hide_confidential`` is set (``brain mcp serve`` without
 ``--include-confidential``); ``brain_link_proposal`` takes ``include_confidential``
 and its destination lookup carries the F6 predicate (stdio too);
-``brain_graphrag_entities`` and the graph retrieval seam drop entity names only
-confidential documents mention, in HTTP mode only. Each growth is reasoned inline
+``brain_graphrag_entities``, the graph retrieval seam and ``brain_timeline`` drop
+entity names only confidential documents mention, and the ``person`` arguments of
+``brain_search`` / ``brain_recall`` / ``brain_timeline`` resolve public people only
+(sec-118b), in HTTP mode only. Each growth is reasoned inline
 ("Grew (RM-46, sec-118 …)"); the HTTP policy itself lives in ``brain.mcp_http*``
 and ``brain.graph_rag.public_entities``. Plan: ``docs/plans/2026-10-31-rm-46-mcp-http.md``.
 
@@ -817,7 +819,9 @@ def brain_search(
             person_match = None
             if person is not None:
                 try:
-                    person_match = resolve_person_to_keys(conn, person)
+                    person_match = resolve_person_to_keys(  # Grew: RM-46 sec-118b N1
+                        conn, person, public_only=state.hide_confidential
+                    )
                 except (PersonNotFound, PersonAmbiguous) as e:
                     raise _mcp_error(INVALID_PARAMS, str(e)) from e
             # Twelfth growth (RM-24): the --entity filter, splatted into the search
@@ -1091,7 +1095,9 @@ def brain_recall(
             person_match = None
             if person is not None:
                 try:
-                    person_match = resolve_person_to_keys(conn, person)
+                    person_match = resolve_person_to_keys(  # Grew: RM-46 sec-118b N1
+                        conn, person, public_only=state.hide_confidential
+                    )
                 except (PersonNotFound, PersonAmbiguous) as e:
                     raise _mcp_error(INVALID_PARAMS, str(e)) from e
             source_kind, source_missing = _split_source_filter(source)
@@ -3785,6 +3791,7 @@ def brain_timeline(
                 enricher=enricher,
                 tenant=tenant,
                 exclude_confidential=not include_confidential,
+                public_entities_only=state.hide_confidential,  # Grew: sec-118b #2-i, N1
             )
     except (PersonNotFound, PersonAmbiguous, GraphTenantError) as exc:
         raise _mcp_error(INVALID_PARAMS, f"timeline: {exc}") from exc

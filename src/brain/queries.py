@@ -234,7 +234,7 @@ def _expand_keys_with_directory_variants(
 
 
 def resolve_person_to_keys(
-    conn: psycopg.Connection[Any], name_or_email: str
+    conn: psycopg.Connection[Any], name_or_email: str, *, public_only: bool = False
 ) -> PersonMatch:
     """Resolve a ``--person`` argument to a participant-key set.
 
@@ -279,8 +279,13 @@ def resolve_person_to_keys(
     # resolver would be a silent policy decision the day that stops being
     # true. Display rules must not gate a query filter.
     records = aggregate_people(
-        conn, owner_keys=frozenset(), min_docs=0, exclude_confidential=False
+        conn, owner_keys=frozenset(), min_docs=0, exclude_confidential=public_only
     )
+    if public_only:
+        # RM-46 (sec-118b N1): over HTTP without --include-confidential, a person
+        # no non-confidential document names is UNKNOWN, so neither a unique
+        # match nor an ambiguity's candidate list can enumerate them.
+        records = [rec for rec in records if rec.docs]
 
     # Step 1 — exact email match.
     for rec in records:

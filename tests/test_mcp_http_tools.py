@@ -140,3 +140,45 @@ def test_an_async_tools_own_refusal_passes_verbatim() -> None:
         _call(server, "brain_async_refuses", {"id_prefix": "abcdef"})
 
     assert "document not found: abcdef" in str(excinfo.value)
+
+
+# ------------------------------------------- sec-118b N1: person_keys stay home
+
+
+def test_dropped_keys_vanish_from_every_level_of_a_result() -> None:
+    server = make_server("throwaway")
+
+    def brain_search(query: str) -> dict[str, Any]:
+        """Returns person_keys at the top, inside a list and inside a dict."""
+        return {
+            "person_keys": ["a@example.com"],
+            "results": [{"matched_filters": {"person_keys": ["a@example.com"], "q": query}}],
+            "explanation": {"matched_filters": {"person_keys": ["a@example.com"]}, "n": 1},
+        }
+
+    server.tool()(brain_search)
+    sanitize_tool_errors(server, ["brain_search"], drop_keys=frozenset({"person_keys"}))
+
+    result = _call(server, "brain_search", {"query": "synthetic"})
+    content = result.model_dump(by_alias=True)["structuredContent"]
+
+    assert "@example.com" not in str(content)
+    assert content["results"][0]["matched_filters"] == {"q": "synthetic"}
+    assert content["explanation"] == {"matched_filters": {}, "n": 1}
+
+
+def test_without_drop_keys_a_result_is_unchanged() -> None:
+    server = make_server("throwaway")
+
+    def brain_search(query: str) -> dict[str, Any]:
+        """Returns person_keys."""
+        return {"person_keys": ["a@example.com"], "q": query}
+
+    server.tool()(brain_search)
+    sanitize_tool_errors(server, ["brain_search"])
+
+    result = _call(server, "brain_search", {"query": "synthetic"})
+
+    assert result.model_dump(by_alias=True)["structuredContent"]["person_keys"] == [
+        "a@example.com"
+    ]

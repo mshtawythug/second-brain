@@ -506,7 +506,12 @@ def serve_http(
         names = anyio.run(registered_tool_names, target)
         withheld = () if opts.allow_writes else apply_read_only(target, names)
         # sec-118 #5: an unexpected failure answers its class, never its text.
-        sanitize_tool_errors(target, [name for name in names if name not in withheld])
+        sanitize_tool_errors(
+            target,
+            [name for name in names if name not in withheld],
+            # sec-118b N1: a person filter's email keys are not needed remotely.
+            drop_keys=frozenset() if opts.include_confidential else frozenset({"person_keys"}),
+        )
         served = len(names) - len(withheld)
         probe = readiness_probe(cfg, read_only=not opts.allow_writes, tools=served)
         app = build_http_app(target, opts, plan, probe=probe)
