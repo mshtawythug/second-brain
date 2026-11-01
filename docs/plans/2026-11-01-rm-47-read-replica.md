@@ -384,4 +384,25 @@ and the databases were dropped by exact name afterwards.
   - Source: a throwaway database. Target: the restore sandbox.
   - It fails on master with the production error, as a mutation run in a git-archive copy shows.
   - Its pair, a source without `age`, passes.
-  - It is skipped without `docker`. CI runs the same 5434 AGE container.
+  - Locally it is skipped without `docker`. Under GitHub Actions a missing `docker` is an error,
+    not a skip, so CI cannot pass it vacuously. The CI log at `f881bbe3` shows
+    `tests/test_restore_real_pg_tools.py ..` (both passed) and no SKIPPED entry for it.
+
+### 10.2 The sec-119 / rev-119 fix round
+
+| Item | Change | Tests |
+|---|---|---|
+| sec L1, L2, rev #1 | `read_marker` catches `RecursionError` and `OverflowError`. `_aware` range-checks with `astimezone(UTC)`. `_read_capped` turns any `OSError` from `fstat` or `read` into the fixed error and closes the fd on every path (`_read_all`). | `test_replica_marker.py`: deep nesting, out-of-range min/max for both timestamps, an edge-of-range keep, and `fstat`/`read` `OSError` with an fd-leak check |
+| Defence in depth | `replica_doctor_check` never raises. Any failure, expected or not, becomes the fixed WARN. | `test_doctor_replica.py`: out of range, deep nesting, an unexpected `RuntimeError`, and a valid marker still OK |
+| sec L3 | `.gitignore` gains `state/` beside `run/`. | `git check-ignore -q state/restored-from.json` |
+| sec L4 | Guide: an encrypted channel (`scp`/`ssh`), and a LAN share (SMB, NFS) is cleartext. The sidecar catches damage, not tampering, so restore only your own archives. Incoming dir `chmod 700`, archive `chmod 600`. The skill reference mirrors this. | docs |
+| rev #2 | Guide and skill: `"${BRAIN_HOME:-$HOME/.brain}/state/restored-from.json"`. Doctor: prose, "remove restored-from.json from $BRAIN_HOME/state (~/.brain/state by default)". `config._brain_home_root` resolves `$BRAIN_HOME`, then the dev-checkout repo root, then `~/.brain`. | `test_doctor_replica.py` (`MARKER_PROSE`) |
+| rev #3, sec I2 | `schema` must be exactly the int `MARKER_SCHEMA` (a bool is refused). The docstring says so. | `schema` 2, 0, "1", True and missing are refused; 1 reads |
+| sec I4 | The staging prep runs only when the dump's TOC (`pg_restore -l`, no DB connection) has an `EXTENSION - age` entry. `_restore_into` moved, unchanged apart from the TOC step, to the new leaf `backup/restore_run.py`, so `restore.py` is now 690 lines (it was 755 at `01c58a72`). | `test_restore_toc.py` (the parser and its look-alike lines). `test_restore_swap.py`: an AGE TOC gets `age`, read before the data restore; a plain TOC on an AGE-capable server gets no extension. `test_restore_real_pg_tools.py`: both pairs probe staging's extensions at real `pg_restore` time. |
+| INFO | `MARKER_UNREADABLE` is a public constant, and the doctor imports it. | — |
+
+**Follow-up for the backlog (sec-119 I6, predates this PR).** The restore preflight still echoes
+archive-controlled manifest strings unfiltered (`brain_version`, `migration_head`, `embedder`,
+`embedding_column_type`, `postgres_version`). A crafted manifest could put ANSI or OSC sequences on
+the terminal just before the destructive gate. The fix is to send them through a shared
+control-character stripper, lifting `replica_marker._display_name` into a utility.
