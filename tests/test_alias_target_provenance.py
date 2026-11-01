@@ -28,9 +28,12 @@ import psycopg
 import pytest
 
 from brain.brief_entities import new_entities
+from brain.config import Config
 from brain.review.queries import iter_entities_for_conflict_scan, list_review_queue
 from brain.sensitivity import name_in_public_record_sql
+from brain.timeline import build_timeline
 from brain.timeline_entities import resolve_entities, top_cotopics
+from tests.conftest import TEST_DATABASE_URL
 
 pytestmark = pytest.mark.usefixtures("test_db")
 
@@ -130,6 +133,18 @@ def test_timeline_cotopics_name_only_a_publicly_named_entity_in_the_gated_lens(
     assert cotopics(True) == [PUBLIC]
     assert sorted(cotopics(False)) == [PUBLIC, SECRET]
     assert top_cotopics(test_db, TENANT, [], [corpus["seed"]], []) == []
+
+
+@pytest.mark.parametrize(("hidden", "expected"), [(True, [PUBLIC]), (False, [PUBLIC, SECRET])])
+def test_the_timeline_passes_its_mode_to_the_cotopics(
+    test_db: psycopg.Connection[Any], corpus: dict[str, str], hidden: bool, expected: list[str]
+) -> None:
+    ctx = build_timeline(
+        test_db, Config(database_url=TEST_DATABASE_URL), "Roadmap",
+        exclude_confidential=True, public_entities_only=hidden,
+    )
+
+    assert sorted(name for bucket in ctx.buckets for name in bucket.cotopics) == expected
 
 
 # ---------------------------------------------------------------------------- brief
