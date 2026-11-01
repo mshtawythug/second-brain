@@ -154,3 +154,31 @@ def normalize_level(value: str | None, *, strict: bool = True) -> SensitivityLev
             f"{'/'.join(sorted(VALID_SENSITIVITY_LEVELS))} (got {value!r})"
         )
     return DEFAULT_SENSITIVITY
+
+
+def confidential_member_sql(alias: str) -> str:
+    """``EXISTS`` predicate: community row ``alias`` has a member a confidential doc mentions.
+
+    The one F6 rule for a graph community, shared by
+    :func:`brain.graph_rag.communities.list_communities`, global graph retrieval
+    (:func:`brain.graph_rag.communities.communities_with_confidential_members`) and
+    the weekly review's graph themes
+    (:func:`brain.review.weekly.weekly_active_communities`): a community's stored
+    summary was generated from member names and representative TITLES, so it is
+    withheld whole when any member is mentioned by a confidential document. Here,
+    beside :func:`not_confidential_sql`, so the review code can share it without
+    importing the graph package. ``alias`` needs ``tenant_id`` and
+    ``community_key`` columns; it is validated like :func:`not_confidential_sql`'s.
+    """
+    if not alias.isidentifier():
+        raise ValueError(f"table alias must be a plain identifier (got {alias!r})")
+    return (
+        "EXISTS ("
+        "  SELECT 1 FROM graph_community_members cm"
+        "  JOIN graph_entity_mentions m"
+        "    ON m.tenant_id = cm.tenant_id AND m.entity_id = cm.entity_id"
+        "  JOIN documents d ON d.id = m.document_id"
+        f"  WHERE cm.tenant_id = {alias}.tenant_id"
+        f"    AND cm.community_key = {alias}.community_key"
+        f"    AND NOT ({not_confidential_sql('d')}))"
+    )

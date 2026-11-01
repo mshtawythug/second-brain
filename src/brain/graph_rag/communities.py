@@ -59,7 +59,7 @@ from networkx.algorithms.community import louvain_communities
 
 from ..config import Config
 from ..errors import GraphTenantError
-from ..sensitivity import not_confidential_sql
+from ..sensitivity import confidential_member_sql
 from ..set_similarity import jaccard
 from .schema import CommunityMember, CommunityRecord
 from .write_lock import acquire_graph_write_lock
@@ -368,28 +368,6 @@ def build_communities(
             dirty=dirty,
             skipped=False,
         )
-
-
-def confidential_member_sql(alias: str) -> str:
-    """``EXISTS`` predicate: community row ``alias`` has a member a confidential doc mentions.
-
-    The one F6 rule for a community, shared by :func:`list_communities` and global
-    retrieval (:func:`communities_with_confidential_members`): its stored summary
-    was generated from member names and representative TITLES, so a community is
-    withheld whole when any member is mentioned by a confidential document.
-    """
-    if not alias.isidentifier():
-        raise ValueError(f"table alias must be a plain identifier (got {alias!r})")
-    return (
-        "EXISTS ("
-        "  SELECT 1 FROM graph_community_members cm"
-        "  JOIN graph_entity_mentions m"
-        "    ON m.tenant_id = cm.tenant_id AND m.entity_id = cm.entity_id"
-        "  JOIN documents d ON d.id = m.document_id"
-        f"  WHERE cm.tenant_id = {alias}.tenant_id"
-        f"    AND cm.community_key = {alias}.community_key"
-        f"    AND NOT ({not_confidential_sql('d')}))"
-    )
 
 
 def communities_with_confidential_members(
