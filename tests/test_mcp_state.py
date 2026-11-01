@@ -53,15 +53,15 @@ def test_build_state_without_a_persistent_connection(none_cfg: Config) -> None:
     assert state.db_conn is None
 
 
-def test_install_state_sets_the_global_the_tools_read(
+def test_start_state_sets_the_global_the_tools_read(
     none_cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(mcp_server, "_state", None)
-    state = mcp_state.build_state(none_cfg, persistent_db=False)
 
-    mcp_server.install_state(state)
+    state = mcp_server.start_state(none_cfg, persistent_db=False)
 
     assert mcp_server._get_state() is state
+    assert state.db_conn is None
 
 
 def test_mcp_state_imports_cold_without_the_server() -> None:

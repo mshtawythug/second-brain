@@ -5059,14 +5059,19 @@ def _load_config() -> Config:
     return cfg
 
 
-def install_state(state: _State) -> None:
-    """Make ``state`` the one every tool reads through :func:`_get_state`.
+def start_state(cfg: Config, *, persistent_db: bool = True) -> _State:
+    """Build the server state for ``cfg``, make it the one the tools read, and warm up.
 
-    Here and not in :mod:`brain.mcp_state`, because the ``_state`` global it
+    The one startup path for stdio (:func:`main`) and HTTP
+    (:func:`brain.mcp_http.serve_http`, which passes ``persistent_db=False``).
+    Here and not in :mod:`brain.mcp_state` because the ``_state`` global it
     assigns is this module's: tests patch ``mcp_server._state`` directly.
     """
     global _state
-    _state = state
+    _state = build_state(cfg, persistent_db=persistent_db)
+    # F7: warm the embedding model into VRAM before the first real query.
+    _warmup_embed(_state.embedder)
+    return _state
 
 
 def main() -> None:
@@ -5079,9 +5084,7 @@ def main() -> None:
     if sys.argv[1:]:
         print(_ARGV_REFUSAL, file=sys.stderr)
         raise SystemExit(2)
-    install_state(build_state(cfg))
-    # F7: warm the embedding model into VRAM before the first real query.
-    _warmup_embed(_get_state().embedder)
+    start_state(cfg)
     logger.info("brain-mcp starting (stdio transport)")
     mcp_app.run(transport="stdio")
 

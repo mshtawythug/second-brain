@@ -1,8 +1,10 @@
 """``brain mcp``: the MCP server's operator commands (RM-46).
 
-``brain mcp token`` mints and describes the bearer token. Thin orchestration
-over :mod:`brain.mcp_auth`, which is a stdlib leaf, so this module is cheap to
-import with ``brain.cli``.
+``brain mcp serve`` serves the MCP tools over streamable HTTP; ``brain mcp
+token`` mints and describes the bearer token it requires. Thin orchestration:
+the policy lives in :mod:`brain.mcp_http` (imported inside ``serve``, so
+``brain.cli`` never pays for uvicorn or the MCP server) and :mod:`brain.mcp_auth`
+(a stdlib leaf). A refused option exits 2, a broken config 1.
 
 Registered through :data:`brain.cli_registry.EXTENSION_REGISTRARS` (RM-06), so
 ``cli.py`` is not edited for it. ``brain-mcp`` itself stays the argument-free
@@ -18,12 +20,13 @@ from typing import Any
 import typer
 
 from .config import Config, ConfigError
-from .errors import McpTokenError
+from .errors import McpTokenError, McpTransportError
 from .mcp_auth import (
     TokenInfo,
     default_token_path,
     generate_token,
     read_token,
+    resolve_token,
     write_token,
 )
 from .settings.mcp_http import load_mcp_http_settings
@@ -112,6 +115,90 @@ def _print_info(path: Path, info: TokenInfo, *, show: bool) -> None:
         typer.echo(f"token        {info.secret}")
     else:
         typer.echo("Use --show to print the token. Treat it like a password.")
+
+
+@mcp_app.command("serve")
+def serve(
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Interface to bind. Non-loopback requires --allow-remote AND a token.",
+    ),
+    port: int = typer.Option(8787, "--port", help="TCP port to listen on."),
+    path: str = typer.Option("/mcp", "--path", help="URL path of the MCP endpoint."),
+    allow_remote: bool = typer.Option(
+        False,
+        "--allow-remote",
+        help="Acknowledge that a non-loopback bind exposes the brain to the network.",
+    ),
+    allow_writes: bool = typer.Option(
+        False,
+        "--allow-writes",
+        help="Also serve the write tools. Off by default: HTTP serves read tools only.",
+    ),
+    include_confidential: bool = typer.Option(
+        False,
+        "--include-confidential",
+        help="Let callers ask for confidential documents. Off by default: refused.",
+    ),
+    allowed_host: list[str] | None = typer.Option(
+        None,
+        "--allowed-host",
+        help="Extra Host header value to accept (repeatable), e.g. a tailnet name.",
+    ),
+    token_file: Path | None = typer.Option(
+        None,
+        "--token-file",
+        help="Bearer-token file. Default: $BRAIN_MCP_TOKEN_PATH or <brain_home>/mcp_token.",
+    ),
+    no_auth: bool = typer.Option(
+        False, "--no-auth", help="Serve without a bearer token. Loopback only."
+    ),
+    max_body_bytes: int = typer.Option(
+        1024 * 1024, "--max-body-bytes", help="Largest request body accepted (1 KiB to 16 MiB)."
+    ),
+    call_timeout: float = typer.Option(
+        300.0, "--call-timeout", help="Seconds a tool call may take before a 504 (1 to 3600)."
+    ),
+    log_level: str = typer.Option(
+        "INFO", "--log-level", help="DEBUG, INFO, WARNING, ERROR or CRITICAL."
+    ),
+) -> None:
+    """Serve the MCP tools over streamable HTTP, for another device on a private network."""
+    try:
+        cfg = Config.load()
+    except ConfigError as exc:
+        raise _fail(str(exc), 1) from exc
+    try:
+        settings = load_mcp_http_settings(os.environ)
+        token = (
+            None
+            if no_auth
+            else resolve_token(settings, explicit=token_file, brain_home=cfg.brain_home)
+        )
+    except (ConfigError, McpTokenError) as exc:
+        raise _fail(str(exc), 2) from exc
+    from .mcp_http import HttpServeOptions, serve_http
+
+    opts = HttpServeOptions(
+        host=host,
+        port=port,
+        path=path,
+        allow_remote=allow_remote,
+        allow_writes=allow_writes,
+        include_confidential=include_confidential,
+        allowed_hosts=tuple(allowed_host or ()),
+        token=token,
+        no_auth=no_auth,
+        max_body_bytes=max_body_bytes,
+        call_timeout_s=call_timeout,
+        log_level=log_level.upper(),
+    )
+    try:
+        serve_http(opts, cfg)
+    except McpTransportError as exc:
+        raise _fail(str(exc), 2) from exc
+    typer.echo("brain mcp serve stopped", err=True)
 
 
 def register(app: typer.Typer) -> None:
