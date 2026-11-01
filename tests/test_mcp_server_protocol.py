@@ -354,9 +354,7 @@ def test_brain_mcp_refuses_arguments_even_with_a_broken_config(tmp_path: Path) -
         for key, value in os.environ.items()
         if key not in {"DATABASE_URL", "TEST_DATABASE_URL"}
     }
-    env.update(
-        {"BRAIN_HOME": str(tmp_path), "BRAIN_IGNORE_CWD_DOTENV": "1", "PYTHONPATH": ""}
-    )
+    env.update({"BRAIN_HOME": str(tmp_path), "BRAIN_IGNORE_CWD_DOTENV": "1"})
     proc = subprocess.run(
         [sys.executable, "-m", "brain.mcp_server", "--http"],
         capture_output=True,
