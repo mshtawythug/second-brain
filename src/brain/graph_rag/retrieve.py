@@ -70,7 +70,6 @@ import psycopg
 from ._retrieval_common import _build_doc_results, _fetch_entities, _row_to_entity
 from .fuse import _retrieve_fuse
 from .global_ import _retrieve_global
-from .public_entities import public_mention_sql, withhold_confidential_entities
 from .router import (
     AUTO_MODE,
     FUSE_MODE,
@@ -137,7 +136,6 @@ def graph_rag_search(
     enricher: _GroupSummarizer | None = None,
     embedder: Embedder | None = None,
     exclude_confidential: bool = False,
-    public_entities_only: bool = False,
 ) -> GraphContext:
     """Graph retrieval (spec §6; ``local`` G2-d, ``themes`` G2-f, router G2-g).
 
@@ -227,9 +225,7 @@ def graph_rag_search(
     # decides the auto branches purely; the DB-derived person list is injected so
     # the router itself stays DB-free (dependency inversion).
     known_persons = (
-        _fetch_known_persons(conn, tenant_id, public_only=public_entities_only)
-        if mode == AUTO_MODE
-        else []
+        _fetch_known_persons(conn, tenant_id) if mode == AUTO_MODE else []
     )
     decision = route(query, mode=mode, person=person, known_persons=known_persons)
 
@@ -241,9 +237,8 @@ def graph_rag_search(
     # ``cfg.graph_community_limit`` (resolved inside ``_retrieve_global``), not
     # the doc ``limit``. The G3-e flip routes BOTH global cases here; the G2
     # ``global→local`` degradation is gone (spec §17c Q6).
-    ctx: GraphContext
     if decision.executed_mode == GLOBAL_MODE:
-        ctx = _retrieve_global(
+        return _retrieve_global(
             conn,
             cfg,
             query,
@@ -260,8 +255,8 @@ def graph_rag_search(
     # and RRF-merges their doc-id rankings; the pre-warmed ``embedder`` feeds the
     # hybrid leg's vector arm (a missing/failed embedder degrades it to FTS-only
     # — never-raise). Local/themes/global/auto are unchanged.
-    elif decision.executed_mode == FUSE_MODE:
-        ctx = _retrieve_fuse(
+    if decision.executed_mode == FUSE_MODE:
+        return _retrieve_fuse(
             conn,
             cfg,
             query,
@@ -276,7 +271,7 @@ def graph_rag_search(
             exclude_confidential=exclude_confidential,
         )
 
-    elif decision.executed_mode == THEMES_MODE:
+    if decision.executed_mode == THEMES_MODE:
         resolved_person = (
             decision.resolved_person.display_name
             if decision.resolved_person is not None
@@ -289,7 +284,7 @@ def graph_rag_search(
         resolved_theme_limit = (
             cfg.graph_theme_limit if theme_limit is None else theme_limit
         )
-        ctx = _retrieve_themes(
+        return _retrieve_themes(
             conn,
             person=resolved_person,
             query=query,
@@ -305,33 +300,24 @@ def graph_rag_search(
             synthesize=synthesize,
             enricher=enricher,
             exclude_confidential=exclude_confidential,
-            public_only=public_entities_only,
         )
 
     # Local path (explicit ``local`` OR the auto non-thematic branch). After the
     # G3-e flip the thematic-no-person case routes to ``global`` above, so no
     # path reaching here ever degrades — the G2 degradation signals stay dormant
     # (``None``) on the returned context (spec §17c Q6).
-    else:
-        ctx = _retrieve_local(
-            conn,
-            query,
-            backend=backend,
-            tenant_id=tenant_id,
-            depth=resolved_depth,
-            frontier_cap=resolved_frontier,
-            min_edge_weight=resolved_min_weight,
-            limit=resolved_limit,
-            session_id=resolved_session,
-            exclude_confidential=exclude_confidential,
-        )
-    # RM-46 (sec-118 #2c, rev-118 round 2): ``brain mcp serve`` without
-    # --include-confidential names no entity, and returns no summary written from
-    # one, that only confidential documents mention. One switch for every mode,
-    # used by the MCP graph tools and by ``brain_ask``'s graph modes.
-    if public_entities_only:
-        ctx = withhold_confidential_entities(conn, ctx)
-    return ctx
+    return _retrieve_local(
+        conn,
+        query,
+        backend=backend,
+        tenant_id=tenant_id,
+        depth=resolved_depth,
+        frontier_cap=resolved_frontier,
+        min_edge_weight=resolved_min_weight,
+        limit=resolved_limit,
+        session_id=resolved_session,
+        exclude_confidential=exclude_confidential,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -488,7 +474,7 @@ def _like_contains(needle: str) -> str:
 
 
 def _fetch_known_persons(
-    conn: psycopg.Connection[Any], tenant_id: str, *, public_only: bool = False
+    conn: psycopg.Connection[Any], tenant_id: str
 ) -> list[KnownPerson]:
     """Fetch tenant-scoped known person entities for the router's name scan.
 
@@ -499,15 +485,10 @@ def _fetch_known_persons(
     is injected). Ordered by ``canonical_key`` for a reproducible input; the
     router's tie-break is order-independent, but a stable order keeps the call
     deterministic regardless of physical row order.
-
-    ``public_only`` (RM-46 sec-118c LOW-1, HTTP without --include-confidential):
-    only people a non-confidential document mentions, so a name only confidential
-    documents carry routes exactly as an unknown name does.
     """
-    public = f"AND {public_mention_sql('graph_entities')} " if public_only else ""
     rows = conn.execute(
         "SELECT canonical_key, name, doc_count FROM graph_entities "
-        f"WHERE tenant_id = %s AND entity_type = 'person' {public}"
+        "WHERE tenant_id = %s AND entity_type = 'person' "
         "ORDER BY canonical_key",
         (tenant_id,),
     ).fetchall()

@@ -5,7 +5,8 @@ or key contains the query. Extracted from :mod:`brain.timeline`, which is over
 the file-size ceiling and asks to be extracted from before it grows: sec-118b's
 #2-i needed a ``public_only`` filter here (over HTTP without
 ``--include-confidential`` the substring match would enumerate entity names only
-confidential documents mention).
+confidential documents mention). ``brain_timeline`` is the one entity-name surface
+still served in that mode; the graph tools are withheld there (RM-46 round 5).
 """
 from __future__ import annotations
 
@@ -13,6 +14,16 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
+
+from .sensitivity import not_confidential_sql
+
+#: ``graph_entities`` row has a mention in a non-confidential document.
+_PUBLIC_MENTION_SQL = (
+    " AND EXISTS (SELECT 1 FROM graph_entity_mentions m "
+    "JOIN documents d ON d.id = m.document_id "
+    "WHERE m.tenant_id = graph_entities.tenant_id AND m.entity_id = graph_entities.id "
+    f"AND {not_confidential_sql('d')})"
+)
 
 #: Entity-resolution fan-out cap — a free-text query that ILIKE-matches more than
 #: this many entities is almost certainly too broad; mirrors the
@@ -50,11 +61,7 @@ def resolve_entities(
     needle = f"%{query.strip()}%"
     # RM-46 (sec-118b #2-i): over HTTP, only entities a non-confidential document
     # mentions; the substring match would otherwise enumerate the graph.
-    public = ""
-    if public_only:
-        from .graph_rag.public_entities import public_mention_sql
-
-        public = " AND " + public_mention_sql("graph_entities")
+    public = _PUBLIC_MENTION_SQL if public_only else ""
     rows = conn.execute(
         "SELECT id::text, name, canonical_key, entity_type "
         "FROM graph_entities "

@@ -38,6 +38,10 @@ TEST_DATABASE_URL = os.environ.get(
 #: The registry at RM-46 and its read-only slice.
 ALL_TOOLS = 51
 READ_TOOLS = 28
+#: Round 5: without --include-confidential the graph family (6 read tools, 12 in
+#: all) is withheld, so the default serves 22 and --allow-writes serves 39.
+GRAPH_READ_TOOLS = 6
+GRAPH_TOOLS = 12
 STARTUP_DEADLINE_S = 60.0
 
 
@@ -171,15 +175,15 @@ def test_streamable_http_serves_the_read_tools(tmp_path: Path) -> None:
         names = asyncio.run(_with_session(url, None, _tool_names))
 
     assert "brain_search" in names
-    assert len(names) == READ_TOOLS
-    assert not {"brain_edit", "brain_rm", "brain_graphrag_build"} & names
+    assert len(names) == READ_TOOLS - GRAPH_READ_TOOLS
+    assert not {"brain_edit", "brain_rm", "brain_graphrag_build", "brain_graphrag_search"} & names
 
 
 def test_allow_writes_serves_every_tool(tmp_path: Path) -> None:
     with _serve(tmp_path, "--no-auth", "--allow-writes") as url:
         names = asyncio.run(_with_session(url, None, _tool_names))
 
-    assert len(names) == ALL_TOOLS
+    assert len(names) == ALL_TOOLS - GRAPH_TOOLS
     assert "brain_edit" in names
 
 
@@ -192,7 +196,23 @@ def test_the_bearer_token_guards_the_endpoint(tmp_path: Path) -> None:
         names = asyncio.run(_with_session(url, token, _tool_names))
 
     assert refused.status_code == 401
+    assert len(names) == READ_TOOLS - GRAPH_READ_TOOLS
+
+
+def test_include_confidential_serves_the_graph_family_and_it_answers(tmp_path: Path) -> None:
+    async def stats(session: Any) -> Any:
+        return _payload(await session.call_tool("brain_graphrag_stats", {}))
+
+    with _serve(tmp_path, "--no-auth", "--include-confidential") as url:
+        names = asyncio.run(_with_session(url, None, _tool_names))
+        payload = asyncio.run(_with_session(url, None, stats))
+    with _serve(tmp_path, "--no-auth", "--include-confidential", "--allow-writes") as url:
+        every = asyncio.run(_with_session(url, None, _tool_names))
+
     assert len(names) == READ_TOOLS
+    assert "brain_graphrag_search" in names
+    assert "total_entities" in payload
+    assert len(every) == ALL_TOOLS
 
 
 @pytest.mark.usefixtures("corpus")

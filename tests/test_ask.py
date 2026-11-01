@@ -363,7 +363,6 @@ def _patch_retrieve(
         exclude_confidential: bool = False,
         fallback: bool = True,
         session_id: str | None = None,
-        public_entities_only: bool = False,
     ) -> tuple[list[SearchResult], str, None]:
         seen_queries.append(query)
         batch = queue.pop(0) if queue else batches[-1]

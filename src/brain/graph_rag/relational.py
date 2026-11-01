@@ -16,7 +16,6 @@ from typing import Any
 import psycopg
 
 from ..errors import GraphBackendError
-from .public_entities import public_mention_sql
 from .schema import EdgeContribution, EntityMention, EntitySummary, GraphStats
 
 __all__ = [
@@ -304,7 +303,6 @@ def list_entities(
     entity_type: str | None = None,
     sort: str = "docs",
     limit: int = 50,
-    public_only: bool = False,
 ) -> list[EntitySummary]:
     """List entities for the tenant, filtered and sorted (admin listing).
 
@@ -313,9 +311,6 @@ def list_entities(
     ``sort`` (``"docs"`` → ``doc_count DESC, name ASC``; ``"name"`` →
     ``name ASC``) with ``entity_type, canonical_key`` appended to both so the
     sort is TOTAL, and capped at ``limit`` rows (``limit <= 0`` returns all).
-    ``public_only`` keeps only entities a non-confidential document mentions
-    (``brain mcp serve`` without ``--include-confidential``, RM-46 sec-118 #2c);
-    ``doc_count`` is unchanged for the entities kept.
     Read-only; no raw Cypher or AGE traversal. The raw ``embedding`` column is
     not selected (a storage handle, not a wire value).
 
@@ -338,8 +333,6 @@ def list_entities(
     if entity_type is not None:
         where_clause += " AND entity_type = %s"
         params.append(entity_type)
-    if public_only:
-        where_clause += " AND " + public_mention_sql("graph_entities")
 
     # ``name`` is NOT unique: graph_entities is UNIQUE on
     # (tenant_id, entity_type, canonical_key), so two entities can share a
@@ -379,8 +372,6 @@ def list_entities(
 def graph_stats(
     conn: psycopg.Connection[Any],
     tenant_id: str,
-    *,
-    public_only: bool = False,
 ) -> GraphStats:
     """Return an at-a-glance graph overview for the tenant.
 
@@ -389,8 +380,6 @@ def graph_stats(
     ``graph_communities``, and the top-10 entities by ``doc_count``
     (the same slice :func:`list_entities` with ``limit=10, sort="docs"``
     returns). All queries are tenant-scoped and parameterized. Read-only.
-    ``public_only`` filters the top-10 NAMES as :func:`list_entities` does; the
-    counts always cover the whole tenant.
     """
     type_rows = conn.execute(
         "SELECT entity_type, COUNT(*) FROM graph_entities "
@@ -412,11 +401,24 @@ def graph_stats(
     ).fetchone()
     total_communities = int(comm_row[0]) if comm_row is not None else 0
 
-    # The same slice list_entities(sort="docs", limit=10) returns, so it shares
-    # that total sort and, over HTTP, its public_only filter: these are NAMES
-    # (RM-46 rev-118 #10). The counts above stay corpus-wide.
+    top_rows = conn.execute(
+        "SELECT entity_type, name, canonical_key, doc_count, description "
+        "FROM graph_entities WHERE tenant_id = %s "
+        # Total sort -- same tiebreak as list_entities, so the "top 10"
+        # is a stable slice rather than an arbitrary one among ties.
+        "ORDER BY doc_count DESC, name ASC, entity_type ASC, canonical_key ASC "
+        "LIMIT 10",
+        (tenant_id,),
+    ).fetchall()
     top_entities = tuple(
-        list_entities(conn, tenant_id, sort="docs", limit=10, public_only=public_only)
+        EntitySummary(
+            entity_type=str(row[0]),
+            name=str(row[1]),
+            canonical_key=str(row[2]),
+            doc_count=int(row[3]),
+            description=str(row[4]) if row[4] is not None else None,
+        )
+        for row in top_rows
     )
     return GraphStats(
         counts_by_type=counts_by_type,

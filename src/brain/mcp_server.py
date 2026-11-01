@@ -245,15 +245,18 @@ the facet predicate, recorded inline at the mapping. Plan:
 ``McpState.hide_confidential`` is set (``brain mcp serve`` without
 ``--include-confidential``); ``brain_link_proposal`` takes ``include_confidential``
 and its destination lookup carries the F6 predicate (stdio too);
-``brain_graphrag_entities``, the graph retrieval seam and ``brain_timeline`` drop
-entity names only confidential documents mention, and the ``person`` arguments of
-``brain_search`` / ``brain_recall`` / ``brain_timeline`` resolve public people only
-(sec-118b), in HTTP mode only. Over HTTP (``McpState.call_timeout_s``, sec-118c)
-``brain_ask`` refuses loop arguments above the Agent tab's and stops at its next
-step past ``--call-timeout``, and the graph seam refuses a deeper ``depth`` than
-configured, because a timed-out call keeps its slot until it returns. Each growth is reasoned inline
-("Grew (RM-46, sec-118 …)"); the HTTP policy itself lives in ``brain.mcp_http*``
-and ``brain.graph_rag.public_entities``. Plan: ``docs/plans/2026-10-31-rm-46-mcp-http.md``.
+``brain_timeline`` drops entity names only confidential documents mention, and the
+``person`` arguments of ``brain_search`` / ``brain_recall`` / ``brain_timeline``
+resolve public people only (sec-118b), in HTTP mode only. In that mode the graph
+tools are not served at all and ``brain_ask`` refuses every mode but ``hybrid``
+(round 5: the graph is derived from every document; ``brain.mcp_tool_classes``).
+Over HTTP (``McpState.call_timeout_s``, sec-118c) ``brain_ask`` refuses loop
+arguments above the Agent tab's and stops at its next step past
+``--call-timeout``, and the graph seam refuses a deeper ``depth`` than configured
+(graph tools are served over HTTP with ``--include-confidential``), because a
+timed-out call keeps its slot until it returns. Each growth is reasoned inline
+("Grew (RM-46, …)"); the HTTP policy itself lives in ``brain.mcp_http*`` and
+``brain.mcp_tool_classes``. Plan: ``docs/plans/2026-10-31-rm-46-mcp-http.md``.
 
 **Hazard this file has already been bitten by.** Every tool is a bare ``def``
 under a lone ``@mcp_app.tool()`` line, so inserting a helper between a decorator
@@ -3142,7 +3145,8 @@ def brain_ask(
     was text-only. Relay ``fallback_note`` to the user when it is set.
     Requires a local Ollama for the LLM steps; an unavailable Ollama (or any
     other ``ask`` failure) is ``INTERNAL_ERROR`` with one fixed sentence. A bad
-    ``mode`` is ``INVALID_PARAMS``.
+    ``mode`` is ``INVALID_PARAMS``, and so is any mode but ``hybrid`` on a server
+    run without ``--include-confidential``.
 
     F6 confidentiality: documents marked ``sensitivity='confidential'`` are
     **excluded from retrieval** — from BOTH the hybrid leg and (for the graph
@@ -3162,6 +3166,7 @@ def brain_ask(
     from .ask_deadline import AskTimedOut, Deadline, deadline_on_step
     from .ask_errors import ASK_FAILURES, describe_ask_failure
     from .chat import chat_json
+    from .mcp_tool_classes import ASK_GRAPH_MODES_REFUSAL
 
     state = _get_state()
     if mode not in ASK_MODES:
@@ -3169,6 +3174,9 @@ def brain_ask(
             INVALID_PARAMS,
             f"mode must be one of: {', '.join(sorted(ASK_MODES))}",
         )
+    if state.hide_confidential and mode != HYBRID_MODE:
+        # Grew (RM-46 round 5): the graph is derived from every document.
+        raise _mcp_error(INVALID_PARAMS, ASK_GRAPH_MODES_REFUSAL)
     if max_iterations is not None and max_iterations < 1:
         raise _mcp_error(
             INVALID_PARAMS, "max_iterations must be >= 1"
@@ -3228,7 +3236,6 @@ def brain_ask(
                     max_iterations=resolved_max_iter,
                     backend=backend,
                     exclude_confidential=not include_confidential,
-                    public_entities_only=state.hide_confidential,
                     on_step=on_step,
                 )
                 _log_ask_interactions_mcp(conn, result)
@@ -3490,9 +3497,6 @@ def _graphrag_search_or_mcp_error(
                 # single seam so all three graphrag retrieval tools inherit it
                 # and none can be gated by accident or forgotten individually.
                 exclude_confidential=not include_confidential,
-                # Grew (RM-46, sec-118 #2c): over HTTP, no confidential-only
-                # entity name or summary. stdio: never set.
-                public_entities_only=_state is not None and _state.hide_confidential,
             )
     except (PersonNotFound, PersonAmbiguous) as exc:
         raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
@@ -4492,10 +4496,10 @@ def brain_graphrag_entities(
     document text, and this tool cannot be used to test a hypothesis about one
     document's contents the way a search hit can.
 
-    **Over HTTP it is gated after all** (RM-46, sec-118 #2c): ``brain mcp serve``
-    without ``--include-confidential`` lists only entities a non-confidential
-    document mentions, because a name extracted from a confidential body is
-    content to a remote caller. stdio keeps the exemption below.
+    **Over HTTP it is not served at all** without ``--include-confidential``
+    (RM-46 round 5): a name extracted from a confidential body is content to a
+    remote caller, and the whole graph family is withheld in that mode. stdio
+    keeps the exemption below.
 
     **The exemption ends the moment ``description`` is written.** Populating it
     from document text — the obvious way to fill it — makes this tool a body
@@ -4539,9 +4543,6 @@ def brain_graphrag_entities(
                 entity_type=entity_type,
                 sort=sort,
                 limit=effective_limit + 1,
-                # Grew (RM-46, sec-118 #2c): over HTTP, only names a
-                # non-confidential document mentions. stdio: never set.
-                public_only=state.hide_confidential,
             )
     except GraphTenantError as exc:
         raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
@@ -4595,7 +4596,7 @@ def brain_graphrag_stats(
         with connect_age(state.cfg.database_url) as conn:
             conn.autocommit = True
             _require_age_or_mcp_error(conn)
-            stats = graph_stats(conn, tenant_id, public_only=state.hide_confidential)
+            stats = graph_stats(conn, tenant_id)
     except GraphTenantError as exc:
         raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
     except psycopg.Error as exc:

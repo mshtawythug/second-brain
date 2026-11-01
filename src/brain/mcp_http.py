@@ -68,7 +68,12 @@ from .mcp_http_guard import (
     ResponseGuardMiddleware,
 )
 from .mcp_http_tools import sanitize_tool_errors
-from .mcp_tool_classes import ToolRegistry, apply_read_only, registered_tool_names
+from .mcp_tool_classes import (
+    ToolRegistry,
+    apply_graph_hide,
+    apply_read_only,
+    registered_tool_names,
+)
 from .ui.context import (
     HostRefused,
     Resolved,
@@ -422,13 +427,18 @@ def banner_lines(
     served: int,
     total: int,
     embedder: str,
+    graph_withheld: int = 0,
 ) -> list[str]:
     """What ``brain mcp serve`` prints to stderr once it is bound. Never the token."""
     origin = bind_origin(plan.host, port, plan.addresses)
+    graph = f"; {graph_withheld} graph tools withheld" if graph_withheld else ""
     if opts.allow_writes:
-        mode = f"READ-WRITE ({served} of {total} tools; --allow-writes: write tools exposed)"
+        mode = (
+            f"READ-WRITE ({served} of {total} tools; --allow-writes: write tools exposed{graph})"
+        )
     else:
-        mode = f"READ-ONLY ({served} of {total} tools; {total - served} write tools withheld)"
+        writes = total - served - graph_withheld
+        mode = f"READ-ONLY ({served} of {total} tools; {writes} write tools withheld{graph})"
     confidential = (
         "SERVED (--include-confidential)"
         if opts.include_confidential
@@ -522,6 +532,12 @@ def serve_http(
         )
         names = anyio.run(registered_tool_names, target)
         withheld = () if opts.allow_writes else apply_read_only(target, names)
+        # Round 5: the entity graph is derived from every document, confidential
+        # ones included, so the graph family needs --include-confidential.
+        graph_withheld = () if opts.include_confidential else apply_graph_hide(
+            target, [name for name in names if name not in withheld]
+        )
+        withheld = (*withheld, *graph_withheld)
         # sec-118 #5: an unexpected failure answers its class, never its text.
         sanitize_tool_errors(
             target,
@@ -534,7 +550,8 @@ def serve_http(
         app = build_http_app(target, opts, plan, probe=probe)
         say = announce or (lambda line: print(line, file=sys.stderr))
         for line in banner_lines(
-            opts, plan, port, served=served, total=len(names), embedder=cfg.embedder
+            opts, plan, port, served=served, total=len(names), embedder=cfg.embedder,
+            graph_withheld=len(graph_withheld),
         ):
             say(line)
         run(app, sockets, uvicorn_config_kwargs(plan, port, opts.log_level))

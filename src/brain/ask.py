@@ -444,12 +444,8 @@ def _retrieve(
     exclude_confidential: bool = False,
     fallback: bool = True,
     session_id: str | None = None,
-    public_entities_only: bool = False,
 ) -> tuple[list[SearchResult], str, SearchFallback | None]:
     """Retrieve documents for one sub-query: (results, graph_summary, fallback).
-
-    ``public_entities_only`` (``brain mcp serve`` without --include-confidential)
-    keeps confidential-only entity names and summaries out of the graph labels.
 
     The hybrid leg always runs. For ``mode != hybrid`` the graph leg runs too
     (requires ``backend``) and its docs are appended after the hybrid docs; the
@@ -487,7 +483,6 @@ def _retrieve(
         limit=limit,
         embedder=embedder,
         exclude_confidential=exclude_confidential,
-        public_entities_only=public_entities_only,
     )
     combined = list(hybrid.results)
     seen_ids = {r.document_id for r in combined}
@@ -539,7 +534,6 @@ def ask_no_loop(
     exclude_confidential: bool = False,
     fallback: bool = True,
     on_step: OnStep | None = None,
-    public_entities_only: bool = False,
 ) -> AskResult:
     """Single retrieve + synthesize pass (the ``--no-loop`` fast path).
 
@@ -561,7 +555,6 @@ def ask_no_loop(
         exclude_confidential=exclude_confidential,
         fallback=fallback,
         session_id=session_id,
-        public_entities_only=public_entities_only,
     )
     _step(on_step, "synthesize", 1)
     raw_answer = _call_synthesize_step(chat, cfg, question, docs, graph_summary)
@@ -594,7 +587,6 @@ def ask(
     fallback: bool = True,
     on_step: OnStep | None = None,
     history: Sequence[AskTurn] = (),
-    public_entities_only: bool = False,
 ) -> AskResult:
     """Agentic plan -> retrieve -> reflect -> synthesize loop over the corpus.
 
@@ -633,7 +625,6 @@ def ask(
             exclude_confidential=exclude_confidential,
             fallback=fallback,
             on_step=on_step,
-            public_entities_only=public_entities_only,
         )
 
     session_id = uuid.uuid4().hex
@@ -671,7 +662,6 @@ def ask(
                 exclude_confidential=exclude_confidential,
                 fallback=fallback,
                 session_id=session_id,
-                public_entities_only=public_entities_only,
             )
             if graph_summary:
                 graph_summaries.append(graph_summary)

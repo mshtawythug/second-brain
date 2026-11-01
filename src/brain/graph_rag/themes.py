@@ -83,7 +83,6 @@ def _retrieve_themes(
     synthesize: bool,
     enricher: _GroupSummarizer | None,
     exclude_confidential: bool = False,
-    public_only: bool = False,
 ) -> GraphContext:
     """Run scope-first "themes with X" retrieval + assemble its ``GraphContext``.
 
@@ -104,7 +103,7 @@ def _retrieve_themes(
 
     # 1. Resolve the person string → canonical participant keys (deterministic;
     #    raises PersonNotFound / PersonAmbiguous for the CLI/MCP to map).
-    match = resolve_person_to_keys(conn, person, public_only=public_only)
+    match = resolve_person_to_keys(conn, person)
     person_display = match.display_name
 
     # 2. Map the resolved person → seed person ENTITY ids, and the owner → its

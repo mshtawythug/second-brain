@@ -656,3 +656,80 @@ def test_statement_timeout_keeps_other_query_values_byte_for_byte() -> None:
         "postgresql://u@db.example.com/brain?application_name=a+b&sslmode=disable&options="
     )
     assert result.endswith("options=-c%20statement_timeout%3D1500")
+
+
+# ------------------------------- round 5: the graph family needs --include-confidential
+
+
+def _graph_server() -> Any:
+    """A throwaway server: one ordinary read tool, one graph read tool, one graph write."""
+    server = make_server("throwaway")
+
+    def brain_search(query: str) -> dict[str, Any]:
+        """A stand-in search."""
+        return {"echo": query}
+
+    def brain_graphrag_search(query: str) -> dict[str, Any]:
+        """A stand-in graph search."""
+        return {"graph": query}
+
+    def brain_graphrag_build(backfill: bool = False) -> dict[str, Any]:
+        """A stand-in graph write."""
+        return {"built": backfill}
+
+    for tool in (brain_search, brain_graphrag_search, brain_graphrag_build):
+        server.tool()(tool)
+    return server
+
+
+@pytest.mark.parametrize(
+    ("include", "writes", "served", "banner"),
+    [
+        (False, False, ("brain_search",),
+         "READ-ONLY (1 of 3 tools; 1 write tools withheld; 1 graph tools withheld)"),
+        (False, True, ("brain_search",),
+         "READ-WRITE (1 of 3 tools; --allow-writes: write tools exposed; 2 graph tools withheld)"),
+        (True, False, ("brain_graphrag_search", "brain_search"),
+         "READ-ONLY (2 of 3 tools; 1 write tools withheld)"),
+        (True, True, ("brain_graphrag_build", "brain_graphrag_search", "brain_search"),
+         "READ-WRITE (3 of 3 tools; --allow-writes: write tools exposed)"),
+    ],
+)
+def test_serve_withholds_the_graph_family_unless_confidential_is_included(
+    cfg: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    include: bool,
+    writes: bool,
+    served: tuple[str, ...],
+    banner: str,
+) -> None:
+    monkeypatch.setattr(mcp_server, "_state", None)
+    server = _graph_server()
+    recorder = _Recorder()
+    opts = HttpServeOptions(
+        token=TOKEN, port=_free_port(), include_confidential=include, allow_writes=writes
+    )
+
+    serve_http(opts, cfg, server=server, run=recorder.run, announce=recorder.say)
+
+    assert anyio.run(registered_tool_names, server) == served
+    assert any(banner in line for line in recorder.lines)
+
+
+@pytest.mark.parametrize(("include", "unknown"), [(False, True), (True, False)])
+def test_a_graph_tool_is_unknown_without_confidential_and_works_with_it(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch, include: bool, unknown: bool
+) -> None:
+    monkeypatch.setattr(mcp_server, "_state", None)
+    recorder = _Recorder()
+    opts = HttpServeOptions(token=TOKEN, port=_free_port(), include_confidential=include)
+
+    serve_http(opts, cfg, server=_graph_server(), run=recorder.run, announce=recorder.say)
+    (app, _, _), = recorder.calls
+    graph = _rpc("tools/call", {"name": "brain_graphrag_search", "arguments": {"query": "q"}})
+    with TestClient(app, base_url="http://127.0.0.1:8787") as test_client:
+        response = _post(test_client, graph)
+
+    assert ("Unknown tool" in response.text) is unknown
+    if not unknown:
+        assert response.json()["result"]["structuredContent"] == {"graph": "q"}

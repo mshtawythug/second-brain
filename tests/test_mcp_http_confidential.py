@@ -10,9 +10,9 @@ found what still left:
   and source path. In HTTP mode (``McpState.hide_confidential``) a confidential
   document answers exactly as an unknown prefix does, for every tool that looks
   a document up by prefix. stdio is unchanged.
-- (c) graph entity names extracted only from confidential documents. In HTTP mode
-  an entity is named only if at least one non-confidential document mentions it.
-  stdio is unchanged.
+- (c) graph entity names extracted only from confidential documents. Round 5
+  withholds the whole graph family in HTTP mode instead
+  (``tests/test_mcp_http_graph_withheld.py``).
 
 Every document, entity and title here is synthetic. Runs against the test DB on 5434.
 """
@@ -28,19 +28,9 @@ import pytest
 
 from brain import mcp_server
 from brain.config import Config
-from brain.graph_rag.public_entities import public_entity_ids, withhold_confidential_entities
-from brain.graph_rag.relational import list_entities
-from brain.graph_rag.schema import (
-    CommunityGroup,
-    GraphContext,
-    GraphEntity,
-    GraphExplanation,
-    ThemeGroup,
-)
 from brain.mcp_compat import MCPError
 from brain.mcp_tools import related
 from tests.conftest import TEST_DATABASE_URL, FakeEmbedder
-from tests.entity_filter_seed import seed_entity, seed_mention
 
 pytestmark = pytest.mark.usefixtures("test_db")
 
@@ -181,128 +171,6 @@ def test_stdio_still_names_a_confidential_document_with_its_body_withheld() -> N
     assert payload["sensitivity"] == "confidential"
 
 
-# ------------------------------------------------------------------ (c) entities
-
-
-@pytest.fixture
-def entities(test_db: psycopg.Connection[Any], corpus: Path) -> dict[str, str]:
-    only_secret = seed_entity(test_db, name="Codename Zephyr", canonical_key="codename zephyr")
-    mixed = seed_entity(test_db, name="Project Harbor", canonical_key="project harbor")
-    only_normal = seed_entity(test_db, name="Project Lantern", canonical_key="project lantern")
-    seed_mention(test_db, only_secret, SECRET_ID)
-    seed_mention(test_db, mixed, SECRET_ID)
-    seed_mention(test_db, mixed, NORMAL_ID)
-    seed_mention(test_db, only_normal, NORMAL_ID)
-    test_db.execute("UPDATE graph_entities SET doc_count = 2 WHERE id = %s", (mixed,))
-    return {"only_secret": only_secret, "mixed": mixed, "only_normal": only_normal}
-
-
-def test_public_entity_ids_keep_entities_with_a_normal_mention(
-    test_db: psycopg.Connection[Any], entities: dict[str, str]
-) -> None:
-    public = public_entity_ids(test_db, "default", list(entities.values()))
-
-    assert public == {entities["mixed"], entities["only_normal"]}
-    assert public_entity_ids(test_db, "default", []) == set()
-
-
-def test_list_entities_public_only_drops_confidential_only_names(
-    test_db: psycopg.Connection[Any], entities: dict[str, str]
-) -> None:
-    rows = list_entities(test_db, "default", public_only=True)
-    public = {row.name: row.doc_count for row in rows}
-    everything = {row.name for row in list_entities(test_db, "default")}
-
-    assert public == {"Project Harbor": 2, "Project Lantern": 0}
-    assert everything == {"Codename Zephyr", "Project Harbor", "Project Lantern"}
-
-
-def _entity(entity_id: str, name: str) -> GraphEntity:
-    return GraphEntity(id=entity_id, entity_type="project", name=name, canonical_key=name.lower())
-
-
-def test_graph_context_entities_are_filtered_everywhere(
-    test_db: psycopg.Connection[Any], entities: dict[str, str]
-) -> None:
-    secret = _entity(entities["only_secret"], "Codename Zephyr")
-    mixed = _entity(entities["mixed"], "Project Harbor")
-    ctx = GraphContext(
-        session_id="s",
-        mode="local",
-        query="q",
-        entities=[secret, mixed],
-        themes=[ThemeGroup(group_id=1, entities=[secret, mixed])],
-        communities=[CommunityGroup(community_key="c", entities=[mixed, secret])],
-        explanation=GraphExplanation(mode="local", seed_entity_ids=[secret.id, mixed.id]),
-    )
-
-    filtered = withhold_confidential_entities(test_db, ctx)
-
-    assert [e.name for e in filtered.entities] == ["Project Harbor"]
-    assert [e.name for e in filtered.themes[0].entities] == ["Project Harbor"]
-    # A community that lost a member is dropped whole, as list_communities
-    # withholds one (rev-118 round 2): its summary was written from all of them.
-    assert filtered.communities == []
-    assert filtered.explanation is not None
-    assert filtered.explanation.seed_entity_ids == [mixed.id]
-    assert [e.name for e in ctx.entities] == ["Codename Zephyr", "Project Harbor"]  # not mutated
-
-
-def test_a_graph_context_with_nothing_to_withhold_is_unchanged(
-    test_db: psycopg.Connection[Any], entities: dict[str, str]
-) -> None:
-    harbor = _entity(entities["mixed"], "Project Harbor")
-    ctx = GraphContext(session_id="s", mode="local", query="q", entities=[harbor])
-
-    assert withhold_confidential_entities(test_db, ctx) == ctx
-
-
-@pytest.mark.parametrize(("hide", "expected"), [
-    (True, {"Project Harbor", "Project Lantern"}),
-    (False, {"Codename Zephyr", "Project Harbor", "Project Lantern"}),
-])
-def test_brain_graphrag_entities_follows_the_mode(
-    monkeypatch: pytest.MonkeyPatch,
-    corpus: Path,
-    entities: dict[str, str],
-    hide: bool,
-    expected: set[str],
-) -> None:
-    _state(monkeypatch, corpus, hide=hide)
-
-    payload = mcp_server.brain_graphrag_entities()
-
-    assert {row["name"] for row in payload["entities"]} == expected
-
-
-def test_graph_retrieval_seam_passes_the_mode_to_graph_rag_search(
-    monkeypatch: pytest.MonkeyPatch, corpus: Path, entities: dict[str, str]
-) -> None:
-    """The MCP graph tools' seam asks ``graph_rag_search`` for public entities in HTTP mode.
-
-    The filtering itself happens inside ``graph_rag_search`` (rev-118 round 2), so
-    one switch covers every mode and ``brain_ask``'s graph legs too; it is tested in
-    ``tests/test_mcp_http_graph_text.py``.
-    """
-    import brain.graph_rag as graph_rag_pkg
-
-    seen: dict[bool, bool] = {}
-
-    def fake_search(*_: Any, **kwargs: Any) -> GraphContext:
-        seen[current] = kwargs["public_entities_only"]
-        return GraphContext(session_id="s", mode="local", query="q")
-
-    monkeypatch.setattr(graph_rag_pkg, "graph_rag_search", fake_search)
-    for current in (True, False):
-        state = _state(monkeypatch, corpus, hide=current)
-        mcp_server._graphrag_search_or_mcp_error(
-            state.cfg, "q", mode="local", tenant=None, person=None, depth=None, limit=None,
-            synthesize=False, enricher=None,
-        )
-
-    assert seen == {True: True, False: False}
-
-
 def test_mcp_state_defaults_to_stdio_behaviour(corpus: Path) -> None:
     state = mcp_server._State(
         cfg=Config(database_url=TEST_DATABASE_URL),
@@ -311,31 +179,3 @@ def test_mcp_state_defaults_to_stdio_behaviour(corpus: Path) -> None:
 
     assert state.hide_confidential is False
     assert dataclasses.replace(state, hide_confidential=True).hide_confidential is True
-
-
-def test_public_mention_sql_refuses_a_non_identifier_alias() -> None:
-    from brain.graph_rag.public_entities import public_mention_sql
-
-    with pytest.raises(ValueError, match="plain identifier"):
-        public_mention_sql("e; DROP TABLE documents")
-    assert "e.tenant_id" in public_mention_sql("e")
-
-
-@pytest.mark.parametrize(("hide", "expected"), [
-    (True, {"Project Harbor", "Project Lantern"}),
-    (False, {"Codename Zephyr", "Project Harbor", "Project Lantern"}),
-])
-def test_brain_graphrag_stats_top_names_follow_the_mode(
-    monkeypatch: pytest.MonkeyPatch,
-    corpus: Path,
-    entities: dict[str, str],
-    hide: bool,
-    expected: set[str],
-) -> None:
-    """rev-118 #10: stats' top-10 are NAMES; only its counts are corpus-wide."""
-    _state(monkeypatch, corpus, hide=hide)
-
-    payload = mcp_server.brain_graphrag_stats()
-
-    assert {row["name"] for row in payload["top_entities"]} == expected
-    assert payload["total_entities"] == 3  # counts are documented as corpus-wide

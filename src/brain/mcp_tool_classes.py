@@ -17,6 +17,16 @@ not obvious, its code; a scan of the read tools' parameters then moved
 ``brain_gaps`` to write (plan ``docs/plans/2026-10-31-rm-46-mcp-http.md``).
 ``tests/test_mcp_http_readonly.py`` pins the judgement calls to the docstring
 phrases they rest on. stdio never calls :func:`apply_read_only`.
+
+**The graph family needs ``--include-confidential`` (RM-46 round 5).** The entity
+graph is derived from EVERY document: entity names, co-occurrence edges and
+weights, themes and communities are all computed over confidential documents
+too. Four security rounds each found one more way a graph output carried that,
+so filtering outputs field by field did not converge. Without
+``--include-confidential`` every ``brain_graphrag_*`` tool is withheld
+(:func:`apply_graph_hide`, matched by prefix so a graph tool added later is
+withheld too), and ``brain_ask`` answers only in ``hybrid`` mode
+(:data:`ASK_GRAPH_MODES_REFUSAL`).
 """
 from __future__ import annotations
 
@@ -82,6 +92,25 @@ async def registered_tool_names(server: ToolRegistry) -> tuple[str, ...]:
 def write_tool_names(registered: Iterable[str]) -> tuple[str, ...]:
     """The names in ``registered`` that are not read-only, sorted and unique."""
     return tuple(sorted({name for name in registered if name not in READ_ONLY_TOOLS}))
+
+
+#: Every graph tool's name starts with this.
+GRAPH_TOOL_PREFIX = "brain_graphrag_"
+
+#: ``brain_ask``'s answer to a graph mode when confidential documents are hidden.
+ASK_GRAPH_MODES_REFUSAL = (
+    "this server runs brain_ask in mode='hybrid' only: the entity graph is built from "
+    "every document, confidential ones included, so its modes need "
+    "brain mcp serve --include-confidential"
+)
+
+
+def apply_graph_hide(server: ToolRegistry, registered: Iterable[str]) -> tuple[str, ...]:
+    """Remove every graph tool in ``registered``; return them, sorted."""
+    withheld = tuple(sorted({name for name in registered if name.startswith(GRAPH_TOOL_PREFIX)}))
+    for name in withheld:
+        server.remove_tool(name)
+    return withheld
 
 
 def apply_read_only(server: ToolRegistry, registered: Iterable[str]) -> tuple[str, ...]:

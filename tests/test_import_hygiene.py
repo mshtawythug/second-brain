@@ -45,7 +45,6 @@ def _fresh(code: str) -> subprocess.CompletedProcess[bytes]:
         "brain.mcp_http_guard",
         "brain.mcp_http_tools",
         "brain.mcp_http_conn",
-        "brain.graph_rag.public_entities",
         "brain.timeline_entities",
         "brain.settings.mcp_http",
         "brain.cli_mcp",
