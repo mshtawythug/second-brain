@@ -337,3 +337,23 @@ prove it.
 6. The AC3 manual run (D5), with the transcript recorded.
 7. The review and audit loop (CLAUDE.md §14) plus `ecc:security-reviewer` on opus.
 8. Push and open the PR, but only within this ticket's flow and on the coordinator's go.
+
+## 10. Deviations found during implementation (approved by the coordinator mid-ticket)
+
+The AC3 end-to-end run (D5) found two defects in `brain restore` that predate RM-47 and that the
+recipe cannot work around. Both are fixed in this PR.
+
+1. **AGE restore failure.** `pg_dump --exclude-schema=ag_catalog` still dumps the `age`
+   EXTENSION entry, which `pg_restore --exit-on-error` replays as `CREATE EXTENSION IF NOT EXISTS
+   age WITH SCHEMA ag_catalog`. That fails on a fresh staging database (`schema "ag_catalog" does
+   not exist`), so every real restore of an AGE brain aborted before the swap. The fix is a new
+   leaf, `backup/staging_prep.py` (`prepare_staging_extensions`). It creates each extension in
+   `STAGING_EXTENSIONS = ("age",)` that the server offers, in the staging database before
+   `pg_restore`, then commits. `restore.py` gains 3 lines. The regression test runs a runner that
+   records the staging database's extensions when `pg_restore` starts; the pair covers an
+   extension the server does not offer, and the failure path is a fixed `BackupError`.
+2. **Preflight label.** "WILL BE OVERWRITTEN: • database X" printed the archive's
+   `database_name`, not the target's. `_print_preflight` now takes `target_database`, taken from
+   `cfg.database_url`.
+
+Line budget after both: `backup/restore.py` 755 → 767, which is +12 of its +15 (spec §2.2).

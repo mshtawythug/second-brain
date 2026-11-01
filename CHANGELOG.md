@@ -35,6 +35,17 @@ git tag scheme:
   from elsewhere (`brain mcp serve`, `brain ui --lan`), or a one-way read replica refreshed by
   `brain backup` plus `brain restore`. Two-way sync is not supported (RM-47.D1).
 
+### Fixed — `brain restore` of an AGE-enabled brain (found by RM-47's end-to-end run)
+
+- Every real restore of a brain with Apache AGE failed at `pg_restore`: the dump excludes the
+  `ag_catalog` schema but keeps the `age` extension entry, which replays as `CREATE EXTENSION IF
+  NOT EXISTS age WITH SCHEMA ag_catalog` and fails on a fresh staging database. The restore now
+  creates `age` in the staging database first, when the server offers it, so the dump's
+  statement is a no-op. Nothing was ever damaged: the failure came before any swap. The restore
+  tests had faked `pg_restore`, which is why they did not see it.
+- The restore summary's "WILL BE OVERWRITTEN" line now names the database being replaced. It
+  used to name the database the archive was taken from, which differs on a read replica.
+
 ### Added — MCP over HTTP: `brain mcp serve` and `brain mcp token` (RM-46, PR #118)
 
 - `brain mcp serve` serves the MCP tools over streamable HTTP, for another device on a
