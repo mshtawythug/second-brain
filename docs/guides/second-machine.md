@@ -96,8 +96,19 @@ contents. Remove the file, and on a replica the next restore writes it again.
 
 ### Refreshing the replica
 
-Repeat the first restore with a newer archive: run `brain backup` on the primary, copy the archive,
-then run `brain restore` on the replica.
+Repeat the first restore with a newer archive. On the primary, run `brain backup` and copy the
+archive across. Then, on the replica:
+
+```bash
+brain restore ~/incoming/brain-backup-<ts>.tar.gz
+brain graphrag build --force       # if you use GraphRAG: rebuilds the AGE graph mirror
+brain doctor
+```
+
+These are the two follow-ups `brain restore` prints ("Then run: brain graphrag build --force",
+"Then run: brain doctor"). The archive does not carry the AGE graph mirror. Until the rebuild runs,
+`brain doctor` shows `graph drift  drift detected (entities rel=N age=0, …)` and graph queries come
+back empty. After the rebuild it shows `graph drift  OK`.
 
 - **Every refresh asks for the typed phrase.** After the first restore the replica is not empty, so
   `brain restore` asks you to type `restore and overwrite my brain`. No flag skips it, `--yes`
