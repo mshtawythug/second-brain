@@ -146,6 +146,13 @@ brain init                      # only if src/brain/migrations/ has new files
 ```
 Then **Cmd-Q + reopen Claude Desktop** so the server re-spawns with the updated code.
 
+## Using the brain from another machine
+
+Claude Desktop runs `brain-mcp` over stdio on the machine that holds the brain. To reach the
+same tools from another device, run `brain mcp serve` there instead: loopback by default,
+bearer-authenticated, read-only. See
+[Reaching your brain from another machine](mcp-http-transport.md).
+
 ## Reference
 
 - The "Claude Desktop (MCP server)" section in [docs/configuration.md](../configuration.md): high-level summary + the full env-var table.

@@ -22,6 +22,43 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — MCP over HTTP: `brain mcp serve` and `brain mcp token` (RM-46)
+
+- `brain mcp serve` serves the MCP tools over streamable HTTP, for another device on a
+  private network. Off until run. Loopback by default (`127.0.0.1:8787`). A non-loopback
+  bind needs `--allow-remote` **and** a bearer token, and the host is judged by the address
+  it resolves to, once, with `brain ui`'s bind code. The bound sockets are handed to uvicorn.
+- **Read-only by default.** The 23 write tools are removed from the server unless
+  `--allow-writes`. The read list is an allowlist, so a new tool is withheld until it is
+  classified. `brain_gaps` counts as a write tool, because `push=true` writes to the
+  elicitation queue.
+- **Confidential documents refused by default.** A `tools/call` asking for
+  `include_confidential` gets a JSON-RPC error unless the server was started with
+  `--include-confidential`. The gate parses strictly: UTF-8, no duplicate keys, no `NaN`,
+  no batches, bounded nesting, no content encoding. It replays the bytes unchanged.
+- Bearer token in `<brain_home>/mcp_token` (0600, `O_EXCL | O_NOFOLLOW`, atomic rotation),
+  read refusing symlinks, FIFOs, other owners and oversized or malformed files. It is
+  compared as bytes in constant time, and every auth failure gets the same 401.
+  `BRAIN_MCP_TOKEN` and `BRAIN_MCP_TOKEN_PATH` live in the new settings leaf
+  `brain/settings/mcp_http.py`. `brain mcp token [--rotate] [--show] [--json] [--path]`
+  manages the token.
+- `Host` is checked on every path (DNS rebinding), and the SDK gets an explicit
+  `TransportSecuritySettings` with no allowed browser origin (403). Limits: a 1 MiB body
+  cap (`--max-body-bytes`), an 8 MiB result cap (502), a per-call deadline
+  (`--call-timeout`, default 300 s, 504), and at most 16 concurrent requests. Sessions are
+  stateless, responses are JSON, and uvicorn runs with no proxy headers, no server header
+  and no access log. The request log names a route label, never a path, header, body or
+  token. `/healthz` is open; `/readyz` needs the token and carries no corpus statistics.
+- HTTP tool calls each open their own database connection, because they run concurrently
+  on worker threads. stdio keeps its single persistent connection.
+- `brain-mcp` now exits 2 when given arguments, instead of silently starting stdio.
+- The `mcp_server` state builder moves to the new leaf `brain/mcp_state.py`
+  (`mcp_server._State` stays as an alias); `start_state` is the one startup path.
+  `mcp_server.py` shrinks.
+- New `http` extra (`pip install 'secondbrain-py[http]'`) pins `mcp>=2.0,<3.0`. The base pin
+  still admits 1.x for stdio, and `brain mcp serve` on 1.x exits 2 naming the extra. Guide:
+  `docs/guides/mcp-http-transport.md`.
+
 ### Added — receipts: Gmail PDF and image attachments (RM-45, PR #117)
 
 - `brain ingest-gmail --with-attachments` appends the text of each thread's PDF, PNG and JPEG

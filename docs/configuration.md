@@ -925,6 +925,8 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault folder for authored notes, ingested mirrors, and MCP note tools. |
 | `BRAIN_USER_EMAIL` | unset | Owner email read by `brain ui`'s email-thread mode for its "Only my replies" filter. Unset, the filter is not offered. Takes effect on the next page load. |
 | `BRAIN_MCP_LOG_LEVEL` | `INFO` | Stderr log level. Accepts `DEBUG`, `INFO`, `WARNING`, `ERROR`. Unknown values fall back to `INFO`. Set it in the `env` block above or in any `.env` the CLI reads (see [Where config lives](#where-config-lives-env-resolution-order)). The `env` block wins. |
+| `BRAIN_MCP_TOKEN` | unset | Bearer token for `brain mcp serve`, for a container that cannot mount a file. Must look like a minted token (43 to 256 of `A-Z a-z 0-9 _ -`); a refusal never quotes it. The token file is preferred. See [Serving MCP over HTTP](#serving-mcp-over-http-brain-mcp-serve). |
+| `BRAIN_MCP_TOKEN_PATH` | `<brain_home>/mcp_token` | Where `brain mcp serve` and `brain mcp token` keep the bearer token. `--token-file` / `--path` override it for one run. |
 | `BRAIN_GRAPH_ENABLED` | `true` | Enable people-aspect graph sync at ingest. On a stock pgvector DB the sync is a best-effort no-op (never raises). |
 | `BRAIN_GRAPH_CONCEPTS` | `true` | Enable concept-aspect extraction (LLM entity extraction over topics/projects/orgs/tools). Requires `BRAIN_GRAPH_EXTRACT_MODEL` to be pullable via Ollama. |
 | `BRAIN_GRAPH_TENANT` | `default` | Tenant id stamped on every graph row, vertex, edge, and query. Single-user local deployments leave it at the default. |
@@ -942,6 +944,23 @@ note for today with these bullets" and it can call `brain_daily` /
 embedder cold start cost (Ollama loading the model, or the Voyage
 SDK/network path warming up). Logs go to stderr and are surfaced by Claude
 Desktop if a tool call fails.
+
+### Serving MCP over HTTP (`brain mcp serve`)
+
+`brain mcp serve` serves the same tools over streamable HTTP, for another device on a
+private network (RM-46). It is off until you run it. By default it binds loopback, needs a
+bearer token, serves the 28 read tools only, and refuses `include_confidential`. A non-loopback
+bind needs `--allow-remote` **and** a token. `--allow-writes` and `--include-confidential` widen
+it, and the startup banner says when they do. It needs the mcp 2.x SDK
+(`pip install 'secondbrain-py[http]'`); stdio does not.
+
+```bash
+brain mcp token --rotate                  # <brain_home>/mcp_token, mode 0600
+brain mcp serve                           # http://127.0.0.1:8787/mcp, read-only
+```
+
+Its two knobs, `BRAIN_MCP_TOKEN` and `BRAIN_MCP_TOKEN_PATH`, are in the table above. Full
+guide: [Reaching your brain from another machine](guides/mcp-http-transport.md).
 
 ### Claude Code (bundled skills)
 
