@@ -16,6 +16,7 @@ from typing import Any
 import psycopg
 
 from ..errors import GraphBackendError
+from .public_entities import public_mention_sql
 from .schema import EdgeContribution, EntityMention, EntitySummary, GraphStats
 
 __all__ = [
@@ -303,6 +304,7 @@ def list_entities(
     entity_type: str | None = None,
     sort: str = "docs",
     limit: int = 50,
+    public_only: bool = False,
 ) -> list[EntitySummary]:
     """List entities for the tenant, filtered and sorted (admin listing).
 
@@ -311,6 +313,9 @@ def list_entities(
     ``sort`` (``"docs"`` → ``doc_count DESC, name ASC``; ``"name"`` →
     ``name ASC``) with ``entity_type, canonical_key`` appended to both so the
     sort is TOTAL, and capped at ``limit`` rows (``limit <= 0`` returns all).
+    ``public_only`` keeps only entities a non-confidential document mentions
+    (``brain mcp serve`` without ``--include-confidential``, RM-46 sec-118 #2c);
+    ``doc_count`` is unchanged for the entities kept.
     Read-only; no raw Cypher or AGE traversal. The raw ``embedding`` column is
     not selected (a storage handle, not a wire value).
 
@@ -333,6 +338,8 @@ def list_entities(
     if entity_type is not None:
         where_clause += " AND entity_type = %s"
         params.append(entity_type)
+    if public_only:
+        where_clause += " AND " + public_mention_sql("graph_entities")
 
     # ``name`` is NOT unique: graph_entities is UNIQUE on
     # (tenant_id, entity_type, canonical_key), so two entities can share a

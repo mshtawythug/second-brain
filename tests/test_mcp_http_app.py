@@ -596,3 +596,16 @@ def test_serve_bounds_every_statement_by_the_call_deadline(
     serve_http(opts, cfg, server=_server(), run=recorder.run, announce=recorder.say)
 
     assert "statement_timeout%3D30000" in mcp_server._get_state().cfg.database_url
+
+
+@pytest.mark.parametrize(("include", "hidden"), [(False, True), (True, False)])
+def test_serve_hides_confidential_metadata_unless_opted_in(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch, include: bool, hidden: bool
+) -> None:
+    monkeypatch.setattr(mcp_server, "_state", None)
+    recorder = _Recorder()
+    opts = HttpServeOptions(token=TOKEN, port=_free_port(), include_confidential=include)
+
+    serve_http(opts, cfg, server=_server(), run=recorder.run, announce=recorder.say)
+
+    assert mcp_server._get_state().hide_confidential is hidden

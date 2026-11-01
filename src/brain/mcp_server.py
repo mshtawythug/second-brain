@@ -240,6 +240,16 @@ because the tool lives here. Resolution and the graph checks are in
 the facet predicate, recorded inline at the mapping. Plan:
 ``docs/plans/2026-10-30-rm-24-entity-filter.md``.
 
+**And 2026-10-31 (RM-46, sec-118 #2): confidential metadata over HTTP.**
+``_resolve_id`` answers a confidential document as an unknown prefix when
+``McpState.hide_confidential`` is set (``brain mcp serve`` without
+``--include-confidential``); ``brain_link_proposal`` takes ``include_confidential``
+and its destination lookup carries the F6 predicate (stdio too);
+``brain_graphrag_entities`` and the graph retrieval seam drop entity names only
+confidential documents mention, in HTTP mode only. Each growth is reasoned inline
+("Grew (RM-46, sec-118 …)"); the HTTP policy itself lives in ``brain.mcp_http*``
+and ``brain.graph_rag.public_entities``. Plan: ``docs/plans/2026-10-31-rm-46-mcp-http.md``.
+
 **Hazard this file has already been bitten by.** Every tool is a bare ``def``
 under a lone ``@mcp_app.tool()`` line, so inserting a helper between a decorator
 and the function it was written for silently moves the registration onto the
@@ -354,7 +364,7 @@ from .resurface import resurface_docs
 from .search import SearchDiagnostics, build_tsquery, hybrid_search
 from .search_pipeline import pipeline_json, run_search
 from .search_predicate import build_predicate
-from .sensitivity import is_confidential
+from .sensitivity import is_confidential, not_confidential_sql
 from .source_kinds import InvalidSourceKind, validate_source_kind
 from .tags import normalize_tags
 from .token_report import count_payload_tokens, count_results_tokens
@@ -550,7 +560,7 @@ def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:
     the failure to the caller.
     """
     try:
-        return resolve_document_prefix(conn, prefix)
+        doc_id = resolve_document_prefix(conn, prefix)
     except (
         IdPrefixTooShort,
         IdPrefixNotHex,
@@ -558,6 +568,14 @@ def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:
         IdPrefixAmbiguous,
     ) as e:
         raise _mcp_error(INVALID_PARAMS, str(e)) from e
+    # Grew (RM-46, sec-118 #2b): over HTTP without --include-confidential, a
+    # confidential document answers EXACTLY as an unknown prefix does, so its
+    # title, tags and source path never leave the machine. stdio: never set.
+    if _state is not None and _state.hide_confidential:
+        row = conn.execute("SELECT sensitivity FROM documents WHERE id = %s", (doc_id,))
+        if is_confidential((row.fetchone() or (None,))[0]):
+            raise _mcp_error(INVALID_PARAMS, str(IdPrefixNotFound(prefix)))
+    return doc_id
 
 
 def _assert_within_vault(target: Path, vault_path: Path, *, label: str) -> None:
@@ -3210,8 +3228,12 @@ def brain_ask(
 def brain_link_proposal(
     src_id_prefix: str,
     dst_id_or_title: str,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Propose adding a ``[[link]]`` from ``src`` to ``dst``. Writes nothing.
+
+    ``include_confidential`` (default False): a confidential destination is not
+    found unless set (F6; RM-46 sec-118).
 
     Resolves both endpoints, builds the line that would append the link
     to the source's body, and returns the diff data — the source's vault
@@ -3256,7 +3278,7 @@ def brain_link_proposal(
                 )
 
             dst_id, dst_title, link_text = _resolve_proposal_dst(
-                conn, dst_id_or_title
+                conn, dst_id_or_title, include_confidential=include_confidential
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -3418,6 +3440,7 @@ def _graphrag_search_or_mcp_error(
     """
     from .graph_rag import graph_rag_search
     from .graph_rag.backends import AgeBackend
+    from .graph_rag.public_entities import withhold_confidential_entities
 
     try:
         with connect_age(cfg.database_url) as conn:
@@ -3425,7 +3448,7 @@ def _graphrag_search_or_mcp_error(
             _require_age_or_mcp_error(conn)
             backend = AgeBackend()
             backend.bootstrap(conn)
-            return graph_rag_search(
+            ctx = graph_rag_search(
                 conn,
                 cfg,
                 query,
@@ -3443,6 +3466,11 @@ def _graphrag_search_or_mcp_error(
                 # and none can be gated by accident or forgotten individually.
                 exclude_confidential=not include_confidential,
             )
+            # Grew (RM-46, sec-118 #2c): over HTTP, drop entity names only
+            # confidential documents mention. stdio: never set.
+            if _state is not None and _state.hide_confidential:
+                ctx = withhold_confidential_entities(conn, ctx)
+            return ctx
     except (PersonNotFound, PersonAmbiguous) as exc:
         raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
     except GraphTenantError as exc:
@@ -4440,6 +4468,11 @@ def brain_graphrag_entities(
     document text, and this tool cannot be used to test a hypothesis about one
     document's contents the way a search hit can.
 
+    **Over HTTP it is gated after all** (RM-46, sec-118 #2c): ``brain mcp serve``
+    without ``--include-confidential`` lists only entities a non-confidential
+    document mentions, because a name extracted from a confidential body is
+    content to a remote caller. stdio keeps the exemption below.
+
     **The exemption ends the moment ``description`` is written.** Populating it
     from document text — the obvious way to fill it — makes this tool a body
     egress and it must then take the flag like every other. Contrast
@@ -4482,6 +4515,9 @@ def brain_graphrag_entities(
                 entity_type=entity_type,
                 sort=sort,
                 limit=effective_limit + 1,
+                # Grew (RM-46, sec-118 #2c): over HTTP, only names a
+                # non-confidential document mentions. stdio: never set.
+                public_only=state.hide_confidential,
             )
     except GraphTenantError as exc:
         raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
@@ -4730,7 +4766,7 @@ def _build_note_file_text(
 
 
 def _resolve_proposal_dst(
-    conn: psycopg.Connection[Any], value: str
+    conn: psycopg.Connection[Any], value: str, *, include_confidential: bool = False
 ) -> tuple[str, str, str]:
     """Resolve ``value`` to ``(document_id, title, link_text)`` for proposals.
 
@@ -4748,13 +4784,17 @@ def _resolve_proposal_dst(
     the candidate ids included in the error message.
     """
     cleaned = value.strip()
+    # Grew (RM-46, sec-118 #2a; F6): a confidential destination is not found
+    # unless the caller opts in, on stdio and HTTP alike, so neither query can
+    # name one (an id + title oracle before).
+    gate = "" if include_confidential else f" AND {not_confidential_sql('d')}"
     if (
         len(cleaned) >= _ID_PREFIX_MIN_LEN
         and _HEX_ONLY_RE.match(cleaned.lower()) is not None
     ):
         rows = conn.execute(
-            "SELECT id::text, title FROM documents "
-            "WHERE id::text LIKE %s LIMIT 2",
+            "SELECT id::text, title FROM documents d "
+            f"WHERE id::text LIKE %s{gate} LIMIT 2",
             (cleaned.lower() + "%",),
         ).fetchall()
         if len(rows) == 1:
@@ -4769,8 +4809,8 @@ def _resolve_proposal_dst(
         # Zero hex matches → fall through to title resolution; users may
         # legitimately have a title that happens to look like hex.
     rows = conn.execute(
-        "SELECT id::text, title FROM documents "
-        "WHERE LOWER(title) = LOWER(%s) LIMIT 5",
+        "SELECT id::text, title FROM documents d "
+        f"WHERE LOWER(title) = LOWER(%s){gate} LIMIT 5",
         (cleaned,),
     ).fetchall()
     if not rows:
@@ -5059,7 +5099,9 @@ def _load_config() -> Config:
     return cfg
 
 
-def start_state(cfg: Config, *, persistent_db: bool = True) -> _State:
+def start_state(
+    cfg: Config, *, persistent_db: bool = True, hide_confidential: bool = False
+) -> _State:
     """Build the server state for ``cfg``, make it the one the tools read, and warm up.
 
     The one startup path for stdio (:func:`main`) and HTTP
@@ -5068,7 +5110,9 @@ def start_state(cfg: Config, *, persistent_db: bool = True) -> _State:
     assigns is this module's: tests patch ``mcp_server._state`` directly.
     """
     global _state
-    _state = build_state(cfg, persistent_db=persistent_db)
+    _state = build_state(
+        cfg, persistent_db=persistent_db, hide_confidential=hide_confidential
+    )
     # F7: warm the embedding model into VRAM before the first real query.
     _warmup_embed(_state.embedder)
     return _state

@@ -66,3 +66,20 @@ users who have no confidential document at all. Recorded here rather than in
 and its own docstring said extract before the next addition. The 2026-10-15
 extraction brought it back under; the note stays here, where readers of this
 audit already look.
+
+
+**RM-46 (sec-118 #2), 2026-10-31: three statements gated, one exemption narrowed.**
+
+- `mcp_server._resolve_proposal_dst` (both statements: the id-prefix `LIKE` and the
+  title match) now carry `not_confidential_sql('d')` unless the caller passes
+  `brain_link_proposal(include_confidential=true)`. Before, a 6-hex prefix or a guessed
+  title named a confidential document's id and title back: an enumeration oracle, on
+  stdio as well as HTTP. Neither statement filters `draft`, so the grep above does not
+  list them; they are recorded here because they are the same egress class.
+- `brain_graphrag_entities` keeps its stdio exemption (entity names are a separate tier;
+  see its docstring), but **over HTTP without `--include-confidential` it is gated**:
+  `list_entities(public_only=True)` keeps only entities with at least one
+  non-confidential mention (`graph_rag/public_entities.public_mention_sql`). The same
+  rule filters every entity list a graph retrieval returns
+  (`withhold_confidential_entities`), and every by-prefix lookup answers a confidential
+  document as an unknown prefix (`McpState.hide_confidential`).

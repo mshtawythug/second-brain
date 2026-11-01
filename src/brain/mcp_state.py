@@ -49,9 +49,16 @@ class McpState:
     # the networkx-pulling graph_rag chain stays off MCP-server startup.
     graph_syncer: GraphSyncer | None = None
     db_conn: PersistentConnection | None = None
+    # RM-46, sec-118 #2: set by ``brain mcp serve`` unless --include-confidential.
+    # A confidential document then answers every by-prefix lookup exactly as an
+    # unknown prefix does, and a graph entity is named only if a non-confidential
+    # document mentions it. stdio leaves it False, so its behaviour is unchanged.
+    hide_confidential: bool = False
 
 
-def build_state(cfg: Config, *, persistent_db: bool = True) -> McpState:
+def build_state(
+    cfg: Config, *, persistent_db: bool = True, hide_confidential: bool = False
+) -> McpState:
     """Construct the embedder, enricher, graph syncer and connection for ``cfg``.
 
     Nothing here touches the network or the database: the enricher does not
@@ -74,4 +81,5 @@ def build_state(cfg: Config, *, persistent_db: bool = True) -> McpState:
         enricher=enricher,
         graph_syncer=graph_syncer,
         db_conn=db_conn,
+        hide_confidential=hide_confidential,
     )

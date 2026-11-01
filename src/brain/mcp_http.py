@@ -485,7 +485,9 @@ def serve_http(
         # sec-118 #4: no statement outlives the call that started it.
         timeout_ms = int(opts.call_timeout_s * 1000)
         cfg = replace(cfg, database_url=with_statement_timeout(cfg.database_url, timeout_ms))
-        mcp_server.start_state(cfg, persistent_db=False)
+        mcp_server.start_state(
+            cfg, persistent_db=False, hide_confidential=not opts.include_confidential
+        )
         names = anyio.run(registered_tool_names, target)
         withheld = () if opts.allow_writes else apply_read_only(target, names)
         # sec-118 #5: an unexpected failure answers its class, never its text.
