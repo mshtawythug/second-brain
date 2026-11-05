@@ -29,7 +29,14 @@ _INVOCATION_PREFIX = "brain "
 _COMMENT_PREFIX = "# "
 _HEADING_RE = re.compile(r"## ([a-z][a-z-]*): (\S.*)\Z")
 _PRINTABLE_ASCII_RE = re.compile(r"[\x20-\x7e]*\Z")
-_SHELL_METACHARACTERS = frozenset(";&|>$`()")
+#: Refused anywhere in an invocation: these control the shell, or it expands them even inside
+#: double quotes. Allowed because each can only change one value, never add a flag: ``~``, a leading
+#: ``=`` (zsh: the path of a command), and ``%`` (special only to job-control builtins).
+_SHELL_METACHARACTERS = frozenset(";&|>$`()\\{}!")
+#: Refused outside quotes only. Globs can match a file named ``--force``, and a word starting ``#``
+#: ends the command in a shell that allows comments. Inside quotes they are ordinary text.
+_UNQUOTED_EXPANSIONS = frozenset("*?[#^")
+_QUOTED_RE = re.compile(r"""\"[^\"]*\"|'[^']*'""")
 
 
 class ExamplesResourceError(BrainError):
@@ -59,9 +66,10 @@ def is_valid_fence_line(line: str) -> bool:
     """
     if not line or line.startswith(_COMMENT_PREFIX):
         return True
-    if not line.startswith(_INVOCATION_PREFIX) or line.endswith("\\"):
+    if not line.startswith(_INVOCATION_PREFIX) or _SHELL_METACHARACTERS.intersection(line):
         return False
-    if _SHELL_METACHARACTERS.intersection(line):
+    unquoted = _QUOTED_RE.sub("", line)
+    if _UNQUOTED_EXPANSIONS.intersection(unquoted) or '"' in unquoted or "'" in unquoted:
         return False
     words = line.split()
     return all(

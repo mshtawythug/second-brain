@@ -307,3 +307,11 @@ ticket's code. `_widths` lays the text out in the fallback to measure it and res
 new layout, and `CSS.getPlatformFontsForNode` reads the last layout, so a query that beat the next frame
 reported the fallback. The evidence and the runs are in the PR. The fix makes one more layout in
 `_widths` rather than polling: a poll would wait on the next frame and leave the stale state in place.
+
+## Fix round: what an interactive shell expands (rev-122)
+
+- **Refused anywhere in an invocation:** `{`, `}`, `!` and `\`, added to the earlier set.
+- **Refused outside quotes:** `*`, `?`, `[` and `^` (a glob can match a file named `--force`), `#` (in a
+  shell that allows comments, `# --dry-run` hides a flag the checker would otherwise count), and an
+  unbalanced quote. Inside quotes these are text, so `brain ask "...?"` stays valid.
+- **Left allowed, because each changes one value and cannot add a flag:** `~`, a leading `=` and `%`.

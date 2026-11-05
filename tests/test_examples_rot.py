@@ -1,7 +1,8 @@
 """RM-53: every example must name a real command with real flags, and be safe to paste.
 
-These run against the real ``brain.cli.app``, so renaming a command or a flag fails here.
-Nothing is invoked: the checks read the command tree only.
+These run against the real ``brain.cli.app``, so renaming a command or a flag fails here. The checks
+read the command tree only. Nothing runs except ``ingest-gmail``'s scope refusal, which exits before
+touching anything.
 """
 from __future__ import annotations
 
@@ -208,6 +209,13 @@ def _commented_invocations() -> list[tuple[str, str]]:
         'brain graphrag themes --person "Jane Doe"',
         "brain ingest-stdin --source slack --external-id t-1 --title T < thread.txt",
         'brain ingest-stdin --source slack --external-id t-1 --title "--nosuchflag" < t.txt',
+        "brain ingest-stdin --source slack --external-id t-1 --title T < --weird",
+        'brain search "what now?"',
+        'brain search "a*b [c] #d ^e"',
+        "brain search 'a*b'",
+        "brain ingest ~/notes/plan.md",
+        "brain search =ls",
+        "brain search 100%",
     ],
 )
 def test_a_real_invocation_has_no_problem(line: str) -> None:
@@ -256,6 +264,19 @@ def test_a_rotten_invocation_is_named(line: str, problem: str) -> None:
         "brain ingest-stdin --source slack --external-id t-1 --title T <t.txt",
         "brain ingest-stdin --source slack --external-id t-1 --title T << EOF",
         "brain search x<y",
+        "brain ingest ./x.pdf {--force,--tag=a}",
+        "brain search x {--yes,--json}",
+        "brain search {x",
+        "brain search x}",
+        'brain search "x" !!',
+        "brain search x\\ y",
+        "brain ingest ./notes/*",
+        "brain search what?",
+        "brain search [ab",
+        "brain ingest ./x.pdf --tag a # --dry-run",
+        "brain search x^y",
+        'brain search "x',
+        "brain search it's",
     ],
 )
 def test_shell_syntax_is_refused_at_load_time_and_by_both_checks(line: str) -> None:
@@ -289,6 +310,7 @@ def test_every_packaged_example_runs_and_is_safe_to_paste(line: str, comment: st
         ("brain ingest-gmail -l receipts --dry-run", ""),
         ("brain review weekly --no-emit", ""),
         ("brain brief", "# Writes: records watch hits"),
+        ("brain brief --no-wiki", "# Writes: records watch hits"),
         ('brain ingest ./notes/plan.pdf --tag "--force"', "# Writes: stores one file"),
         ("brain gaps --since 30d", ""),
     ],
