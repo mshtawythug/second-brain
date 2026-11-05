@@ -807,6 +807,12 @@ where = ["src"]
     "static/*.svg",
     "static/*.png",
     "static/*.ico",
+    # The reading face and its licence and provenance (RM-50). Same trap, third
+    # instance: "*" stops at "/", so these need their own patterns. A page without
+    # its font degrades silently to the fallback stack, which is why
+    # scripts/check_wheel_static.py compares a built wheel with the tree.
+    "static/fonts/*.woff2",
+    "static/fonts/*.txt",
 ]
 # brain.demo: the synthetic `brain demo` corpus manifest (a plain data subdir
 # under corpus/, no __init__.py) shipped so the zero-Ollama taste test works on

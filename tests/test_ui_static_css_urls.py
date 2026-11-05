@@ -362,13 +362,12 @@ def test_an_unparseable_css_url_is_a_problem(tmp_path: Path) -> None:
 def test_unshipped_targets_reports_only_files_no_glob_ships(tmp_path: Path) -> None:
     """The ``package-data`` clause of the real-tree test, against the real globs.
 
-    Today's stylesheets name no file at all (their one ``url()`` is a ``data:``
-    SVG), so on the real tree this clause checks nothing. This test is what
-    keeps it honest until RM-50 gives it a font to check.
+    RM-50 gave the real tree its first target, the reading face, which the globs do
+    ship. This test is the refusing half: a directory no glob reaches.
     """
     globs = _package_data_globs("brain.ui")
     package_root = tmp_path / "ui"
-    unshipped = package_root / "static" / "fonts" / "a.woff2"
+    unshipped = package_root / "static" / "vendor" / "a.woff2"
     shipped_image = package_root / "static" / "brain-logo.png"
     shipped_sheet = package_root / "static" / "css" / "x.css"
     for path in (unshipped, shipped_image, shipped_sheet):
@@ -381,7 +380,7 @@ def test_unshipped_targets_reports_only_files_no_glob_ships(tmp_path: Path) -> N
 
     assert len(problems) == 1
     assert "css/x.css" in problems[0]
-    assert "static/fonts/a.woff2" in problems[0]
+    assert "static/vendor/a.woff2" in problems[0]
 
 
 def test_stylesheet_problems_include_an_unshipped_target(tmp_path: Path) -> None:
@@ -392,10 +391,10 @@ def test_stylesheet_problems_include_an_unshipped_target(tmp_path: Path) -> None
     """
     static_root = tmp_path / "ui" / "static"
     (static_root / "css").mkdir(parents=True)
-    (static_root / "fonts").mkdir()
-    (static_root / "fonts" / "a.woff2").write_bytes(b"font")
+    (static_root / "vendor").mkdir()
+    (static_root / "vendor" / "a.woff2").write_bytes(b"font")
     (static_root / "css" / "x.css").write_text(
-        'a { src: url("../fonts/a.woff2"); }', encoding="utf-8"
+        'a { src: url("../vendor/a.woff2"); }', encoding="utf-8"
     )
 
     problems = _stylesheet_problems(static_root, _package_data_globs("brain.ui"))

@@ -63,12 +63,14 @@ TOKEN_HEADER = "x-brain-ui-token"
 #: ``<script>`` and no inline ``<style>``; that is what removes the need for a
 #: nonce. ``img-src data:`` exists solely for the SVG grain overlay.
 #: ``form-action 'none'`` and ``frame-ancestors 'none'`` add CSRF and
-#: clickjacking hardening on top.
+#: clickjacking hardening on top. ``font-src 'self'`` is for the packaged reading
+#: face: without it ``default-src 'none'`` blocks every ``@font-face`` silently.
 CSP = (
     "default-src 'none'; "
     "script-src 'self'; "
     "style-src 'self'; "
     "img-src 'self' data:; "
+    "font-src 'self'; "
     "connect-src 'self'; "
     "base-uri 'none'; "
     "form-action 'none'; "

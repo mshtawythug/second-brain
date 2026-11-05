@@ -1,0 +1,24 @@
+Newsreader, subset for the reading surfaces of brain ui (roadmap RM-50).
+
+Upstream: github.com/google/fonts, commit 24ddc1f324cac5d9f5aedca126d298f56e3f1640, ofl/newsreader/
+Each input below was checked against that commit's tree by git blob hash.
+
+Inputs, SHA-256:
+  Newsreader[opsz,wght].ttf         8a08d13f8a6c0d51be379a60af84f945f65369a67e509ee3c3bdcc421254d7c1
+  Newsreader-Italic[opsz,wght].ttf  796668611f80b64d5adf182fde3b6f29ed83b4e7cbec7b96937e84ac01364792
+
+Shipped files, SHA-256:
+110bb963189e7c3d58d214d1594706ffe6cb68c6068309c830370313ad221b79  newsreader-roman.woff2
+75526143aeb4a96a0a33b5bcad185b49e448abb0d17bb8850c9c73ceca04593c  newsreader-italic.woff2
+fdfad38143ec470553cae82a1e45320bdd1b9ec70415d37bd0171051d8a4ded8  OFL.txt
+
+Licence: SIL Open Font License 1.1. OFL.txt is upstream's file, byte for byte. Neither the
+copyright statement in OFL.txt nor any name-table record of either input declares a Reserved Font
+Name, so these modified versions may keep the name.
+
+Modifications, made with fonttools 4.68.0 and its brotli extra. Run once per input:
+  fonttools varLib.instancer INPUT wght=400:700 opsz=16 -o VARIABLE.ttf
+  pyftsubset VARIABLE.ttf --flavor=woff2 --output-file=OUTPUT.woff2 \
+    --unicodes=U+0020-007E,U+00A0-017F,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FFFD \
+    --layout-features=kern,liga,calt,ccmp,locl,mark,mkmk,lnum,onum,pnum,tnum \
+    --name-IDs=0,1,2,3,4,5,6,13,14

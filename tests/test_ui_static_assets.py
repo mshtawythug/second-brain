@@ -73,7 +73,13 @@ def _import_specifiers(source: str) -> list[str]:
 #:
 #: ``.svg`` is deliberately absent: it is XML, it is scanned as text, and it is
 #: the one image format that *can* carry an external fetch (``<image href=…>``).
-_BINARY_SUFFIXES = {".png", ".ico"}
+_BINARY_SUFFIXES = {".png", ".ico", ".woff2"}
+
+#: Package-relative paths the URL scan skips, by EXACT path. Just the one: the OFL
+#: must ship verbatim (RM-50), and its text cites its own URLs on lines that are not
+#: comments. Nothing fetches a licence. An exact path, so a stylesheet or a second
+#: ``.txt`` beside it is still scanned.
+_URL_SCAN_EXEMPT = {"static/fonts/OFL.txt"}
 
 
 def _glob_matches(relative: str, pattern: str) -> bool:
@@ -282,16 +288,13 @@ def test_the_import_resolver_would_catch_a_typo() -> None:
     )
 
 
-def test_no_external_urls_anywhere_in_the_static_tree() -> None:
-    """The offline guarantee, enforced rather than asserted in prose.
-
-    ``brain ui`` must work with no network at all. A single CDN reference would
-    break that silently — the page would render fine on the developer's machine
-    and lose its stylesheet on a plane.
-    """
+def _external_url_offenders(paths: list[Path], package_root: Path) -> list[str]:
+    """Every line under ``paths`` naming an external URL, skipping what cannot fetch."""
     offenders = []
-    for path in _shipped_files():
+    for path in paths:
         if path.suffix.lower() in _BINARY_SUFFIXES:
+            continue
+        if path.relative_to(package_root).as_posix() in _URL_SCAN_EXEMPT:
             continue
         text = path.read_text(encoding="utf-8")
         for number, line in enumerate(text.splitlines(), start=1):
@@ -304,7 +307,44 @@ def test_no_external_urls_anywhere_in_the_static_tree() -> None:
                 if "www.w3.org" in line:
                     continue
                 offenders.append(f"{path.name}:{number}: {stripped[:80]}")
+    return offenders
+
+
+def test_no_external_urls_anywhere_in_the_static_tree() -> None:
+    """The offline guarantee, enforced rather than asserted in prose.
+
+    ``brain ui`` must work with no network at all. A single CDN reference would
+    break that silently — the page would render fine on the developer's machine
+    and lose its stylesheet on a plane.
+    """
+    offenders = _external_url_offenders(_shipped_files(), Path(str(static_dir())).parent)
     assert not offenders, f"external URLs found in the static tree: {offenders}"
+
+
+def test_the_url_scan_exempts_only_the_licence_by_its_exact_path(tmp_path: Path) -> None:
+    """The exemption does not grow into "anything in fonts/" or "any .txt" (RM-50)."""
+    url_line = "see https://example.org/x\n"
+    allowed = tmp_path / "static" / "fonts" / "OFL.txt"
+    refused = [
+        tmp_path / "static" / "fonts" / "NOTES.txt",
+        tmp_path / "static" / "fonts" / "x.css",
+        tmp_path / "static" / "fonts" / "sub" / "OFL.txt",
+        tmp_path / "static" / "css" / "OFL.txt",
+    ]
+    for path in (allowed, *refused):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(url_line, encoding="utf-8")
+
+    assert _external_url_offenders([allowed], tmp_path) == []
+    assert len(_external_url_offenders(refused, tmp_path)) == len(refused)
+
+
+def test_a_font_is_neither_scanned_as_text_nor_dropped_from_the_packaging_walk() -> None:
+    """A ``.woff2`` is not UTF-8, and skipping it must not hide it from the glob guard."""
+    fonts = [p for p in _shipped_files() if p.suffix == ".woff2"]
+
+    assert fonts, "no font in the packaging walk"
+    assert _external_url_offenders(fonts, Path(str(static_dir())).parent) == []
 
 
 def test_no_inline_script_or_style_in_the_shell() -> None:

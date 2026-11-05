@@ -163,6 +163,14 @@ def test_ci_runs_ruff_mypy_and_pytest() -> None:
 CEILING_CHECK_RUN = "python scripts/check_ceiling_table.py"
 
 
+def test_ci_lint_job_builds_a_real_wheel_and_checks_its_static_tree() -> None:
+    """RM-50: the globs are compared with a built wheel, not only with the source tree."""
+    lint = _jobs(load_workflow("ci.yml"))["lint"]
+    runs = [str(step.get("run", "")).strip() for step in lint["steps"] if isinstance(step, dict)]
+
+    assert "python scripts/check_wheel_static.py" in runs
+
+
 def test_ci_lint_job_runs_the_ceiling_table_check_after_mypy() -> None:
     """RM-04: the lint job runs the ceiling-table check, as its own named step.
 

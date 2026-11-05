@@ -10,9 +10,10 @@
 #
 # Design decisions:
 #
-#   * THREE JOBS, one workflow. `lint` (ruff, mypy, and the docs/ceiling-table.md
-#     check, scripts/check_ceiling_table.py) needs no Docker and
-#     finishes in well under a minute, so a formatting or typing mistake fails
+#   * THREE JOBS, one workflow. `lint` (ruff, mypy, the docs/ceiling-table.md
+#     check, scripts/check_ceiling_table.py, and the built-wheel check,
+#     scripts/check_wheel_static.py) needs no Docker and
+#     finishes in about a minute, so a formatting or typing mistake fails
 #     fast and cheap instead of after a container bring-up plus the full
 #     suite. `browser` needs neither Docker nor Postgres. All three live here
 #     so a single `ci.yml` badge covers the union.
@@ -135,6 +136,12 @@ jobs:
       # a missing table header exits 2. bin/brain-ci runs the same step.
       - name: Ceiling table matches the tree
         run: python scripts/check_ceiling_table.py
+
+      # RM-50: build a real wheel from a clean copy and require every file under
+      # ui/static in it. The package-data guards in the suite read the source tree;
+      # this is the one check that opens a wheel. bin/brain-ci runs the same step.
+      - name: A built wheel carries the whole static tree
+        run: python scripts/check_wheel_static.py
 
   test:
     name: Tests (pytest, AGE Postgres)
@@ -369,6 +376,7 @@ jobs:
           tests/test_ui_browser_api.py
           tests/test_ui_browser_copy_path.py
           tests/test_ui_browser_discovery.py
+          tests/test_ui_browser_fonts.py
           tests/test_ui_browser_graph.py
           tests/test_ui_browser_graph_labels.py
           tests/test_ui_browser_graph_layout.py

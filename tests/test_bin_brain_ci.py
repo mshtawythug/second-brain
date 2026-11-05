@@ -403,7 +403,9 @@ def test_every_lint_status_feeds_the_exit_code() -> None:
         r"(?m)^elif \(\( (?P<cond>[^)]*) \)\); then\n\s*EXIT_STATUS=1$", script
     )
 
-    assert {"RUFF_STATUS", "MYPY_STATUS", "CEILING_STATUS"} <= set(statuses), statuses
+    assert {"RUFF_STATUS", "MYPY_STATUS", "CEILING_STATUS", "WHEEL_STATUS"} <= set(statuses), (
+        statuses
+    )
     assert condition is not None, "bin/brain-ci has no `elif (( ... )); then EXIT_STATUS=1`"
     for status in statuses:
         assert f"{status} != 0" in condition.group("cond"), (
