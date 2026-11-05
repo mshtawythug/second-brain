@@ -9,7 +9,9 @@ Exit codes: 0 every file is in the wheel; 1 some are missing (each is named); 2 
 check could not run. Runs in ``ci.yml``'s ``lint`` job and in ``bin/brain-ci``.
 
 The build backend is code resolved from the index, so it runs with a minimal
-environment, in its own session so a timeout can stop all of it.
+environment, in its own session so a timeout can stop all of it. Its own session also
+means a SIGTERM or SIGHUP to this script can leave a hung build and the temporary
+directory behind. That is accepted: it is local, and neither holds a secret.
 """
 from __future__ import annotations
 
@@ -66,8 +68,13 @@ def log_tail(log: Path) -> str:
 
 
 def kill_group(process: subprocess.Popen[bytes]) -> None:
-    """Stop the whole build. Its session leader's pid is its group id."""
-    with contextlib.suppress(ProcessLookupError):
+    """Stop the whole build. Its session leader's pid is its group id.
+
+    Gone is quiet, and so is a group of only unreaped exits: macOS answers ``killpg``
+    on one with ``EPERM``. Same rule as ``brain.ingest.capped_process.kill_group``, which
+    is not imported because importing it pulls in the whole ingest package.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):  # gone, or only zombies
         os.killpg(process.pid, signal.SIGKILL)
     process.wait()
 

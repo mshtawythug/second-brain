@@ -20,6 +20,8 @@ from types import ModuleType
 
 import pytest
 
+from tests.test_capped_process import _until_exited
+
 pytestmark = pytest.mark.nodb
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -316,7 +318,9 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def test_a_timeout_exits_2_and_takes_the_build_children_with_it(tmp_path: Path) -> None:
+def test_a_timeout_raises_the_check_error_and_takes_the_build_children_with_it(
+    tmp_path: Path,
+) -> None:
     """``subprocess.run`` would kill pip alone and leave its build hook running."""
     log = tmp_path / "log"
     pid_file = tmp_path / "grandchild"
@@ -349,6 +353,23 @@ def test_a_group_that_is_already_gone_is_not_an_error() -> None:
     """A timeout racing the group's own exit must still report the timeout."""
     process = subprocess.Popen(_python("pass"), start_new_session=True)
     process.wait()
+
+    check.kill_group(process)
+
+    assert process.returncode == 0
+
+
+def test_a_group_holding_only_an_unreaped_child_is_not_an_error() -> None:
+    """macOS answers ``killpg`` on a zombie-only group with ``EPERM``, not ``ESRCH``.
+
+    A build exiting just as the timeout fires leaves exactly that group, and the
+    ``PermissionError`` was then reported as "the build could not run". The child is
+    left unreaped on purpose. ``os.waitid`` would do that without polling, but macOS
+    has it only from Python 3.13, so this uses the ``ps`` wait the RM-43 test uses.
+    """
+    process = subprocess.Popen(_python("pass"), start_new_session=True)
+    _until_exited(process)
+    assert process.returncode is None, "the child was reaped before the call under test"
 
     check.kill_group(process)
 
