@@ -406,3 +406,24 @@ archive-controlled manifest strings unfiltered (`brain_version`, `migration_head
 `embedding_column_type`, `postgres_version`). A crafted manifest could put ANSI or OSC sequences on
 the terminal just before the destructive gate. The fix is to send them through a shared
 control-character stripper, lifting `replica_marker._display_name` into a utility.
+
+### 10.3 The final round (rev-119 LOW, sec-119b N1 to N4)
+
+- **rev-119 LOW.** `test_restore_run.py` no longer depends on the ambient `PGPASSWORD`. A new test
+  pins the real invariant: the DSN's password never reaches the listing call's environment.
+- **N1.** The TOC parser splits on `\n` only and compiles with `re.ASCII`. A vertical tab, form
+  feed, NEL, U+2028, U+2029, a non-ASCII digit or a no-break space cannot forge an `age` line.
+- **N2.** The listing has its own `TOC_TIMEOUT_S` (120 s) and `TOC_MAX_CHARS` (16 MiB).
+  - Over the cap is the fixed `TOC_UNREADABLE` error.
+  - The cap is checked after capture, because `CommandRunner` returns the whole output. It bounds
+    what gets parsed, not what `subprocess.run` briefly buffers. The short timeout limits how long
+    that buffering can run. A hard memory bound would need a streaming runner, which this ticket
+    does not add.
+- **N3.** A `UnicodeDecodeError` from the listing becomes `TOC_UNREADABLE`, and staging is dropped.
+  `run_tool` itself is unchanged, so the data restore's own output decoding predates this PR and
+  stays as it was.
+  - This refuses an archive with a non-UTF-8 byte in an object name. Such an archive restored
+    before this ticket if it had no AGE. A brain's object names come from its migrations and are
+    ASCII, so only a crafted or foreign archive is affected.
+- **N4.** The ignore rule is anchored: `/state/`.
+- **rev INFO.** The guide's `scp` line says `# on the primary`, and the skill reference mirrors it.
