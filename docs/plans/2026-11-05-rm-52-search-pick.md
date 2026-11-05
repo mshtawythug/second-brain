@@ -6,6 +6,38 @@ Ticket: `docs/specs/2026-10-23-roadmap-completion-design.md`, RM-52. Size XS, wa
 RM-09 (merged). The trigger has fired and nothing is built: `fzf` appears nowhere in `src/`, `tests/`
 or `docs/` outside the spec.
 
+## Rulings and deviations (recorded after approval)
+
+- **D1 approved: deviates from the spec's wording.** The probe is "stderr is a TTY and `/dev/tty`
+  opens", not `stdout.isatty()`. Evidence is in the table below.
+- **D2, D4, D6 approved as recommended.** A WARN leaves `brain doctor` at exit 0: `report.failed`
+  counts only `fail`.
+- **D3 approved after verification.** `_NO_CLICK_SQL` requires `session_id IS NOT NULL`, so plain CLI
+  rows stay out; tests pin an aborted pick in, a completed pick out, and plain searches out.
+- **D5 changed:** CI installs real `fzf` from apt (0.44.1 on Ubuntu 24.04), and the real test **fails
+  rather than skips** under `GITHUB_ACTIONS`. The script-on-`PATH` end-to-end test is dropped as
+  redundant; small scripts still exercise `run_fzf` and the version probe.
+- **Version floor added: `fzf` 0.29.** The picker's exact flags were run on real 0.29.0, 0.44.1 and
+  0.72.0: real keys, id hidden, `{1}` exactly 36 bytes, no OSC leak. 0.29 is the lowest version run,
+  on macOS only. Below it, `--pick` refuses and the doctor row warns. An unreadable version proceeds.
+- **`FZF_*` cleared for the child (new).** This replaces "`FZF_DEFAULT_OPTS` is honoured" under Risks.
+  `--select-1` and `--filter` pick with no human, `--bind=...:execute` runs commands, and `--listen`
+  serves the titles over HTTP. The cost is the user's theme. `FZF_DEFAULT_COMMAND` has no effect with
+  stdin piped, and is cleared with the rest. Stdout matching stays as a second layer.
+- **ANSI stripping added.** `one_line` removes the ESC byte but leaves a sequence's body as text, so a
+  small regex removes whole CSI and OSC sequences first. `one_line` covers tabs, newlines, control
+  and bidi characters (Unicode category `C*`).
+- **D7, a judgment call for review: the preview and confidential documents.** `brain show` has no
+  sensitivity gate, by the documented policy that the local CLI is inside the trust boundary. The
+  **set** of documents is not widened: the list is plain search's, under the same filters, and the
+  preview only receives offered ids. The **amount shown by default** is: the highlighted row's whole
+  body, the first row's from the start, against the table's 120-character snippet. Withholding it per
+  row needs a shell branch (`$SHELL` may not be POSIX) or a new `brain show` flag. Kept as the spec's
+  plain `brain show {1}` and documented, with `--sensitivity normal` as the way to exclude them.
+- **Line budgets:** `search_pick.py` came to about 290 lines against ≤ 180, for the version probe, the
+  ANSI regex and the outcome type. `doctor_fzf.py` is 52 against ≤ 45. `cli_search.py` is +11, within
+  its +12.
+
 ## Goal and acceptance criteria (quoted)
 
 > **Goal:** Pick a search result interactively in the terminal, and record the pick.

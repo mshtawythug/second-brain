@@ -67,6 +67,17 @@ def _healthy_osascript(
     monkeypatch.setattr("brain.doctor_apple_notes.OSASCRIPT_PATH", str(present))
 
 
+@pytest.fixture(autouse=True)
+def _healthy_fzf(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every check here sees a current ``fzf``, whatever the host (RM-52).
+
+    ``tests/test_doctor_fzf.py`` covers the missing and too-old cases. Without this a
+    machine with no ``fzf`` would add a WARN that the exact-set tests here do not expect.
+    """
+    monkeypatch.setattr("brain.doctor_fzf.shutil.which", lambda _name: "/usr/bin/fzf")
+    monkeypatch.setattr("brain.doctor_fzf.installed_fzf_version", lambda _binary: (0, 72))
+
+
 def _install_plists(
     launchd_dir: Path,
     *labels: str,
@@ -581,11 +592,12 @@ def test_all_healthy_yields_no_failures(
     # RM-33 adds "drop folders": none configured (ok) in the suite's isolated $BRAIN_HOME.
     # RM-38 adds "voice memos": off (ok) under tests/voice_isolation_plugin.py.
     # RM-43 adds "git", ok here because ``git`` is found (``shutil.which`` is pinned above).
+    # RM-52 adds "fzf", ok here because ``_healthy_fzf`` pins it.
     assert [c.check for c in checks] == [
         "config", "daemons", "vault watcher", "brief delivery", "reranker", "github", "ocr",
-        "apple notes", "drop folders", "voice memos", "git",
+        "apple notes", "drop folders", "voice memos", "git", "fzf",
     ]
-    assert [c.status for c in checks] == ["ok"] * 11
+    assert [c.status for c in checks] == ["ok"] * 12
 
 
 def test_every_failing_check_names_a_remedy(

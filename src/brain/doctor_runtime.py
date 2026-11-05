@@ -34,6 +34,8 @@ process:
     Composed in from :mod:`brain.doctor_voice` (RM-38): can memos be transcribed here?
 ``git``
     Composed in from :mod:`brain.doctor_git` (RM-43): is ``git`` on ``PATH``?
+``fzf``
+    Composed in from :mod:`brain.doctor_fzf` (RM-52): can ``brain search --pick`` run?
 ``replica``
     Composed in from :mod:`brain.doctor_replica` (RM-47): is this a restored copy?
 ``vault watcher`` / ``retired daemon``
@@ -116,6 +118,7 @@ def runtime_doctor_checks(
     from .doctor_apple_notes import apple_notes_doctor_check
     from .doctor_delivery import brief_delivery_doctor_check
     from .doctor_drop_folders import drop_folders_doctor_check
+    from .doctor_fzf import fzf_doctor_check
     from .doctor_git import git_doctor_check
     from .doctor_github import github_doctor_check
     from .doctor_ocr import ocr_doctor_check
@@ -149,6 +152,7 @@ def runtime_doctor_checks(
         *drop_folders_doctor_check(launchd_dir=resolved_dir),
         *voice_doctor_check(),
         *git_doctor_check(),
+        *fzf_doctor_check(),
         *replica_doctor_check(),
     ]
 

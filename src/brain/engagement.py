@@ -12,8 +12,8 @@ Five rulings, each reached by reading the writers rather than the column names
 **The gate counts ``reads``: ``opened`` + ``clicked``.** That total is what
 ``brain usage``'s own report calls "opens" (``usage._READ_ACTIONS``). The
 readout's ``opens`` and ``clicks`` split it: ``opens`` is ``opened`` only, and
-``clicks`` is ``clicked`` only. Nothing writes ``clicked`` since the wiki was
-deleted, but the action is allowed, so it is counted.
+``clicks`` is ``clicked`` only. Since the wiki was deleted, ``brain search --pick``
+(RM-52) is the one thing that writes ``clicked``.
 
 **Reads include ``brain ask``'s citations.** ``brain ask`` (CLI and MCP) records
 one ``opened`` row for each citation in an answer, so those rows count toward

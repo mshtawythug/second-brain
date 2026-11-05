@@ -22,6 +22,18 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — `brain search --pick`, choosing a result in `fzf` (RM-52)
+
+- `--pick` opens the results in `fzf` 0.29 or newer with a `brain show` preview, prints the chosen
+  document's id on stdout, and records a `clicked` interaction under a session id it also puts on
+  the search's `search_queries` row. It works inside `$(...)`. Plain `brain search` is unchanged.
+- It refuses before doing any work when stderr is not a terminal or there is no `/dev/tty`, because
+  `fzf` can hang there rather than fail. Stdout is only trusted when it matches an offered id.
+- Titles lose control, ANSI and bidi characters before `fzf` sees them, and every `FZF_*` variable
+  is cleared for the child, so your `fzf` theme does not apply here.
+- An aborted pick counts as `no_click` in `brain gaps`; plain CLI searches still never do.
+- `brain doctor` gains an `fzf` row, a WARN at worst. CI installs `fzf` and runs a real pty test.
+
 ### Added — a real text face on the reading surfaces of `brain ui` (RM-50)
 
 - Notes now render in Newsreader (SIL OFL 1.1), served from the package, in a roman and an italic

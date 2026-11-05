@@ -22,6 +22,7 @@ from __future__ import annotations
 from datetime import datetime
 from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
 import psycopg
 import typer
@@ -49,6 +50,7 @@ from .ingest import Embedder
 from .queries import PersonMatch
 from .rerank import rerank_notice
 from .search import SearchDiagnostics, build_tsquery
+from .search_pick import refuse_unpickable, run_pick
 from .search_pipeline import PipelineResult, override_stages, run_search
 from .search_predicate import build_predicate
 from .sensitivity import VALID_SENSITIVITY_LEVELS
@@ -353,6 +355,7 @@ def search(
         ),
     ),
     rerank: bool | None = _RERANK,
+    pick: bool = typer.Option(False, "--pick", help="Choose a result in fzf; prints its id."),
 ) -> None:
     """Hybrid search across the brain.
 
@@ -370,13 +373,15 @@ def search(
     text-only (FTS) matches and says so on **stderr**; ``--json --meta`` also
     carries ``"fallback": "fts_only"`` and a class-only ``fallback_reason``.
     """
+    if pick:
+        refuse_unpickable(json_output=json_output, facets=facets)
     _validate_source_choice(source)
     effective_tag = _reconcile_tag_flags(tag, has_tag)
     # Validate before any query so `--sensitivity confidental` is a usage error
     # rather than a silent empty result set that reads as "nothing is marked".
     sensitivity = _validate_sensitivity_choice(sensitivity)
     since_days = None if since is None else since_window(since, unit="days")
-    show_meta = not no_meta
+    show_meta = not no_meta and not pick
     # ``--facets`` needs the whole match set measured, and the ``--json
     # --meta`` envelope reports the total explicitly. Anything that would
     # print or emit the number turns the count query on; ``--no-meta`` is the
@@ -386,6 +391,7 @@ def search(
     embedder = _build_embedder(cfg)
     _warn_if_fts_only_degraded(embedder)
     facet_data: SearchFacets | None = None
+    pick_session = uuid4() if pick else None
     with connect(cfg.database_url) as conn:
         # Autocommit so the Plan 08 search-failure log INSERT below is a single
         # round-trip that persists immediately (hybrid_search reads are fine
@@ -505,8 +511,8 @@ def search(
         # missing-column ``psycopg.errors.UndefinedColumn`` for ``fts_count``
         # (migration 023 not applied) — each warns with a `brain init` hint;
         # search must keep working on a pre-019/pre-023 DB. Other schema errors
-        # propagate. CLI searches have no session, so ``session_id=None``
-        # (no-click detection is MCP-only).
+        # propagate. A CLI search has no session unless ``--pick`` minted one
+        # (RM-52), so plain searches stay out of no-click detection.
         record_search_query(
             conn,
             query=query,
@@ -517,7 +523,7 @@ def search(
                 if diagnostics.total_ms is None
                 else round(diagnostics.total_ms)
             ),
-            session_id=None,
+            session_id=pick_session,
             source="cli",
             agent_id=resolve_agent_id(agent, cfg),
             payload_tokens=diagnostics.results_tokens,
@@ -525,6 +531,11 @@ def search(
             tenant_id=cfg.graph_tenant_id,
         )
 
+    if pick_session is not None:  # Outside the `with`: no connection held while a human chooses.
+        run_pick(
+            results, query=query, session_id=pick_session, database_url=cfg.database_url,
+            agent_id=resolve_agent_id(agent, cfg),
+        )
     if json_output:
         # ``--facets`` implies ``--meta`` under ``--json``: facet data has
         # nowhere else to live. Without either flag this is the pre-F5 path,

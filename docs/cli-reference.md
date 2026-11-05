@@ -239,6 +239,46 @@ remaining `--since` flags are unchanged and do **not** take suffixes:
 `ingest-gmail` expects a Gmail `YYYY/MM/DD` date, `timeline` an ISO `YYYY-MM`
 month, and `gaps push` a plain integer day count.
 
+### Picking a result in the terminal: `--pick`
+
+```bash
+brain search "platform migration" --pick            # choose in fzf; prints the id
+brain show "$(brain search "platform migration" --pick -n 50)"
+```
+
+`--pick` opens the results in [`fzf`](https://github.com/junegunn/fzf), with a `brain show`
+preview of the highlighted one. It prints only the chosen document's full id on stdout, so it
+works inside `$(...)` and pipes. The default `--limit` is still 5, so a wider `-n` is often useful.
+It is for a person at a terminal, never for agents or scripts with nobody at the keyboard.
+
+It needs `fzf` 0.29 or newer on `PATH` (`brain doctor` has a row for it, a WARN at worst) and
+`brain` on `PATH` for the preview; without that the pane says so and picking still works. Your
+`FZF_DEFAULT_OPTS` and every other `FZF_*` variable are ignored. Those settings can pick with
+nobody choosing, run commands, or serve the list over HTTP, so your `fzf` theme does not apply here.
+
+| Case | Exit | stdout | stderr |
+|---|---|---|---|
+| Picked | 0 | the id | |
+| Esc or Ctrl-C | 130 | | |
+| Enter with no match | 1 | | `nothing picked` |
+| No results (`fzf` does not start) | 1 | | `(no results)` |
+| `fzf` failed, or its output was not one of the offered lines | 1 | | a fixed message |
+| No terminal (stderr is not a terminal, or no `/dev/tty`), or no usable `fzf` | 1 | | a fixed message |
+| With `--json` or `--facets` | 2 | | usage error |
+
+A refusal happens before any work and logs nothing. Otherwise the search is logged with a new
+session id, and a pick adds a `clicked` interaction under that id, which is what lets
+`brain usage --engagement` count it as a read from a search session. Picking nothing leaves the
+search unclicked, so `brain gaps` counts it as `no_click`. A plain `brain search` has no session
+and never counts as `no_click`.
+
+The list holds the same documents as `brain search` with the same filters, **including
+confidential ones by default**. The preview is plain `brain show`, so highlighting a confidential
+row shows its whole body, with the first row highlighted from the start. That is more than the
+search table's short snippet, within the local trust boundary described under
+[`--sensitivity`](#--sensitivity-on-search-is-a-lens-not-a-filter-you-can-rely-on). Add
+`--sensitivity normal` to keep confidential rows out of both the list and the preview.
+
 ### Search transparency and facets
 
 ```bash
@@ -2165,7 +2205,8 @@ brain audio --person "Jane Doe" --json           # print script JSON, write no f
 
 Search-failure-driven knowledge-gap detection. Mines the `search_queries` log
 for queries the brain failed to answer — `zero_results` (nothing matched) and
-`no_click` (results returned but never opened) — over a lookback window, then
+`no_click` (results returned but never opened, which needs a session: MCP searches and
+`brain search --pick`, not a plain `brain search`) — over a lookback window, then
 clusters them into knowledge gaps. The read view shows the **normalized**
 canonical query label (raw query strings stay server-side); `push` upserts the
 resulting `search_failure` gaps into the `brain elicit` queue.

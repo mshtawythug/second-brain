@@ -192,6 +192,18 @@ def test_ci_lint_job_runs_the_ceiling_table_check_after_mypy() -> None:
     )
 
 
+def test_ci_test_job_installs_fzf_before_pytest_with_no_way_to_pass_without_it() -> None:
+    """RM-52: the real picker test fails, not skips, on CI, so CI must have the binary."""
+    workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["test"]["steps"]
+    runs = [str(step.get("run", "")) for step in steps]
+    install = next(i for i, run in enumerate(runs) if "apt-get install -y fzf" in run)
+    pytest_step = next(i for i, run in enumerate(runs) if run.strip() == ".venv/bin/pytest")
+    assert install < pytest_step
+    assert "continue-on-error" not in steps[install]
+    assert "|| true" not in runs[install]
+
+
 def test_ci_never_configures_pytest_through_the_environment() -> None:
     """`addopts` must be the only thing deciding what pytest runs — for real.
 
