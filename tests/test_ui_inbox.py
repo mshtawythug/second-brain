@@ -111,7 +111,7 @@ def test_the_inbox_takes_only_uploadable_extensions(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "raw",
     [None, 7, ["a.md"], "", ".", "..", "../a.md", "a/b.md", "/etc/a.md", ".hidden.md",
-     "a\0.md", "a\x1b[31m.md", "a\nb.md", "a‮.md", "\ud800.md", "é" * 128 + ".md"],
+     "a\0.md", "a\x1b[31m.md", "a\nb.md", "a\u202e.md", "\ud800.md", "é" * 128 + ".md"],
 )
 def test_a_name_that_is_not_one_plain_file_name_is_invalid(raw: object) -> None:
     with pytest.raises(UiBadRequest) as exc:

@@ -144,8 +144,13 @@ for a real v0.3.0 failure:
 
 Exit codes: `0` pass · pytest's own status when pytest failed · `1` when only
 ruff/mypy/the ceiling-table or wheel check failed · `64` usage error · `70` environment
-failure (no `uv`/Docker, venv build failed, DB never came up, or a refusal to
+failure (no `uv`/Docker, no `fzf`, venv build failed, DB never came up, or a refusal to
 target production).
+
+The test job needs `fzf` on `PATH` (`brew install fzf`, or `apt-get install fzf`):
+`tests/test_search_pick_real_fzf.py` runs `brain search --pick` against the real binary, and it
+fails rather than skips under `GITHUB_ACTIONS`, which this script exports. A plain `pytest` on your
+machine skips it when `fzf` is missing.
 
 Any mode that is not the full run — `--reuse-venv`, `--lint-only`,
 `--tests-only`, pass-through arguments — prints a loud **"THIS RUN IS NOT THE

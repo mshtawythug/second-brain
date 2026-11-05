@@ -99,7 +99,7 @@ def test_write_stores_the_basename_never_the_full_path(tmp_path: Path) -> None:
 
 def test_write_strips_control_escape_and_bidi_characters(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    hostile = tmp_path / "brain-\x1b[31mbackup‮-\x07x.tar.gz"
+    hostile = tmp_path / "brain-\x1b[31mbackup\u202e-\x07x.tar.gz"
 
     _write(home, hostile)
 

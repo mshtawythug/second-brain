@@ -59,8 +59,8 @@ _ZERO_RESULT_SQL = f"""
 """
 
 # No-click: a non-empty result set that the user never opened/clicked within
-# the same search session. MCP-only — CLI searches carry ``session_id IS NULL``
-# (no session to join), so the predicate excludes them automatically.
+# the same search session. Plain CLI searches carry ``session_id IS NULL``, so
+# the predicate excludes them; an aborted ``brain search --pick`` has one (RM-52).
 #
 # Mutual exclusivity with the lexical-miss pass (matters since migration 023):
 # a lexical miss now keys off ``fts_count = 0``, but such a row can still have

@@ -65,7 +65,7 @@
 #   1   pytest passed (or did not run) but ruff / mypy / the ceiling-table
 #       or wheel check failed
 #   64  usage error (bad flag)
-#   70  environment failure — no uv, no Docker, venv build failed, DB never
+#   70  environment failure — no uv, no Docker, no fzf, venv build failed, DB never
 #       came up, or a refusal to target the production database
 #
 # The venv it builds lives at <repo>/.venv, exactly as ci.yml's test job does.
@@ -398,6 +398,13 @@ compose() {
   ( cd "$REPO_ROOT" && docker compose -f "$CI_COMPOSE_FILE" "$@" )
 }
 
+# The real `brain search --pick` test FAILS rather than skips under GITHUB_ACTIONS,
+# which this script exports, so a missing fzf should be named here, not as a test failure.
+require_fzf() {
+  command -v fzf >/dev/null 2>&1 || die "fzf not found — the test job runs the real picker test,
+    which may not skip here. Install it (brew install fzf, or apt-get install fzf)." 70
+}
+
 start_test_database() {
   command -v docker >/dev/null 2>&1 || die "docker not found — the test job needs the
     AGE instance from $CI_COMPOSE_FILE. Re-run with --skip-compose if it is already up." 70
@@ -485,6 +492,12 @@ assert_not_prod_db "exported TEST_DATABASE_URL" "$TEST_DATABASE_URL"
 ok "database pinned to ${CI_PG_HOST}:${CI_PG_PORT}/${CI_PG_DB} — production port 55432 is unreachable from this run"
 ok "CI=true GITHUB_ACTIONS=true; colour/width/PYTEST_* overrides scrubbed"
 report_dotenv_divergence
+
+# Before the venv rebuild, so it fails in a second, not minutes in. Not on a pass-through
+# selection, which may never reach the picker test.
+if (( RUN_TESTS )) && (( ${#PYTEST_ARGS[@]} == 0 )); then
+  require_fzf
+fi
 
 if (( REUSE_VENV )); then
   step "Virtualenv (REUSED — not a fresh resolve)"

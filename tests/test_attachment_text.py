@@ -130,7 +130,7 @@ def test_link_and_image_brackets_are_escaped() -> None:
 
 
 def test_control_and_format_characters_are_removed_but_newlines_and_tabs_kept() -> None:
-    raw = "a\x1b[31mb‮c​d\x00e\tf\r\ng\rh"
+    raw = "a\x1b[31mb\u202ec​d\x00e\tf\r\ng\rh"
 
     out = neutralize_markup(raw)
 

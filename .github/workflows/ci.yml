@@ -195,6 +195,15 @@ jobs:
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -e ".[dev]"
 
+      - name: Install fzf for the real picker test (RM-52)
+        # tests/test_search_pick_real_fzf.py runs `brain search --pick` against real
+        # fzf on a pty, and FAILS rather than skips under GITHUB_ACTIONS without it.
+        # Whatever apt ships, unpinned (0.67.0 on the first run), not a developer's build.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fzf
+          fzf --version
+
       - name: Wait for the AGE instance to be ready
         run: |
           for i in $(seq 1 60); do

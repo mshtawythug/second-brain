@@ -671,6 +671,40 @@ def test_script_refuses_a_production_database_url(tmp_path: Path) -> None:
     assert "PRODUCTION" in result.stderr
 
 
+def _run_copy_without_fzf(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """A copy that looks for a binary nobody has, since CI's ``/usr/bin`` does have ``fzf``."""
+    copy = tmp_path / "brain-ci"
+    text = _script_text()
+    mutated = text.replace("command -v fzf ", "command -v fzf-absent-for-this-test ")
+    assert mutated != text, "mutation did not apply"
+    copy.write_text(mutated, encoding="utf-8")
+    copy.chmod(0o755)
+    return subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(copy), *args], capture_output=True, text=True, timeout=30, check=False
+    )
+
+
+def test_the_test_job_names_a_missing_fzf_before_any_work(tmp_path: Path) -> None:
+    result = _run_copy_without_fzf(tmp_path, "--tests-only", "--reuse-venv")
+    assert result.returncode == 70, result.stderr
+    assert "fzf not found" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "args",
+    [("--lint-only", "--reuse-venv"), ("--reuse-venv", "--", "tests/test_x.py")],
+    ids=["lint-only", "pass-through"],
+)
+def test_a_run_that_may_not_reach_the_picker_test_does_not_need_fzf(
+    tmp_path: Path, args: tuple[str, ...]
+) -> None:
+    """They stop at the copy's missing venv instead, which is past where fzf would be named."""
+    result = _run_copy_without_fzf(tmp_path, *args)
+    assert result.returncode == 70, result.stderr
+    assert "fzf not found" not in result.stderr
+    assert "has no pytest" in result.stderr
+
+
 # ---------------------------------------------------------------------------
 # Behaviour that needs no venv, no Docker, and no database.
 # ---------------------------------------------------------------------------

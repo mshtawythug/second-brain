@@ -144,7 +144,7 @@ brain recall "<query>" --budget 2000 --json
 Same filters as `brain search` (`--person`, `--after`/`--before`, `--kind`,
 `--tag`, `--source`, `--thread`, `--without-tag`, `--fts-only`), so most tuned
 searches port straight over — `--draft`, `--has-tag`, `--sensitivity`, `--entity` and
-`--updated-*` are search-only. Raise `--budget` for a broad question (4000 for
+`--updated-*` are search-only (and never `brain search --pick`: it waits for a person at a terminal). Raise `--budget` for a broad question (4000 for
 multi-source synthesis). **`--budget` bounds the passage block, not the
 `--json` payload**: `--json` adds per-passage metadata around the same text,
 measured at ~1.25–1.3× the budget (`--budget 2000` prints ~2,500 tokens,
