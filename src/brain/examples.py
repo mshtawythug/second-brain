@@ -4,7 +4,9 @@ The resource's grammar is strict so that no ``brain ...`` line can sit where the
 (``tests/test_examples_rot.py``) does not look: a stale line this parser did not recognise as an
 invocation would never be checked. Outside a fence: blank lines, the one title, and
 ``## <slug>: <title>``. Inside a ```` ```bash ```` fence: blank lines, ``# comment`` lines, and
-lines starting ``brain ``. Anything else raises.
+single ``brain ...`` invocations with no shell syntax beyond one trailing ``< word``, because the
+safety check reads an example as one command and a shell must read it the same way. Anything else
+raises.
 
 Printable ASCII only. The lines are meant to be pasted into a shell, so nothing may be invisible
 to the reader. Split on ``\\n`` alone, because ``str.splitlines`` would quietly treat ``\\x0b`` or
@@ -27,6 +29,7 @@ _INVOCATION_PREFIX = "brain "
 _COMMENT_PREFIX = "# "
 _HEADING_RE = re.compile(r"## ([a-z][a-z-]*): (\S.*)\Z")
 _PRINTABLE_ASCII_RE = re.compile(r"[\x20-\x7e]*\Z")
+_SHELL_METACHARACTERS = frozenset(";&|>$`()")
 
 
 class ExamplesResourceError(BrainError):
@@ -47,15 +50,24 @@ class ExampleTopic:
         return tuple(line for line in self.lines if line.startswith(_INVOCATION_PREFIX))
 
 
-def _fence_line_is_valid(line: str) -> bool:
-    if not line:
-        return True
-    if line.startswith(_COMMENT_PREFIX):
+def is_valid_fence_line(line: str) -> bool:
+    """Whether ``line`` may sit inside a fence: blank, a comment, or one ``brain`` invocation.
+
+    An invocation may redirect its stdin only, as a trailing ``< word``. A shell would pass
+    anything after that word to ``brain``, and it would read ``<word`` or ``<placeholder>`` as a
+    redirect, so every other ``<`` is refused.
+    """
+    if not line or line.startswith(_COMMENT_PREFIX):
         return True
     if not line.startswith(_INVOCATION_PREFIX) or line.endswith("\\"):
         return False
-    # A <placeholder> is a redirect to a shell. A real redirect has a space after the "<".
-    return not any(token.startswith("<") and token != "<" for token in line.split())
+    if _SHELL_METACHARACTERS.intersection(line):
+        return False
+    words = line.split()
+    return all(
+        "<" not in word or (word == "<" and index == len(words) - 2)
+        for index, word in enumerate(words)
+    )
 
 
 def _finished(topic: ExampleTopic, seen: tuple[ExampleTopic, ...]) -> tuple[ExampleTopic, ...]:
@@ -78,7 +90,7 @@ def parse_examples(text: str) -> tuple[ExampleTopic, ...]:
         if in_fence:
             if line == _FENCE_CLOSE:
                 in_fence = False
-            elif current is not None and _fence_line_is_valid(line):
+            elif current is not None and is_valid_fence_line(line):
                 current = ExampleTopic(current.slug, current.title, (*current.lines, line))
             else:
                 raise ExamplesResourceError(f"line {number}: not a comment or an invocation")

@@ -286,3 +286,16 @@ completion audit. Your call at PR time.
   its 36 invocations carries a comment and a blank line; `examples.py` 104 (90); `test_examples_rot.py`
   268 (110), from the safety checks above; `test_examples.py` 143 (110); `test_cli_examples.py` 124 (80).
 - **`check_wheel_static.py`'s messages changed,** from "static files" to "files" and "shipped files".
+
+## Fix round: the safety checker could be bypassed (rev-122)
+
+- **One invocation only, enforced at load time.** `is_valid_fence_line` refuses `;`, `&`, `|`, `>`,
+  `$`, backtick and parentheses, and any `<` that is not the second-to-last word. The trailing-word
+  rule lives here rather than in the test's `_args`, so it holds when the resource loads; the checkers
+  call the same function.
+- **A subcommand after a group's flag is refused,** because Click parses the group's options and then
+  dispatches: `brain gaps --since 30d push` runs `gaps push`.
+- **Added beyond the review's list: an option's value is no longer read as a flag.** `--tag --dry-run`
+  passed the safety check as a preview, when Click takes `--dry-run` as the tag and the command writes.
+  `_flags` now skips values and expands aliases, so `-l` counts as `--label`.
+- **The Gmail scope list is compared with the real refusal text,** by equality.
