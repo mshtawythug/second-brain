@@ -38,6 +38,32 @@ or `docs/` outside the spec.
   ANSI regex and the outcome type. `doctor_fzf.py` is 52 against ≤ 45. `cli_search.py` is +11, within
   its +12.
 
+## Fix round after review (sec-121, rev-121)
+
+- **F1, the preview was not clean, and this plan said it was.** I tested only OSC 0 and CSI, which
+  `fzf` drops, and concluded hostile bodies could not drive the terminal. sec-121 measured iTerm2
+  `OSC 1337`, tmux-wrapped OSC 52, sixel, kitty and OSC 8 reaching the pty from `brain show`'s raw
+  output, on the first row with no keystroke. The preview is now
+  `brain show {1} 2>&1 | <python> -I -m brain.preview_filter`.
+- **Why a Python filter, not sec-121's suggested `tr -d '\033'`.** `tr` works on bytes. C1 controls
+  are two bytes in UTF-8 and `0x9B` also ends ordinary characters (U+00DB), so it cannot strip them
+  safely. The filter also removes whole sequences, so a payload does not stay on screen as text. It
+  starts in about 0.1s and imports only the stdlib. `2>&1` puts `brain show`'s own errors through it.
+- **Non-POSIX `$SHELL`.** `fzf` runs the preview with `$SHELL -c`. `SHELL=/bin/sh` is set for the
+  child rather than relying on each shell's syntax. A real test uses a `$SHELL` that records being run
+  and always fails. fish is not installed here, so fish itself was not run, and it no longer matters.
+- **F2:** `run_fzf` uses `Popen`, and on `KeyboardInterrupt` sends SIGTERM, waits a bounded time, then
+  kills, so `fzf` restores the terminal.
+- **F3:** exactly one non-empty line, split on `\n` only.
+- **F4:** C1 forms left the regex. That one character is removed and the words after it stay. Their
+  payload stays too, as inert text. An unterminated 7-bit string also takes only its introducer.
+- **I1, no change.** The `clicked` row stores the query because the spec requires it, in the same
+  column MCP `brain_show` and `brain show --query` write, and the query never reaches a log.
+- **I2, no change.** `brain` and `fzf` resolve through `PATH`; a hostile `PATH` already means code
+  execution, and the docs state the requirement.
+- **Not fixed here:** plain `brain show` on a terminal still prints raw. It predates this ticket, and
+  sec-121 suggests a separate ticket.
+
 ## Goal and acceptance criteria (quoted)
 
 > **Goal:** Pick a search result interactively in the terminal, and record the pick.
@@ -67,7 +93,7 @@ a 0x0 window, so its preview result was vacuous and was discarded. These results
 | Unknown flag | rc 2 | `fzf` failed |
 | `--delimiter <literal tab> --with-nth 2..` | Title and source shown, id absent from the screen | The id is hidden as the spec intends |
 | `{1}` in `--preview` | Exactly 36 bytes for a UUID, no trailing tab | `brain show {1}` receives a clean id |
-| Preview prints an OSC title-setter and CSI clear | Body rendered, `ESC ]0;` never reached the pty | Hostile bodies in the preview do not drive the terminal |
+| Preview prints an OSC title-setter and CSI clear | Body rendered, `ESC ]0;` never reached the pty | **Wrong conclusion, corrected below:** those two forms are dropped, but others are passed through |
 
 `brain show` with no `--query` writes no interaction (`cli.py`, `show`), so the spec's plain
 `brain show {1}` does not add `opened` rows as the cursor moves. A `--query` in the preview would add

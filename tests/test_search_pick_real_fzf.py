@@ -35,13 +35,52 @@ TEST_DATABASE_URL = os.environ.get(
     "postgresql://brain:brain@localhost:5434/second_brain_test",
 )
 TERM = "fjordquill"
-BODY_MARKER = "preview-body-marker"
-OSC_MARKER = "PWNEDTITLE"
+ORDINARY_TERM = "marrowlight"
+MARKER_PREFIX = b"preview-marker-"
+#: Everything that reached a pty raw on real fzf 0.72.0 (sec-121 F1), plus the C1 forms.
+CANARY = "cHduZWQ"
+HOSTILE = (
+    f"\x1b]1337;Copy=:{CANARY}=\x07"
+    f"\x1b]1337;SetUserVar=x={CANARY}\x1b\\"
+    f"\x1bPtmux;\x1b\x1b]52;c;{CANARY}=\x07\x1b\\"
+    f"\x1b]52;c;{CANARY}=\x07"
+    f"\x1bPq#0;2;0;0;0#0~~{CANARY}\x1b\\"
+    f"\x1b_Gf=100,a=T;{CANARY}\x1b\\"
+    f"\x1b]8;;https://{CANARY}.invalid\x1b\\"
+    # Kept short: a long leftover would push the marker past the pane's right edge.
+    "\u009d0\u009c\u009b31m"
+)
+FORBIDDEN = (
+    b"\x1b]1337",
+    b"\x1bPtmux",
+    b"\x1b]52",
+    b"\x1bPq",
+    b"\x1b_G",
+    b"\x1b]8;",
+    "\u009b".encode(),
+    "\u009d".encode(),
+    CANARY.encode(),
+)
 KEY_UP_ENTER = b"\x1b[A\r"
+KEY_UP = b"\x1b[A"
 KEY_ESC = b"\x1b"
+#: A non-zero pixel size opens more of fzf's pass-through path (sec-121 F1).
+WINSIZE = struct.pack("HHHH", 40, 160, 1600, 800)
 #: Every wait below is bounded; the process group is killed on the way out regardless.
-DEADLINE_SECONDS = 60.0
+DEADLINE_SECONDS = 30.0
 BOUNDED_SECONDS = 30.0
+
+Action = Callable[["subprocess.Popen[bytes]", int], None]
+Step = tuple[tuple[bytes, ...], Action]
+
+
+def press(keys: bytes) -> Action:
+    """An action that types ``keys`` on the terminal."""
+    return lambda _proc, master: _write(master, keys)
+
+
+def _write(master: int, keys: bytes) -> None:
+    os.write(master, keys)
 
 
 def require_fzf(
@@ -127,16 +166,30 @@ def _run_bounded(
     return subprocess.CompletedProcess(args, proc.returncode, out, err)
 
 
+def _drain(master: int) -> bytes:
+    """Whatever is left on the pty. The caller's slave stays open: macOS drops it on close."""
+    chunks = b""
+    while select.select([master], [], [], 0.3)[0]:
+        try:
+            chunk = os.read(master, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        chunks += chunk
+    return chunks
+
+
 def _run_under_pty(
-    args: list[str], env: dict[str, str], cwd: Path, *, keys: bytes, wait_for: tuple[bytes, ...]
+    args: list[str], env: dict[str, str], cwd: Path, *, steps: list[Step]
 ) -> PtyRun:
     """Run ``brain`` with stderr and the controlling terminal on a pty, and stdout piped.
 
-    Presses ``keys`` once every ``wait_for`` marker has appeared on the screen. A marker never
-    appearing fails the test rather than hanging it: the whole group is killed at the deadline.
+    Each step waits for its markers on the screen, then acts. A marker never appearing fails the
+    test rather than hanging it: the whole group is killed at the deadline.
     """
     master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 160, 0, 0))
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, WINSIZE)
 
     def take_controlling_terminal() -> None:
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
@@ -151,27 +204,24 @@ def _run_under_pty(
         start_new_session=True,
         preexec_fn=take_controlling_terminal,  # noqa: PLW1509 - the only way to set a ctty
     )
-    os.close(slave)
     screen = b""
-    sent = False
+    pending = list(steps)
     deadline = time.monotonic() + DEADLINE_SECONDS
     try:
         while proc.poll() is None:
             if time.monotonic() > deadline:
                 pytest.fail(f"--pick did not finish; screen tail: {screen[-600:]!r}")
-            ready, _, _ = select.select([master], [], [], 0.1)
-            if ready:
-                try:
-                    screen += os.read(master, 65536)
-                except OSError:
-                    break
-            if not sent and all(marker in screen for marker in wait_for):
-                os.write(master, keys)
-                sent = True
+            if select.select([master], [], [], 0.1)[0]:
+                screen += os.read(master, 65536)
+            if pending and all(marker in screen for marker in pending[0][0]):
+                pending.pop(0)[1](proc, master)
+        screen += _drain(master)
         stdout = proc.communicate(timeout=10)[0].decode("utf-8")
         assert proc.returncode is not None
+        assert not pending, f"steps never ran: {len(pending)}; tail: {screen[-600:]!r}"
         return PtyRun(proc.returncode, stdout, screen)
     finally:
+        os.close(slave)
         os.close(master)
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -192,22 +242,23 @@ def ranked_ids(
     fzf: str,
     tmp_path: Path,
 ) -> list[str]:
-    """Two documents with a hostile title and body, in the order real search ranks them."""
-    for title, body in (
-        ("Alpha plan", f"{TERM} first {BODY_MARKER} one"),
-        (
-            f"Beta\x1b]0;{OSC_MARKER}\x07\tplan\nnotes",
-            f"{TERM} second \x1b]0;{OSC_MARKER}\x07 {BODY_MARKER} two",
-        ),
-    ):
+    """Two documents, both hostile in title and body, in the order real search ranks them.
+
+    Both, so that no test here depends on which one ranks first to have rendered a hostile preview.
+    """
+    for name, marker in (("Alpha plan", "one"), ("Beta plan", "two")):
         ingest_document(
             test_db,
             embedder=fake_embedder,
             doc=ExtractedDoc(
-                title=title, content=body, content_type="note", source_path=None, metadata={}
+                title=f"{HOSTILE}{name}\tnotes{HOSTILE}",
+                content=f"{HOSTILE} {TERM} {HOSTILE} preview-marker-{marker} {HOSTILE} end",
+                content_type="note",
+                source_path=None,
+                metadata={},
             ),
             source_kind="manual",
-            source_external_id=f"manual:{title[:5]}",
+            source_external_id=f"manual:{name}",
         )
     test_db.commit()
     plain = _run_bounded(
@@ -233,8 +284,7 @@ def test_real_fzf_up_then_enter_prints_the_second_result_and_records_the_click(
         _pick_args(),
         _brain_env(tmp_path, fzf),
         tmp_path,
-        keys=KEY_UP_ENTER,
-        wait_for=(b"Alpha plan", b"Beta", BODY_MARKER.encode()),
+        steps=[((b"Alpha plan", b"Beta plan", MARKER_PREFIX), press(KEY_UP_ENTER))],
     )
     assert run.returncode == 0, run.screen[-600:]
     assert run.stdout == f"{ranked_ids[1]}\n"
@@ -252,22 +302,70 @@ def test_real_fzf_up_then_enter_prints_the_second_result_and_records_the_click(
     assert (doc, query, source) == (ranked_ids[1], TERM, "cli")
 
 
-def test_real_fzf_shows_no_id_and_no_escape_from_a_hostile_title_or_body(
+def test_real_fzf_no_sequence_from_a_hostile_title_or_body_reaches_the_terminal(
     ranked_ids: list[str], fzf: str, tmp_path: Path
 ) -> None:
+    """Both rows previewed, each proved by a marker, on a pty that reports a pixel size."""
     run = _run_under_pty(
         _pick_args(),
         _brain_env(tmp_path, fzf),
         tmp_path,
-        keys=KEY_ESC,
-        wait_for=(b"Alpha plan", b"Beta", BODY_MARKER.encode()),
+        steps=[
+            ((b"Alpha plan", b"Beta plan", MARKER_PREFIX), press(KEY_UP)),
+            ((MARKER_PREFIX + b"one", MARKER_PREFIX + b"two"), press(KEY_ESC)),
+        ],
     )
     assert run.returncode == 130
-    # The cursor starts on the first result, whose id is in the preview's own `id:` line
-    # (`brain show` prints it); the second result's id is on no line of the screen.
-    assert ranked_ids[1].encode() not in run.screen
-    assert OSC_MARKER.encode() not in run.screen
-    assert b"\x1b]0;" not in run.screen
+    for forbidden in FORBIDDEN:
+        assert forbidden not in run.screen, forbidden
+
+
+def test_real_fzf_preview_keeps_ordinary_text(
+    test_db: psycopg.Connection[Any],
+    fake_embedder: Embedder,
+    fzf: str,
+    tmp_path: Path,
+) -> None:
+    ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="季度计划 résumé",
+            content=f"{ORDINARY_TERM} Çà et là\tcolumn\n\nsecond-paragraph-marker",
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+        source_external_id="manual:ordinary",
+    )
+    test_db.commit()
+    wanted = ("季度计划".encode(), "Çà et là".encode(), b"second-paragraph-marker")
+    run = _run_under_pty(
+        ["search", ORDINARY_TERM, "--fts-only", "--pick"],
+        _brain_env(tmp_path, fzf),
+        tmp_path,
+        steps=[(wanted, press(KEY_ESC))],
+    )
+    assert run.returncode == 130
+    for text in wanted:
+        assert text in run.screen, text
+
+
+def test_real_fzf_previews_under_sh_whatever_shell_the_user_has(
+    ranked_ids: list[str], fzf: str, tmp_path: Path
+) -> None:
+    """fzf runs the preview with ``$SHELL -c``, and the pipe needs a POSIX shell: it gets one."""
+    marker = tmp_path / "user-shell-ran"
+    user_shell = tmp_path / "not-posix-shell"
+    user_shell.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 1\n', encoding="utf-8")
+    user_shell.chmod(0o700)
+    env = _brain_env(tmp_path, fzf, SHELL=str(user_shell))
+    run = _run_under_pty(
+        _pick_args(), env, tmp_path, steps=[((MARKER_PREFIX,), press(KEY_ESC))]
+    )
+    assert run.returncode == 130
+    assert not marker.exists()
 
 
 def test_real_fzf_esc_prints_nothing_records_no_click_and_shows_in_gaps(
@@ -277,7 +375,10 @@ def test_real_fzf_esc_prints_nothing_records_no_click_and_shows_in_gaps(
     tmp_path: Path,
 ) -> None:
     run = _run_under_pty(
-        _pick_args(), _brain_env(tmp_path, fzf), tmp_path, keys=KEY_ESC, wait_for=(b"Alpha plan",)
+        _pick_args(),
+        _brain_env(tmp_path, fzf),
+        tmp_path,
+        steps=[((b"Alpha plan",), press(KEY_ESC))],
     )
     assert (run.returncode, run.stdout) == (130, "")
     assert test_db.execute("SELECT count(*) FROM interactions").fetchone() == (0,)
@@ -299,7 +400,9 @@ def test_real_fzf_ignores_a_hostile_environment(
         FZF_DEFAULT_OPTS=f"--select-1 --filter=plan --bind=enter:execute-silent(touch {marker})",
         FZF_DEFAULT_COMMAND=f"touch {marker}",
     )
-    run = _run_under_pty(_pick_args(), env, tmp_path, keys=KEY_ESC, wait_for=(b"Alpha plan",))
+    run = _run_under_pty(
+        _pick_args(), env, tmp_path, steps=[((b"Alpha plan",), press(KEY_ESC))]
+    )
     assert (run.returncode, run.stdout) == (130, "")
     assert not marker.exists()
     assert test_db.execute("SELECT count(*) FROM interactions").fetchone() == (0,)
@@ -314,7 +417,9 @@ def test_real_fzf_enter_with_a_hostile_bind_still_returns_the_top_result(
         fzf,
         FZF_DEFAULT_OPTS=f"--bind=enter:execute-silent(touch {marker})+abort",
     )
-    run = _run_under_pty(_pick_args(), env, tmp_path, keys=b"\r", wait_for=(b"Alpha plan",))
+    run = _run_under_pty(
+        _pick_args(), env, tmp_path, steps=[((b"Alpha plan",), press(b"\r"))]
+    )
     assert (run.returncode, run.stdout) == (0, f"{ranked_ids[0]}\n")
     assert not marker.exists()
 

@@ -4,7 +4,9 @@ All data is synthetic. Every guard here has a "refuses" and a "keeps ordinary be
 """
 from __future__ import annotations
 
+import shlex
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -81,7 +83,7 @@ def test_a_separator_in_a_title_cannot_add_a_field_or_a_line(hostile: str) -> No
         ("Hi\x1b[31mred\x1b[0m", "Hired"),
         ("Hi\x1b]0;PWNED\x07there", "Hithere"),
         ("Hi\x1b]8;;http://example.invalid\x1b\\there", "Hithere"),
-        ("Hi\x9b31mred", "Hired"),
+        ("Hi\x9b31mred", "Hi31mred"),
         ("Hi\x1b(Bthere", "Hithere"),
         ("Hi\x07\x08\x7fthere", "Hithere"),
         ("Hi‮reversed‬", "Hireversed"),
@@ -132,7 +134,7 @@ def test_argv_hides_the_id_and_previews_by_field_index_only() -> None:
         "2..",
         "--no-multi",
         "--preview",
-        "brain show {1}",
+        f"brain show {{1}} 2>&1 | {shlex.quote(sys.executable)} -I -m brain.preview_filter",
     ]
 
 
@@ -319,6 +321,13 @@ def test_run_fzf_clears_every_fzf_variable_from_the_child(
     run = run_fzf([_script(tmp_path, "env")], "")
     assert "FZF_" not in run.stdout
     assert "BRAIN_PICK_TEST_MARKER=kept" in run.stdout
+
+
+def test_child_env_forces_a_posix_shell_because_fzf_runs_the_preview_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SHELL", "/opt/homebrew/bin/fish")
+    assert child_env()["SHELL"] == "/bin/sh"
 
 
 def test_child_env_keeps_ordinary_variables(monkeypatch: pytest.MonkeyPatch) -> None:

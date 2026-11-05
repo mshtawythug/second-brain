@@ -8,20 +8,25 @@ Measured against real ``fzf`` (0.29.0, 0.44.1, 0.72.0), which is what shapes thi
   human is choosing, so the preflight is the only thing standing between a script and a hang.
 - Stdout is matched against the ids offered (:func:`parse_selection`) and never taken on trust.
 
-Titles are other people's text (email subjects, web pages). They reach ``fzf`` only over stdin,
-cleaned by :func:`result_lines`, so they are never in an argv or a shell string. The preview is the
-fixed :data:`_PREVIEW`, where ``fzf`` quotes field 1, a UUID from the database. It carries no
+Titles and bodies are other people's text (email subjects, web pages), and they reach the terminal
+by two paths. The list: titles go to ``fzf`` only over stdin, cleaned by :func:`result_lines`, and
+never in an argv or a shell string. The preview: ``brain show`` prints a document raw and ``fzf``
+passes some sequences straight to the terminal, so :func:`_preview_command` pipes it through
+:mod:`brain.preview_filter`. ``fzf`` quotes field 1, a UUID from the database. There is no
 ``--query``, because ``brain show --query`` would write an ``opened`` row per cursor move.
 
-Every ``FZF_*`` variable is cleared for the child (:func:`child_env`). ``FZF_DEFAULT_OPTS`` can pick
-with no human (``--select-1``, ``--filter``), run commands (``--bind=...:execute``), or serve the
-list of titles over HTTP (``--listen``), and the user's theme is not worth any of those here.
+The child's environment is fixed (:func:`child_env`). Every ``FZF_*`` variable is cleared:
+``FZF_DEFAULT_OPTS`` can pick with no human (``--select-1``, ``--filter``), run commands
+(``--bind=...:execute``), or serve the list of titles over HTTP (``--listen``), and the user's theme
+is not worth any of those here. ``SHELL`` is ``/bin/sh``, because ``fzf`` runs the preview with
+``$SHELL -c`` and the pipe and ``2>&1`` need a POSIX shell, which fish, csh and nu are not all.
 """
 from __future__ import annotations
 
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -37,6 +42,7 @@ from .db import connect
 from .errors import InteractionError
 from .ingest.text_safety import one_line
 from .interactions import record_interaction
+from .preview_filter import strip_sequences
 from .search import SearchResult
 
 logger = logging.getLogger(__name__)
@@ -49,20 +55,11 @@ OLD_FZF_MESSAGE = (
     f"--pick needs fzf {MIN_FZF_VERSION[0]}.{MIN_FZF_VERSION[1]} or newer; upgrade fzf"
 )
 
-_PREVIEW = "brain show {1}"
 _TITLE_MAX_CHARS = 200
 _VERSION_PROBE_SECONDS = 5.0
 _EXIT_ABORTED = 130
 _EXIT_NO_MATCH = 1
 _VERSION_RE = re.compile(r"^(\d{1,4})\.(\d{1,4})")
-#: CSI (7-bit and C1), OSC and string sequences up to their terminator, and two-byte escapes.
-#: :func:`one_line` removes the ESC itself; without this the sequence's body would stay as text.
-_ANSI_RE = re.compile(
-    r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
-    r"|(?:\x1b[\]PX^_]|[\x9d\x90\x98\x9e\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)?"
-    r"|\x1b[ -/]*[0-~]"
-)
-
 
 class _Tty(Protocol):
     def isatty(self) -> bool: ...
@@ -86,8 +83,9 @@ class PickOutcome:
 
 
 def child_env() -> dict[str, str]:
-    """This environment without any ``FZF_*`` variable (the module docstring says why)."""
-    return {name: value for name, value in os.environ.items() if not name.startswith("FZF_")}
+    """This environment with no ``FZF_*`` and ``SHELL=/bin/sh`` (the module docstring says why)."""
+    kept = {name: value for name, value in os.environ.items() if not name.startswith("FZF_")}
+    return {**kept, "SHELL": "/bin/sh"}
 
 
 def _open_controlling_tty() -> None:
@@ -161,7 +159,7 @@ def refuse_unpickable(*, json_output: bool, facets: bool) -> None:
 
 
 def _field(text: str) -> str:
-    return one_line(_ANSI_RE.sub("", text))
+    return one_line(strip_sequences(text))
 
 
 def result_lines(results: Sequence[SearchResult]) -> str:
@@ -174,6 +172,14 @@ def result_lines(results: Sequence[SearchResult]) -> str:
     return "".join(lines)
 
 
+def _preview_command() -> str:
+    """``brain show``, cleaned. ``-I`` keeps a planted ``brain`` in the cwd from being imported.
+
+    If the filter cannot run the pane is empty, because the pipe never lets raw output through.
+    """
+    return f"brain show {{1}} 2>&1 | {shlex.quote(sys.executable)} -I -m brain.preview_filter"
+
+
 def fzf_argv(binary: str) -> list[str]:
     """The fixed argv: id hidden, one selection, preview by field index only."""
     return [
@@ -184,7 +190,7 @@ def fzf_argv(binary: str) -> list[str]:
         "2..",
         "--no-multi",
         "--preview",
-        _PREVIEW,
+        _preview_command(),
     ]
 
 

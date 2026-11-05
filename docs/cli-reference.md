@@ -246,8 +246,9 @@ brain search "platform migration" --pick            # choose in fzf; prints the 
 brain show "$(brain search "platform migration" --pick -n 50)"
 ```
 
-`--pick` opens the results in [`fzf`](https://github.com/junegunn/fzf), with a `brain show`
-preview of the highlighted one. It prints only the chosen document's full id on stdout, so it
+`--pick` opens the results in [`fzf`](https://github.com/junegunn/fzf), with a cleaned `brain show`
+preview of the highlighted one: escape sequences, control characters and bidi overrides are removed,
+so an ingested document cannot drive your terminal. It prints only the chosen document's full id on stdout, so it
 works inside `$(...)` and pipes. The default `--limit` is still 5, so a wider `-n` is often useful.
 It is for a person at a terminal, never for agents or scripts with nobody at the keyboard.
 
@@ -255,6 +256,7 @@ It needs `fzf` 0.29 or newer on `PATH` (`brain doctor` has a row for it, a WARN 
 `brain` on `PATH` for the preview; without that the pane says so and picking still works. Your
 `FZF_DEFAULT_OPTS` and every other `FZF_*` variable are ignored. Those settings can pick with
 nobody choosing, run commands, or serve the list over HTTP, so your `fzf` theme does not apply here.
+The preview runs under `/bin/sh` whatever your `$SHELL` is.
 
 | Case | Exit | stdout | stderr |
 |---|---|---|---|
@@ -273,7 +275,7 @@ search unclicked, so `brain gaps` counts it as `no_click`. A plain `brain search
 and never counts as `no_click`.
 
 The list holds the same documents as `brain search` with the same filters, **including
-confidential ones by default**. The preview is plain `brain show`, so highlighting a confidential
+confidential ones by default**. The preview shows what `brain show` shows, so highlighting a confidential
 row shows its whole body, with the first row highlighted from the start. That is more than the
 search table's short snippet, within the local trust boundary described under
 [`--sensitivity`](#--sensitivity-on-search-is-a-lens-not-a-filter-you-can-rely-on). Add

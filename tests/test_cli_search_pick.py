@@ -107,7 +107,7 @@ def test_the_real_argv_reaches_the_runner(
     assert _pick().exit_code == 0
     argv = seen[0]
     assert argv[0] == "/fake/fzf"
-    assert argv[argv.index("--preview") + 1] == "brain show {1}"
+    assert argv[argv.index("--preview") + 1].startswith("brain show {1} 2>&1 | ")
     assert not any(SHARED_TERM in arg for arg in argv), "the query must not show in ps"
 
 
