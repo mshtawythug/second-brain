@@ -58,14 +58,19 @@ def require_fzf(
 
 @pytest.mark.nodb
 def test_a_missing_fzf_fails_rather_than_skips_on_ci() -> None:
-    with pytest.raises(pytest.fail.Exception, match="may not skip"):
+    # Both outcomes are caught on purpose. Catching only the failure let a skip escape, which
+    # turned this very test into a skip: mutation-tested, and it survived until this was fixed.
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as caught:
         require_fzf(env={"GITHUB_ACTIONS": "true"}, which=lambda _name: None)
+    assert caught.type is pytest.fail.Exception
+    assert "may not skip" in str(caught.value)
 
 
 @pytest.mark.nodb
 def test_a_missing_fzf_skips_on_a_developer_machine() -> None:
-    with pytest.raises(pytest.skip.Exception):
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as caught:
         require_fzf(env={}, which=lambda _name: None)
+    assert caught.type is pytest.skip.Exception
 
 
 @pytest.mark.nodb
