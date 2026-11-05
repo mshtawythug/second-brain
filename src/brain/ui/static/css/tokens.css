@@ -13,10 +13,14 @@
  *      Total shadow usage in the app: the two modals.
  *
  * Typography carries meaning: mono for machine-shaped things (paths, ids,
- * dates, latency, chips), serif for the note body only, sans for chrome.
+ * dates, latency, chips), serif for the words a person reads, sans for chrome.
  * Reading the interface tells you what kind of thing you are looking at.
  *
- * Fonts are system stacks only — zero downloads, works fully offline.
+ * The instrument keeps system stacks (--font-ui, --font-mono). The reading role
+ * (--font-read) has one packaged face, served from static/fonts/ with no network,
+ * so the app still works fully offline. It reaches the note title and body, the
+ * Agent tab's heading, question box, questions and answers, the Ingest heading,
+ * and Discovery titles.
  *
  * ---------------------------------------------------------------------------
  * THE STYLESHEET IS FOUR FILES, AND THE ORDER THEY LOAD IN IS LOAD-BEARING.
