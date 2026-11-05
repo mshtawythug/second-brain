@@ -29,7 +29,7 @@ _SEQUENCE_RE = re.compile(
     r"|\x1b[PX^_](?:[^\x1b\x9c]|\x1b\x1b)*(?:\x1b\\|\x9c)"
     r"|\x1b[ -/]*[0-~]?"
 )
-_BIDI_CONTROLS = "‪‫‬‭‮⁦⁧⁨⁩"
+_BIDI_CONTROLS = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
 #: C0 but for tab and newline, DEL, C1, and the bidi overrides go; Unicode line separators become
 #: newlines, so a pane line stays a line.
 _DROP: dict[int, str | None] = {

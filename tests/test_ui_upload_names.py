@@ -87,7 +87,7 @@ def test_a_registered_extension_outside_the_allow_list_is_not_uploadable() -> No
         ("r%C3%A9sum%C3%A9.pdf", SafeName("résumé", ".pdf")),
         ("two%20words.md", SafeName("two words", ".md")),
         # Control characters are removed, NUL included; so is a bidi override,
-        # which can make "evil‮fdp.txt" render as "eviltxt.pdf".
+        # which can make "evil\u202efdp.txt" render as "eviltxt.pdf".
         ("a%00b.txt", SafeName("ab", ".txt")),
         ("tab%09name.md", SafeName("tabname", ".md")),
         ("evil%E2%80%AEfdp.txt", SafeName("evilfdp", ".txt")),

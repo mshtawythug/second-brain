@@ -334,3 +334,46 @@ def test_no_new_untracked_docs_paths(doc_path: str) -> None:
         f"{doc_path} is swallowed by the broad .gitignore pattern {pattern!r} and can never be "
         "added. Deliberate exclusions must name the file explicitly."
     )
+
+
+#: Trojan Source: bidi embeddings, overrides and isolates. Spelled as code points so that this
+#: file passes its own scan, and so that a reader can audit the list.
+_BIDI_CONTROLS = frozenset(chr(code) for code in (*range(0x202a, 0x202f), *range(0x2066, 0x206a)))
+_SCANNED_SUFFIXES = frozenset({".py", ".js", ".css", ".html", ".sql", ".sh", ".yml", ".yaml"})
+
+
+def _raw_bidi_lines(root: Path) -> list[str]:
+    """``path:line`` for each scanned text file line holding a raw bidi control character."""
+    found = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix not in _SCANNED_SUFFIXES:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        found += [
+            f"{path}:{number}"
+            for number, line in enumerate(text.splitlines(), 1)
+            if _BIDI_CONTROLS.intersection(line)
+        ]
+    return found
+
+
+def test_the_bidi_list_has_all_nine_controls() -> None:
+    assert len(_BIDI_CONTROLS) == 9
+
+
+@pytest.mark.parametrize("control", sorted(_BIDI_CONTROLS), ids=lambda c: f"U+{ord(c):04X}")
+def test_the_bidi_scan_finds_each_raw_control(tmp_path: Path, control: str) -> None:
+    (tmp_path / "hostile.py").write_text(f"ok\nx = 'a{control}b'\n", encoding="utf-8")
+    assert _raw_bidi_lines(tmp_path) == [f"{tmp_path / 'hostile.py'}:2"]
+
+
+def test_the_bidi_scan_keeps_escapes_and_ordinary_text(tmp_path: Path) -> None:
+    body = "x = 'a\\u202eb'\ny = 'שלום résumé 季度'\n"
+    (tmp_path / "ordinary.py").write_text(body, encoding="utf-8")
+    assert _raw_bidi_lines(tmp_path) == []
+
+
+@pytest.mark.parametrize("tree", ["src", "tests"])
+def test_no_raw_bidi_control_is_checked_in(tree: str) -> None:
+    """A reader cannot see these, and they can make code read as other than it runs."""
+    assert _raw_bidi_lines(REPO_ROOT / tree) == []

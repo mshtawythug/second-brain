@@ -54,7 +54,18 @@ def test_a_bare_escape_or_a_short_escape_sequence_goes(escape: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "bidi", ["\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066", "\u2069"]
+    "bidi",
+    [
+        "\u202a",
+        "\u202b",
+        "\u202c",
+        "\u202d",
+        "\u202e",
+        "\u2066",
+        "\u2067",
+        "\u2068",
+        "\u2069",
+    ],
 )
 def test_bidi_overrides_go(bidi: str) -> None:
     assert clean_line(f"a{bidi}b") == "ab"
