@@ -14,12 +14,12 @@ or `docs/` outside the spec.
   counts only `fail`.
 - **D3 approved after verification.** `_NO_CLICK_SQL` requires `session_id IS NOT NULL`, so plain CLI
   rows stay out; tests pin an aborted pick in, a completed pick out, and plain searches out.
-- **D5 changed:** CI installs real `fzf` from apt (0.44.1 on Ubuntu 24.04), and the real test **fails
-  rather than skips** under `GITHUB_ACTIONS`. The script-on-`PATH` end-to-end test is dropped as
+- **D5 changed:** CI installs real `fzf` from apt (0.67.0 on the first run, unpinned), and the real
+  test **fails rather than skips** under `GITHUB_ACTIONS`. The script-on-`PATH` end-to-end test is dropped as
   redundant; small scripts still exercise `run_fzf` and the version probe.
 - **Version floor added: `fzf` 0.29.** The picker's exact flags were run on real 0.29.0, 0.44.1 and
   0.72.0: real keys, id hidden, `{1}` exactly 36 bytes, no OSC leak. 0.29 is the lowest version run,
-  on macOS only. Below it, `--pick` refuses and the doctor row warns. An unreadable version proceeds.
+  on macOS only; CI's apt build is much newer, so CI does not test the floor. Below it, `--pick` refuses and the doctor row warns. An unreadable version proceeds.
 - **`FZF_*` cleared for the child (new).** This replaces "`FZF_DEFAULT_OPTS` is honoured" under Risks.
   `--select-1` and `--filter` pick with no human, `--bind=...:execute` runs commands, and `--listen`
   serves the titles over HTTP. The cost is the user's theme. `FZF_DEFAULT_COMMAND` has no effect with

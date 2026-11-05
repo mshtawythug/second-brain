@@ -41,7 +41,7 @@ from .search import SearchResult
 
 logger = logging.getLogger(__name__)
 
-#: The lowest version run end to end. CI runs the real test on apt's (0.44.1 on 24.04).
+#: The lowest version run end to end, by hand on macOS. CI runs the real test on apt's build.
 MIN_FZF_VERSION: tuple[int, int] = (0, 29)
 NO_TERMINAL_MESSAGE = "--pick needs a terminal"
 NO_FZF_MESSAGE = "--pick needs fzf on PATH; install it with brew install fzf or your OS's package"
