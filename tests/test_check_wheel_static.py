@@ -1,17 +1,21 @@
 """Tests for ``scripts/check_wheel_static.py``: a wheel must carry the whole static tree (RM-50).
 
-The script lives outside ``src/brain``, so it is loaded with :mod:`importlib.util`. These
-tests drive it on synthetic zips and a fake build. The real build runs in CI's ``lint``
+The script lives outside ``src/brain``, so it is loaded with :mod:`importlib.util`. The
+comparison and the exit codes run on synthetic zips and a fake build. The subprocess
+wrapper runs real child processes, because its environment, its output cap and its
+group kill are exactly what a fake would hide. The real wheel build runs in CI's ``lint``
 job and in ``bin/brain-ci``.
 """
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
+import sys
+import time
 import zipfile
 from pathlib import Path
 from types import ModuleType
-from typing import Any
 
 import pytest
 
@@ -113,26 +117,25 @@ def _repo(root: Path) -> Path:
     return root
 
 
-class _FakePip:
-    """Stands in for ``subprocess.run`` and records what the build was given."""
+class _FakeBuild:
+    """Stands in for the real build and records what it was given."""
 
     def __init__(self, *, names: list[str] = TREE, returncode: int = 0) -> None:
         self.names = names
         self.returncode = returncode
         self.argv: list[str] = []
-        self.kwargs: dict[str, Any] = {}
         self.copied: set[str] = set()
 
-    def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+    def __call__(self, argv: list[str], log: Path) -> int:
         self.argv = argv
-        self.kwargs = kwargs
         source = Path(argv[-1])
         self.copied = {p.relative_to(source).as_posix() for p in source.rglob("*") if p.is_file()}
         out = Path(argv[argv.index("--wheel-dir") + 1])
+        log.write_text("the tail of a build log\n", encoding="utf-8")
         if self.returncode == 0:
             out.mkdir()
             _wheel(out / "x-1-py3-none-any.whl", self.names)
-        return subprocess.CompletedProcess(argv, self.returncode, b"a\nsecret-path\n", b"")
+        return self.returncode
 
 
 def test_main_passes_on_a_complete_wheel_built_from_a_clean_copy(
@@ -142,17 +145,16 @@ def test_main_passes_on_a_complete_wheel_built_from_a_clean_copy(
     repo = _repo(tmp_path)
     (repo / "build" / "lib").mkdir(parents=True)
     (repo / "build" / "lib" / "stale.txt").write_text("x", encoding="utf-8")
-    pip = _FakePip()
+    build = _FakeBuild()
 
-    assert check.main(repo, run=pip) == 0
+    assert check.main(repo, build=build) == 0
 
     assert "5 static files" in capsys.readouterr().out
-    assert Path(pip.argv[-1]) != repo
-    assert pip.kwargs["timeout"] == check.BUILD_TIMEOUT_S
-    assert "src/brain/ui/static/fonts/a.woff2" in pip.copied
-    assert "pyproject.toml" in pip.copied
-    assert not any(name.startswith("build/") for name in pip.copied)
-    assert not any("__pycache__" in name for name in pip.copied)
+    assert Path(build.argv[-1]) != repo
+    assert "src/brain/ui/static/fonts/a.woff2" in build.copied
+    assert "pyproject.toml" in build.copied
+    assert not any(name.startswith("build/") for name in build.copied)
+    assert not any("__pycache__" in name for name in build.copied)
 
 
 def test_main_exits_1_and_names_the_missing_file(
@@ -160,33 +162,22 @@ def test_main_exits_1_and_names_the_missing_file(
 ) -> None:
     repo = _repo(tmp_path)
 
-    assert check.main(repo, run=_FakePip(names=TREE[:-1])) == 1
+    assert check.main(repo, build=_FakeBuild(names=TREE[:-1])) == 1
 
     assert "fonts/OFL.txt" in capsys.readouterr().err
 
 
-def test_a_failed_build_exits_2_with_a_fixed_message(
+def test_a_failed_build_exits_2_and_prints_the_tail_of_its_log(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The tail of a build log may hold paths; the exit message does not repeat it."""
+    """A red CI step must be diagnosable from its own output."""
     repo = _repo(tmp_path)
 
-    assert check.main(repo, run=_FakePip(returncode=1)) == 2
+    assert check.main(repo, build=_FakeBuild(returncode=1)) == 2
 
-    assert "exit 1" in capsys.readouterr().err
-
-
-def test_a_build_that_times_out_exits_2(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    repo = _repo(tmp_path)
-
-    def hang(argv: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
-        raise subprocess.TimeoutExpired(argv, check.BUILD_TIMEOUT_S)
-
-    assert check.main(repo, run=hang) == 2
-
-    assert "timed out" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "the wheel build failed (exit 1)" in err
+    assert "the tail of a build log" in err
 
 
 def test_a_build_with_no_wheel_exits_2(
@@ -194,17 +185,164 @@ def test_a_build_with_no_wheel_exits_2(
 ) -> None:
     repo = _repo(tmp_path)
 
-    def nothing(argv: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(argv, 0, b"", b"")
-
-    assert check.main(repo, run=nothing) == 2
+    assert check.main(repo, build=lambda argv, log: 0) == 2
 
     assert "exactly one wheel" in capsys.readouterr().err
 
 
-def test_a_repo_with_no_static_tree_exits_2(
+def test_a_repo_it_cannot_build_exits_2_with_a_neutral_message(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert check.main(tmp_path, run=_FakePip()) == 2
+    assert check.main(tmp_path, build=_FakeBuild()) == 2
 
-    assert capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "the build could not run" in err
+    assert str(tmp_path) not in err
+
+
+def test_a_build_that_cannot_start_exits_2_with_the_same_message(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repo(tmp_path)
+
+    def cannot_start(argv: list[str], log: Path) -> int:
+        raise FileNotFoundError("/some/secret/path")
+
+    assert check.main(repo, build=cannot_start) == 2
+
+    err = capsys.readouterr().err
+    assert "the build could not run" in err
+    assert "/some/secret/path" not in err
+
+
+# ------------------------------------------------ the real child process --
+
+
+def _python(code: str) -> list[str]:
+    return [sys.executable, "-c", code]
+
+
+def test_the_child_sees_a_minimal_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build backend runs as code; it gets no developer secret from this script's env."""
+    log = tmp_path / "log"
+    monkeypatch.setenv("FAKE_API_KEY", "not-for-the-backend")
+    monkeypatch.setenv("VOYAGE_API_KEY", "not-for-the-backend")
+    monkeypatch.setenv("PIP_INDEX_URL", "https://user:not-for-the-backend@example.org/simple")
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:not-for-the-backend@example.org:1")
+    monkeypatch.setenv("PATH", "/bin:/usr/bin")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+
+    code = "import os; print(sorted(os.environ.items()))"
+    assert check.run_build(_python(code), log) == 0
+
+    output = log.read_text(encoding="utf-8")
+    assert "not-for-the-backend" not in output
+    assert "('PATH', '/bin:/usr/bin')" in output
+    assert f"('HOME', '{tmp_path}')" in output
+    assert f"('TMPDIR', '{tmp_path}')" in output
+
+
+def test_the_child_env_keeps_what_pip_and_a_shared_libpython_need(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keeps: setup-python's interpreter needs ``LD_LIBRARY_PATH``, and pip its own config."""
+    for name in ("LD_LIBRARY_PATH", "PIP_CONFIG_FILE", "SSL_CERT_FILE"):
+        monkeypatch.setenv(name, "/kept")
+
+    env = check.child_env()
+
+    assert {env["LD_LIBRARY_PATH"], env["PIP_CONFIG_FILE"], env["SSL_CERT_FILE"]} == {"/kept"}
+
+
+def test_the_child_env_omits_a_name_that_is_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+
+    assert "LD_LIBRARY_PATH" not in check.child_env()
+
+
+def test_the_exit_status_and_the_output_reach_the_log(tmp_path: Path) -> None:
+    log = tmp_path / "log"
+    code = "import sys; print('from stdout'); sys.stderr.write('from stderr'); sys.exit(3)"
+
+    assert check.run_build(_python(code), log) == 3
+
+    output = log.read_text(encoding="utf-8")
+    assert "from stdout" in output
+    assert "from stderr" in output
+
+
+def test_the_tail_is_bounded_and_keeps_the_end(tmp_path: Path) -> None:
+    log = tmp_path / "log"
+    log.write_bytes(b"x" * (check.TAIL_BYTES * 3) + b"THE END")
+
+    tail = check.log_tail(log)
+
+    assert len(tail) == check.TAIL_BYTES
+    assert tail.endswith("THE END")
+
+
+def test_the_tail_keeps_ordinary_text_whole(tmp_path: Path) -> None:
+    log = tmp_path / "log"
+    log.write_text("  line one\n\tline two\n", encoding="utf-8")
+
+    assert check.log_tail(log) == "  line one\n\tline two\n"
+
+
+def test_the_tail_cannot_drive_the_terminal(tmp_path: Path) -> None:
+    """Build output is not trusted: no escape sequence reaches the caller's terminal."""
+    log = tmp_path / "log"
+    log.write_bytes(b"before\x1b[2Jafter\xff\r")
+
+    tail = check.log_tail(log)
+
+    assert "\x1b" not in tail
+    assert "\r" not in tail
+    assert tail.startswith("before?[2Jafter?")
+
+
+def test_a_log_that_was_never_written_has_an_empty_tail(tmp_path: Path) -> None:
+    assert check.log_tail(tmp_path / "missing") == ""
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_a_timeout_exits_2_and_takes_the_build_children_with_it(tmp_path: Path) -> None:
+    """``subprocess.run`` would kill pip alone and leave its build hook running."""
+    log = tmp_path / "log"
+    pid_file = tmp_path / "grandchild"
+    code = (
+        "import subprocess, sys, pathlib, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n"
+        "print('started', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+
+    with pytest.raises(check.WheelCheckError, match="timed out") as raised:
+        check.run_build(_python(code), log, timeout=3.0)
+
+    assert "started" in str(raised.value)
+    pid = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5.0
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _alive(pid), "the build's child survived the timeout"
+
+
+def test_a_group_that_is_already_gone_is_not_an_error() -> None:
+    """A timeout racing the group's own exit must still report the timeout."""
+    process = subprocess.Popen(_python("pass"), start_new_session=True)
+    process.wait()
+
+    check.kill_group(process)
+
+    assert process.returncode == 0

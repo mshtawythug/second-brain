@@ -7,26 +7,92 @@ stale ``build/``, which can hide exactly this) and compares it with the tree.
 
 Exit codes: 0 every file is in the wheel; 1 some are missing (each is named); 2 the
 check could not run. Runs in ``ci.yml``'s ``lint`` job and in ``bin/brain-ci``.
+
+The build backend is code resolved from the index, so it runs with a minimal
+environment, in its own session so a timeout can stop all of it.
 """
 from __future__ import annotations
 
+import contextlib
+import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 WHEEL_STATIC_PREFIX = "brain/ui/static/"
-BUILD_TIMEOUT_S = 300
+BUILD_TIMEOUT_S = 300.0
+TAIL_BYTES = 4000
 _NOT_SHIPPED = {"__pycache__", ".DS_Store"}
 _BUILD_INPUTS = ("pyproject.toml", "README.md", "LICENSE")
+
+#: What the child inherits, and nothing else. ``LD_LIBRARY_PATH``: setup-python's
+#: interpreter links a shared libpython. Deliberately absent: ``PIP_INDEX_URL`` and the
+#: proxy variables, whose values can embed credentials. A mirror or proxy belongs in
+#: ``pip.conf``, which pip finds through ``HOME`` or ``PIP_CONFIG_FILE``.
+_CHILD_ENV_NAMES = (
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "XDG_CONFIG_HOME",
+    "PIP_CONFIG_FILE", "PIP_CERT", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+)
+
+#: Build output is not trusted: anything but printable ASCII and plain whitespace
+#: becomes ``?``, so no escape sequence reaches the caller's terminal.
+_UNPRINTABLE_RE = re.compile(r"[^\t\n\x20-\x7e]")
 
 
 class WheelCheckError(Exception):
     """The check could not run, as distinct from finding a file missing."""
+
+
+def child_env() -> dict[str, str]:
+    """The parts of this process's environment the build may see."""
+    return {name: os.environ[name] for name in _CHILD_ENV_NAMES if name in os.environ}
+
+
+def log_tail(log: Path) -> str:
+    """The last :data:`TAIL_BYTES` of ``log``, made safe to print."""
+    try:
+        with log.open("rb") as handle:
+            handle.seek(max(0, log.stat().st_size - TAIL_BYTES))
+            raw = handle.read(TAIL_BYTES)
+    except OSError:
+        return ""
+    return _UNPRINTABLE_RE.sub("?", raw.decode("ascii", errors="replace"))
+
+
+def kill_group(process: subprocess.Popen[bytes]) -> None:
+    """Stop the whole build. Its session leader's pid is its group id."""
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
+
+
+def run_build(argv: list[str], log: Path, *, timeout: float = BUILD_TIMEOUT_S) -> int:
+    """Run ``argv`` with its output in ``log``; return its exit status."""
+    with log.open("wb") as output:
+        process = subprocess.Popen(
+            argv,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            env=child_env(),
+            start_new_session=True,
+        )
+    try:
+        return process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        kill_group(process)
+        raise WheelCheckError(
+            f"the wheel build timed out after {timeout:g}s; last output:\n{log_tail(log)}"
+        ) from exc
+    except KeyboardInterrupt:
+        # Its own session means the terminal's Ctrl-C never reached it.
+        kill_group(process)
+        raise
 
 
 def _static_files(static_root: Path) -> set[str]:
@@ -51,7 +117,7 @@ def missing_from_wheel(static_root: Path, wheel: Path) -> list[str]:
     return sorted(name for name in tree if f"{WHEEL_STATIC_PREFIX}{name}" not in names)
 
 
-def build_wheel(repo_root: Path, workdir: Path, run: Callable[..., Any]) -> Path:
+def build_wheel(repo_root: Path, workdir: Path, build: Callable[[list[str], Path], int]) -> Path:
     """Copy the build inputs into ``workdir``, build there, and return the one wheel."""
     source = workdir / "source"
     source.mkdir()
@@ -60,28 +126,27 @@ def build_wheel(repo_root: Path, workdir: Path, run: Callable[..., Any]) -> Path
     ignore = shutil.ignore_patterns("*.egg-info", *_NOT_SHIPPED)
     shutil.copytree(repo_root / "src", source / "src", ignore=ignore)
     out = workdir / "out"
-    argv = [sys.executable, "-m", "pip", "wheel", "--no-deps", "--wheel-dir", str(out), str(source)]
-    try:
-        result = run(argv, capture_output=True, timeout=BUILD_TIMEOUT_S, check=False)
-    except subprocess.TimeoutExpired as exc:
-        raise WheelCheckError(f"the wheel build timed out after {BUILD_TIMEOUT_S}s") from exc
-    if result.returncode != 0:
-        raise WheelCheckError(f"the wheel build failed (exit {result.returncode})")
+    log = workdir / "build.log"
+    pip = [sys.executable, "-m", "pip", "wheel", "--no-input", "--no-color"]
+    status = build([*pip, "--no-deps", "--wheel-dir", str(out), str(source)], log)
+    if status != 0:
+        tail = log_tail(log)
+        raise WheelCheckError(f"the wheel build failed (exit {status}); last output:\n{tail}")
     wheels = sorted(out.glob("*.whl")) if out.is_dir() else []
     if len(wheels) != 1:
         raise WheelCheckError(f"the build did not produce exactly one wheel ({len(wheels)})")
     return wheels[0]
 
 
-def main(repo_root: Path, run: Callable[..., Any] = subprocess.run) -> int:
+def main(repo_root: Path, build: Callable[[list[str], Path], int] = run_build) -> int:
     """Build, compare, report. See the module docstring for the exit codes."""
     static_root = repo_root / "src" / "brain" / "ui" / "static"
     try:
         with tempfile.TemporaryDirectory() as workdir:
-            wheel = build_wheel(repo_root, Path(workdir), run)
+            wheel = build_wheel(repo_root, Path(workdir), build)
             missing = missing_from_wheel(static_root, wheel)
     except (WheelCheckError, OSError) as exc:
-        message = str(exc) if isinstance(exc, WheelCheckError) else "the build inputs are missing"
+        message = str(exc) if isinstance(exc, WheelCheckError) else "the build could not run"
         print(f"check_wheel_static: {message}", file=sys.stderr)
         return 2
     if missing:
