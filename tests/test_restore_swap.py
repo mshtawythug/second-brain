@@ -19,6 +19,7 @@ from psycopg import sql
 from brain.backup import create_backup, read_manifest, restore_backup
 from brain.backup.replica_marker import marker_path, read_marker
 from brain.backup.restore import RESTORED_FROM_NOT_RECORDED
+from brain.backup.restore_run import TOC_MAX_CHARS, TOC_UNREADABLE
 from brain.backup.staging_prep import prepare_staging_extensions
 from brain.config import Config
 from brain.errors import BackupError, RestoreAborted
@@ -578,3 +579,37 @@ def test_staging_prep_failure_is_a_backup_error_with_a_fixed_message(
         test_db.autocommit = False
 
     assert TEST_DATABASE_URL not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("trouble", "stdout"),
+    [
+        ({"pg_restore -l": UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad byte")}, ""),
+        ({}, "x" * (TOC_MAX_CHARS + 1)),
+    ],
+    ids=["undecodable", "over-the-cap"],
+)
+def test_an_unusable_listing_drops_staging_and_leaves_live_untouched(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+    seed_live_doc: Callable[..., str],
+    trouble: dict[str, BaseException],
+    stdout: str,
+) -> None:
+    """sec-119b N2, N3: fixed error, no staging left behind, and no swap."""
+    seed_live_doc(title="Larkspur review", content="Synthetic body before the restore.")
+    responses = {"--version": CONTAINER_VERSION}
+    if stdout:
+        responses["pg_restore -l"] = stdout
+    unusable = StubAndRestoreRunner(
+        base_dsn=TEST_DATABASE_URL, responses=responses, raises=trouble
+    )
+
+    with pytest.raises(BackupError) as excinfo:
+        _restore(archive, cfg, unusable)
+
+    assert str(excinfo.value) == TOC_UNREADABLE
+    assert _live_document_count() == 1
+    assert _databases(f"{TEST_DB_NAME}_restore_%") == []
+    assert _databases(f"{TEST_DB_NAME}_replaced_%") == []

@@ -21,9 +21,23 @@ from pathlib import Path
 import psycopg
 
 from ..db import connect
+from ..errors import BackupError
 from .create import run_tool
 from .pgtool import RESTORE_TIMEOUT_S, CommandRunner, PgToolPlan, password_env_file
 from .staging_prep import prepare_staging_extensions, staging_needs
+
+#: ``pg_restore -l`` reads only the dump's header, so it takes seconds, not the
+#: two hours a whole restore may. A wedged ``docker exec`` should fail fast.
+TOC_TIMEOUT_S = 120
+#: A brain's listing is a few hundred short lines, so this is far above any real one.
+#: Checked after capture, because :class:`CommandRunner` returns the whole output:
+#: this bounds what gets parsed, not what ``subprocess.run`` briefly buffers.
+TOC_MAX_CHARS = 16 * 1024 * 1024
+#: Fixed, with no archive content: a hostile archive chooses what the listing says.
+TOC_UNREADABLE = (
+    "Could not read the archive's table of contents (it is too large or not valid "
+    "UTF-8). Restore refused; nothing was changed and your database is untouched."
+)
 
 
 def _prepare_from_toc(
@@ -33,13 +47,18 @@ def _prepare_from_toc(
     runner: CommandRunner,
 ) -> None:
     """Read the dump's TOC and create in staging what the archive needs first."""
-    toc = run_tool(
-        runner,
-        plan.argv("-l", dump_arg),
-        timeout=RESTORE_TIMEOUT_S,
-        env=plan.env(None) if plan.source != "container" else None,
-        what="pg_restore -l (reading the dump's contents)",
-    ).stdout
+    try:
+        toc = run_tool(
+            runner,
+            plan.argv("-l", dump_arg),
+            timeout=TOC_TIMEOUT_S,
+            env=plan.env(None) if plan.source != "container" else None,
+            what="pg_restore -l (reading the dump's contents)",
+        ).stdout
+    except UnicodeDecodeError as exc:
+        raise BackupError(TOC_UNREADABLE) from exc
+    if len(toc or "") > TOC_MAX_CHARS:
+        raise BackupError(TOC_UNREADABLE)
     needed = staging_needs(toc or "")
     if needed:
         with connect(psycopg.conninfo.make_conninfo(**parts)) as staged:
