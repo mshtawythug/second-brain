@@ -239,7 +239,8 @@ the reviewer may overturn it. D2 to D8 as recommended.
   `python -m build`. pip is already in both venvs, so `build` is not installed anywhere, and the
   copy is what keeps a stale `build/` from hiding a missing file. It is one command, so
   `tests/test_bin_brain_ci.py`'s lint-parity guard applies as it stands.
-- The script is 99 lines, not 80.
+- The script is 164 lines, not 80. The review's fix round added the minimal environment, the bounded
+  log tail and the group kill.
 - The browser job's selection is an explicit roster, not a glob. `tests/test_ui_browser_fonts.py`
   was added to it, as `tests/test_ci_workflow.py` requires.
 - `fonts/SOURCE.txt` is new. It holds the provenance in place of the comment above the `@font-face`
