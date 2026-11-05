@@ -86,7 +86,7 @@
 
   --font-ui:   ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
                "Helvetica Neue", Arial, sans-serif;
-  --font-read: ui-serif, Georgia, "Iowan Old Style", "Palatino Linotype",
+  --font-read: "Newsreader", ui-serif, Georgia, "Iowan Old Style", "Palatino Linotype",
                "Times New Roman", serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
                "Liberation Mono", monospace;
@@ -100,10 +100,11 @@
   /* 48, not 68. `ch` is the advance of "0" — about 0.6em in every family in
      --font-read — while running prose averages 0.40-0.45em, so an `Nch` cap
      admits roughly 1.37N characters. At 68ch the reading column measured 92-101
-     characters; the classical band is 45-75. Measured at 48ch: New York 71,
-     Georgia 65, Iowan Old Style 59, Times New Roman 59. The unit stays `ch` on
-     purpose — it tracks --t-body, so the measure survives a type-scale change
-     that a rem value would silently invalidate. */
+     characters; the classical band is 45-75. Measured at 48ch: Newsreader 57 (the
+     packaged face, RM-50; its "0" is 0.567em, and 48ch is 489px at 18px), and for
+     the fallbacks New York 71, Georgia 65, Iowan Old Style 59, Times New Roman 59.
+     The unit stays `ch` on purpose — it tracks --t-body, so the measure survives a
+     type-scale change that a rem value would silently invalidate. */
   --measure: 48ch;
   --lead-dense: 1.35;
   --lead-read:  1.66;

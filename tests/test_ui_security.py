@@ -98,20 +98,27 @@ def test_csp_is_present_and_default_src_none(tmp_path: Path) -> None:
 #: layer that holds if a sink is ever missed. Compared with a copy rather than with
 #: ``security.CSP``, so loosening the constant reddens this test instead of
 #: silently moving both sides of the comparison.
-_RM18B_CSP = (
+#:
+#: RM-50, acceptance 2: ``font-src 'self'`` is the one directive added since, for the
+#: packaged reading face. Exact equality is what refuses a wider value.
+_PINNED_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-    "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    "font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; "
+    "frame-ancestors 'none'"
 )
 
 
-@pytest.mark.parametrize("path", ["/", "/static/js/ask.js", "/api/ask/config"])
-def test_the_agent_tab_ships_under_the_unchanged_csp(tmp_path: Path, path: str) -> None:
-    """The shell, the Agent tab's module and its config route all carry it."""
+@pytest.mark.parametrize(
+    "path",
+    ["/", "/static/js/ask.js", "/api/ask/config", "/static/fonts/newsreader-roman.woff2"],
+)
+def test_every_surface_ships_under_the_pinned_csp(tmp_path: Path, path: str) -> None:
+    """The shell, the Agent tab's module, its config route and a font all carry it."""
     with _client(_context(tmp_path)) as client:
         response = client.get(path)
 
     assert response.status_code == 200, path
-    assert response.headers["content-security-policy"] == _RM18B_CSP
+    assert response.headers["content-security-policy"] == _PINNED_CSP
 
 
 def test_hardening_headers_on_every_response(tmp_path: Path) -> None:

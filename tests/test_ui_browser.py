@@ -556,12 +556,16 @@ def test_the_reading_measure_stays_in_the_classical_band(page: Any) -> None:
     column against the font actually in use, which is the property that was
     wrong at 68ch.
     """
-    width = page.evaluate("""() => {
+    width = page.evaluate("""async () => {
         const probe = document.createElement('div');
         probe.className = 'note-body';
         probe.style.cssText = 'position:absolute;visibility:hidden';
         probe.textContent = 'x';
         document.body.appendChild(probe);
+        const first = getComputedStyle(probe);
+        // RM-50: the face must be in before anything is measured. Canvas does not
+        // wait for a web font, so this would otherwise measure the fallback.
+        await document.fonts.load(`${first.fontSize} ${first.fontFamily}`);
         const px = parseFloat(getComputedStyle(probe).maxWidth);
         const cs = getComputedStyle(probe);
         // Average advance of running prose ~0.5em is too crude; measure a real
@@ -575,8 +579,8 @@ def test_the_reading_measure_stays_in_the_classical_band(page: Any) -> None:
     # 75, not 80. The docstring and the message below both cite the classical
     # 45-75 band while the assertion used to accept up to 80 — a test whose
     # stated claim and enforced claim differed by five characters. MEASURED at
-    # 48ch: **60.18 characters**, so the honest bound passes with 15 to spare
-    # and the loose one was buying nothing.
+    # 48ch in Newsreader (RM-50): **57.23 characters**, so the honest bound passes
+    # with 18 to spare and the loose one was buying nothing.
     assert 45 <= width <= 75, (
         f"the reading column renders ~{width:.0f} characters; the classical "
         "band is 45-75 and 68ch measured 92-101"

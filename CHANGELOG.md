@@ -22,6 +22,19 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — a real text face on the reading surfaces of `brain ui` (RM-50)
+
+- Notes now render in Newsreader (SIL OFL 1.1), served from the package, in a roman and an italic
+  of 111 KB together. It also applies wherever `--font-read` was already used: the note title and
+  body, the Agent tab's heading, question box, questions and answers, the Ingest heading, and
+  Discovery titles. The instrument chrome keeps its system stacks.
+- The Content-Security-Policy gains `font-src 'self'` and nothing else. No external origin: fonts,
+  licence and provenance live in `ui/static/fonts/`.
+- `.woff2` is served as `font/woff2` on every host. Python 3.11 and 3.12 only know the type through
+  a host MIME database.
+- New `scripts/check_wheel_static.py`, in CI's `lint` job and `bin/brain-ci`: it builds a real wheel
+  from a clean copy and fails if any file under `ui/static` is missing from it.
+
 ### Added — a read replica on a second machine, and the `replica` doctor row (RM-47)
 
 - `brain restore` now writes `$BRAIN_HOME/state/restored-from.json` after a successful restore:

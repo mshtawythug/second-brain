@@ -4,6 +4,7 @@
 # Mirrors .github/workflows/ci.yml (both jobs) on your own machine:
 #
 #   lint job  →  ruff check  +  mypy src/  +  python scripts/check_ceiling_table.py
+#                +  python scripts/check_wheel_static.py
 #   test job  →  a BARE `pytest` against the pinned AGE Postgres on port 5434
 #
 # WHY THIS EXISTS
@@ -508,6 +509,7 @@ fi
 RUFF_STATUS=0
 MYPY_STATUS=0
 CEILING_STATUS=0
+WHEEL_STATUS=0
 PYTEST_STATUS=0
 PYTEST_RAN=0
 
@@ -529,6 +531,12 @@ if (( RUN_LINT )); then
   ( cd "$REPO_ROOT" && "$VENV/bin/python" scripts/check_ceiling_table.py )
   CEILING_STATUS=$?
   (( CEILING_STATUS == 0 )) && ok "ceiling table matches the tree"
+
+  # RM-50: a real wheel, built from a clean copy, must carry all of ui/static.
+  step "ci.yml job 'lint' — python scripts/check_wheel_static.py"
+  ( cd "$REPO_ROOT" && "$VENV/bin/python" scripts/check_wheel_static.py )
+  WHEEL_STATUS=$?
+  (( WHEEL_STATUS == 0 )) && ok "the built wheel carries the static tree"
 fi
 
 if (( RUN_TESTS )); then
@@ -554,10 +562,12 @@ if (( RUN_LINT )); then
   render "ruff check" "$( (( RUFF_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $RUFF_STATUS)")"
   render "mypy src/" "$( (( MYPY_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $MYPY_STATUS)")"
   render "ceiling table" "$( (( CEILING_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $CEILING_STATUS)")"
+  render "wheel static tree" "$( (( WHEEL_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $WHEEL_STATUS)")"
 else
   render "ruff check" "skipped (--tests-only)"
   render "mypy src/" "skipped (--tests-only)"
   render "ceiling table" "skipped (--tests-only)"
+  render "wheel static tree" "skipped (--tests-only)"
 fi
 if (( PYTEST_RAN )); then
   render "pytest" "$( (( PYTEST_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $PYTEST_STATUS)")"
@@ -570,9 +580,9 @@ EXIT_REASON="everything this run attempted passed"
 if (( PYTEST_RAN && PYTEST_STATUS != 0 )); then
   EXIT_STATUS=$PYTEST_STATUS
   EXIT_REASON="pytest's own exit status, verbatim (not a wrapper's)"
-elif (( RUFF_STATUS != 0 || MYPY_STATUS != 0 || CEILING_STATUS != 0 )); then
+elif (( RUFF_STATUS != 0 || MYPY_STATUS != 0 || CEILING_STATUS != 0 || WHEEL_STATUS != 0 )); then
   EXIT_STATUS=1
-  EXIT_REASON="pytest passed but ruff/mypy/the ceiling-table check did not"
+  EXIT_REASON="pytest passed but ruff/mypy/the ceiling-table or wheel check did not"
 fi
 
 say ""

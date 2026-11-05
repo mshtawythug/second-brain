@@ -83,8 +83,8 @@ drawn for long-form screen reading and leaves more room under the cap.
   pick. T1 produces them. **Recommendation: Newsreader**, subject to the screenshots, because
   §7.1.2 names it and it sits mid-band.
 - **D2, how much of the face.** (a) Roman only, with browser-synthesised italics. (b) Roman and
-  italic, two files. **Recommendation: (b).** `.lede` and every `<em>` in a note body are italic, and both
-  candidates fit under the cap with both styles. This reads the ticket's "one face" as one family, not one
+  italic, two files. **Recommendation: (b).** Every `<em>` in a note body is italic, and both candidates fit
+  under the cap with both styles. This reads the ticket's "one face" as one family, not one
   file.
 - **D3, where the face applies.** (a) Prepend it to the `--font-read` token. (b) Apply it to
   `.note-body` and `.note-title` only. **Recommendation: (a).** The token is the "page" role, and
@@ -228,3 +228,27 @@ rglob scans, skills tests, `scripts/check_ceiling_table.py`, `tests/test_ci_work
 - **Pinned tests.** Other guards may read the static tree; the named set finds them.
 - **Real-app browser test.** The first browser row with uvicorn, so the fixture must shut down
   cleanly and leave nothing running.
+
+## Rulings and what changed in the build
+
+**Rulings on the plan:** D1 Newsreader, without stopping for a pick; the screenshots stay local and
+the reviewer may overturn it. D2 to D8 as recommended.
+
+**Departures from the text above:**
+- `scripts/check_wheel_static.py` builds with `python -m pip wheel` from a clean copy instead of
+  `python -m build`. pip is already in both venvs, so `build` is not installed anywhere, and the
+  copy is what keeps a stale `build/` from hiding a missing file. It is one command, so
+  `tests/test_bin_brain_ci.py`'s lint-parity guard applies as it stands.
+- The script is 99 lines, not 80.
+- The browser job's selection is an explicit roster, not a glob. `tests/test_ui_browser_fonts.py`
+  was added to it, as `tests/test_ci_workflow.py` requires.
+- `fonts/SOURCE.txt` is new. It holds the provenance in place of the comment above the `@font-face`
+  rules, and a test ties its digests to the shipped files. It carries no URL scheme, so it needs no
+  scan exemption.
+- `.lede` does not use the face. It sets no `font-family` and sits outside `.note-body`, so it keeps
+  the UI stack. D2's first draft said otherwise. Nothing was changed for this.
+- Two RM-05 tests used `static/fonts/` as their example of a directory no glob ships. It now is one,
+  so they use `static/vendor/`.
+- T1's data came from `brain demo --database-url` on a throwaway database, by ruling. `/api/recent` is
+  empty for that corpus, so the Discovery screenshot stubs its two rows, and the Agent-turn screenshot
+  injects a turn's markup. Both go through the real stylesheets.

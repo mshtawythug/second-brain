@@ -136,6 +136,12 @@ jobs:
       - name: Ceiling table matches the tree
         run: python scripts/check_ceiling_table.py
 
+      # RM-50: build a real wheel from a clean copy and require every file under
+      # ui/static in it. The package-data guards in the suite read the source tree;
+      # this is the one check that opens a wheel. bin/brain-ci runs the same step.
+      - name: A built wheel carries the whole static tree
+        run: python scripts/check_wheel_static.py
+
   test:
     name: Tests (pytest, AGE Postgres)
     runs-on: ubuntu-latest
@@ -369,6 +375,7 @@ jobs:
           tests/test_ui_browser_api.py
           tests/test_ui_browser_copy_path.py
           tests/test_ui_browser_discovery.py
+          tests/test_ui_browser_fonts.py
           tests/test_ui_browser_graph.py
           tests/test_ui_browser_graph_labels.py
           tests/test_ui_browser_graph_layout.py

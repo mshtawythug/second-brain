@@ -8,11 +8,12 @@ without anyone having to remember it.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
@@ -40,6 +41,9 @@ from .context import UiContext
 from .errors import UiError, UiNotFound
 from .ingest_limits import STOP_TIMEOUT_S
 from .security import build_middleware
+
+if TYPE_CHECKING:  # pragma: no cover — typing only
+    from starlette.types import Scope
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +142,29 @@ async def index(request: Request) -> FileResponse:
             code="assets_missing",
         )
     return FileResponse(shell)
+
+
+class _StaticAssets(StaticFiles):
+    """``StaticFiles``, serving a font as a font on every host.
+
+    Python 3.11 and 3.12 know no ``.woff2``. It resolves only through a host's MIME
+    database, and without one Starlette labels the font ``application/octet-stream``.
+    Set here rather than with ``mimetypes.add_type``, which is process-global and is
+    undone by the next ``mimetypes.init()``.
+    """
+
+    def file_response(
+        self,
+        full_path: str | os.PathLike[str],
+        stat_result: os.stat_result,
+        scope: Scope,
+        status_code: int = 200,
+    ) -> Response:
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        # Not a 304: it carries no body, and no Content-Type to correct.
+        if response.status_code == 200 and str(full_path).endswith(".woff2"):
+            response.headers["content-type"] = "font/woff2"
+        return response
 
 
 def _lifespan(context: UiContext) -> Any:
@@ -243,7 +270,7 @@ def create_app(context: UiContext) -> Starlette:
         Route("/api/jobs/{job_id}/cancel", routes_jobs.cancel_job, methods=["POST"]),
         Mount(
             "/static",
-            app=StaticFiles(directory=static_dir(), check_dir=False),
+            app=_StaticAssets(directory=static_dir(), check_dir=False),
             name="static",
         ),
     ]
