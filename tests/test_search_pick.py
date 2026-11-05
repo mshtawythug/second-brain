@@ -30,6 +30,7 @@ from brain.search_pick import (
     result_lines,
     run_fzf,
 )
+from tests.thread_wait import wait_for
 
 pytestmark = pytest.mark.nodb
 
@@ -330,13 +331,6 @@ def test_run_fzf_reports_a_binary_that_cannot_start(tmp_path: Path) -> None:
     assert run_fzf([str(tmp_path / "absent")], "") == FzfRun(None, "")
 
 
-def _wait_for(path: Path) -> None:
-    deadline = time.monotonic() + 10
-    while not path.exists():
-        assert time.monotonic() < deadline, f"{path.name} never appeared"
-        time.sleep(0.01)
-
-
 def _run_fzf_catching_interrupts(argv: list[str]) -> FzfRun:
     """An interrupt that escapes would abort the whole pytest session, not fail this test."""
     try:
@@ -356,7 +350,7 @@ def test_an_interrupt_stops_fzf_with_sigterm_so_it_can_restore_the_terminal(
     )
 
     def interrupted(*_args: object, **_kwargs: object) -> None:
-        _wait_for(ready)
+        wait_for(ready.exists)
         raise KeyboardInterrupt
 
     monkeypatch.setattr("brain.search_pick.subprocess.Popen.communicate", interrupted)
@@ -373,7 +367,7 @@ def test_an_fzf_that_ignores_sigterm_is_killed_after_a_bounded_wait(
 
     def interrupted(self: subprocess.Popen[bytes], *_args: object, **_kwargs: object) -> None:
         seen.append(self)
-        _wait_for(ready)
+        wait_for(ready.exists)
         raise KeyboardInterrupt
 
     monkeypatch.setattr("brain.search_pick.subprocess.Popen.communicate", interrupted)
