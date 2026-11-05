@@ -61,6 +61,8 @@ or `docs/` outside the spec.
   column MCP `brain_show` and `brain show --query` write, and the query never reaches a log.
 - **I2, no change.** `brain` and `fzf` resolve through `PATH`; a hostile `PATH` already means code
   execution, and the docs state the requirement.
+- **Line budgets after this round:** `search_pick.py` 315, new `preview_filter.py` 65. `cli_search.py`
+  is unchanged at +11.
 - **Not fixed here:** plain `brain show` on a terminal still prints raw. It predates this ticket, and
   sec-121 suggests a separate ticket.
 
