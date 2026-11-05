@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from brain.preview_filter import clean_line, strip_sequences
+from brain.preview_filter import clean_line
 from brain.search_pick import fzf_argv
 
 pytestmark = pytest.mark.nodb
@@ -33,7 +33,10 @@ HOSTILE = {
 
 @pytest.mark.parametrize("payload", HOSTILE.values(), ids=HOSTILE.keys())
 def test_a_whole_sequence_goes_with_its_payload(payload: str) -> None:
-    assert clean_line(f"before{payload}after\n") == "beforeafter\n"
+    # tmux's wrapper is the one exception: stopping a string at any ESC is what keeps the regex
+    # linear, so its inert word stays. Its payload does not.
+    leftover = "tmux;" if payload.startswith("\x1bPtmux;") else ""
+    assert clean_line(f"before{payload}after\n") == f"before{leftover}after\n"
 
 
 @pytest.mark.parametrize("c1", ["\u009b", "\u009d", "\u0090", "\u009e", "\u009f", "\u0085"])
@@ -69,6 +72,20 @@ def test_a_bare_escape_or_a_short_escape_sequence_goes(escape: str) -> None:
 )
 def test_bidi_overrides_go(bidi: str) -> None:
     assert clean_line(f"a{bidi}b") == "ab"
+
+
+def test_tag_characters_go() -> None:
+    hidden = "".join(chr(0xe0000 + ord(char)) for char in "hidden")
+    assert clean_line(f"a\U000e0001{hidden}\U000e007fb") == "ab"
+
+
+@pytest.mark.parametrize(
+    "ordinary",
+    ["می\u200cخواهم", "क\u094d\u200dष", "family \U0001f468\u200d\U0001f469 emoji"],
+    ids=["zwnj-persian", "zwj-devanagari", "zwj-emoji"],
+)
+def test_zero_width_joiners_stay_because_real_text_needs_them(ordinary: str) -> None:
+    assert clean_line(ordinary) == ordinary
 
 
 @pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
@@ -107,14 +124,31 @@ def test_ordinary_text_is_untouched(ordinary: str) -> None:
 
 @pytest.mark.parametrize(
     "hostile",
-    ["\x1b]" * 200_000, "\x1bP" * 200_000, "\x1b_" * 200_000, "\x1bP" + "\x1b\x1b" * 200_000],
-    ids=["osc-starts", "dcs-starts", "apc-starts", "doubled-escapes"],
+    [
+        "\x1b]" * 200_000,
+        "\x1bP" * 200_000,
+        "\x1b_" * 200_000,
+        "\x1bP" + "\x1b\x1b" * 200_000,
+        "\x1bP" + "\x1b\x1bP" * 32_000,
+        "\x1b]" + "\x1b\x1b]" * 32_000,
+        "\x1b[" + "0" * 200_000,
+    ],
+    ids=[
+        "osc-starts",
+        "dcs-starts",
+        "apc-starts",
+        "doubled-escapes",
+        "dcs-doubled-repeated",
+        "osc-doubled-repeated",
+        "csi-params",
+    ],
 )
 def test_a_pathological_line_stays_linear(hostile: str) -> None:
+    """96 KB of a repeated form took 45s when DCS allowed doubled ESCs (sec-121b N1)."""
     started = time.monotonic()
-    cleaned = strip_sequences(hostile)
+    cleaned = clean_line(hostile)
     assert time.monotonic() - started < 5.0
-    assert cleaned is not None
+    assert "\x1b" not in cleaned
 
 
 # --- The real pipeline: the argv's preview string, through /bin/sh, with a stub `brain` ----------
@@ -158,7 +192,8 @@ def test_the_preview_string_cleans_what_brain_show_prints(tmp_path: Path) -> Non
     payload = "".join(HOSTILE.values())
     body = f"# {payload}Title{payload}\n\nbody{payload} line\u009b\n".encode()
     out = _run_preview(_stub_brain(tmp_path, body), tmp_path)
-    assert out == f"args:2:{ID}\n# Title\n\nbody line\n".encode()
+    # One inert "tmux;" per payload: test_a_whole_sequence_goes_with_its_payload says why.
+    assert out == f"args:2:{ID}\n# tmux;Titletmux;\n\nbodytmux; line\n".encode()
 
 
 def test_the_preview_string_keeps_ordinary_text(tmp_path: Path) -> None:

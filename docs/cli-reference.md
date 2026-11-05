@@ -256,7 +256,9 @@ It needs `fzf` 0.29 or newer on `PATH` (`brain doctor` has a row for it, a WARN 
 `brain` on `PATH` for the preview; without that the pane says so and picking still works. Your
 `FZF_DEFAULT_OPTS` and every other `FZF_*` variable are ignored. Those settings can pick with
 nobody choosing, run commands, or serve the list over HTTP, so your `fzf` theme does not apply here.
-The preview runs under `/bin/sh` whatever your `$SHELL` is.
+The preview runs under `/bin/sh` whatever your `$SHELL` is. Its filter runs with Python's `-I`, so a
+`brain` installed with `pip install --user` or found only through `PYTHONPATH` shows an error in the
+pane instead of a preview, and picking still works. A venv or `uv tool` install previews normally.
 
 | Case | Exit | stdout | stderr |
 |---|---|---|---|

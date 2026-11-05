@@ -120,6 +120,18 @@ def test_a_long_title_is_capped_and_a_short_one_is_not() -> None:
     assert result_lines([_hit(ID_A, "x" * 200)]).rstrip("\n").split("\t")[1] == "x" * 200
 
 
+@pytest.mark.parametrize(
+    "hostile",
+    ["\x1bP" + "\x1b\x1bP" * 32_000, "\x1b]" * 200_000, "\t\n" * 200_000],
+    ids=["dcs-doubled-repeated", "osc-starts", "separators"],
+)
+def test_a_pathological_title_cannot_stall_the_list_before_fzf_opens(hostile: str) -> None:
+    started = time.monotonic()
+    line = result_lines([_hit(ID_A, hostile)])
+    assert time.monotonic() - started < 5.0
+    assert line.count("\t") == 2
+
+
 def test_only_id_title_and_source_reach_fzf() -> None:
     assert "SNIPPET" not in result_lines([_hit(ID_A, "T")])
 

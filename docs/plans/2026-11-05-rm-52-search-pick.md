@@ -61,6 +61,17 @@ or `docs/` outside the spec.
   column MCP `brain_show` and `brain show --query` write, and the query never reaches a log.
 - **I2, no change.** `brain` and `fzf` resolve through `PATH`; a hostile `PATH` already means code
   execution, and the docs state the requirement.
+- **sec-121b N1:** the DCS branch's doubled-ESC alternative was quadratic, on the title path too, which
+  runs before `fzf` opens. Removed; every string now stops at the next ESC. tmux's wrapper leaves the
+  inert word `tmux;`, and its inner sequence still goes. `_SEQUENCE_RE` is the only regex on the title
+  path that looks at title text (`one_line` uses none; `_VERSION_RE` reads `fzf --version` only).
+- **sec-121b N2:** tag characters are dropped from the pane, so a subdivision flag such as England's
+  shows as a plain black flag. ZWJ and ZWNJ stay because real text needs them. U+200B, U+2060 and
+  U+FEFF also stay: they are invisible but inert, and U+200B is used for line breaking in some scripts.
+  `-I` gives `--user` and `PYTHONPATH` installs an error pane; that fails closed, so it stays, and the
+  docs say so.
+- **rev-121, second pass:** raw bidi controls became escapes, in 5 older test files too, and
+  `tests/test_repo_hygiene_files.py` now keeps them out of `src/` and `tests/`.
 - **Line budgets after this round:** `search_pick.py` 315, new `preview_filter.py` 65. `cli_search.py`
   is unchanged at +11.
 - **Not fixed here:** plain `brain show` on a terminal still prints raw. It predates this ticket, and
