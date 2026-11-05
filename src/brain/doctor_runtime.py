@@ -34,6 +34,8 @@ process:
     Composed in from :mod:`brain.doctor_voice` (RM-38): can memos be transcribed here?
 ``git``
     Composed in from :mod:`brain.doctor_git` (RM-43): is ``git`` on ``PATH``?
+``replica``
+    Composed in from :mod:`brain.doctor_replica` (RM-47): is this a restored copy?
 ``vault watcher`` / ``retired daemon``
     Composed in from :mod:`brain.doctor_watcher` (wiki-to-ui phase 8): is the
     vault-sync watcher installed or running (A9), and is the retired
@@ -117,6 +119,7 @@ def runtime_doctor_checks(
     from .doctor_git import git_doctor_check
     from .doctor_github import github_doctor_check
     from .doctor_ocr import ocr_doctor_check
+    from .doctor_replica import replica_doctor_check
     from .doctor_reranker import reranker_doctor_check
     from .doctor_voice import voice_doctor_check
     from .doctor_watcher import retired_daemon_doctor_check, watcher_doctor_check
@@ -146,6 +149,7 @@ def runtime_doctor_checks(
         *drop_folders_doctor_check(launchd_dir=resolved_dir),
         *voice_doctor_check(),
         *git_doctor_check(),
+        *replica_doctor_check(),
     ]
 
 

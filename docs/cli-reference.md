@@ -1500,6 +1500,15 @@ vault aside whole, so a `.quartz/` on disk moves with it to
 `--yes` skips the y/N prompt but **never** skips the pre-flight compatibility
 checks — those are what stop a restore from half-applying.
 
+After a successful restore (either leg), `brain restore` writes
+`$BRAIN_HOME/state/restored-from.json`: the restored backup's `created_at`, the
+archive's file name (never its path) and when the restore ran. `brain doctor`
+then shows a `replica` row, "read replica, restored from a backup taken at …".
+With no file there is no row. If the file cannot be written the restore still
+succeeds and prints `restored-from marker NOT recorded`. A primary restored from
+its own backup removes the file. The read-replica recipe, and why there is no
+two-way sync: [Using your brain from a second machine](guides/second-machine.md).
+
 ## brain ui
 
 ```bash

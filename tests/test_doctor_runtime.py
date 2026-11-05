@@ -616,3 +616,34 @@ def test_every_failing_check_names_a_remedy(
     for check in checks:
         if check.status != "ok":
             assert check.remedy, f"{check.check} {check.status} without naming a remedy"
+
+
+def test_a_restored_from_marker_adds_the_replica_row_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RM-47: the ``replica`` row is composed in, and only when the marker exists.
+
+    The pinned list in ``test_all_healthy_yields_no_failures`` has no marker, so
+    the row is absent there; this is its positive control.
+    """
+    home = tmp_path / "home"
+    state = home / "state"
+    state.mkdir(parents=True)
+    (state / "restored-from.json").write_text(
+        '{"schema": 1, "created_at": "2026-10-30T18:15:00+00:00", '
+        '"archive": "brain-backup-20261030-181500.tar.gz", '
+        '"restored_at": "2026-10-31T09:00:00+00:00"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BRAIN_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    launchd_dir = tmp_path / "agents"
+    launchd_dir.mkdir()
+
+    checks = runtime_doctor_checks(
+        launchd_dir=launchd_dir, launchctl="launchctl", platform="darwin"
+    )
+
+    assert checks[-1].check == "replica"
+    assert checks[-1].status == "ok"
+    assert [c.check for c in checks].count("replica") == 1

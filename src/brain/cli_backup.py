@@ -27,6 +27,7 @@ from .backup import (
     restore_backup,
     validate_label,
 )
+from .backup.create import dsn_parts
 from .config import Config
 from .db import connect
 from .errors import BackupError, BrainError, RestoreAborted, RestoreIncompatible
@@ -165,8 +166,14 @@ def backup_cmd(
 # ---------------------------------------------------------------------------
 
 
-def _print_preflight(check: Preflight, archive: Path, *, vault_path: Path) -> None:
-    """The pre-gate summary: what the archive holds versus what is here now."""
+def _print_preflight(
+    check: Preflight, archive: Path, *, vault_path: Path, target_database: str
+) -> None:
+    """The pre-gate summary: what the archive holds versus what is here now.
+
+    ``target_database`` is the database this restore replaces. It is not the
+    archive's ``database_name``, which differs on a read replica (RM-47).
+    """
     manifest = check.manifest
     counts = manifest.counts
     typer.echo("")
@@ -194,7 +201,7 @@ def _print_preflight(check: Preflight, archive: Path, *, vault_path: Path) -> No
     )
     typer.echo("")
     typer.echo("WILL BE OVERWRITTEN:")
-    typer.echo(f"  • database {manifest.database_name}")
+    typer.echo(f"  • database {target_database}")
     typer.echo(
         f"      currently holds {check.target_documents} documents / "
         f"{check.target_chunks} chunks / {check.target_sources} sources"
@@ -319,7 +326,12 @@ def restore_cmd(
     # In --json mode stdout must stay parseable, so the human summary is
     # suppressed and any blocking issues come back as JSON instead.
     if not json_output:
-        _print_preflight(check, archive, vault_path=cfg.vault_path)
+        _print_preflight(
+            check,
+            archive,
+            vault_path=cfg.vault_path,
+            target_database=dsn_parts(cfg.database_url).get("dbname", ""),
+        )
         for issue in check.issues:
             colour = "red" if issue.fatal else "yellow"
             marker = "FATAL" if issue.fatal else "note "
