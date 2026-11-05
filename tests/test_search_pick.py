@@ -337,6 +337,14 @@ def _wait_for(path: Path) -> None:
         time.sleep(0.01)
 
 
+def _run_fzf_catching_interrupts(argv: list[str]) -> FzfRun:
+    """An interrupt that escapes would abort the whole pytest session, not fail this test."""
+    try:
+        return run_fzf(argv, "")
+    except KeyboardInterrupt:
+        pytest.fail("run_fzf let the KeyboardInterrupt escape")
+
+
 def test_an_interrupt_stops_fzf_with_sigterm_so_it_can_restore_the_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -352,7 +360,7 @@ def test_an_interrupt_stops_fzf_with_sigterm_so_it_can_restore_the_terminal(
         raise KeyboardInterrupt
 
     monkeypatch.setattr("brain.search_pick.subprocess.Popen.communicate", interrupted)
-    assert run_fzf([binary], "") == FzfRun(130, "")
+    assert _run_fzf_catching_interrupts([binary]) == FzfRun(130, "")
     assert stopped.exists(), "SIGTERM was not what stopped it"
 
 
@@ -371,7 +379,7 @@ def test_an_fzf_that_ignores_sigterm_is_killed_after_a_bounded_wait(
     monkeypatch.setattr("brain.search_pick.subprocess.Popen.communicate", interrupted)
     monkeypatch.setattr("brain.search_pick._STOP_SECONDS", 0.2)
     started = time.monotonic()
-    assert run_fzf([binary], "") == FzfRun(130, "")
+    assert _run_fzf_catching_interrupts([binary]) == FzfRun(130, "")
     assert time.monotonic() - started < 10, "the wait was not bounded"
     assert seen[0].poll() is not None, "fzf outlived the bounded wait"
 
