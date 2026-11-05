@@ -41,6 +41,7 @@ KEY_UP_ENTER = b"\x1b[A\r"
 KEY_ESC = b"\x1b"
 #: Every wait below is bounded; the process group is killed on the way out regardless.
 DEADLINE_SECONDS = 60.0
+BOUNDED_SECONDS = 30.0
 
 
 def require_fzf(
@@ -93,6 +94,32 @@ def _brain_env(tmp_path: Path, fzf: str, **extra: str) -> dict[str, str]:
         "LANG": "C.UTF-8",
         **extra,
     }
+
+
+def _run_bounded(
+    args: list[str], env: dict[str, str], cwd: Path, *, stderr: int = subprocess.PIPE
+) -> subprocess.CompletedProcess[bytes]:
+    """Run ``brain`` in its own session with no terminal, and kill the whole group at the deadline.
+
+    A plain ``subprocess.run(timeout=...)`` kills only ``brain``: if a regression ever reached real
+    ``fzf`` here, it would be orphaned, hung, for the life of the machine.
+    """
+    proc = subprocess.Popen(
+        [str(Path(sys.executable).parent / "brain"), *args],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=stderr,
+        env=env,
+        cwd=cwd,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=BOUNDED_SECONDS)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        pytest.fail(f"brain {' '.join(args)} did not finish in {BOUNDED_SECONDS}s")
+    return subprocess.CompletedProcess(args, proc.returncode, out, err)
 
 
 def _run_under_pty(
@@ -178,17 +205,10 @@ def ranked_ids(
             source_external_id=f"manual:{title[:5]}",
         )
     test_db.commit()
-    plain = subprocess.run(
-        [
-            str(Path(sys.executable).parent / "brain"),
-            "search", TERM, "--fts-only", "--no-meta", "--json",
-        ],
-        capture_output=True,
-        env=_brain_env(tmp_path, fzf),
-        cwd=tmp_path,
-        timeout=60,
-        check=True,
+    plain = _run_bounded(
+        ["search", TERM, "--fts-only", "--no-meta", "--json"], _brain_env(tmp_path, fzf), tmp_path
     )
+    assert plain.returncode == 0, plain.stderr
     ids = [row["id"] for row in json.loads(plain.stdout)]
     assert len(ids) == 2
     return ids
@@ -298,16 +318,7 @@ def test_a_real_pipe_on_stderr_is_refused_at_once_rather_than_hanging(
     fzf: str, tmp_path: Path
 ) -> None:
     """No terminal at all: real ``fzf`` would hang here, so the preflight must stop it first."""
-    done = subprocess.run(
-        [str(Path(sys.executable).parent / "brain"), *_pick_args()],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        env=_brain_env(tmp_path, fzf),
-        cwd=tmp_path,
-        timeout=60,
-        start_new_session=True,
-        check=False,
-    )
+    done = _run_bounded(_pick_args(), _brain_env(tmp_path, fzf), tmp_path)
     assert done.returncode == 1
     assert b"--pick needs a terminal" in done.stderr
     assert done.stdout == b""
@@ -320,17 +331,7 @@ def test_a_terminal_on_stderr_with_no_controlling_tty_is_refused_rather_than_han
     master, slave = pty.openpty()
     screen = b""
     try:
-        done = subprocess.run(
-            [str(Path(sys.executable).parent / "brain"), *_pick_args()],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=slave,
-            env=_brain_env(tmp_path, fzf),
-            cwd=tmp_path,
-            timeout=60,
-            start_new_session=True,
-            check=False,
-        )
+        done = _run_bounded(_pick_args(), _brain_env(tmp_path, fzf), tmp_path, stderr=slave)
         # Read while this end of the slave is open: macOS drops the buffer once it closes.
         while select.select([master], [], [], 0.2)[0]:
             screen += os.read(master, 65536)
