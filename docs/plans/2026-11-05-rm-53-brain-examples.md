@@ -299,3 +299,11 @@ completion audit. Your call at PR time.
   passed the safety check as a preview, when Click takes `--dry-run` as the tag and the command writes.
   `_flags` now skips values and expands aliases, so `-l` counts as `--label`.
 - **The Gmail scope list is compared with the real refusal text,** by equality.
+
+## Fix round: the browser job's font failure, in an RM-50 test
+
+`test_the_text_is_actually_painted_in_the_face` failed in CI at 354d52f5 and is not caused by this
+ticket's code. `_widths` lays the text out in the fallback to measure it and restored the style without a
+new layout, and `CSS.getPlatformFontsForNode` reads the last layout, so a query that beat the next frame
+reported the fallback. The evidence and the runs are in the PR. The fix makes one more layout in
+`_widths` rather than polling: a poll would wait on the next frame and leave the stale state in place.

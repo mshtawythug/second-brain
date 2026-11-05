@@ -206,6 +206,9 @@ def _widths(page: Any, selector: str) -> dict[str, float]:
             el.style.fontFamily = stack.slice(stack.indexOf(',') + 1);
             const fallback = measure();
             el.style.fontFamily = '';
+            // A new layout, because CSS.getPlatformFontsForNode reads the last one: without
+            // this, a query that beats the next frame reports the fallback measured above.
+            measure();
             return {rendered, fallback};
         }""",
         selector,
@@ -213,16 +216,27 @@ def _widths(page: Any, selector: str) -> dict[str, float]:
     return result
 
 
-def _platform_fonts(page: Any, selector: str) -> list[dict[str, Any]]:
-    """What Chromium actually painted ``selector`` with, not what the CSS asked for."""
+def _font_query(page: Any, selector: str) -> Callable[[], list[dict[str, Any]]]:
+    """A prepared query for what Chromium last laid ``selector`` out with."""
     cdp = page.context.new_cdp_session(page)
     cdp.send("DOM.enable")
     cdp.send("CSS.enable")
     root = cdp.send("DOM.getDocument")["root"]["nodeId"]
     node = cdp.send("DOM.querySelector", {"nodeId": root, "selector": selector})["nodeId"]
     assert node, f"{selector} is not in the page"
-    fonts: list[dict[str, Any]] = cdp.send("CSS.getPlatformFontsForNode", {"nodeId": node})["fonts"]
-    return fonts
+
+    def query() -> list[dict[str, Any]]:
+        fonts: list[dict[str, Any]] = cdp.send(
+            "CSS.getPlatformFontsForNode", {"nodeId": node}
+        )["fonts"]
+        return fonts
+
+    return query
+
+
+def _platform_fonts(page: Any, selector: str) -> list[dict[str, Any]]:
+    """What Chromium actually painted ``selector`` with, not what the CSS asked for."""
+    return _font_query(page, selector)()
 
 
 def _first_family(page: Any, selector: str) -> str:
@@ -263,6 +277,25 @@ def test_the_text_is_actually_painted_in_the_face(opened: _Opened) -> None:
     assert painted[0]["isCustomFont"]
     assert painted[0]["familyName"].startswith(FACE)
     assert "italic" not in painted[0]["postScriptName"].lower()
+
+
+def test_measuring_leaves_the_layout_in_the_real_face(opened: _Opened) -> None:
+    """Regression: the platform-font query reads the last layout and does not make a new one.
+
+    ``_widths`` lays the text out in the fallback to measure it. If it restored the style without
+    a new layout, a query that beat the next frame reported the fallback (Georgia, not custom),
+    and ``test_the_text_is_actually_painted_in_the_face`` failed intermittently (4 of 40 local
+    runs, and once in CI). The query is prepared first here so that a frame is unlikely to land in
+    between: without the fix this failed 10 of 10 local runs.
+    """
+    _face_statuses(opened.page)
+    query = _font_query(opened.page, "#probe")
+
+    _widths(opened.page, "#probe")
+    painted = query()
+
+    assert len(painted) == 1, painted
+    assert painted[0]["isCustomFont"], painted
 
 
 def test_the_italic_is_the_real_italic_not_a_synthesised_slant(opened: _Opened) -> None:
