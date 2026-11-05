@@ -360,6 +360,7 @@ def test_a_conditional_font_request_still_gets_a_304(tmp_path: Path) -> None:
 
     assert response.status_code == 304
     assert response.content == b""
+    assert "content-type" not in response.headers
 
 
 def test_a_missing_font_is_a_404_not_a_typed_empty_body(tmp_path: Path) -> None:
