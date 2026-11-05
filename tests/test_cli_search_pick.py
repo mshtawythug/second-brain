@@ -176,7 +176,11 @@ def test_ac3_a_refusal_exits_1_with_the_message_before_any_work(
     def must_not_run(_argv: list[str], _stdin: str) -> FzfRun:
         raise AssertionError("a refusal must not start fzf")
 
+    def must_not_load(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a refusal must not load the config")
+
     monkeypatch.setattr(seam, value)
+    monkeypatch.setattr("brain.cli_search.Config.load", must_not_load)
     monkeypatch.setattr("brain.cli._build_embedder", must_not_build)
     _use_runner(monkeypatch, must_not_run)
     result = _pick()
@@ -196,7 +200,11 @@ def test_pick_with_a_competing_output_flag_is_a_usage_error(
     def must_not_run(_argv: list[str], _stdin: str) -> FzfRun:
         raise AssertionError("a usage error must not start fzf")
 
+    def must_not_load(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a usage error must not load the config")
+
     _use_runner(monkeypatch, must_not_run)
+    monkeypatch.setattr("brain.cli_search.Config.load", must_not_load)
     result = _pick(flag)
     assert result.exit_code == 2
     assert "--pick" in result.stderr
@@ -404,6 +412,21 @@ def test_a_failed_click_write_still_prints_the_id_and_exits_0(
     assert "OperationalError" in caplog.text
     assert "SENTINEL-DETAIL" not in caplog.text
     assert SHARED_TERM not in caplog.text
+
+
+def test_the_id_is_printed_before_the_click_is_written(
+    corpus: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even a failure nothing expects, which is not caught, cannot lose the printed id."""
+
+    def boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("unexpected")
+
+    _use_runner(monkeypatch, _second_line)
+    monkeypatch.setattr("brain.search_pick.connect", boom)
+    result = _pick()
+    assert isinstance(result.exception, RuntimeError)
+    assert result.stdout.strip() in corpus
 
 
 def test_a_document_deleted_during_the_wait_still_prints_the_id(

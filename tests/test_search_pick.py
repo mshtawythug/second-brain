@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import shlex
 import stat
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -147,6 +149,24 @@ def test_a_real_line_returns_its_id() -> None:
 
 def test_a_leading_blank_line_does_not_hide_the_selection() -> None:
     assert parse_selection(f"\n{ID_B}\tTitle\tkrisp\n", {ID_A, ID_B}) == ID_B
+
+
+@pytest.mark.parametrize("stdout", [f"{ID_B}\tTitle\tkrisp", f"{ID_B}\n", ID_B])
+def test_one_line_with_or_without_a_newline_or_fields_returns_its_id(stdout: str) -> None:
+    assert parse_selection(stdout, {ID_A, ID_B}) == ID_B
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        f"junk\n{ID_B}\tTitle\n",
+        f"junk\x0b{ID_A}\tTitle\n",
+        f"{ID_A}\tTitle\n{ID_B}\tTitle\n",
+    ],
+    ids=["junk-first", "vertical-tab", "two-offered-lines"],
+)
+def test_more_than_one_line_fails_closed(stdout: str) -> None:
+    assert parse_selection(stdout, {ID_A, ID_B}) is None
 
 
 @pytest.mark.parametrize(
@@ -308,6 +328,52 @@ def test_run_fzf_never_captures_stderr_where_fzf_draws(
 
 def test_run_fzf_reports_a_binary_that_cannot_start(tmp_path: Path) -> None:
     assert run_fzf([str(tmp_path / "absent")], "") == FzfRun(None, "")
+
+
+def _wait_for(path: Path) -> None:
+    deadline = time.monotonic() + 10
+    while not path.exists():
+        assert time.monotonic() < deadline, f"{path.name} never appeared"
+        time.sleep(0.01)
+
+
+def test_an_interrupt_stops_fzf_with_sigterm_so_it_can_restore_the_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ready, stopped = tmp_path / "ready", tmp_path / "stopped"
+    binary = _script(
+        tmp_path,
+        f'trap \'touch "{stopped}"; exit 0\' TERM\ntouch "{ready}"\n'
+        "while :; do sleep 0.02; done",
+    )
+
+    def interrupted(*_args: object, **_kwargs: object) -> None:
+        _wait_for(ready)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("brain.search_pick.subprocess.Popen.communicate", interrupted)
+    assert run_fzf([binary], "") == FzfRun(130, "")
+    assert stopped.exists(), "SIGTERM was not what stopped it"
+
+
+def test_an_fzf_that_ignores_sigterm_is_killed_after_a_bounded_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ready = tmp_path / "ready"
+    binary = _script(tmp_path, f'trap "" TERM\ntouch "{ready}"\nexec sleep 60')
+    seen: list[subprocess.Popen[bytes]] = []
+
+    def interrupted(self: subprocess.Popen[bytes], *_args: object, **_kwargs: object) -> None:
+        seen.append(self)
+        _wait_for(ready)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("brain.search_pick.subprocess.Popen.communicate", interrupted)
+    monkeypatch.setattr("brain.search_pick._STOP_SECONDS", 0.2)
+    started = time.monotonic()
+    assert run_fzf([binary], "") == FzfRun(130, "")
+    assert time.monotonic() - started < 10, "the wait was not bounded"
+    assert seen[0].poll() is not None, "fzf outlived the bounded wait"
 
 
 def test_run_fzf_clears_every_fzf_variable_from_the_child(

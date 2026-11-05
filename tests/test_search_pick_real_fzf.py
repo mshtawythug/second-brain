@@ -368,6 +368,28 @@ def test_real_fzf_previews_under_sh_whatever_shell_the_user_has(
     assert not marker.exists()
 
 
+def _interrupt_brain_only(proc: subprocess.Popen[bytes], _master: int) -> None:
+    os.kill(proc.pid, signal.SIGINT)
+
+
+def test_real_fzf_a_sigint_to_brain_alone_still_restores_the_terminal(
+    ranked_ids: list[str],
+    test_db: psycopg.Connection[Any],
+    fzf: str,
+    tmp_path: Path,
+) -> None:
+    """sec-121 F2: a SIGKILLed fzf leaves the alternate screen up, with a body still on it."""
+    run = _run_under_pty(
+        _pick_args(),
+        _brain_env(tmp_path, fzf),
+        tmp_path,
+        steps=[((MARKER_PREFIX,), _interrupt_brain_only)],
+    )
+    assert (run.returncode, run.stdout) == (130, "")
+    assert b"\x1b[?1049l" in run.screen
+    assert test_db.execute("SELECT count(*) FROM interactions").fetchone() == (0,)
+
+
 def test_real_fzf_esc_prints_nothing_records_no_click_and_shows_in_gaps(
     ranked_ids: list[str],
     test_db: psycopg.Connection[Any],

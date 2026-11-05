@@ -39,7 +39,7 @@ import psycopg
 import typer
 
 from .db import connect
-from .errors import InteractionError
+from .errors import InteractionError, describe_failure
 from .ingest.text_safety import one_line
 from .interactions import record_interaction
 from .preview_filter import strip_sequences
@@ -57,6 +57,7 @@ OLD_FZF_MESSAGE = (
 
 _TITLE_MAX_CHARS = 200
 _VERSION_PROBE_SECONDS = 5.0
+_STOP_SECONDS = 2.0
 _EXIT_ABORTED = 130
 _EXIT_NO_MATCH = 1
 _VERSION_RE = re.compile(r"^(\d{1,4})\.(\d{1,4})")
@@ -194,34 +195,51 @@ def fzf_argv(binary: str) -> list[str]:
     ]
 
 
+def _stop_gently(proc: subprocess.Popen[bytes]) -> None:
+    """SIGTERM, so ``fzf`` can restore the terminal; SIGKILL only if it ignores that (sec-121 F2).
+
+    A killed ``fzf`` leaves the alternate screen up, with a preview's body still on it.
+    """
+    proc.terminate()
+    try:
+        proc.wait(timeout=_STOP_SECONDS)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
 def run_fzf(argv: Sequence[str], stdin_text: str) -> FzfRun:
     """Run ``fzf`` with stderr inherited, because that is where it draws.
 
     Deliberately no timeout: a human is choosing, for as long as they like. :func:`has_terminal`
     is what makes that safe. The echo is one line (``--no-multi``, and no user options reach it).
+    Ctrl-C at the keyboard is a key to ``fzf``; only a signal sent to this process lands here.
     """
     try:
-        done = subprocess.run(
-            list(argv),
-            input=stdin_text.encode("utf-8", "replace"),
-            stdout=subprocess.PIPE,
-            env=child_env(),
-            check=False,
+        proc = subprocess.Popen(
+            list(argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=child_env()
         )
     except OSError:
         return FzfRun(None, "")
-    except KeyboardInterrupt:
-        return FzfRun(_EXIT_ABORTED, "")
-    return FzfRun(done.returncode, done.stdout.decode("utf-8", "replace"))
+    with proc:
+        try:
+            stdout, _ = proc.communicate(stdin_text.encode("utf-8", "replace"))
+        except KeyboardInterrupt:
+            _stop_gently(proc)
+            return FzfRun(_EXIT_ABORTED, "")
+    return FzfRun(proc.returncode, stdout.decode("utf-8", "replace"))
 
 
 def parse_selection(stdout: str, offered: Collection[str]) -> str | None:
-    """The first line's id that was offered; anything else is ``None``, so it fails closed."""
-    for line in stdout.splitlines():
-        candidate = line.split("\t", 1)[0]
-        if candidate in offered:
-            return candidate
-    return None
+    """The id of the only non-empty line, if it was offered; anything else fails closed (``None``).
+
+    Split on ``\\n`` alone: ``splitlines`` also splits on a vertical tab and its relatives.
+    """
+    lines = [line for line in stdout.split("\n") if line]
+    if len(lines) != 1:
+        return None
+    candidate = lines[0].split("\t", 1)[0]
+    return candidate if candidate in offered else None
 
 
 def interpret_run(run: FzfRun, offered: Collection[str]) -> PickOutcome:
@@ -262,7 +280,7 @@ def _record_click(
                 agent_id=agent_id,
             )
     except (psycopg.Error, InteractionError) as exc:
-        logger.warning("pick logging failed: %s", type(exc).__name__)
+        logger.warning("pick logging failed: %s", describe_failure(exc))
 
 
 def run_pick(
