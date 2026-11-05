@@ -1798,6 +1798,26 @@ Exit codes: `2` for a refused option, an unsafe token file, a port in use, or mc
 keys are exactly `path`, `exists`, `mode`, `mode_ok`, `fingerprint` and `token`; `token` is
 `null` without `--show`. Guide: [Reaching your brain from another machine](guides/mcp-http-transport.md).
 
+## brain examples
+
+`brain examples` (RM-53) prints curated invocations, grouped by task, so you can find the right
+command without reading this file. It needs no config and no database, so it works before
+`brain init`.
+
+```bash
+brain examples                 # every topic
+brain examples ingest          # one topic: search, ingest, graph, brief-review or maintenance
+brain examples | grep gmail    # find a command by what it touches
+```
+
+Every example is synthetic and safe to paste. Commands that write carry `--dry-run` or `--no-emit`,
+or a `# Writes:` comment directly above them. No example deletes anything or overrides a safety
+check, and `brain ingest-gmail` always carries a scope flag. `tests/test_examples_rot.py` holds all
+of this, and also fails if an example names a command or flag that no longer exists.
+
+An unknown topic lists the valid ones on stderr and exits `2`; the argument is not echoed. A broken
+install, where the packaged `brain/resources/examples.md` cannot be read, exits `1`.
+
 ## brain people
 
 ```bash

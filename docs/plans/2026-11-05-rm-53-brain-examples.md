@@ -271,3 +271,18 @@ What remains, all handled above:
 
 A dedicated security reviewer looks disproportionate here, so I would run the normal code review and
 completion audit. Your call at PR time.
+
+## Rulings and deviations (recorded after approval)
+
+- **D1 to D5 approved as recommended,** and no dedicated security reviewer.
+- **Added by the coordinator at approval:** every example is safe to run as written against a real
+  brain, and `brain ingest-gmail` always carries a scope flag. `tests/test_examples_rot.py` holds
+  this: an allowlist of classified commands, a banned-flag list, a preview flag or a `# Writes:`
+  comment on anything that writes, and a required Gmail scope flag.
+- **`brain brief` and `brain review weekly` are classified as writing.** `brief` checks saved watches
+  and records their hits; `review weekly` writes a vault page unless `--no-emit`. `--wiki` is banned
+  outright because it can deliver the digest off the machine.
+- **Line budgets exceeded, none near the ceiling:** `examples.md` 129 (budget 90), because each of
+  its 36 invocations carries a comment and a blank line; `examples.py` 104 (90); `test_examples_rot.py`
+  268 (110), from the safety checks above; `test_examples.py` 143 (110); `test_cli_examples.py` 124 (80).
+- **`check_wheel_static.py`'s messages changed,** from "static files" to "files" and "shipped files".

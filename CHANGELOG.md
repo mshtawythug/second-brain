@@ -22,6 +22,14 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — `brain examples`, finding a command by example (RM-53)
+
+- `brain examples [TOPIC]` prints curated, synthetic invocations by task: `search`, `ingest`, `graph`,
+  `brief-review` and `maintenance`. With no topic it prints all of them. It needs no config or database.
+- A test walks the real command tree, so an example naming a missing command or flag fails, and every
+  example must be safe to paste: a preview flag or a `# Writes:` comment on anything that writes.
+- `scripts/check_wheel_static.py` now also requires `brain/resources/` in the built wheel.
+
 ### Added — `brain search --pick`, choosing a result in `fzf` (RM-52)
 
 - `--pick` opens the results in `fzf` 0.29 or newer with a cleaned `brain show` preview, prints the chosen

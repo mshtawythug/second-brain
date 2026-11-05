@@ -824,6 +824,10 @@ where = ["src"]
 # bundle them; without this `brain init` globs an empty dir and never creates the
 # schema. Explicit "migrations/*.sql" (not "**/*") ships only the SQL.
 "brain" = ["migrations/*.sql"]
+# brain.resources: the curated `brain examples` text, read at run time through
+# importlib.resources (RM-53). scripts/check_wheel_static.py opens a real wheel to
+# prove it ships, because the tests read the source tree.
+"brain.resources" = ["*.md"]
 
 [tool.setuptools.exclude-package-data]
 # Strip bytecode caches that Python creates on-disk when the package is imported
@@ -837,6 +841,7 @@ where = ["src"]
 # create those packages.
 "brain.templates.claude" = ["__pycache__/*", "*.pyc"]
 "brain.ui" = ["__pycache__/*", "*.pyc"]
+"brain.resources" = ["__pycache__/*", "*.pyc"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
