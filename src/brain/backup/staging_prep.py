@@ -32,13 +32,18 @@ STAGING_EXTENSIONS: tuple[str, ...] = ("age",)
 
 #: One ``pg_restore -l`` line for an EXTENSION entry: ``<id>; <oid> <oid> EXTENSION - <name>``.
 #: Anchored, so ``COMMENT - EXTENSION age``, a table named ``age`` and a commented-out
-#: (``;``) line are not mistaken for one.
-_TOC_EXTENSION = re.compile(r"^\d+;\s+\d+\s+\d+\s+EXTENSION\s+-\s+(\S+)\s*$")
+#: (``;``) line are not mistaken for one. ``re.ASCII``, so a Unicode digit or space is not one.
+_TOC_EXTENSION = re.compile(r"^\d+;\s+\d+\s+\d+\s+EXTENSION\s+-\s+(\S+)\s*$", re.ASCII)
 
 
 def extensions_in_toc(toc: str) -> frozenset[str]:
-    """The extension names a ``pg_restore -l`` listing says the dump creates."""
-    found = (_TOC_EXTENSION.match(line) for line in toc.splitlines())
+    """The extension names a ``pg_restore -l`` listing says the dump creates.
+
+    Split on ``\\n`` only. ``pg_restore`` sanitises newlines out of the names it
+    prints, but not the vertical tab, form feed, NEL or U+2028 that
+    ``str.splitlines`` also breaks on, so those could forge a line (sec-119b N1).
+    """
+    found = (_TOC_EXTENSION.match(line) for line in toc.split("\n"))
     return frozenset(match.group(1) for match in found if match is not None)
 
 

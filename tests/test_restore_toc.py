@@ -60,6 +60,30 @@ def test_lines_that_merely_mention_age_are_not_an_age_extension(line: str) -> No
     assert "age" not in extensions_in_toc(line + "\n")
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "220; 1259 1004 TABLE public x\x0b3; 3079 1001 EXTENSION - age",  # vertical tab
+        "220; 1259 1004 TABLE public x\x0c3; 3079 1001 EXTENSION - age",  # form feed
+        "220; 1259 1004 TABLE public x\x853; 3079 1001 EXTENSION - age",  # NEL
+        "220; 1259 1004 TABLE public x\u20283; 3079 1001 EXTENSION - age",  # line separator
+        "220; 1259 1004 TABLE public x\u20293; 3079 1001 EXTENSION - age",  # para separator
+        "\u0663; \u0663\u0660\u0667\u0669 \u0661 EXTENSION - age",  # Arabic-Indic digits
+        "4;\u00a03079 1001 EXTENSION - age",  # a no-break space is not a separator
+        "4; 3079 1001 EXTENSION - age\u00a0",  # the name would be "age" plus a no-break space
+    ],
+)
+def test_an_archive_cannot_spoof_an_age_line_with_a_unicode_separator(line: str) -> None:
+    """sec-119b N1: ``pg_restore -l`` sanitises only newlines, so split on those alone."""
+    assert staging_needs(line + "\n") == ()
+
+
+def test_a_real_line_still_counts_between_lines_holding_those_characters() -> None:
+    toc = "220; 1259 1004 TABLE public caf\u00e9\x0bx brain\n4; 3079 1001 EXTENSION - age \n"
+
+    assert staging_needs(toc) == ("age",)
+
+
 def test_an_empty_toc_names_nothing() -> None:
     assert extensions_in_toc("") == frozenset()
 
