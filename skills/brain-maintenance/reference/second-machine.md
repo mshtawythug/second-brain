@@ -15,7 +15,7 @@ suggest rsyncing `data/postgres`, two machines writing to one vault, or merging 
 ```bash
 # primary
 brain backup
-# copy the archive AND its .sha256 sidecar over scp / rsync -e ssh into a chmod 700 ~/incoming
+# on the primary: copy the archive AND its .sha256 sidecar over scp / rsync -e ssh into a chmod 700 ~/incoming
 # (a LAN file share such as SMB or NFS is cleartext; the sidecar catches damage, not tampering)
 # replica: same BRAIN_EMBEDDER as the primary, no --daemons
 brain setup

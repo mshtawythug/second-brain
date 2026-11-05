@@ -59,7 +59,7 @@ accounts on that machine cannot read the corpus while it waits there:
 
 ```bash
 mkdir -p ~/incoming && chmod 700 ~/incoming        # on the replica
-scp ~/.brain/backups/brain-backup-<ts>.tar.gz* replica.example.internal:~/incoming/
+scp ~/.brain/backups/brain-backup-<ts>.tar.gz* replica.example.internal:~/incoming/   # on the primary
 chmod 600 ~/incoming/brain-backup-<ts>.tar.gz*     # on the replica
 ```
 
