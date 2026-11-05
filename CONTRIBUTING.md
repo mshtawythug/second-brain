@@ -104,7 +104,7 @@ jobs:
 
 | Job | What it runs |
 |-----|--------------|
-| **Lint and types (ruff + mypy)** | `ruff check`, `mypy src/`, and `python scripts/check_ceiling_table.py` (the file-size ceiling table in `docs/ceiling-table.md` must list exactly the `src/brain/` modules over 800 lines). No Docker, finishes in under a minute, so a formatting or typing mistake fails fast and cheap. |
+| **Lint and types (ruff + mypy)** | `ruff check`, `mypy src/`, `python scripts/check_ceiling_table.py` (the file-size ceiling table in `docs/ceiling-table.md` must list exactly the `src/brain/` modules over 800 lines), and `python scripts/check_wheel_static.py` (a real wheel, built from a clean copy, must carry every file under `ui/static`). No Docker, finishes in under a minute, so a formatting or typing mistake fails fast and cheap. |
 | **Tests (pytest, AGE Postgres)** | A bare `pytest` against the pinned AGE test instance on port 5434. |
 
 The test job runs **bare `pytest`** on purpose: `pyproject.toml` owns the marker
@@ -124,7 +124,7 @@ Do not try to reassemble CI conditions by hand. Run the script:
 ```bash
 bin/brain-ci                    # the full, faithful gate — this is the one to trust
 bin/brain-ci --reuse-venv       # fast re-run against the existing .venv; NOT the gate
-bin/brain-ci --lint-only        # only the `lint` job (ruff + mypy + ceiling table)
+bin/brain-ci --lint-only        # only the `lint` job (ruff + mypy + ceiling table + wheel)
 bin/brain-ci --tests-only       # only the `test` job (pytest)
 bin/brain-ci --skip-compose     # the AGE test DB on 5434 is already up
 bin/brain-ci --teardown         # `compose down -v` the TEST stack afterwards
@@ -143,7 +143,7 @@ for a real v0.3.0 failure:
 | Exits with **pytest's own status** | A wrapper that ends in `\| tail` reports *tail's* status. That nearly published a broken release, so pytest is never piped and the summary names the exit code's source. |
 
 Exit codes: `0` pass · pytest's own status when pytest failed · `1` when only
-ruff/mypy/the ceiling-table check failed · `64` usage error · `70` environment
+ruff/mypy/the ceiling-table or wheel check failed · `64` usage error · `70` environment
 failure (no `uv`/Docker, venv build failed, DB never came up, or a refusal to
 target production).
 

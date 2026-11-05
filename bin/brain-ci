@@ -63,7 +63,7 @@
 #   N   pytest's OWN status, verbatim, whenever pytest ran and failed
 #       (1 tests failed / 2 interrupted / 3 internal / 4 usage / 5 no tests)
 #   1   pytest passed (or did not run) but ruff / mypy / the ceiling-table
-#       check failed
+#       or wheel check failed
 #   64  usage error (bad flag)
 #   70  environment failure — no uv, no Docker, venv build failed, DB never
 #       came up, or a refusal to target the production database
@@ -162,7 +162,7 @@ $SCRIPT_NAME — run .github/workflows/ci.yml locally, faithfully.
   $SCRIPT_NAME                    the full, faithful gate (default)
   $SCRIPT_NAME --reuse-venv       fast re-run against the existing .venv;
                               NOT the gate (announced loudly)
-  $SCRIPT_NAME --lint-only        only ci.yml's 'lint' job (ruff + mypy + ceiling table)
+  $SCRIPT_NAME --lint-only        only ci.yml's 'lint' job (ruff + mypy + ceiling table + wheel)
   $SCRIPT_NAME --tests-only       only ci.yml's 'test' job (pytest)
   $SCRIPT_NAME --skip-compose     assume the AGE test DB on $CI_PG_PORT is up
   $SCRIPT_NAME --teardown         'compose down -v' the TEST stack afterwards
@@ -197,7 +197,7 @@ while (( $# )); do
       shift ;;
     --tests-only)
       RUN_LINT=0
-      mark_not_the_gate "--tests-only: only ci.yml's 'test' job ran; ruff/mypy/the ceiling-table check did not."
+      mark_not_the_gate "--tests-only: only ci.yml's 'test' job ran; ruff/mypy/the ceiling-table and wheel checks did not."
       shift ;;
     --skip-compose) USE_COMPOSE=0; shift ;;
     --teardown)     TEARDOWN=1; shift ;;
