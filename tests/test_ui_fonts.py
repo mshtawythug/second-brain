@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -54,7 +55,9 @@ def _font_tree_problems(fonts_dir: Path, *, budget: int = FONT_BUDGET_BYTES) -> 
     if total > budget:
         problems.append(f"{total} bytes of woff2 is over the {budget} byte budget")
     problems.extend(_licence_problems(fonts_dir / LICENCE_NAME))
-    problems.extend(_source_problems(fonts_dir / SOURCE_NAME, fonts))
+    licence = fonts_dir / LICENCE_NAME
+    pinned = [*fonts, licence] if licence.is_file() else fonts
+    problems.extend(_source_problems(fonts_dir / SOURCE_NAME, pinned))
     return problems
 
 
@@ -74,8 +77,11 @@ def _licence_problems(licence: Path) -> list[str]:
     return problems
 
 
-def _source_problems(source: Path, fonts: list[Path]) -> list[str]:
-    """Every shipped font is named in the provenance record, with its current digest."""
+def _source_problems(source: Path, pinned: list[Path]) -> list[str]:
+    """Every pinned file has its current digest on record, and every record has a file.
+
+    The licence is pinned with the fonts: it is the one file the URL scan skips.
+    """
     if not source.is_file():
         return [f"{source.name}: missing; nothing records where the fonts came from"]
     recorded = {
@@ -83,15 +89,43 @@ def _source_problems(source: Path, fonts: list[Path]) -> list[str]:
         for match in _SOURCE_LINE_RE.finditer(source.read_text(encoding="utf-8"))
     }
     problems = []
-    for font in fonts:
-        digest = hashlib.sha256(font.read_bytes()).hexdigest()
-        if recorded.get(font.name) != digest:
-            problems.append(f"{font.name}: its digest does not match {source.name}")
+    for path in pinned:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if recorded.get(path.name) != digest:
+            problems.append(f"{path.name}: its digest does not match {source.name}")
+    shipped = {path.name for path in source.parent.iterdir()}
+    problems.extend(
+        f"{source.name} names {name}, which is not shipped"
+        for name in sorted(recorded)
+        if name not in shipped
+    )
     return problems
 
 
-def _font_face_problems(css: str) -> list[str]:
-    """Each ``@font-face`` swaps, and loads one relative woff2 from the package."""
+@dataclass(frozen=True)
+class SubsetClaims:
+    """What the recorded subset commands say the files hold."""
+
+    unicodes: tuple[str, ...]
+    weight: str
+
+
+def _subset_claims(source_text: str) -> SubsetClaims:
+    """Read the kept ``--unicodes`` and ``wght`` axis out of ``SOURCE.txt``'s commands."""
+    unicodes = re.search(r"--unicodes=(\S+)", source_text)
+    weight = re.search(r"\bwght=(\d+):(\d+)", source_text)
+    assert unicodes, f"{SOURCE_NAME} does not record --unicodes"
+    assert weight, f"{SOURCE_NAME} does not record the wght axis"
+    return SubsetClaims(tuple(unicodes[1].split(",")), f"{weight[1]} {weight[2]}")
+
+
+def _font_face_problems(css: str, claims: SubsetClaims) -> list[str]:
+    """Each ``@font-face`` swaps, loads one relative woff2, and claims only what was kept.
+
+    A ``unicode-range`` wider than the subset promises glyphs the file lacks, and a
+    narrower one sends kept glyphs to the fallback. A ``font-weight`` wider than the
+    axis has the browser clamp or synthesise. Neither fails visibly.
+    """
     problems = []
     for match in _FONT_FACE_RE.finditer(css):
         declarations = [part.strip() for part in match["body"].split(";")]
@@ -101,6 +135,12 @@ def _font_face_problems(css: str) -> list[str]:
         sources = [d for d in declarations if d.startswith("src")]
         if len(sources) != 1 or not _RELATIVE_WOFF2_SRC_RE.fullmatch(sources[0]):
             problems.append(f"{family}: src is not one relative woff2: {sources}")
+        if f"font-weight: {claims.weight}" not in declarations:
+            problems.append(f"{family}: font-weight is not {claims.weight}")
+        ranges = [d for d in declarations if d.startswith("unicode-range:")]
+        stated = [" ".join(d.split(":", 1)[1].split()) for d in ranges]
+        if stated != [", ".join(claims.unicodes)]:
+            problems.append(f"{family}: unicode-range differs from {SOURCE_NAME}'s --unicodes")
     return problems
 
 
@@ -127,10 +167,11 @@ def test_the_shipped_fonts_pass_every_tree_guard() -> None:
     assert _font_tree_problems(static_dir() / "fonts") == []
 
 
-def test_the_shipped_font_faces_swap_and_stay_relative() -> None:
+def test_the_shipped_font_faces_match_what_the_subset_was_cut_to() -> None:
     css = (static_dir() / "css" / "reading.css").read_text(encoding="utf-8")
+    source = (static_dir() / "fonts" / SOURCE_NAME).read_text(encoding="utf-8")
     assert _FONT_FACE_RE.search(css), "reading.css declares no @font-face"
-    assert _font_face_problems(css) == []
+    assert _font_face_problems(css, _subset_claims(source)) == []
 
 
 def test_one_family_in_two_styles_is_declared() -> None:
@@ -172,9 +213,18 @@ def _good_tree(root: Path, *, size: int = 64) -> Path:
         '"Reserved Font Name" refers to any names specified as such.\n',
         encoding="utf-8",
     )
-    digest = hashlib.sha256(font.read_bytes()).hexdigest()
-    (root / SOURCE_NAME).write_text(f"{digest}  a.woff2\n", encoding="utf-8")
+    _record_digests(root)
     return root
+
+
+def _record_digests(fonts: Path) -> None:
+    """Write a provenance record matching the directory as it stands."""
+    lines = [
+        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+        for path in sorted(fonts.iterdir())
+        if path.name != SOURCE_NAME
+    ]
+    (fonts / SOURCE_NAME).write_text("".join(lines), encoding="utf-8")
 
 
 def test_a_good_tree_passes_and_keeps_the_ofls_own_definition_of_the_term(tmp_path: Path) -> None:
@@ -196,9 +246,7 @@ def test_the_budget_counts_every_font_not_each_one(tmp_path: Path) -> None:
     fonts = _good_tree(tmp_path / "fonts", size=60)
     second = fonts / "b.woff2"
     second.write_bytes(b"wOF2" + b"\0" * 56)
-    digest = hashlib.sha256(second.read_bytes()).hexdigest()
-    with (fonts / SOURCE_NAME).open("a", encoding="utf-8") as handle:
-        handle.write(f"{digest}  b.woff2\n")
+    _record_digests(fonts)
 
     assert any("budget" in p for p in _font_tree_problems(fonts, budget=100))
 
@@ -211,9 +259,7 @@ def test_a_file_that_is_not_woff2_is_refused(tmp_path: Path) -> None:
     fonts = _good_tree(tmp_path / "fonts")
     font = fonts / "a.woff2"
     font.write_bytes(b"<svg>" + b"\0" * 8)
-    (fonts / SOURCE_NAME).write_text(
-        f"{hashlib.sha256(font.read_bytes()).hexdigest()}  a.woff2\n", encoding="utf-8"
-    )
+    _record_digests(fonts)
 
     assert _font_tree_problems(fonts) == ["a.woff2: not a WOFF2 file"]
 
@@ -251,6 +297,33 @@ def test_a_font_replaced_without_updating_the_record_is_refused(tmp_path: Path) 
     assert _font_tree_problems(fonts) == [f"a.woff2: its digest does not match {SOURCE_NAME}"]
 
 
+def test_a_licence_edited_without_updating_the_record_is_refused(tmp_path: Path) -> None:
+    """OFL.txt is the one file the URL scan skips, so its bytes must be pinned instead."""
+    fonts = _good_tree(tmp_path / "fonts")
+    with (fonts / LICENCE_NAME).open("a", encoding="utf-8") as handle:
+        handle.write("see https://example.org/x\n")
+
+    assert _font_tree_problems(fonts) == [
+        f"{LICENCE_NAME}: its digest does not match {SOURCE_NAME}"
+    ]
+
+
+def test_a_digest_line_naming_a_file_that_is_not_shipped_is_refused(tmp_path: Path) -> None:
+    """A record that outlived its file claims a provenance nothing can check."""
+    fonts = _good_tree(tmp_path / "fonts")
+    with (fonts / SOURCE_NAME).open("a", encoding="utf-8") as handle:
+        handle.write(f"{'0' * 64}  gone.woff2\n")
+
+    assert _font_tree_problems(fonts) == [f"{SOURCE_NAME} names gone.woff2, which is not shipped"]
+
+
+def test_a_font_absent_from_the_record_is_refused(tmp_path: Path) -> None:
+    fonts = _good_tree(tmp_path / "fonts")
+    (fonts / "b.woff2").write_bytes(b"wOF2")
+
+    assert _font_tree_problems(fonts) == [f"b.woff2: its digest does not match {SOURCE_NAME}"]
+
+
 def test_a_missing_provenance_record_is_refused(tmp_path: Path) -> None:
     fonts = _good_tree(tmp_path / "fonts")
     (fonts / SOURCE_NAME).unlink()
@@ -260,13 +333,70 @@ def test_a_missing_provenance_record_is_refused(tmp_path: Path) -> None:
 
 _GOOD_FACE = (
     '@font-face { font-family: "X"; src: url("../fonts/x.woff2") format("woff2"); '
-    "font-display: swap; }"
+    "font-weight: 400 700; font-display: swap; unicode-range: U+0020-007E, U+00A0-017F; }"
 )
+_SOURCE_COMMANDS = (
+    "fonttools varLib.instancer INPUT wght=400:700 opsz=16 -o VARIABLE.ttf\n"
+    "pyftsubset VARIABLE.ttf --unicodes=U+0020-007E,U+00A0-017F \\\n"
+)
+_CLAIMS = _subset_claims(_SOURCE_COMMANDS)
+
+
+def test_the_claims_are_read_from_the_recorded_commands() -> None:
+    assert SubsetClaims(unicodes=("U+0020-007E", "U+00A0-017F"), weight="400 700") == _CLAIMS
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "pyftsubset VARIABLE.ttf --unicodes=U+0020-007E\n",
+        "fonttools varLib.instancer INPUT wght=400:700\n",
+    ],
+)
+def test_a_record_missing_a_claim_is_an_error_not_a_pass(source: str) -> None:
+    with pytest.raises(AssertionError, match="does not record"):
+        _subset_claims(source)
 
 
 def test_a_good_font_face_and_a_stylesheet_with_none_both_pass() -> None:
-    assert _font_face_problems(_GOOD_FACE) == []
-    assert _font_face_problems("a { color: red; }") == []
+    assert _font_face_problems(_GOOD_FACE, _CLAIMS) == []
+    assert _font_face_problems("a { color: red; }", _CLAIMS) == []
+
+
+def test_a_wrapped_unicode_range_still_matches() -> None:
+    """Keeps: a long range wraps in the stylesheet; the line break is not a difference."""
+    css = _GOOD_FACE.replace("U+0020-007E, U+00A0-017F", "U+0020-007E,\n    U+00A0-017F")
+
+    assert _font_face_problems(css, _CLAIMS) == []
+
+
+@pytest.mark.parametrize(
+    "bad_range",
+    ["U+0020-007E", "U+0020-007E, U+00A0-017F, U+0400-04FF", "U+00A0-017F, U+0020-007E"],
+)
+def test_a_unicode_range_that_differs_from_the_subset_is_refused(bad_range: str) -> None:
+    css = _GOOD_FACE.replace("U+0020-007E, U+00A0-017F", bad_range)
+
+    problems = _font_face_problems(css, _CLAIMS)
+
+    assert len(problems) == 1
+    assert "unicode-range differs" in problems[0]
+
+
+def test_a_face_with_no_unicode_range_is_refused() -> None:
+    css = _GOOD_FACE.replace(" unicode-range: U+0020-007E, U+00A0-017F;", "")
+
+    assert any("unicode-range differs" in p for p in _font_face_problems(css, _CLAIMS))
+
+
+@pytest.mark.parametrize("bad_weight", ["font-weight: 400 900; ", "font-weight: 400; ", ""])
+def test_a_font_weight_other_than_the_kept_axis_is_refused(bad_weight: str) -> None:
+    css = _GOOD_FACE.replace("font-weight: 400 700; ", bad_weight)
+
+    problems = _font_face_problems(css, _CLAIMS)
+
+    assert len(problems) == 1
+    assert "font-weight is not 400 700" in problems[0]
 
 
 @pytest.mark.parametrize(
@@ -283,14 +413,14 @@ def test_a_good_font_face_and_a_stylesheet_with_none_both_pass() -> None:
 def test_a_src_that_is_not_one_relative_woff2_is_refused(bad_src: str) -> None:
     css = _GOOD_FACE.replace('url("../fonts/x.woff2") format("woff2")', bad_src)
 
-    problems = _font_face_problems(css)
+    problems = _font_face_problems(css, _CLAIMS)
 
     assert len(problems) == 1
     assert "src is not one relative woff2" in problems[0]
 
 
 def test_a_font_face_with_no_swap_is_refused() -> None:
-    problems = _font_face_problems(_GOOD_FACE.replace("font-display: swap; ", ""))
+    problems = _font_face_problems(_GOOD_FACE.replace("font-display: swap; ", ""), _CLAIMS)
 
     assert problems == ['font-family: "X": no font-display: swap']
 
