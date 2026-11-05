@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -321,10 +322,12 @@ def test_a_timeout_exits_2_and_takes_the_build_children_with_it(tmp_path: Path) 
     pid_file = tmp_path / "grandchild"
     code = (
         "import subprocess, sys, pathlib, time\n"
-        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
         f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n"
         "print('started', flush=True)\n"
-        "time.sleep(60)\n"
+        # Shorter than the grandchild's. If the group kill misses, ``wait`` returns when
+        # this ends, and the grandchild is still there to be seen.
+        "time.sleep(15)\n"
     )
 
     with pytest.raises(check.WheelCheckError, match="timed out") as raised:
@@ -332,10 +335,14 @@ def test_a_timeout_exits_2_and_takes_the_build_children_with_it(tmp_path: Path) 
 
     assert "started" in str(raised.value)
     pid = int(pid_file.read_text(encoding="utf-8"))
-    deadline = time.monotonic() + 5.0
-    while _alive(pid) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert not _alive(pid), "the build's child survived the timeout"
+    try:
+        deadline = time.monotonic() + 5.0
+        while _alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _alive(pid), "the build's child survived the timeout"
+    finally:
+        if _alive(pid):
+            os.kill(pid, signal.SIGKILL)
 
 
 def test_a_group_that_is_already_gone_is_not_an_error() -> None:
