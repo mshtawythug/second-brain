@@ -286,7 +286,7 @@ def test_measuring_leaves_the_layout_in_the_real_face(opened: _Opened) -> None:
     a new layout, a query that beat the next frame reported the fallback (Georgia, not custom),
     and ``test_the_text_is_actually_painted_in_the_face`` failed intermittently (4 of 40 local
     runs, and once in CI). The query is prepared first here so that a frame is unlikely to land in
-    between: without the fix this failed 10 of 10 local runs.
+    between: without the fix this failed 25 of 31 local runs, so it catches the bug most times.
     """
     _face_statuses(opened.page)
     query = _font_query(opened.page, "#probe")
