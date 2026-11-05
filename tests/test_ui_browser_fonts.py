@@ -55,7 +55,13 @@ STUBS: dict[str, Any] = {
     "/api/health": {"status": "ok", "read_only": False, "notices": []},
     "/api/tree": TREE,
     "/api/facets": {"sources": [], "content_types": [], "tags": []},
-    "/api/search": {"results": [], "total_documents": 0, "timing_ms": {}, "session_id": "s"},
+    "/api/search": {
+        "results": [{"id": "n-font", "title": "A Synthetic Result", "snippet": "a snippet",
+                     "tags": [], "source_kind": "manual", "date": "2026-01-06",
+                     "withheld": None}],
+        "total_documents": 1, "timing_ms": {"total": 1, "embed": 0, "sql": 1},
+        "session_id": "s-synthetic",
+    },
 }
 
 
@@ -305,11 +311,27 @@ def test_the_page_default_is_the_system_stack(opened: _Opened) -> None:
     assert _first_family(opened.page, "body") == "ui-sans-serif"
 
 
-@pytest.mark.parametrize("selector", [".tab", '[role="treeitem"]'])
-def test_the_instrument_chrome_keeps_its_system_stack(opened: _Opened, selector: str) -> None:
+@pytest.mark.parametrize(
+    ("selector", "stack"),
+    [
+        (".tab", "ui-sans-serif"),
+        ('[role="treeitem"]', "ui-sans-serif"),
+        (".result-title", "ui-sans-serif"),
+        # The date, because the gutter's other cell holds an emoji glyph and the
+        # platform-font query reads a node's own text.
+        (".gutter > div:last-child", "ui-monospace"),
+    ],
+)
+def test_the_instrument_chrome_keeps_its_system_stack(
+    opened: _Opened, selector: str, stack: str
+) -> None:
+    """The ledger row has both of the instrument's stacks, with the face already loaded."""
     _face_statuses(opened.page)
+    opened.page.locator("#q").fill("synthetic")
+    opened.page.keyboard.press("Enter")
+    opened.page.wait_for_selector(".result-title")
 
-    assert _first_family(opened.page, selector) == "ui-sans-serif"
+    assert _first_family(opened.page, selector) == stack
     painted = _platform_fonts(opened.page, selector)
     assert painted, f"{selector} painted nothing"
     assert not any(f["isCustomFont"] for f in painted), painted
