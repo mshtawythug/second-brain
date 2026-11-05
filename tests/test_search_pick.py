@@ -89,8 +89,8 @@ def test_a_separator_in_a_title_cannot_add_a_field_or_a_line(hostile: str) -> No
         ("Hi\x9b31mred", "Hi31mred"),
         ("Hi\x1b(Bthere", "Hithere"),
         ("Hi\x07\x08\x7fthere", "Hithere"),
-        ("Hi‮reversed‬", "Hireversed"),
-        ("Hi⁦isolated⁩", "Hiisolated"),
+        ("Hi\u202ereversed\u202c", "Hireversed"),
+        ("Hi\u2066isolated\u2069", "Hiisolated"),
     ],
 )
 def test_control_ansi_and_bidi_characters_never_reach_fzf(hostile: str, clean: str) -> None:
@@ -346,7 +346,8 @@ def test_an_interrupt_stops_fzf_with_sigterm_so_it_can_restore_the_terminal(
     binary = _script(
         tmp_path,
         f'trap \'touch "{stopped}"; exit 0\' TERM\ntouch "{ready}"\n'
-        "while :; do sleep 0.02; done",
+        # Bounded: if run_fzf ever lets the interrupt escape, nothing stops this stub for it.
+        'i=0; while [ "$i" -lt 500 ]; do sleep 0.02; i=$((i+1)); done',
     )
 
     def interrupted(*_args: object, **_kwargs: object) -> None:
