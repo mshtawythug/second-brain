@@ -20,6 +20,7 @@ from brain.engagement import engagement_stats
 from brain.gaps import top_search_failures
 from brain.ingest import Embedder
 from brain.search_pick import NO_FZF_MESSAGE, NO_TERMINAL_MESSAGE, OLD_FZF_MESSAGE, FzfRun
+from brain.search_pipeline import run_search as real_run_search
 from tests.entity_filter_seed import SHARED_TERM, seed_document
 
 TEST_DATABASE_URL = os.environ.get(
@@ -238,6 +239,22 @@ def test_pick_prints_neither_the_table_nor_the_footer(
     result = _pick()
     assert "Search results" not in result.output
     assert " matched" not in result.output
+
+
+def test_pick_skips_the_footers_count_query_and_plain_search_keeps_it(
+    corpus: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[bool] = []
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["total_count"])
+        return real_run_search(*args, **kwargs)
+
+    monkeypatch.setattr("brain.cli_search.run_search", spy)
+    _use_runner(monkeypatch, _second_line)
+    assert _pick().exit_code == 0
+    assert CliRunner().invoke(app, ["search", SHARED_TERM, "--fts-only"]).exit_code == 0
+    assert seen == [False, True]
 
 
 # --- D3: `brain gaps` -------------------------------------------------------------
