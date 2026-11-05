@@ -37,19 +37,19 @@ brain ingest-dir ./notes --tag planning --dry-run
 # Writes: stores one file; running it again changes nothing
 brain ingest ./notes/vendor-renewal.pdf --tag vendor
 
-# Preview one sender's mail; a scope flag is always required
+# Reads your real Gmail and prints real subjects, storing nothing; a scope flag is always required
 brain ingest-gmail --from someone@example.com --since 2026/10/01 --max 20 --dry-run
 
-# Preview one Gmail label
+# The same, for one Gmail label
 brain ingest-gmail --label receipts --max 20 --dry-run
 
 # Writes: stores a Slack thread you saved to a file
 brain ingest-stdin --source slack --external-id thread-0001 --title "Design thread" < thread.txt
 
-# Preview a month of calendar events
-brain ingest-calendar --since 2026-10-01 --until 2026-10-31 --dry-run
+# Reads your real calendar and prints real titles, storing nothing; --until is exclusive
+brain ingest-calendar --since 2026-10-01 --until 2026-11-01 --dry-run
 
-# Preview your code-host activity
+# Reads your real GitHub activity in every org the account can see and prints real titles, storing nothing
 brain ingest-github --mine --since 2026-10-01 --dry-run
 ```
 
@@ -65,7 +65,7 @@ brain graphrag themes --person "Jane Doe"
 # One entity and what it connects to
 brain graphrag entity "Jane Doe" --depth 2
 
-# The most connected people and concepts
+# The people and concepts in the most documents
 brain graphrag entities --limit 20
 
 # The clusters the graph has found
@@ -124,6 +124,6 @@ brain vault sync --dry-run
 # Who has been using this brain, and how
 brain usage --days 30
 
-# Writes: a backup archive of the database and the vault
+# Writes: a plaintext archive of the whole database and vault; it can be large
 brain backup --label before-upgrade
 ```

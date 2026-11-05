@@ -545,11 +545,11 @@ if (( RUN_LINT )); then
   CEILING_STATUS=$?
   (( CEILING_STATUS == 0 )) && ok "ceiling table matches the tree"
 
-  # RM-50: a real wheel, built from a clean copy, must carry all of ui/static.
+  # RM-50, RM-53: a real wheel, built from a clean copy, must carry all of ui/static and resources.
   step "ci.yml job 'lint' — python scripts/check_wheel_static.py"
   ( cd "$REPO_ROOT" && "$VENV/bin/python" scripts/check_wheel_static.py )
   WHEEL_STATUS=$?
-  (( WHEEL_STATUS == 0 )) && ok "the built wheel carries the static tree"
+  (( WHEEL_STATUS == 0 )) && ok "the built wheel carries the static and resources trees"
 fi
 
 if (( RUN_TESTS )); then
@@ -575,12 +575,12 @@ if (( RUN_LINT )); then
   render "ruff check" "$( (( RUFF_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $RUFF_STATUS)")"
   render "mypy src/" "$( (( MYPY_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $MYPY_STATUS)")"
   render "ceiling table" "$( (( CEILING_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $CEILING_STATUS)")"
-  render "wheel static tree" "$( (( WHEEL_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $WHEEL_STATUS)")"
+  render "wheel shipped trees" "$( (( WHEEL_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $WHEEL_STATUS)")"
 else
   render "ruff check" "skipped (--tests-only)"
   render "mypy src/" "skipped (--tests-only)"
   render "ceiling table" "skipped (--tests-only)"
-  render "wheel static tree" "skipped (--tests-only)"
+  render "wheel shipped trees" "skipped (--tests-only)"
 fi
 if (( PYTEST_RAN )); then
   render "pytest" "$( (( PYTEST_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $PYTEST_STATUS)")"

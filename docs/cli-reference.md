@@ -1810,10 +1810,12 @@ brain examples ingest          # one topic: search, ingest, graph, brief-review 
 brain examples | grep gmail    # find a command by what it touches
 ```
 
-Every example is synthetic and safe to paste. Commands that write carry `--dry-run` or `--no-emit`,
-or a `# Writes:` comment directly above them. No example deletes anything or overrides a safety
-check, and `brain ingest-gmail` always carries a scope flag. `tests/test_examples_rot.py` holds all
-of this, and also fails if an example names a command or flag that no longer exists.
+Every example is synthetic and is one `brain` invocation, with no shell syntax beyond a trailing
+`< file`. Commands that write carry `--dry-run` or `--no-emit`, or a `# Writes:` comment directly
+above them. No example deletes anything or overrides a safety check, and `brain ingest-gmail` always
+carries a scope flag. The Gmail, calendar and GitHub previews store nothing, but they read your real
+accounts and print real subjects and titles. `tests/test_examples_rot.py` holds the safety rules, and
+also fails if an example names a command or flag that no longer exists.
 
 An unknown topic lists the valid ones on stderr and exits `2`; the argument is not echoed. A broken
 install, where the packaged `brain/resources/examples.md` cannot be read, exits `1`.
