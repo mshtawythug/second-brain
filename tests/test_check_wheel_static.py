@@ -1,4 +1,4 @@
-"""Tests for ``scripts/check_wheel_static.py``: a wheel must carry the whole static tree (RM-50).
+"""Tests for ``scripts/check_wheel_static.py``: a wheel must carry each shipped tree (RM-50, RM-53).
 
 The script lives outside ``src/brain``, so it is loaded with :mod:`importlib.util`. The
 comparison and the exit codes run on synthetic zips and a fake build. The subprocess
@@ -107,6 +107,9 @@ def test_a_file_that_is_not_a_wheel_is_a_setup_error(tmp_path: Path) -> None:
         check.missing_from_wheel(static, bad)
 
 
+RESOURCE_NAMES = ("brain/resources/__init__.py", "brain/resources/examples.md")
+
+
 def _repo(root: Path) -> Path:
     """The files the build copies, with a small source tree."""
     (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
@@ -115,6 +118,10 @@ def _repo(root: Path) -> Path:
     static = root / "src" / "brain" / "ui"
     static.mkdir(parents=True)
     _static_tree(static)
+    resources = root / "src" / "brain" / "resources"
+    resources.mkdir()
+    (resources / "__init__.py").write_text('"""r."""\n', encoding="utf-8")
+    (resources / "examples.md").write_text("# e\n", encoding="utf-8")
     (root / "src" / "brain" / "ui" / "__pycache__").mkdir()
     (root / "src" / "brain" / "ui" / "__pycache__" / "x.pyc").write_bytes(b"x")
     return root
@@ -123,8 +130,15 @@ def _repo(root: Path) -> Path:
 class _FakeBuild:
     """Stands in for the real build and records what it was given."""
 
-    def __init__(self, *, names: list[str] = TREE, returncode: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        names: list[str] = TREE,
+        returncode: int = 0,
+        extra: tuple[str, ...] = RESOURCE_NAMES,
+    ) -> None:
         self.names = names
+        self.extra = extra
         self.returncode = returncode
         self.argv: list[str] = []
         self.copied: set[str] = set()
@@ -137,7 +151,7 @@ class _FakeBuild:
         log.write_text("the tail of a build log\n", encoding="utf-8")
         if self.returncode == 0:
             out.mkdir()
-            _wheel(out / "x-1-py3-none-any.whl", self.names)
+            _wheel(out / "x-1-py3-none-any.whl", self.names, self.extra)
         return self.returncode
 
 
@@ -152,7 +166,7 @@ def test_main_passes_on_a_complete_wheel_built_from_a_clean_copy(
 
     assert check.main(repo, build=build) == 0
 
-    assert "5 static files" in capsys.readouterr().out
+    assert "7 shipped files" in capsys.readouterr().out
     assert Path(build.argv[-1]) != repo
     assert "src/brain/ui/static/fonts/a.woff2" in build.copied
     assert "pyproject.toml" in build.copied
@@ -168,6 +182,32 @@ def test_main_exits_1_and_names_the_missing_file(
     assert check.main(repo, build=_FakeBuild(names=TREE[:-1])) == 1
 
     assert "fonts/OFL.txt" in capsys.readouterr().err
+
+
+def test_main_exits_1_when_only_the_resource_tree_is_missing_a_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """RM-53: `brain examples` reads this file at run time, so a wheel without it is broken."""
+    repo = _repo(tmp_path)
+
+    assert check.main(repo, build=_FakeBuild(extra=RESOURCE_NAMES[:1])) == 1
+
+    assert "brain/resources/examples.md" in capsys.readouterr().err
+
+
+def test_main_refuses_an_empty_resource_tree_as_a_setup_error(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    for path in (repo / "src" / "brain" / "resources").iterdir():
+        path.unlink()
+
+    assert check.main(repo, build=_FakeBuild()) == 2
+
+
+def test_the_shipped_trees_include_the_static_tree_and_the_resources() -> None:
+    assert dict(check.SHIPPED_TREES) == {
+        "src/brain/ui/static": "brain/ui/static/",
+        "src/brain/resources": "brain/resources/",
+    }
 
 
 def test_a_failed_build_exits_2_and_prints_the_tail_of_its_log(

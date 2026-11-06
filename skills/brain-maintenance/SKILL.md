@@ -26,7 +26,7 @@ description: >
 # Brain Maintenance
 
 Operational commands for the brain corpus. Most of these are idempotent and
-safe to re-run.
+safe to re-run. To find a command by task: `brain examples [TOPIC]` (no DB needed).
 
 For searching, see `consult-brain`. For ingestion, see `ingest-brain`. For
 authoring, see `brain-authoring`. For action items, see `brain-todo`. For

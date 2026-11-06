@@ -138,9 +138,9 @@ jobs:
         run: python scripts/check_ceiling_table.py
 
       # RM-50: build a real wheel from a clean copy and require every file under
-      # ui/static in it. The package-data guards in the suite read the source tree;
+      # ui/static and resources in it. The package-data guards in the suite read the source tree;
       # this is the one check that opens a wheel. bin/brain-ci runs the same step.
-      - name: A built wheel carries the whole static tree
+      - name: A built wheel carries the whole static and resources trees
         run: python scripts/check_wheel_static.py
 
   test:

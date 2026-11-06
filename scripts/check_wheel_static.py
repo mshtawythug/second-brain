@@ -1,9 +1,10 @@
-"""Fail when a wheel built from this repository is missing a file from ``ui/static``.
+"""Fail when a wheel built from this repository is missing a file from a shipped data tree.
 
-The ``package-data`` globs do not cross ``/``, and every guard in the test suite reads
+The trees are :data:`SHIPPED_TREES`: ``ui/static`` and, since RM-53, ``resources``. The
+``package-data`` globs do not cross ``/``, and every guard in the test suite reads
 the source tree, so a nested asset no glob reaches passes them all until someone
 installs the wheel. This builds a real one from a clean copy (an in-place build reuses a
-stale ``build/``, which can hide exactly this) and compares it with the tree.
+stale ``build/``, which can hide exactly this) and compares it with the trees.
 
 Exit codes: 0 every file is in the wheel; 1 some are missing (each is named); 2 the
 check could not run. Runs in ``ci.yml``'s ``lint`` job and in ``bin/brain-ci``.
@@ -28,6 +29,11 @@ from collections.abc import Callable
 from pathlib import Path
 
 WHEEL_STATIC_PREFIX = "brain/ui/static/"
+#: Each data tree a wheel must carry whole: its path in the repository, its prefix in the wheel.
+SHIPPED_TREES = (
+    ("src/brain/ui/static", WHEEL_STATIC_PREFIX),
+    ("src/brain/resources", "brain/resources/"),
+)
 BUILD_TIMEOUT_S = 300.0
 TAIL_BYTES = 4000
 _NOT_SHIPPED = {"__pycache__", ".DS_Store"}
@@ -111,8 +117,10 @@ def _static_files(static_root: Path) -> set[str]:
     }
 
 
-def missing_from_wheel(static_root: Path, wheel: Path) -> list[str]:
-    """Paths under ``static_root``, relative to it, that ``wheel`` does not carry."""
+def missing_from_wheel(
+    static_root: Path, wheel: Path, prefix: str = WHEEL_STATIC_PREFIX
+) -> list[str]:
+    """Paths under ``static_root``, relative to it, that ``wheel`` lacks under ``prefix``."""
     tree = _static_files(static_root)
     if not tree:
         raise WheelCheckError("no static files in the tree")
@@ -121,7 +129,7 @@ def missing_from_wheel(static_root: Path, wheel: Path) -> list[str]:
             names = set(archive.namelist())
     except (OSError, zipfile.BadZipFile) as exc:
         raise WheelCheckError("the build output is not a readable wheel") from exc
-    return sorted(name for name in tree if f"{WHEEL_STATIC_PREFIX}{name}" not in names)
+    return sorted(name for name in tree if f"{prefix}{name}" not in names)
 
 
 def build_wheel(repo_root: Path, workdir: Path, build: Callable[[list[str], Path], int]) -> Path:
@@ -147,23 +155,26 @@ def build_wheel(repo_root: Path, workdir: Path, build: Callable[[list[str], Path
 
 def main(repo_root: Path, build: Callable[[list[str], Path], int] = run_build) -> int:
     """Build, compare, report. See the module docstring for the exit codes."""
-    static_root = repo_root / "src" / "brain" / "ui" / "static"
     try:
         with tempfile.TemporaryDirectory() as workdir:
             wheel = build_wheel(repo_root, Path(workdir), build)
-            missing = missing_from_wheel(static_root, wheel)
+            missing = [
+                f"{prefix}{name}"
+                for tree, prefix in SHIPPED_TREES
+                for name in missing_from_wheel(repo_root / tree, wheel, prefix)
+            ]
     except (WheelCheckError, OSError) as exc:
         message = str(exc) if isinstance(exc, WheelCheckError) else "the build could not run"
         print(f"check_wheel_static: {message}", file=sys.stderr)
         return 2
     if missing:
-        print("check_wheel_static: the wheel is missing these static files:", file=sys.stderr)
+        print("check_wheel_static: the wheel is missing these files:", file=sys.stderr)
         for name in missing:
             print(f"  {name}", file=sys.stderr)
         print("Add a package-data glob for them in pyproject.toml.", file=sys.stderr)
         return 1
-    count = len(_static_files(static_root))
-    print(f"check_wheel_static: the wheel carries all {count} static files")
+    count = sum(len(_static_files(repo_root / tree)) for tree, _prefix in SHIPPED_TREES)
+    print(f"check_wheel_static: the wheel carries all {count} shipped files")
     return 0
 
 

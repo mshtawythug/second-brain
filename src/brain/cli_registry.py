@@ -38,6 +38,7 @@ import typer
 
 from .cli_dedup import register as register_dedup
 from .cli_docs import register_lifecycle, register_list
+from .cli_examples import register as register_examples
 from .cli_ingest import register as register_ingest
 from .cli_ingest_apple_notes import register as register_ingest_apple_notes
 from .cli_ingest_bookmarks import register as register_ingest_bookmarks
@@ -102,6 +103,7 @@ EXTENSION_REGISTRARS: tuple[tuple[str, Registrar], ...] = (
     ("ingest-web", register_ingest_web),  # RM-41, allowlisted browser history and bookmarks
     ("ingest-bookmarks", register_ingest_bookmarks),  # RM-44, liked/bookmarked posts (archive)
     ("mcp", register_mcp),  # RM-46, the MCP server over HTTP and its token
+    ("examples", register_examples),  # RM-53, curated invocations by topic
 )
 
 #: Registrars that attach to a SUB-APP rather than the root ``app``, and so
