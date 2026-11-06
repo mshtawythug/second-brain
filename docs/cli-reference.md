@@ -208,8 +208,8 @@ brain explain "that thing about renewing" --rewrite   # names the query that fou
 
 - **Ranking.** The document rankings are fused with Reciprocal Rank Fusion, the original weighted 1.0
   and each paraphrase 0.5. Every filter applies to every query, including `brain search`'s
-  `--sensitivity`. A reranker then sees the fused rows and the original query. `score` stays the hybrid score, so the list can be
-  out of order by `score`.
+  `--sensitivity`. A reranker then sees the fused rows and the original query. `score` stays the
+  hybrid score, so the list can be out of order by `score`.
 - **`brain explain --rewrite`** adds a "Found by" table; with `--json`, each row gains `fused_score` and
   `found_by` (`query`, `is_original`, 1-indexed `rank`). Both are present whenever the flag was passed.
 - **Cost.** One chat call plus two more searches, possibly with a cold model load. The footer gains a

@@ -2,8 +2,9 @@
 
 The real ``hybrid_search``, the real CLI and the real ``chat.chat_json`` run here; only the HTTP
 under ``chat`` is a ``MockTransport``, through ``chat._build_client``. These tests pass
-``--fts-only`` wherever ranks are asserted, because ``FakeEmbedder``'s hashed vectors make the
-vector leg return every document. All data is synthetic.
+``--fts-only`` wherever ranks are asserted, because ``FakeEmbedder``'s hashed vectors have arbitrary
+cosines, so the vector leg would add hits that have nothing to do with the words. All data is
+synthetic.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from typer.testing import CliRunner
 
 from brain import chat
 from brain.cli import app
+from brain.db import connect
 from brain.embeddings import OllamaEmbedError
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.search import _cached_query_embed, hybrid_search
@@ -553,12 +555,12 @@ def cold_embed_cache() -> None:
     _cached_query_embed.cache_clear()
 
 
+@pytest.mark.usefixtures("cold_embed_cache")
 def test_paraphrases_get_the_vector_leg_on_a_healthy_search(
     corpus: dict[str, str],
     fake_embedder: Any,
     patch_embedder: Any,
     install_chat: Callable[..., ChatStub],
-    cold_embed_cache: None,  # noqa: ARG001
 ) -> None:
     # Arrange
     embedder = _QueryEmbedder(fake_embedder)
@@ -571,13 +573,60 @@ def test_paraphrases_get_the_vector_leg_on_a_healthy_search(
     # Assert: one query embed each, for the original and the two paraphrases.
     assert result.exit_code == 0, result.output
     assert embedder.queries == [ORIGINAL_TERM, PARAPHRASE_TERM, SECOND_TERM]
+    assert SKIPPED not in result.stderr
+    assert "a paraphrase search failed" not in result.stderr
 
 
+def _assert_the_vector_leg_reached_the_fusion(
+    conn: psycopg.Connection[Any], embedder: Any
+) -> None:
+    """No document holds ``SECOND_TERM``, so a hit credited to it can only be the vector leg's.
+
+    The floor is -1.0 because the leg keeps ``dist <= 1 - floor``. At hybrid_search's default 0.0 a
+    negative cosine is dropped, and with hashed vectors whether one is negative is down to the hash.
+    """
+    outcome = run_search(
+        hybrid_search,
+        conn,
+        embedder=embedder,
+        query=ORIGINAL_TERM,
+        limit=5,
+        stages=(),
+        vector_sim_floor=-1.0,
+        rewriter=lambda _q: [SECOND_TERM],
+    )
+
+    report = outcome.stages[0]
+    assert report.applied is True
+    assert report.skipped_reason is None
+    assert outcome.fused is not None
+    assert any(hit.query == SECOND_TERM for doc in outcome.fused.values() for hit in doc.hits)
+
+
+def test_a_paraphrases_vector_leg_reaches_the_fusion_in_autocommit(
+    test_db: psycopg.Connection[Any], corpus: dict[str, str], fake_embedder: Any
+) -> None:
+    # ``brain search``'s connection shape: the per-paraphrase block is a real transaction.
+    assert test_db.autocommit is True
+
+    _assert_the_vector_leg_reached_the_fusion(test_db, fake_embedder)
+
+
+def test_a_paraphrases_vector_leg_reaches_the_fusion_in_a_transaction(
+    corpus: dict[str, str], fake_embedder: Any
+) -> None:
+    # ``brain explain``'s connection shape: the per-paraphrase block is a savepoint.
+    with connect(TEST_DATABASE_URL) as conn:
+        assert conn.autocommit is False
+
+        _assert_the_vector_leg_reached_the_fusion(conn, fake_embedder)
+
+
+@pytest.mark.usefixtures("cold_embed_cache")
 def test_a_paraphrases_own_embed_failure_drops_it_without_a_fallback(
     test_db: psycopg.Connection[Any],
     corpus: dict[str, str],
     fake_embedder: Any,
-    cold_embed_cache: None,  # noqa: ARG001
 ) -> None:
     # Arrange: the original's embed succeeds, and the paraphrase's fails.
     embedder = _QueryEmbedder(fake_embedder, fail_from=2)
