@@ -13,9 +13,9 @@ rewrite budget appears anywhere in `src/`.
   policy forbids real Ollama generation in tests or E2E (`feedback_disk_hygiene_agents`), so neither
   the real corpus nor a real model is available. The coordinator withdrew its first ruling, a synthetic
   run with real Ollama, once this conflict was raised. The one-off, uncommitted eval script goes in the
-  PR body as an owner step, read-only, reporting aggregate means only. It is proved to run with a
-  mocked chat on a small synthetic corpus in a throwaway 5434 database, which tests the script and
-  measures nothing. No golden-corpus content, or anything derived from it, is committed.
+  PR body as an owner step, read-only, reporting aggregate means only. A run with a mocked chat on a
+  small synthetic corpus in a throwaway 5434 database tests the script and measures nothing; the PR
+  says whether that proof has run. No golden-corpus content, or anything derived from it, is committed.
 - **No real-model run.** The plan's end-to-end run against `llama3.1:8b` is dropped for the same
   reason. **The reply shape was never checked against the real model.** Mocked replies follow what
   existing `chat_json` callers and tests document: `brief.py`'s `{"suggestions": [...]}` for a list of

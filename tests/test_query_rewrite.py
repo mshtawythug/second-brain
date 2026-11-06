@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import logging
 from typing import Any
 
 import pytest
@@ -434,6 +435,22 @@ def test_a_failed_paraphrase_drops_alone_and_says_so() -> None:
     notice = rewrite_notice(outcome.stages)
     assert notice is not None and "RuntimeError" in notice
     assert "synthetic failure" not in notice
+
+
+def test_a_failed_paraphrase_logs_its_failure_class_not_its_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Arrange
+    search = _Search({"original": ["a"]}, fail=("privateparaphrase",))
+
+    # Act
+    with caplog.at_level(logging.DEBUG, logger="brain"):
+        _run(search, lambda _q: ["privateparaphrase"])
+
+    # Assert
+    assert "RuntimeError" in caplog.text
+    assert "privateparaphrase" not in caplog.text
+    assert "synthetic failure" not in caplog.text
 
 
 def test_every_paraphrase_failing_is_not_applied() -> None:
