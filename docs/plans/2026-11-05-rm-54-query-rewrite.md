@@ -6,6 +6,32 @@ Ticket: `docs/specs/2026-10-23-roadmap-completion-design.md`, RM-54. Size S, wav
 (merged). Nothing is built: `src/brain/query_rewrite.py` does not exist, and neither `--rewrite` nor a
 rewrite budget appears anywhere in `src/`.
 
+## Rulings and deviations (recorded after approval)
+
+- **D1–D5, D7–D9 approved as recommended.**
+- **D6: the spec's "measured once both ways" is NOT met.** Prod stays off limits, and the standing
+  policy forbids real Ollama generation in tests or E2E (`feedback_disk_hygiene_agents`), so neither
+  the real corpus nor a real model is available. The coordinator withdrew its first ruling, a synthetic
+  run with real Ollama, once this conflict was raised. The one-off, uncommitted eval script goes in the
+  PR body as an owner step, read-only, reporting aggregate means only. It is proved to run with a
+  mocked chat on a small synthetic corpus in a throwaway 5434 database, which tests the script and
+  measures nothing. No golden-corpus content, or anything derived from it, is committed.
+- **No real-model run.** The plan's end-to-end run against `llama3.1:8b` is dropped for the same
+  reason. **The reply shape was never checked against the real model.** Mocked replies follow what
+  existing `chat_json` callers and tests document: `brief.py`'s `{"suggestions": [...]}` for a list of
+  strings under one key, and `tests/test_chat.py`'s `{"message": {"content": ...}}` envelope. If the
+  real model answers another shape, the result is a notice and the original search, which is tested.
+- **Egress notes are user-facing:** both are in `--rewrite`'s help text and in `docs/cli-reference.md`.
+- **Test-first was not followed in order.** The implementation was drafted before the tests, while
+  the disk was under the floor and pytest could not run. The mutation proofs stand in for RED.
+- **A paraphrase search that fails while another succeeds** reports `applied: true` with its failure
+  class in `skipped_reason`, and prints a notice. The plan had no line for it; silence would hide a
+  weaker result.
+- **Cleaning sits in the leg, not the rewriter,** so no rewriter can hand back uncleaned text.
+- **Line budgets:** see the PR; `query_rewrite.py`, `search_pipeline.py` and `format_search.py` came in
+  over their estimates. None is near 800.
+- **The example** lives in `src/brain/resources/examples.md`, not `examples.py`.
+
 ## Goal and acceptance criteria (quoted from the spec)
 
 **Goal:** "A vague query can opt into paraphrase retrieval, one run at a time."
@@ -113,7 +139,6 @@ the original's lexical match set, so a fused row can sit outside that count. The
 | `tests/test_search_rewrite_surfaces.py` | new: CLI on real Postgres, real `chat_json` over `MockTransport` | ≤ 300 |
 | `tests/test_ollama_num_ctx.py` | the two pinned lists gain the fourth budget | small |
 | `docs/cli-reference.md`, `CHANGELOG.md` | the flag, its costs, what it does not change | |
-| spec Appendix B | RM-54's row, as prior tickets did | |
 
 No file over 800 is touched, so `docs/ceiling-table.md` has no change. No migration, no config knob.
 
@@ -142,10 +167,9 @@ No file over 800 is touched, so `docs/ceiling-table.md` has no change. No migrat
 | `--rerank` order | the reranker receives fused rows and the original query | no stage: fused order is the output |
 
 **Real things:** Postgres is real on every surface test, and the real `chat_json` runs over
-`httpx.MockTransport` through its existing `_build_client` seam. Before review I run once end to end
-against real Ollama (`llama3.1:8b`) and a throwaway 5434 database, and record it in the PR. That run
-checks what a fake cannot: that the model really returns `{"paraphrases": [...]}` under this prompt.
-There is no Ollama in CI, so no committed test depends on it, and none can skip locally.
+`httpx.MockTransport` through its existing `_build_client` seam. One surface test uses the real
+transport against a closed port. Real Ollama is never run (see the rulings above), so what a fake
+cannot check, that the model really returns `{"paraphrases": [...]}`, stays unchecked.
 
 **Mutation proofs (git-archive copy, never the worktree):** drop the `diagnostics` denylist; swap the
 weights; remove `one_line`; send `Text` back to a plain string; remove the savepoint; forward the
@@ -162,8 +186,7 @@ tests, `test_search_pipeline_boundary`, `test_examples_rot`, `scripts/check_ceil
   then `ingest.text_safety.one_line` (Unicode category `C*`, which covers surrogates, NUL, bidi and
   tag characters); a length cap that **drops** rather than cuts, because half a paraphrase is a garbled
   query; at most two items; `Text` cells. `chat_json`'s `num_predict` bounds the reply, and its
-  transport already catches `RecursionError` on the envelope. I will verify the inner `json.loads`
-  catches it too, and the broad catch in the leg covers it regardless.
+  transport catches `RecursionError` on both the envelope and the inner `json.loads` (`chat.py`).
 - **Confidential data:** no document text reaches the prompt, only the query. Every filter, including
   the `--sensitivity` lens, applies to paraphrases. MCP and the UI gain nothing: `fused` is not in
   `pipeline_json`, and neither surface passes a rewriter. The search set under no filters is what the
@@ -185,11 +208,8 @@ tests, `test_search_pipeline_boundary`, `test_examples_rot`, `scripts/check_ceil
   the footer shows it.
 - **`cli_search.py` budget:** about 10 of +12 counted in advance; if it would pass, the explain
   projection moves further into `format_search.py`.
-- **Prompt quality:** real `llama3.1:8b` might not return the shape asked for. The end-to-end run finds
-  out early, and the failure mode is only a notice.
-- **Local resources:** the real run loads an 8B model with swap as the disk driver, at 8.4 GiB free
-  today. `df` first, nothing under 6 GiB, a short `keep_alive` for that run, and no Ollama restart (the
-  brew plist is hand-edited and a restart reverts it).
+- **Prompt quality is unproven:** real `llama3.1:8b` might not return the shape asked for, and nothing
+  here checks it. The failure mode is only a notice, but in that case `--rewrite` would never help.
 - **Footer and facets vs. fused rows:** see "What the extra queries do not touch". Documented, not fixed.
 
 ## Decisions
@@ -254,6 +274,6 @@ RM-54.D1 (an MCP parameter: **no**) is the spec's and is not reopened.
 3. The pipeline leg; fake-`search_fn` tests.
 4. CLI flag, output, notice; real-DB surface tests.
 5. Docs, CHANGELOG, example, Appendix B.
-6. `ruff`, `mypy`, the targeted and named sets; end-to-end against real Ollama; mutation proofs.
+6. `ruff`, `mypy`, the targeted and named sets; mutation proofs; the eval script's mocked proof.
 7. Push once, open the PR, report for review. Auto-memory (`cli.md`, `types.md`, `search.md`) is noted
    in that report for whoever holds it.

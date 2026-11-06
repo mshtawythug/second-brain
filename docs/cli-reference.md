@@ -196,6 +196,35 @@ brain search "platform migration" --rerank      # needs BRAIN_RERANKER set; else
   `applied: false` and the failure's class.
 - MCP and `brain ui` follow the setting; they have no per-call switch.
 
+**Query rewriting (`--rewrite`, off by default).** For a vague query, `brain search` and `brain
+explain` can also search up to two paraphrases from the chat model (`BRAIN_ENRICH_MODEL`), for that
+one run. It is never a default, because paraphrases can hurt exact-name lookups, and MCP and `brain
+ui` have no way to ask for it.
+
+```bash
+brain search "that thing about renewing" --rewrite
+brain explain "that thing about renewing" --rewrite   # names the query that found each result
+```
+
+- **Ranking.** The document rankings are fused with Reciprocal Rank Fusion, the original weighted 1.0
+  and each paraphrase 0.5. Every filter applies to every query, `--sensitivity` included. A reranker
+  then sees the fused rows and the original query. `score` stays the hybrid score, so the list can be
+  out of order by `score`.
+- **`brain explain --rewrite`** adds a "Found by" table; with `--json`, each row gains `fused_score` and
+  `found_by` (`query`, `is_original`, 1-indexed `rank`). Both are present whenever the flag was passed.
+- **Cost.** One chat call plus two more searches, possibly with a cold model load. The footer gains a
+  `rewrite …ms` segment, and `--json --meta` a `rewrite` entry in `stages`.
+- **What stays about the original.** `N matched`, `--facets` and the `search_queries` row (so `brain
+  gaps` too) describe the original query only, so a fused row can sit outside `N matched`. Paraphrases
+  are never stored or logged.
+- **Where the text goes.** The query, up to 256 tokens of it, goes to the chat model at `OLLAMA_HOST`.
+  That is local by default; if you point `OLLAMA_HOST` at another machine, that machine receives the
+  query. The paraphrases go to your embedder like any query, so with `BRAIN_EMBEDDER=voyage`, Voyage
+  receives them.
+- **If it fails.** Chat down, a context overflow, a malformed reply, a model that is not pulled, or no
+  usable paraphrases: you get the original search, exit 0, and one line on stderr: `query rewrite
+  skipped (<failure class>); showing the original search only.`
+
 `brain explain` runs the same query as `brain search` but prints per-result
 ranking diagnostics — FTS rank, vector cosine, RRF contributions, and the
 recency boost — so you can see *why* a result surfaced and in what order. Add
