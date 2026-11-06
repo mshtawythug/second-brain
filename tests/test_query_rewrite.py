@@ -14,6 +14,7 @@ import pytest
 import tiktoken
 from rich.console import Console
 
+from brain import chat
 from brain.errors import OllamaUnavailable
 from brain.format_search import found_by_table
 from brain.ollama_budget import (
@@ -34,6 +35,7 @@ from brain.query_rewrite import (
     build_prompt,
     clean_paraphrases,
     fuse_rankings,
+    make_rewriter,
     rewrite_notice,
 )
 from brain.search import SearchDiagnostics, SearchResult
@@ -220,6 +222,20 @@ def test_an_item_that_cleans_to_nothing_is_dropped() -> None:
     assert clean_paraphrases(["\x1b[0m", "   ", "\u202e"], original="q") == ()
 
 
+def test_format_characters_around_a_space_do_not_leave_a_searchable_space() -> None:
+    # Regression (rev-123): one_line collapses whitespace before it removes C* characters.
+    assert clean_paraphrases(["\u202e \u202e", "\u200b \u200b \u200b"], original="q") == ()
+
+
+def test_a_format_character_cannot_disguise_an_echo_of_the_original() -> None:
+    # Regression (rev-123): this used to clean to "vague  query", which is not the original.
+    assert clean_paraphrases(["vague \u202e query"], original="vague query") == ()
+
+
+def test_a_format_character_inside_a_real_paraphrase_leaves_one_space() -> None:
+    assert clean_paraphrases(["other \u202e words"], original="vague query") == ("other words",)
+
+
 # --- rendering ----------------------------------------------------------------------------------
 
 
@@ -293,6 +309,37 @@ def test_a_query_over_the_cap_is_cut_in_the_prompt_only() -> None:
 
 def test_a_short_query_is_sent_verbatim() -> None:
     assert "a short query" in build_prompt("a short query", cost=_tokens)
+
+
+def test_only_the_prompt_is_capped_the_original_search_gets_the_whole_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    query = "word " * 2000
+    prompts: list[str] = []
+
+    def fake_chat_json(prompt: str, **_kwargs: Any) -> dict[str, Any]:
+        prompts.append(prompt)
+        return {"paraphrases": ["p1"]}
+
+    monkeypatch.setattr(chat, "chat_json", fake_chat_json)
+    search = _Search({})
+    rewriter = make_rewriter(None, cost=_tokens, enabled=True)  # type: ignore[arg-type]
+
+    # Act
+    run_search(
+        search,
+        _Conn(),  # type: ignore[arg-type]
+        embedder=None,  # type: ignore[arg-type]
+        query=query,
+        limit=5,
+        stages=(),
+        rewriter=rewriter,
+    )
+
+    # Assert
+    assert search.calls[0]["query"] == query
+    assert query not in prompts[0]
 
 
 def test_a_query_with_braces_does_not_break_the_prompt() -> None:
@@ -369,6 +416,29 @@ def test_only_the_original_gets_the_diagnostics_and_every_filter_reaches_all() -
     for key, value in (("source_kind", "manual"), ("sensitivity", "normal"), ("without_tag", "t")):
         assert original[key] == value
         assert paraphrase[key] == value
+
+
+def test_a_healthy_search_gives_paraphrases_the_vector_leg() -> None:
+    # Arrange
+    search = _Search({"original": ["a"], "p1": ["b"]})
+
+    # Act
+    _run(search, lambda _q: ["p1"])
+
+    # Assert
+    assert search.calls[1]["query"] == "p1"
+    assert search.calls[1].get("fts_only", False) is False
+
+
+def test_a_users_fts_only_reaches_the_paraphrases() -> None:
+    # Arrange
+    search = _Search({"original": ["a"], "p1": ["b"]})
+
+    # Act
+    _run(search, lambda _q: ["p1"], fts_only=True)
+
+    # Assert
+    assert search.calls[1]["fts_only"] is True
 
 
 def test_the_rewriter_output_is_cleaned_inside_the_leg() -> None:

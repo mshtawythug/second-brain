@@ -19,8 +19,9 @@ from typer.testing import CliRunner
 
 from brain import chat
 from brain.cli import app
+from brain.embeddings import OllamaEmbedError
 from brain.ingest import ExtractedDoc, ingest_document
-from brain.search import hybrid_search
+from brain.search import _cached_query_embed, hybrid_search
 from brain.search_pipeline import run_search
 from tests.conftest import TEST_DATABASE_URL
 from tests.embed_down import QueryEmbedDownEmbedder
@@ -520,3 +521,88 @@ def test_a_dead_embedder_costs_one_failed_embed_not_three(
         "Note paraphrase",
     ]
     assert "text-only (FTS) matches" in result.stderr
+
+
+# --- paraphrases and the embedder ----------------------------------------------------------------
+
+
+class _QueryEmbedder:
+    """Records each query embed. From the ``fail_from``-th on, the embed fails transiently."""
+
+    def __init__(self, inner: Any, *, fail_from: int | None = None) -> None:
+        self._inner = inner
+        self._fail_from = fail_from
+        self.dim = inner.dim
+        self.queries: list[str] = []
+
+    def embed(self, texts: list[str], *, input_type: str = "document") -> list[list[float]]:
+        if input_type != "query":
+            return self._inner.embed(texts, input_type=input_type)  # type: ignore[no-any-return]
+        self.queries.extend(texts)
+        if self._fail_from is not None and len(self.queries) >= self._fail_from:
+            raise OllamaEmbedError("synthetic embed detail", transient=True)
+        return self._inner.embed(texts, input_type=input_type)  # type: ignore[no-any-return]
+
+    def count_tokens(self, text: str) -> int:
+        return self._inner.count_tokens(text)  # type: ignore[no-any-return]
+
+
+@pytest.fixture
+def cold_embed_cache() -> None:
+    """The query-embed LRU outlives a test, and a hit would hide an embed these tests count."""
+    _cached_query_embed.cache_clear()
+
+
+def test_paraphrases_get_the_vector_leg_on_a_healthy_search(
+    corpus: dict[str, str],
+    fake_embedder: Any,
+    patch_embedder: Any,
+    install_chat: Callable[..., ChatStub],
+    cold_embed_cache: None,  # noqa: ARG001
+) -> None:
+    # Arrange
+    embedder = _QueryEmbedder(fake_embedder)
+    patch_embedder(embedder)
+    install_chat(_reply(PARAPHRASE_TERM, SECOND_TERM))
+
+    # Act: no --fts-only here, unlike the rank tests above.
+    result = CliRunner().invoke(app, ["search", ORIGINAL_TERM, "--rewrite", "--no-meta"])
+
+    # Assert: one query embed each, for the original and the two paraphrases.
+    assert result.exit_code == 0, result.output
+    assert embedder.queries == [ORIGINAL_TERM, PARAPHRASE_TERM, SECOND_TERM]
+
+
+def test_a_paraphrases_own_embed_failure_drops_it_without_a_fallback(
+    test_db: psycopg.Connection[Any],
+    corpus: dict[str, str],
+    fake_embedder: Any,
+    cold_embed_cache: None,  # noqa: ARG001
+) -> None:
+    # Arrange: the original's embed succeeds, and the paraphrase's fails.
+    embedder = _QueryEmbedder(fake_embedder, fail_from=2)
+    calls: list[tuple[str, bool]] = []
+
+    def search_fn(conn: psycopg.Connection[Any], **kwargs: Any) -> list[Any]:
+        calls.append((kwargs["query"], kwargs.get("fts_only", False)))
+        return hybrid_search(conn, **kwargs)  # type: ignore[no-any-return]
+
+    # Act
+    outcome = run_search(
+        search_fn,
+        test_db,
+        embedder=embedder,
+        query=ORIGINAL_TERM,
+        limit=5,
+        stages=(),
+        rewriter=lambda _q: [PARAPHRASE_TERM],
+    )
+
+    # Assert: dropped, with no text-only retry and no claim that the search fell back.
+    assert calls == [(ORIGINAL_TERM, False), (PARAPHRASE_TERM, False)]
+    assert outcome.fallback is None
+    report = outcome.stages[0]
+    assert report.applied is False
+    assert report.skipped_reason == "OllamaEmbedError"
+    assert "synthetic embed detail" not in (report.skipped_reason or "")
+    assert all(hit.is_original for doc in outcome.fused.values() for hit in doc.hits)

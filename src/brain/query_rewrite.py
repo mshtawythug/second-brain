@@ -1,4 +1,4 @@
-"""Opt-in query rewriting: paraphrases from the local chat model, fused with the original (RM-54).
+"""Opt-in query rewriting: paraphrases from the chat model, fused with the original (RM-54).
 
 ``brain search --rewrite`` and ``brain explain --rewrite`` ask the chat model for up to two other
 wordings of the query. :func:`brain.search_pipeline.run_search` searches each one under the SAME
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from .ingest.text_safety import one_line
 from .ollama_budget import CHAT_DEFAULT_NUM_PREDICT, REWRITE_MAX_INPUT_TOKENS
@@ -28,6 +28,7 @@ from .token_budget import TokenCost, truncate_to_token_budget
 
 if TYPE_CHECKING:
     from .config import Config
+    from .search_pipeline import StageReport
 
 #: The name of the rewrite leg in ``stages``, the footer and ``--json --meta``.
 REWRITE_STAGE_NAME = "rewrite"
@@ -46,11 +47,11 @@ MAX_PARAPHRASE_CHARS = 512
 #: document just past the cut no credit even when both paraphrases rank it first.
 REWRITE_FETCH_FACTOR = 2
 
-#: ``brain search --help``. The two egress facts are here because this is where a user decides.
+#: ``brain search --help``. The egress facts are here because this is where a user decides.
 REWRITE_HELP = (
     "For this run, also search up to two paraphrases from the chat model. Can hurt exact-name "
-    "lookups. The query goes to OLLAMA_HOST; with BRAIN_EMBEDDER=voyage, Voyage embeds the "
-    "paraphrases."
+    "lookups. The query goes to OLLAMA_HOST. With BRAIN_EMBEDDER=voyage, Voyage embeds the "
+    "paraphrases; with BRAIN_RERANKER=voyage, passages they find can go to Voyage."
 )
 
 #: Why a leg that ran the chat has nothing to fuse. Class-only, like every ``skipped_reason``.
@@ -72,19 +73,6 @@ Query:
 
 #: Asks the model for paraphrases; returns its reply's raw, untrusted value.
 Rewriter = Callable[[str], object]
-
-
-class _StageReportLike(Protocol):
-    """What :func:`rewrite_notice` reads of a ``StageReport`` (the pipeline imports this leaf)."""
-
-    @property
-    def name(self) -> str: ...
-
-    @property
-    def applied(self) -> bool: ...
-
-    @property
-    def skipped_reason(self) -> str | None: ...
 
 
 @dataclass(frozen=True)
@@ -140,8 +128,13 @@ def fuse_rankings(rankings: Sequence[QueryRanking]) -> dict[str, FusedDoc]:
 
 
 def _clean(text: str) -> str:
-    """``text`` with no escape sequence (payload included), on one line, without any ``C*`` char."""
-    return one_line(strip_sequences(text))
+    """``text`` with no escape sequence (payload included), on one line, without any ``C*`` char.
+
+    Whitespace collapses again after ``one_line``, which collapses before it removes characters: a
+    format character between two spaces would otherwise leave a double space, or a lone space that
+    gets searched, and a spaced-out echo of the original would pass as a paraphrase.
+    """
+    return " ".join(one_line(strip_sequences(text)).split())
 
 
 def clean_paraphrases(raw: object, *, original: str) -> tuple[str, ...]:
@@ -192,7 +185,7 @@ def make_rewriter(cfg: Config, *, cost: TokenCost, enabled: bool) -> Rewriter | 
     return rewrite
 
 
-def rewrite_notice(reports: Sequence[_StageReportLike]) -> str | None:
+def rewrite_notice(reports: Sequence[StageReport]) -> str | None:
     """The CLI's stderr line when the rewrite leg fell short, else ``None``. Class-only."""
     for report in reports:
         if report.name != REWRITE_STAGE_NAME or report.skipped_reason is None:

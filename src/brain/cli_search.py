@@ -233,7 +233,7 @@ def _warn_if_fts_only_degraded(embedder: Embedder) -> None:
 
 
 def _warn_if_fell_back(outcome: PipelineResult) -> None:
-    """Print the text-only fallback notice, then a skipped reranker's, on stderr.
+    """Print the text-only fallback notice, then a skipped reranker's and rewrite's, on stderr.
 
     Stderr, like :func:`_warn_if_fts_only_degraded`, so ``--json`` stdout stays
     parseable and the exit code stays 0: the results are real, only weaker.

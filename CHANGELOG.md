@@ -30,7 +30,8 @@ git tag scheme:
 - Every filter applies to every query. A chat failure means the original search, one line on stderr,
   and exit 0. Paraphrases are cleaned as untrusted output, capped in count and length, and never
   logged or stored; `search_queries` and `brain gaps` keep the original query only.
-- The query goes to `OLLAMA_HOST`, and with `BRAIN_EMBEDDER=voyage`, Voyage embeds the paraphrases.
+- The query goes to `OLLAMA_HOST`. With `BRAIN_EMBEDDER=voyage`, Voyage embeds the paraphrases; with
+  `BRAIN_RERANKER=voyage`, passages they find can go to Voyage, confidential rows excepted.
   The new fixed-ceiling chat call is declared in `capped_call_budgets()`. No new setting.
 
 ### Added — `brain examples`, finding a command by example (RM-53)

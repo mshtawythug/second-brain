@@ -157,10 +157,8 @@ def _is_fts_only(diag: SearchDiagnostics) -> bool:
     return diag.embed_ms is None
 
 
-def _found_by_json(doc: FusedDoc | None) -> dict[str, Any]:
+def _found_by_json(doc: FusedDoc) -> dict[str, Any]:
     """The two keys ``explain --rewrite --json`` adds to a row."""
-    if doc is None:
-        return {"fused_score": None, "found_by": []}
     return {
         "fused_score": doc.fused_score,
         "found_by": [
@@ -183,7 +181,7 @@ def explain_rows_json(
         {
             **base,
             "explain": explanation_json(r.explain),
-            **({} if fused is None else _found_by_json(fused.get(r.document_id))),
+            **({} if fused is None else _found_by_json(fused[r.document_id])),
         }
         for r, base in zip(results, search_results_json(results), strict=True)
     ]
@@ -195,7 +193,9 @@ def _hit_line(hit: QueryHit) -> str:
 
 
 def found_by_table(results: list[SearchResult], fused: FusedDocs) -> Table:
-    """``brain explain --rewrite``: which query found each result, and the score that ordered it.
+    """``brain explain --rewrite``: which query found each result, and its fused score.
+
+    Every row is in ``fused``: stages reorder or filter what the fusion produced, and never add.
 
     ``format.py`` is at its ceiling, and paraphrases would crush the 11-column explain table, so
     this is a second table. Cells are :class:`~rich.text.Text`: paraphrases are model output, and
@@ -206,10 +206,9 @@ def found_by_table(results: list[SearchResult], fused: FusedDocs) -> Table:
     table.add_column("Fused", justify="right")
     table.add_column("Query")
     for r in results:
-        doc = fused.get(r.document_id)
-        score = "-" if doc is None else f"{doc.fused_score:.5f}"
-        lines = () if doc is None else tuple(_hit_line(hit) for hit in doc.hits)
-        table.add_row(r.document_id[:8], score, Text("\n".join(lines)))
+        doc = fused[r.document_id]
+        lines = "\n".join(_hit_line(hit) for hit in doc.hits)
+        table.add_row(r.document_id[:8], f"{doc.fused_score:.5f}", Text(lines))
     return table
 
 
