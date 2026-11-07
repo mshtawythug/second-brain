@@ -191,12 +191,24 @@ backend's `embedder` value, the stage ignores them (D11), and `--stale` re-embed
   (the existing "after the base keys" loop).
 - A row where the stage skipped (`no_document_vectors`, an SQL error, `text_only_search`) is
   `stages_skipped` and refused like a degraded one, by the RM-14a machinery as it stands.
-- **Owner step (recorded, not run here):** after RM-14c's ruling, on the owner's machine:
-  `brain docembed backfill --stale` until "0 still without a vector"; `brain status` to confirm the
-  document count; then `brain eval --baseline ci --diff` with `BRAIN_DOC_LEG=false` and `=true` in
-  the same session (weights 1.0 and one alternative), numbers into a follow-up PR. Adopted →
-  `ci.json` re-recorded in that PR, trigger "ranking change (document leg adopted)"; otherwise
-  recorded and kept off. Never during another ticket's run of record.
+## Owner step (after RM-14c)
+
+Recorded here and in the PR body; not run by this ticket. On the owner's machine, after RM-14c's
+ruling has fixed the pipeline the leg is measured on top of, and never during another ticket's run
+of record:
+
+1. `brain init` (applies 031), then `brain docembed backfill --stale` until it reports
+   `0 document(s) still without a vector`; `brain status` to confirm the document count the
+   baseline was recorded on.
+2. Two runs in the same session, under RM-14c's adoption rule (spec §2.7): `brain eval --baseline
+   ci --diff` with `BRAIN_DOC_LEG=false`, then with `BRAIN_DOC_LEG=true` (weight 1.0; optionally one
+   alternative weight). Both sets of numbers go in a follow-up PR.
+3. **Adopted** → the adopting PR flips the default, re-records `ci.json`
+   (`brain eval --record-baseline ci`) and names the trigger in its commit message: "ranking change
+   (document leg adopted)". It also carries the D15 follow-ups below. **Not adopted** → the numbers
+   are recorded and the leg stays off.
+
+The tracker row (spec Appendix B) moves to DONE with "(measurement owed after RM-14c)".
 
 ## Tests (TDD: each lands red first)
 
@@ -350,8 +362,60 @@ ordinary path still works (so the guard is not "refuse everything").
 - **D18 — `brain ui`'s `results.js` meta line is not changed.** `timing_ms.doc_leg` and `total`
   already carry the time; showing it is for the adopting PR.
 
+## Rulings (team-lead, 2026-11-07, on `071a726c`)
+
+- **D1 yes**: ship now, off, no signature key while off; the "Owner step (after RM-14c)" section
+  above is the recorded measurement. **D2, D3, D4, D6–D9, D11, D13, D14, D16–D18** accepted as
+  recommended. Any touched file over 800 lines gets the full ceiling treatment.
+- **D5, amended:** the flag is declared in a typed Protocol in `search_pipeline`,
+  `class QueryVectorStage(Protocol): needs_query_vector: bool`, so mypy sees the contract;
+  `stage_needs_query_vector` remains the only reader, with a documented `getattr(..., False)`
+  default, so `RerankStage`, `_UnsizedStage` and the fakes are unchanged. Test: a stage without the
+  attribute is treated as `False`.
+- **D10:** the identity function (`search.embedder_identity`, alias of `_embedder_identity`) is named
+  in the PR body; test: a change of **model alone** (same class, same dim) makes a row stale.
+- **D12:** both sides tested: one vector among the candidates → the stage applies; zero → skipped
+  (`no_document_vectors`), and `brain eval` refuses the row loudly.
+- **D15 follow-ups (for the adopting PR):** an ingest-time hook or a daemon line
+  (`brain docembed backfill --stale`), and a `brain doctor` coverage line (vectors / eligible
+  documents for the active embedder).
+
+Spec items made explicit:
+
+- (a) `EMBEDDING_TARGET_ALLOWLIST` gains `("document_embeddings", "embedding")`, with a test.
+- (b) AC5 at all three call sites: `brain init` on a qwen3-dim DB, `backup.restore`, and the demo
+  (both `ensure_*` calls: the seed and the container bring-up).
+- (c) AC2's "filters still exclude what they excluded" with at least `--source`, `--tag` and the
+  sensitivity lens.
+- (d) AC3, both halves: the hosted fake's received texts never contain a confidential basis, and
+  the confidential row keeps its index when the stage runs.
+- (e) Backfill logs and output carry ids and counts only, never titles, summaries or content
+  (caplog + output assertion with a synthetic marker in all three fields).
+
+## Execution while Docker is down
+
+1. The no-DB work first: settings, `doc_leg_order`, basis, `build_stages`, the gate; mutations
+   M3, M5, M7, M13.
+2. The DB tests are written too and validated by CI's own Postgres; push once the no-DB set,
+   `ruff`, `mypy` and the ceiling check are clean, then iterate on CI.
+3. The DB mutation proofs (M1, M2, M4, M6, M8–M12) and the DoD-17 end-to-end transcript are
+   **owed (Docker down)** and listed so in the PR body, as in #123 and #124.
+
 ## Deviations from the spec
 
 D5, D6 (the exact meaning of "neutral"), D8, D12, D13 and D14 fill in or tighten points the ticket
-leaves open; none changes an acceptance criterion. `search.py` grows by the two alias lines plus
-its docstring hop (the spec counted the two code lines).
+leaves open; none changes an acceptance criterion. Found during implementation:
+
+- **`cli.py` is not net zero.** `init`'s AGE-gated graph call still needs `ensure_embedding_column`,
+  so the import list gains `ensure_relational_embedding_columns` rather than swapping one name for
+  another. It is the file's tenth growth: one import line with its inline note, plus a three-line
+  docstring paragraph (+5), with a ceiling-table hop.
+- **`search.py` grows +6, not +2:** the comment and the alias line, the two blank lines PEP 8 puts
+  around a top-level statement, and the two-line docstring hop (which also promoted RM-24's
+  descriptive hop to `8951620` / 832).
+- **`skills/brain-maintenance/SKILL.md` is not edited:** it is at the house cap of 300 lines
+  (`tests/test_skill_frontmatter.py`), so the command is documented in `docs/cli-reference.md` only,
+  as RM-14a's "only if under its line ceiling" allowed.
+- **AC5's demo bring-up site (`demo.provision`) is checked from its source,** because it starts a
+  Docker container; the demo seed and `restore_backup` are exercised for real
+  (`tests/test_demo_seed.py`, `tests/test_restore_swap.py`).

@@ -119,6 +119,7 @@ def test_shipped_extension_tuple_registers_exactly_the_shipped_sub_apps() -> Non
     assert [name for name, _ in cli_registry.EXTENSION_REGISTRARS] == [
         "watch",
         "dedup",
+        "docembed",
         "tags",
         "ingest-calendar",
         "ingest-github",
@@ -147,6 +148,7 @@ def test_shipped_extension_tuple_registers_exactly_the_shipped_sub_apps() -> Non
         "nnn-group",
         "watch",
         "dedup",
+        "docembed",
         "tags",
         "mcp",
     ]

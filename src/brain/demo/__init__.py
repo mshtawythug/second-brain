@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from brain.db import connect, ensure_embedding_column, run_migrations
+from brain.db import connect, ensure_relational_embedding_columns, run_migrations
 from brain.errors import BrainError, DemoError
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.queries import finalize_embedding_index
@@ -187,7 +187,7 @@ def seed_demo(database_url: str, *, with_embeddings: bool = False) -> SeedReport
     skipped = 0
     with connect(database_url) as conn:
         conn.autocommit = True
-        ensure_embedding_column(conn, embedder)
+        ensure_relational_embedding_columns(conn, embedder)
         for record in corpus:
             result = ingest_document(
                 conn,
@@ -383,7 +383,7 @@ def provision(port: int) -> str:
     with connect(database_url) as conn:
         conn.autocommit = True
         run_migrations(conn)
-        ensure_embedding_column(conn, DemoEmbedder())
+        ensure_relational_embedding_columns(conn, DemoEmbedder())
     return database_url
 
 

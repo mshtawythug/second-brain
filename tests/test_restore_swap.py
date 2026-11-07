@@ -191,6 +191,29 @@ def test_successful_swap_retains_previous_database(
     assert _databases(f"{TEST_DB_NAME}_restore_%") == []
 
 
+def test_restore_reconciles_the_document_vectors_column(
+    test_db: psycopg.Connection,
+    archive: Path,
+    cfg: Config,
+    runner: StubAndRestoreRunner,
+) -> None:
+    """RM-20 AC5: the restored database's document table is sized for the embedder.
+
+    The restored database comes from migrations (``vector(1024)``); the restore's
+    reconcile step must bring it to the active embedder's ``EMBEDDING_DIM``.
+    """
+    report = _restore(archive, cfg, runner)
+
+    assert report.db_restored is True
+    # A fresh connection to the live NAME, which the swap now points at.
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        row = conn.execute(
+            "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+            "WHERE attrelid = 'document_embeddings'::regclass AND attname = 'embedding'"
+        ).fetchone()
+    assert row == (f"vector({EMBEDDING_DIM})",)
+
+
 def test_previous_database_still_holds_the_old_rows(
     test_db: psycopg.Connection,
     archive: Path,

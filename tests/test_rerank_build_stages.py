@@ -12,9 +12,12 @@ from brain.config import ConfigError
 from brain.rerank import RerankStage
 from brain.rerank_backends import LlamaCppReranker, VoyageReranker
 from brain.search_pipeline import build_stages, size_stages
+from tests.conftest import FakeEmbedder
 from tests.search_stages import ReverseStage
 
 LLAMACPP = {"BRAIN_RERANKER": "llamacpp"}
+#: ``build_stages`` binds the document leg to the search's embedder (RM-20).
+_EMBEDDER = FakeEmbedder()
 
 
 def test_a_configured_backend_adds_one_rerank_stage() -> None:
@@ -24,7 +27,8 @@ def test_a_configured_backend_adds_one_rerank_stage() -> None:
             "BRAIN_RERANK_DEPTH": "12",
             "BRAIN_RERANK_MAX_CHARS": "800",
             "BRAIN_RERANK_TIMEOUT_S": "2",
-        }
+        },
+        embedder=_EMBEDDER,
     )
 
     assert isinstance(stage, RerankStage)
@@ -38,29 +42,31 @@ def test_a_configured_backend_adds_one_rerank_stage() -> None:
 
 
 def test_voyage_is_wired_as_a_hosted_backend() -> None:
-    (stage,) = build_stages({"BRAIN_RERANKER": "voyage", "VOYAGE_API_KEY": "pa-synthetic"})
+    (stage,) = build_stages(
+        {"BRAIN_RERANKER": "voyage", "VOYAGE_API_KEY": "pa-synthetic"}, embedder=_EMBEDDER
+    )
     assert isinstance(stage, RerankStage)
     assert isinstance(stage.reranker, VoyageReranker)
     assert stage.reranker.hosted_egress is True
 
 
 def test_no_rerank_drops_a_configured_stage() -> None:
-    assert build_stages(LLAMACPP, rerank=False) == ()
+    assert build_stages(LLAMACPP, embedder=_EMBEDDER, rerank=False) == ()
 
 
 def test_rerank_true_keeps_a_configured_stage() -> None:
-    (stage,) = build_stages(LLAMACPP, rerank=True)
+    (stage,) = build_stages(LLAMACPP, embedder=_EMBEDDER, rerank=True)
     assert isinstance(stage, RerankStage)
 
 
 def test_rerank_true_without_a_backend_is_a_config_error() -> None:
     with pytest.raises(ConfigError, match="BRAIN_RERANKER"):
-        build_stages({}, rerank=True)
+        build_stages({}, embedder=_EMBEDDER, rerank=True)
 
 
 def test_a_bad_knob_is_a_config_error_even_while_off() -> None:
     with pytest.raises(ConfigError, match="BRAIN_RERANK_DEPTH"):
-        build_stages({"BRAIN_RERANK_DEPTH": "500"})
+        build_stages({"BRAIN_RERANK_DEPTH": "500"}, embedder=_EMBEDDER)
 
 
 def test_size_stages_takes_the_deepest_candidate_limit() -> None:

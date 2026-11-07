@@ -17,6 +17,7 @@ from .errors import BrainError
 EMBEDDING_TARGET_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     {
         ("chunks", "embedding"),
+        ("document_embeddings", "embedding"),  # RM-20, the document-leg stage
         ("graph_entities", "embedding"),
         ("graph_communities", "summary_embedding"),
     }

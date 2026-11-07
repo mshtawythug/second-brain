@@ -1500,6 +1500,29 @@ deletes the `$BRAIN_HOME` runtime files (`.env`, `.shims/`, and a legacy
 **Your database and vault are kept by default** — read its `--help` before
 passing anything that widens the blast radius.
 
+## brain docembed
+
+```bash
+brain docembed backfill             # one vector per document that has none
+brain docembed backfill --stale     # also refresh changed or other-embedder vectors
+brain docembed backfill --limit 200 # at most 200 documents this run
+```
+
+Writes the whole-document vectors the document-leg search stage reads
+(`BRAIN_DOC_LEG`, off by default; see
+[docs/configuration.md](configuration.md)). Each vector is made from the
+document's title and summary, or its title and the first 512 tokens of its
+content when it has no summary. `--stale` also re-embeds a document whose text
+changed since its vector was written, or whose vector another embedder or model
+wrote. Re-runnable: a second run with nothing to do embeds nothing.
+
+Output is counts only (`embedded N documents`, `N documents still without a
+vector`), never a title or text. Under a hosted embedder confidential documents
+are skipped and counted, because their text is never sent off-machine. Exit 1
+under `BRAIN_EMBEDDER=none` (no vectors to make), when migration 031 is missing
+(run `brain init`), or when the embedder fails mid-run; the documents already
+embedded are kept, so re-running resumes.
+
 ## brain graphrag remove
 
 ```bash

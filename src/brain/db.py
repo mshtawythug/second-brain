@@ -518,6 +518,40 @@ def _current_embedding_dim(
     return int(formatted[len("vector(") : -1])
 
 
+def _refuse_populated_mismatch(
+    conn: psycopg.Connection, embedder: Embedder, table: str, column: str
+) -> bool:
+    """True when ``<table>.<column>`` must be resized; raise if it holds vectors.
+
+    False when its dim already matches ``embedder.dim``. Read-only, so
+    :func:`ensure_relational_embedding_columns` can check every target first.
+    """
+    validate_embedding_target(table, column)
+    current_dim = _current_embedding_dim(conn, table, column)
+    if current_dim == embedder.dim:
+        return False
+
+    # Count rows that ACTUALLY hold a vector. Rows whose embedding is NULL
+    # (e.g. immediately after migration 002 drops + re-adds the column, or
+    # after `brain reembed` ingest of new docs that haven't been embedded)
+    # contribute no data we'd lose by resizing.
+    populated_sql = sql.SQL(
+        "SELECT count(*) FROM {table} WHERE {column} IS NOT NULL"
+    ).format(table=sql.Identifier(table), column=sql.Identifier(column))
+    row = conn.execute(populated_sql).fetchone()
+    assert row is not None  # count(*) always yields one row
+    populated = int(row[0])
+    if populated > 0:
+        raise BrainError(
+            f"Embedding column {table}.{column} is vector({current_dim}) but "
+            f"BRAIN_EMBEDDER expects vector({embedder.dim}). Switching backends "
+            f"with existing embeddings requires a destructive reset. Run: "
+            f"docker compose down && rm -rf data/postgres && "
+            f"docker compose up -d && brain init && brain reembed"
+        )
+    return True
+
+
 def ensure_embedding_column(
     conn: psycopg.Connection,
     embedder: Embedder,
@@ -549,33 +583,14 @@ def ensure_embedding_column(
       silent; those embeddings would all be invalidated and re-embedding is
       the only correct recovery.
 
-    Called by ``brain init`` after :func:`run_migrations` so ``chunks.embedding``
-    always matches the configured backend before any embeddings are written;
-    the GraphRAG reconcile path uses it for ``graph_entities.embedding``.
+    ``brain init`` reaches it after :func:`run_migrations` through
+    :func:`ensure_relational_embedding_columns`, so ``chunks.embedding`` and
+    ``document_embeddings.embedding`` always match the configured backend before
+    any embeddings are written; the GraphRAG reconcile path uses it for
+    ``graph_entities.embedding``.
     """
-    validate_embedding_target(table, column)
-    current_dim = _current_embedding_dim(conn, table, column)
-    if current_dim == embedder.dim:
+    if not _refuse_populated_mismatch(conn, embedder, table, column):
         return
-
-    # Count rows that ACTUALLY hold a vector. Rows whose embedding is NULL
-    # (e.g. immediately after migration 002 drops + re-adds the column, or
-    # after `brain reembed` ingest of new docs that haven't been embedded)
-    # contribute no data we'd lose by resizing.
-    populated_sql = sql.SQL(
-        "SELECT count(*) FROM {table} WHERE {column} IS NOT NULL"
-    ).format(table=sql.Identifier(table), column=sql.Identifier(column))
-    row = conn.execute(populated_sql).fetchone()
-    assert row is not None  # count(*) always yields one row
-    populated = int(row[0])
-    if populated > 0:
-        raise BrainError(
-            f"Embedding column {table}.{column} is vector({current_dim}) but "
-            f"BRAIN_EMBEDDER expects vector({embedder.dim}). Switching backends "
-            f"with existing embeddings requires a destructive reset. Run: "
-            f"docker compose down && rm -rf data/postgres && "
-            f"docker compose up -d && brain init && brain reembed"
-        )
 
     index_name = embedding_index_name(table, column)
     with conn.transaction():
@@ -598,6 +613,31 @@ def ensure_embedding_column(
                 dim=sql.Literal(embedder.dim),
             )
         )
+
+
+#: The relational embedding columns ``brain init``, ``brain restore`` and the
+#: demo reconcile together (RM-20). The graph column is separate: it exists only
+#: where the image ships Apache AGE, so its call stays gated.
+RELATIONAL_EMBEDDING_TARGETS: tuple[tuple[str, str], ...] = (
+    ("chunks", "embedding"),
+    ("document_embeddings", "embedding"),
+)
+
+
+def ensure_relational_embedding_columns(
+    conn: psycopg.Connection, embedder: Embedder
+) -> None:
+    """Reconcile every :data:`RELATIONAL_EMBEDDING_TARGETS` column with ``embedder.dim``.
+
+    Each column gets :func:`ensure_embedding_column`'s contract (no-op on a
+    match, resize while it holds no vectors, refuse with the destructive-reset
+    hint once it does), in two passes: every target is checked first, so a
+    refusal on one leaves the others untouched rather than half reconciled.
+    """
+    for table, column in RELATIONAL_EMBEDDING_TARGETS:
+        _refuse_populated_mismatch(conn, embedder, table, column)
+    for table, column in RELATIONAL_EMBEDDING_TARGETS:
+        ensure_embedding_column(conn, embedder, table, column)
 
 
 class PersistentConnection:

@@ -34,10 +34,12 @@ to :mod:`brain.search_vector_leg` with the exact-scan fix -- a ranking change,
 eval-measured and re-baselined) -> 819 (``f7882ea``) -> 823 (``128f78f``:
 ``SearchDiagnostics.vector_ms``, the leg's own time, which the revisit trigger
 needs; still net below 826) -> 823 (``c343f5c``, which added that hop; no net
-change) -> 823 (``737247c``, a docstring reworded) -> the RM-24 commit
-(descriptive): ``hybrid_search`` gains ``entity_ids`` / ``entity_tenant``, the
-``--entity`` filter, and forwards them to :func:`build_predicate` and nothing
-else (reasoned inline at the parameters).
+change) -> 823 (``737247c``, a docstring reworded) -> 832 (``8951620``, RM-24):
+``hybrid_search`` gains ``entity_ids`` / ``entity_tenant``, the ``--entity``
+filter, and forwards them to :func:`build_predicate` and nothing else (reasoned
+inline at the parameters) -> the RM-20 commit (descriptive): two public aliases,
+``cached_query_embedding`` and ``embedder_identity``, so the document-leg stage
+reuses this cache and its identity without a second embed (reasoned inline).
 Two earlier changes, both reasoned inline at the
 point of growth: :attr:`SearchResult.recency_ts`, whose read was hoisted OUT of
 the recency-boost branch so a hit's displayed date and its ranking date cannot
@@ -345,6 +347,10 @@ def _query_embed(
     identity = _embedder_identity(embedder)
     _embedder_registry[identity] = embedder
     return list(_cached_query_embed(identity, input_type, text))
+
+
+# Ceiling growth (RM-20): public aliases for brain.search_doc_leg; see the module docstring.
+cached_query_embedding, embedder_identity = _query_embed, _embedder_identity
 
 
 def _finalize_diagnostics(
