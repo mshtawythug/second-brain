@@ -34,6 +34,12 @@ ASK_FAILURES: tuple[type[BaseException], ...] = (
 )
 
 
+#: The one sentence for "Ollama is down", shared with ``brain tags summarize`` (RM-55).
+OLLAMA_UNAVAILABLE = (
+    "Ollama is not available. Start it (for example `brew services start ollama`) and retry."
+)
+
+
 def describe_ask_failure(exc: BaseException) -> str:
     """One fixed, class-only sentence per failure family; never the exception message.
 
@@ -41,10 +47,7 @@ def describe_ask_failure(exc: BaseException) -> str:
     each keeps its own advice.
     """
     if isinstance(exc, OllamaUnavailable):
-        return (
-            "Ollama is not available. Start it (for example `brew services start "
-            "ollama`) and retry."
-        )
+        return OLLAMA_UNAVAILABLE
     if isinstance(exc, OllamaContextOverflow):
         return (
             "the question and the retrieved documents did not fit the chat model's "
