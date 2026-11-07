@@ -561,6 +561,8 @@ def test_a_healthy_run_has_no_notice() -> None:
     report = StageReport(name="rewrite", applied=True, skipped_reason=None, ms=1.0)
     assert rewrite_notice([report]) is None
     assert rewrite_notice([]) is None
+    other = StageReport(name="rerank", applied=False, skipped_reason="RerankError", ms=1.0)
+    assert rewrite_notice([other]) is None
 
 
 def test_the_originals_row_wins_for_a_shared_document() -> None:
