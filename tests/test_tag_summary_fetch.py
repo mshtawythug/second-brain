@@ -1,7 +1,8 @@
 """The one statement that reads a tag's documents for ``brain tags summarize`` (RM-55).
 
 Pinned against the test DB (5434): the F6 lens, the draft filter, recency order, the limit, and
-an exact tag match. Every row is synthetic.
+an exact tag match. ``documents.doc_date`` is GENERATED as ``coalesce(sent_at, ingested_at)``
+(migration 021), so the fixtures set ``sent_at``. Every row is synthetic.
 """
 from __future__ import annotations
 
@@ -22,15 +23,15 @@ def _doc(
     summary: str | None = None,
     sensitivity: str = "normal",
     draft: bool = False,
-    doc_date: datetime | None = None,
+    sent_at: datetime | None = None,
     ingested_at: datetime = datetime(2026, 1, 1, tzinfo=UTC),
 ) -> str:
     row = conn.execute(
         "INSERT INTO documents (title, content, content_hash, content_type, tags, summary,"
-        " sensitivity, draft, doc_date, ingested_at)"
+        " sensitivity, draft, sent_at, ingested_at)"
         " VALUES (%s, %s, %s, 'note', %s, %s, %s, %s, %s, %s) RETURNING id::text",
         (title, f"body {title}", f"hash-{title}", list(tags), summary, sensitivity, draft,
-         doc_date, ingested_at),
+         sent_at, ingested_at),
     ).fetchone()
     assert row is not None
     return str(row[0])
@@ -65,12 +66,12 @@ def test_non_drafts_with_the_tag_are_included(test_db: psycopg.Connection[Any]) 
 
 
 def test_order_is_discovery_date_desc_then_id(test_db: psycopg.Connection[Any]) -> None:
-    _doc(test_db, "old event, new ingest", doc_date=datetime(2025, 1, 1, tzinfo=UTC),
+    _doc(test_db, "old event, new ingest", sent_at=datetime(2025, 1, 1, tzinfo=UTC),
          ingested_at=datetime(2026, 3, 1, tzinfo=UTC))
     _doc(test_db, "undated, mid ingest", ingested_at=datetime(2026, 2, 1, tzinfo=UTC))
-    _doc(test_db, "newest event", doc_date=datetime(2026, 4, 1, tzinfo=UTC))
-    a = _doc(test_db, "tie a", doc_date=datetime(2025, 6, 1, tzinfo=UTC))
-    b = _doc(test_db, "tie b", doc_date=datetime(2025, 6, 1, tzinfo=UTC))
+    _doc(test_db, "newest event", sent_at=datetime(2026, 4, 1, tzinfo=UTC))
+    a = _doc(test_db, "tie a", sent_at=datetime(2025, 6, 1, tzinfo=UTC))
+    b = _doc(test_db, "tie b", sent_at=datetime(2025, 6, 1, tzinfo=UTC))
     tie = ["tie a", "tie b"] if a < b else ["tie b", "tie a"]
     assert _titles(test_db) == [
         "newest event", "undated, mid ingest", *tie, "old event, new ingest"
@@ -79,7 +80,7 @@ def test_order_is_discovery_date_desc_then_id(test_db: psycopg.Connection[Any]) 
 
 def test_limit_caps_the_fetch(test_db: psycopg.Connection[Any]) -> None:
     for day in range(1, 6):
-        _doc(test_db, f"note {day}", doc_date=datetime(2026, 1, day, tzinfo=UTC))
+        _doc(test_db, f"note {day}", sent_at=datetime(2026, 1, day, tzinfo=UTC))
     assert _titles(test_db, limit=2) == ["note 5", "note 4"]
 
 
@@ -92,7 +93,7 @@ def test_other_tags_are_not_matched(test_db: psycopg.Connection[Any]) -> None:
 
 def test_rows_carry_the_summary_and_the_discovery_date(test_db: psycopg.Connection[Any]) -> None:
     when = datetime(2026, 2, 2, tzinfo=UTC)
-    doc_id = _doc(test_db, "with summary", summary="zephyr routine", doc_date=when)
+    doc_id = _doc(test_db, "with summary", summary="zephyr routine", sent_at=when)
     (doc,) = fetch_tag_documents(test_db, "nebula", limit=5, sensitivity=None)
     assert (doc.document_id, doc.summary, doc.date) == (doc_id, "zephyr routine", when)
 

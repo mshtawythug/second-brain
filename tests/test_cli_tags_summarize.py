@@ -76,7 +76,7 @@ def _doc(
 ) -> str:
     row = conn.execute(
         "INSERT INTO documents (title, content, content_hash, content_type, tags, summary,"
-        " sensitivity, doc_date) VALUES (%s, %s, %s, 'note', %s, %s, %s, %s) RETURNING id::text",
+        " sensitivity, sent_at) VALUES (%s, %s, %s, 'note', %s, %s, %s, %s) RETURNING id::text",
         (title, f"body {title}", f"hash-{title}", list(tags), summary, sensitivity,
          datetime(2026, 1, day, tzinfo=UTC)),
     ).fetchone()
