@@ -1,8 +1,10 @@
 """Production ``gws`` subprocess runner conforming to the GwsRunner Protocol.
 
-Every ``gws`` call in the package runs here: Calendar and Contacts refreshes,
+Every ``gws`` read in the package runs here: Calendar and Contacts refreshes,
 ``ingest-calendar``, receipt attachments, and ``ingest-gmail``'s ``messages list`` / ``get``
-(``brain.ingest.gmail._run``, BL-39). It lived in ``brain.vault.derived_links.gws``, which
+(``brain.ingest.gmail._run``, BL-39). The one ``gws`` call that does not is a write:
+``brain.brief_delivery.run_gws`` sends the brief with ``gws gmail +send`` under its own timeout,
+because its argv holds the message body. It lived in ``brain.vault.derived_links.gws``, which
 still re-exports it; it moved to this neutral leaf so an ``ingest`` module can use it without
 importing ``vault``. All expected
 subprocess failures (missing binary, non-zero exit, timeout, unexpected ``OSError``) are routed
@@ -22,6 +24,7 @@ read in chunks and the process group is killed as soon as the cap is passed, at 
 timeout, or on an interrupt, so an oversized answer is refused instead of held in
 memory; stdin is ``/dev/null`` and stderr is discarded.
 """
+import itertools
 import os
 import shutil
 import subprocess
@@ -35,6 +38,15 @@ _STDERR_SNIPPET_LIMIT = 200
 # Default subprocess timeout. ``gws`` calendar / people calls are I/O bound
 # against Google APIs; 30s is generous for a single page.
 _DEFAULT_TIMEOUT_SECONDS = 30
+
+
+def call_label(args: list[str]) -> str:
+    """``args``' words before the first flag, in backticks: ``gws calendar events list``.
+
+    What a message may name of a ``gws`` call. Everything after the first flag (the
+    ``--params`` JSON: a Gmail query, an address, a message id) stays out (BL-39, sec-126 I3).
+    """
+    return f"`{' '.join(itertools.takewhile(lambda word: not word.startswith('--'), args))}`"
 
 
 def real_gws_runner(
@@ -80,7 +92,7 @@ def real_gws_runner(
         ) from exc
     except subprocess.TimeoutExpired as exc:
         raise GwsTimeoutError(
-            f"gws command timed out after {timeout:g}s: {' '.join(args)}",
+            f"{call_label(args)} timed out after {timeout:g}s",
             log_detail=f"timed out after {timeout:g}s",
         ) from exc
     except OSError as exc:
@@ -125,7 +137,7 @@ def _run_capped(args: list[str], *, timeout: float, max_stdout_bytes: int) -> st
         ) from exc
     if run.timed_out:
         raise GwsTimeoutError(
-            f"gws command timed out after {timeout:g}s: {' '.join(args)}",
+            f"{call_label(args)} timed out after {timeout:g}s",
             log_detail=f"timed out after {timeout:g}s",
         )
     if run.oversized:

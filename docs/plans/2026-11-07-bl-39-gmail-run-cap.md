@@ -34,6 +34,29 @@ New tests beyond T1–T9: `tests/test_gmail_timeouts.py` (nodb: the rule's pairs
 `tests/test_cli_ingest_gmail_bl39.py` (the list catch and its ordinary pair are nodb, because they
 end before `connect`; the three CLI stop-rule tests need the database).
 
+## Review round (rev-126, sec-126 at `5626a6ca`)
+
+- **sec F1:** `gws` runs in its own session, so a SIGTERM or the terminal's SIGHUP killed Python
+  and left a hung `gws` running with no timer. `sigterm_as_system_exit` was installed only inside
+  the attachment session. `ingest_gmail` now runs under `sigterm_as_system_exit(also=(SIGHUP,))`
+  for its whole body. The context manager is applied as a decorator: Typer reads the wrapped
+  signature, and this avoids re-indenting a 140-line body. Test:
+  `tests/test_cli_ingest_gmail_signals.py` (nodb, a subprocess per signal, bounded waits). The
+  ordinary run restores both handlers.
+- **sec F2 / rev 2:** `--dry-run` swallowed every timeout as "(unable to fetch)". The subject
+  helper re-raises `GmailTimeoutError`, and the new `_gmail_dry_run_threads` applies
+  `ConsecutiveTimeouts` with the same stop line, "listed K of N thread(s) before stopping", and
+  exit 1. Tests are nodb, because a dry run never connects.
+- **sec I3:** `real_gws_runner`'s timeout message no longer ends in the argv. It is
+  `call_label(args)` plus "timed out after Ns". `call_label` is now public in `brain/gws.py`, and
+  `gmail._run` uses it (DRY). Test: `tests/test_gws_timeout_message.py` (both timeout paths).
+- **rev 1:** `brain/gws.py`'s docstring says "every `gws` read" and names
+  `brief_delivery.run_gws`'s `gws gmail +send`.
+- **Follow-ups:** sec F3 and F4 are BL-43 and BL-44. BL-42 is skipped because the RM-46 plan
+  used that number and then dropped it.
+- `cli_ingest.py` grows to 947. The growth is recorded inline, in the docstring and as a
+  ceiling-table hop, with `a37874b2`/917 promoted.
+
 ## The bug (read from source at `862c5cdc`)
 
 `src/brain/ingest/gmail.py:657` `_run(cmd, runner=None)` is the one shell-out behind

@@ -2,14 +2,15 @@
 
 A separate file because ``tests/test_cli_ingest_gmail.py`` is past 800 lines. The list tests run
 a throwaway ``gws`` script (``tests/gws_stub_fixtures.py``) and fail or finish before the command
-connects, so they are marked ``nodb``. The stop-rule tests ingest, so they need the test
-database; there the module-level ``_run`` is replaced, as in the sibling files. All messages,
-addresses and bodies are synthetic.
+connects, and a ``--dry-run`` never connects, so those are marked ``nodb``. The ingest's
+stop-rule tests need the test database. Both kinds replace the module-level ``_run``, as the
+sibling files do. All messages, addresses and bodies are synthetic.
 """
 from __future__ import annotations
 
 import json
 import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -60,11 +61,14 @@ def test_a_list_that_answers_keeps_its_ordinary_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _list_env(tmp_path, monkeypatch, answering('{"resultSizeEstimate":0}', "{}"))
+    handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
 
     result = CliRunner().invoke(app, ["ingest-gmail", "--from", SYNTH_ADDRESS])
 
     assert result.exit_code == 0, result.output
     assert "found 0 message(s)" in result.output and "no messages matched" in result.output
+    # sec-126 F1: the run converts SIGTERM/SIGHUP while it lasts, and restores them after.
+    assert {s: signal.getsignal(s) for s in handlers} == handlers
 
 
 # --- the stop rule (test database) ---------------------------------------------------------
@@ -97,11 +101,15 @@ def _runner(outcomes: dict[str, GmailError | None], reads: list[str]) -> Any:
 
 def _invoke(
     monkeypatch: pytest.MonkeyPatch,
-    fake_embedder: object,
+    fake_embedder: object | None,
     tmp_path: Path,
     pattern: str,
 ) -> tuple[Any, list[str]]:
-    """Run ``ingest-gmail`` with each thread's read: ``T`` timeout, ``E`` failure, ``R`` returns."""
+    """Run ``ingest-gmail`` with each thread's read: ``T`` timeout, ``E`` failure, ``R`` returns.
+
+    With no ``fake_embedder`` it is a ``--dry-run``, which never connects: the database URL is
+    then the unreachable one.
+    """
     timeout = GmailTimeoutError("`gws gmail users messages get` timed out after 60s")
     failure = GmailError("`gws gmail users messages get` exit 3")
     outcomes = {
@@ -109,11 +117,14 @@ def _invoke(
         for mid, event in zip(MESSAGES, pattern, strict=True)
     }
     reads: list[str] = []
-    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    dry_run = fake_embedder is None
+    monkeypatch.setenv("DATABASE_URL", UNREACHABLE_DATABASE_URL if dry_run else TEST_DATABASE_URL)
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
-    monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: fake_embedder)
+    if not dry_run:
+        monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: fake_embedder)
     monkeypatch.setattr("brain.ingest.gmail._run", _runner(outcomes, reads))
-    return CliRunner().invoke(app, ["ingest-gmail", "--label", "test-label"]), reads
+    args = ["ingest-gmail", "--label", "test-label", *(["--dry-run"] if dry_run else [])]
+    return CliRunner().invoke(app, args), reads
 
 
 def test_three_consecutive_timeouts_stop_the_run_with_the_counts_so_far(
@@ -147,4 +158,58 @@ def test_other_failures_in_a_row_keep_going(
     assert result.exit_code == 0, result.output
     assert STOP_MESSAGE not in result.output
     assert "1 ingested, 0 skipped (unchanged), 4 failed" in result.output
+    assert reads == list(MESSAGES)
+
+
+# --- the stop rule under --dry-run (no database: a dry run never connects) -----------------
+
+
+@pytest.mark.nodb
+def test_three_consecutive_timeouts_stop_a_dry_run_with_the_counts_so_far(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """sec-126 F2: the dry run swallowed every timeout as "(unable to fetch)" and exited 0."""
+    result, reads = _invoke(monkeypatch, None, tmp_path, "RTTTR")
+
+    assert result.exit_code == 1, result.output
+    assert STOP_MESSAGE in result.output
+    assert result.output.count("Subject: (timed out)") == 3
+    assert "listed 4 of 5 thread(s) before stopping" in result.output
+    assert reads == ["m-synth-1", "m-synth-2", "m-synth-3", "m-synth-4"]
+
+
+@pytest.mark.nodb
+def test_a_dry_run_stopped_on_its_last_thread_still_exits_1(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result, reads = _invoke(monkeypatch, None, tmp_path, "RRTTT")
+
+    assert result.exit_code == 1, result.output
+    assert STOP_MESSAGE in result.output
+    assert "listed 5 of 5 thread(s) before stopping" in result.output
+    assert reads == list(MESSAGES)
+
+
+@pytest.mark.nodb
+def test_dry_run_timeouts_broken_up_by_a_returned_read_keep_going(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result, reads = _invoke(monkeypatch, None, tmp_path, "TTRTT")
+
+    assert result.exit_code == 0, result.output
+    assert STOP_MESSAGE not in result.output
+    assert result.output.count("Subject: (timed out)") == 4
+    assert "total: 5 threads, 5 messages" in result.output
+    assert reads == list(MESSAGES)
+
+
+@pytest.mark.nodb
+def test_other_dry_run_failures_still_read_unable_to_fetch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result, reads = _invoke(monkeypatch, None, tmp_path, "EEERE")
+
+    assert result.exit_code == 0, result.output
+    assert STOP_MESSAGE not in result.output
+    assert result.output.count("Subject: (unable to fetch)") == 4
     assert reads == list(MESSAGES)

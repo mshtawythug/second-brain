@@ -115,7 +115,7 @@ def test_a_failing_gws_is_reported_by_exit_code_never_stderr_or_params(
 def test_a_timeout_message_never_carries_the_query(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T6: the runner's own timeout message ends in the full argv; ours must not."""
+    """T6: no part of the ``--params`` reaches the message (the runner's no longer holds it)."""
     gws_on_path(tmp_path, monkeypatch, HUNG)
     _lower(monkeypatch, timeout=0.3)
 

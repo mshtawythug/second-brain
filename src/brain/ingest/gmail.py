@@ -11,7 +11,6 @@ Every call runs through :func:`brain.gws.real_gws_runner` under :data:`GWS_TIMEO
 """
 import base64
 import html
-import itertools
 import json
 import re
 from collections.abc import Callable
@@ -21,7 +20,7 @@ from typing import Any
 
 from brain.config import BOILERPLATE_PATTERNS
 from brain.errors import DirectoryRefreshError, GwsTimeoutError
-from brain.gws import real_gws_runner
+from brain.gws import call_label, real_gws_runner
 
 # Re-using the shared Re/Fwd-prefix helper from vault.slug rather than
 # duplicating the regex — it's marked private (leading underscore) but the
@@ -677,8 +676,7 @@ def _run(cmd: list[str], runner: Runner | None = None) -> str:
     here at call time: no stdin, stderr discarded, and its process group killed at the timeout,
     past the cap or on an interrupt. A failure names the call and the runner's content-free
     ``log_detail``, never the ``--params`` (the query, an address, a message id) or ``gws``'s
-    stderr, and is raised ``from None`` so a traceback cannot print the runner's message (it
-    ends in the argv on a timeout).
+    stderr, and is raised ``from None`` so a traceback prints only this message.
     """
     if runner is not None:
         return runner(cmd)
@@ -687,11 +685,6 @@ def _run(cmd: list[str], runner: Runner | None = None) -> str:
             cmd, timeout=GWS_TIMEOUT_SECONDS, max_stdout_bytes=GWS_MAX_STDOUT_BYTES
         )
     except GwsTimeoutError as exc:
-        raise GmailTimeoutError(f"{_call_label(cmd)} {exc.log_detail}") from None
+        raise GmailTimeoutError(f"{call_label(cmd)} {exc.log_detail}") from None
     except DirectoryRefreshError as exc:
-        raise GmailError(f"{_call_label(cmd)} {exc.log_detail}") from None
-
-
-def _call_label(cmd: list[str]) -> str:
-    """``cmd``'s words before its first flag, in backticks: ``gws gmail users messages get``."""
-    return f"`{' '.join(itertools.takewhile(lambda word: not word.startswith('--'), cmd))}`"
+        raise GmailError(f"{call_label(cmd)} {exc.log_detail}") from None

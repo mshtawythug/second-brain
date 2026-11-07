@@ -28,13 +28,17 @@ git tag scheme:
   timeout and a 48 MiB stdout cap read in chunks. It gets no stdin, its stderr is discarded, and its
   whole process group is killed at the timeout, past the cap or on Ctrl-C. A thread whose read
   fails that way fails alone, and the run continues.
-- Three timeouts in a row stop the run with exit 1, after the counts so far. A failed message list is
-  one line and exit 1, where it was a traceback.
+- Three timeouts in a row stop the run with exit 1, after the counts so far, and the same rule
+  stops `--dry-run`, which lists a timed-out thread as `(timed out)`. A failed message list is one
+  line and exit 1, where it was a traceback.
+- A SIGTERM or SIGHUP (a closed terminal) during the command now kills a hung `gws` with it.
+  `gws` runs in its own session, so before this the signal left it running with no timer.
 - A failure names the call and the reason (`timed out after 60s`, `stdout over … bytes`, `exit N`),
   never `gws`'s stderr or the query, which held the sender address.
 - The runner moved from `brain.vault.derived_links.gws` to the neutral leaf `brain.gws`, which the
   old path re-exports. A timeout is now its subclass `GwsTimeoutError` of `DirectoryRefreshError`,
-  so a Calendar or Contacts refresh WARNING names it `GwsTimeoutError[timed out after …]`.
+  so a Calendar or Contacts refresh WARNING names it `GwsTimeoutError[timed out after …]`. Its
+  message no longer ends in the command's arguments (the `--params` JSON), for every caller.
 
 ### Added — `brain examples`, finding a command by example (RM-53)
 
