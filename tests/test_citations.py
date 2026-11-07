@@ -34,3 +34,26 @@ def test_cited_refs_ignores_zero_and_out_of_range() -> None:
 
 def test_cited_refs_of_text_without_markers_is_empty() -> None:
     assert cited_refs("no markers at all", 5) == ()
+
+
+def test_a_seven_digit_marker_is_stripped_and_not_cited() -> None:
+    assert strip_dangling_citations("a [1234567] b [1]", 2) == "a b [1]"
+    assert cited_refs("a [1234567] b", 2) == ()
+
+
+def test_a_5000_digit_marker_does_not_crash_and_is_stripped() -> None:
+    text = f"claim [{'9' * 5000}] and [2]"
+    assert strip_dangling_citations(text, 2) == "claim and [2]"
+    assert cited_refs(text, 2) == (2,)
+
+
+def test_a_six_digit_marker_is_still_read_as_a_number() -> None:
+    assert strip_dangling_citations("x [000002] y", 2) == "x [000002] y"
+    assert cited_refs("x [000002] y", 2) == (2,)
+
+
+def test_a_marker_in_non_ascii_digits_is_stripped_and_not_cited() -> None:
+    arabic_indic_two = "٢"
+    text = f"x [{arabic_indic_two}] y [1]"
+    assert strip_dangling_citations(text, 2) == "x y [1]"
+    assert cited_refs(text, 2) == (1,)
