@@ -33,6 +33,7 @@ from brain.errors import (
 )
 from brain.mcp_compat import MCPError
 from brain.mcp_tools import tags as tags_tool
+from tests.stepped_clock import SteppedClock
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -395,16 +396,6 @@ def test_summarize_writes_nothing(
     assert summarized.execute("SELECT count(*) FROM interactions").fetchone() == interactions
 
 
-class _Clock:
-    """Answers each reading in turn, then repeats the last one: a bounded, fake clock."""
-
-    def __init__(self, *readings: float) -> None:
-        self._readings = list(readings)
-
-    def __call__(self) -> float:
-        return self._readings.pop(0) if len(self._readings) > 1 else self._readings[0]
-
-
 @pytest.mark.parametrize(
     ("call_timeout_s", "expected"),
     [(5.0, (5.0 - 1.0) / chat.CHAT_ATTEMPTS), (1000.0, 60.0)],
@@ -415,7 +406,7 @@ def test_summarize_chat_gets_the_time_left_after_the_fetch(
 ) -> None:
     capped = dataclasses.replace(mcp_state, call_timeout_s=call_timeout_s)
     monkeypatch.setattr(mcp_server, "_state", capped)
-    monkeypatch.setattr(tags_tool, "_clock", _Clock(100.0, 101.0))  # the fetch takes 1 second
+    monkeypatch.setattr(tags_tool, "_clock", SteppedClock(100.0, 101.0))  # the fetch takes 1 second
     fake = _use(monkeypatch, _FakeChat("Routine [1]."))
 
     tags_tool.brain_tags_summarize("nebula")
@@ -428,7 +419,7 @@ def test_summarize_past_its_deadline_refuses_without_calling_the_chat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(mcp_server, "_state", dataclasses.replace(mcp_state, call_timeout_s=5.0))
-    monkeypatch.setattr(tags_tool, "_clock", _Clock(100.0, 106.0))  # the fetch took 6 seconds
+    monkeypatch.setattr(tags_tool, "_clock", SteppedClock(100.0, 106.0))  # the fetch took 6 seconds
     fake = _use(monkeypatch, _FakeChat("Routine [1]."))
 
     with pytest.raises(MCPError) as excinfo:

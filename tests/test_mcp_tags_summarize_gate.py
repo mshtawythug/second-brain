@@ -24,7 +24,8 @@ from brain.ask_deadline import Deadline
 from brain.errors import EnrichmentError
 from brain.mcp_http_guard import ConfidentialGateMiddleware
 from brain.mcp_tool_classes import READ_ONLY_TOOLS
-from brain.mcp_tools.tags import SummaryDeadlineError, chat_timeout
+from brain.mcp_tools.tags import MIN_CHAT_ATTEMPT_SECONDS, SummaryDeadlineError, chat_timeout
+from tests.stepped_clock import SteppedClock
 
 pytestmark = pytest.mark.nodb
 
@@ -102,33 +103,35 @@ def test_a_default_lens_call_reaches_the_tool_unchanged(arguments: dict[str, Any
 # --- the call deadline (sec-124 LOW-1) --------------------------------------------------------
 
 
-class _Clock:
-    """Answers each reading in turn, then repeats the last one: a bounded, fake clock."""
-
-    def __init__(self, *readings: float) -> None:
-        self._readings = list(readings)
-
-    def __call__(self) -> float:
-        return self._readings.pop(0) if len(self._readings) > 1 else self._readings[0]
-
-
 def test_stdio_has_no_deadline_and_keeps_the_chat_default() -> None:
     assert chat_timeout(60.0, None) is None
 
 
 def test_the_time_left_after_the_fetch_is_split_across_the_attempts() -> None:
-    deadline = Deadline(_Clock(0.0, 1.0), 5.0)  # created at 0; the fetch took 1 second
+    deadline = Deadline(SteppedClock(0.0, 1.0), 5.0)  # created at 0; the fetch took 1 second
     assert chat_timeout(60.0, deadline) == (5.0 - 1.0) / chat.CHAT_ATTEMPTS == 2.0
 
 
 def test_a_generous_call_timeout_is_capped_by_the_enrich_timeout() -> None:
-    assert chat_timeout(60.0, Deadline(_Clock(0.0, 0.5), 1000.0)) == 60.0
+    assert chat_timeout(60.0, Deadline(SteppedClock(0.0, 0.5), 1000.0)) == 60.0
 
 
 @pytest.mark.parametrize("after_fetch", [5.0, 6.0, 1e9])
 def test_no_time_left_refuses_before_any_chat_call(after_fetch: float) -> None:
     with pytest.raises(SummaryDeadlineError):
-        chat_timeout(60.0, Deadline(_Clock(0.0, after_fetch), 5.0))
+        chat_timeout(60.0, Deadline(SteppedClock(0.0, after_fetch), 5.0))
+
+
+def test_a_share_below_the_floor_refuses_rather_than_failing_as_ollama_down() -> None:
+    """1.9 s left is 0.95 s an attempt: too little to answer, and a timeout there would read as
+    "Ollama is not available". It takes the deadline path instead (rev-124 sliver floor)."""
+    assert MIN_CHAT_ATTEMPT_SECONDS == 1.0
+    with pytest.raises(SummaryDeadlineError):
+        chat_timeout(60.0, Deadline(SteppedClock(0.0, 3.1), 5.0))
+
+
+def test_a_share_exactly_at_the_floor_still_reaches_the_chat() -> None:
+    assert chat_timeout(60.0, Deadline(SteppedClock(0.0, 3.0), 5.0)) == MIN_CHAT_ATTEMPT_SECONDS
 
 
 def test_the_split_matches_how_many_attempts_chat_json_makes() -> None:

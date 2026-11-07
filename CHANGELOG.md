@@ -31,7 +31,8 @@ git tag scheme:
 - The MCP twin, `brain_tags_summarize`, leaves confidential documents out of what it sends the
   model unless `include_confidential`. It is read-only and served by `brain mcp serve` (52 tools, 29
   of them read-only). There the chat gets only what is left of `--call-timeout` after the fetch,
-  split across its two attempts, and the tool refuses without calling it once that has run out.
+  split across its two attempts, and the tool refuses without calling it once an attempt would get
+  less than a second.
 - Escape sequences and control characters are removed from the reply and from titles. Ollama down,
   a context overflow and a cut-off reply each give their own fixed sentence (exit 1;
   `INTERNAL_ERROR` over MCP).

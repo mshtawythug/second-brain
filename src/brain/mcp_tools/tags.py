@@ -24,9 +24,11 @@ prompt. The fetch's READ ONLY transaction is over before the chat model runs.
 ``--call-timeout``, but the call keeps its worker, and the chat its Ollama slot, until the tool
 returns. So the deadline starts when the tool does. After the fetch, the chat gets only the time
 left, split across ``chat_json``'s :data:`~brain.chat.CHAT_ATTEMPTS` (each attempt's wait for the
-model gets its share, at most ``enrich_timeout_seconds``). Once no time is left, the tool refuses
-without calling the chat. The fetch itself is not cut short; it runs on the database's own
-timeouts, and a slow one simply leaves the chat less time, or none. On stdio there is no deadline.
+model gets its share, at most ``enrich_timeout_seconds``). Once a share would fall below
+:data:`MIN_CHAT_ATTEMPT_SECONDS`, the tool refuses without calling the chat, because an attempt
+that short would time out and read as "Ollama is not available". The fetch itself is not cut
+short; it runs on the database's own timeouts, and a slow one simply leaves the chat less time, or
+none. On stdio there is no deadline.
 """
 
 from __future__ import annotations
@@ -60,6 +62,9 @@ _CONTEXT = ContextSlot(__name__)
 
 #: The clock the HTTP call deadline is read on. A module global so a test can pass a fake one.
 _clock: Callable[[], float] = time.monotonic
+
+#: The least time one chat attempt is given. Below it the call takes the deadline path instead.
+MIN_CHAT_ATTEMPT_SECONDS = 1.0
 
 #: ``brain_tags_summarize``'s answer once the server's call deadline has passed, as ``brain_ask``'s.
 DEADLINE_PASSED = "brain_tags_summarize passed this server's call deadline"
@@ -131,21 +136,22 @@ def brain_tags_suggest_merges(
 
 
 class SummaryDeadlineError(BrainError):
-    """No time is left on the call deadline to give the chat."""
+    """Too little time is left on the call deadline to give the chat."""
 
 
 def chat_timeout(enrich_timeout_s: float, deadline: Deadline | None) -> float | None:
     """The timeout for each ``chat_json`` attempt, or ``None`` for the chat's default (stdio).
 
     Raises:
-        SummaryDeadlineError: the deadline has been reached or passed.
+        SummaryDeadlineError: an attempt's share of the time left is below
+            :data:`MIN_CHAT_ATTEMPT_SECONDS` (the deadline passed, or nearly has).
     """
     if deadline is None:
         return None
-    left = deadline.remaining()
-    if left <= 0:
-        raise SummaryDeadlineError("the call deadline passed before the chat could run")
-    return min(enrich_timeout_s, left / chat.CHAT_ATTEMPTS)
+    share = deadline.remaining() / chat.CHAT_ATTEMPTS
+    if share < MIN_CHAT_ATTEMPT_SECONDS:
+        raise SummaryDeadlineError("too little of the call deadline is left for the chat")
+    return min(enrich_timeout_s, share)
 
 
 def brain_tags_summarize(
