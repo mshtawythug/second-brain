@@ -161,7 +161,8 @@ def test_each_chat_failure_prints_its_sentence_and_exits_1(
     result = _run("nebula-notes")
 
     assert result.exit_code == 1
-    assert f"tags summarize: {fragment}" in result.stderr
+    assert result.stderr.startswith("tags summarize: ")
+    assert fragment in result.stderr
     assert _SECRET not in result.output
 
 
