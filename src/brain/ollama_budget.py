@@ -66,6 +66,19 @@ NUM_PREDICT_RETRY_FACTOR = 2
 #: bucket synthesis, elicit drafts, brief suggestions).
 CHAT_DEFAULT_NUM_PREDICT = 256
 
+#: ``brain tags summarize`` (RM-55): each document's entry is cut to this many tokens ...
+TAG_SUMMARY_DOC_TOKENS = 120
+
+#: ... the entries together are packed into this many ...
+TAG_SUMMARY_MAX_INPUT_TOKENS = 3000
+
+#: ... the tag itself is cut to this many inside the prompt frame ...
+TAG_SUMMARY_TAG_TOKENS = 32
+
+#: ... and the synthesis may be this long (``ask``'s synthesize budget). Here, not in
+#: ``tag_summary``, because this module defines every number the load-time check reads.
+TAG_SUMMARY_NUM_PREDICT = 512
+
 #: Completion budget for GraphRAG concept extraction — larger than the default
 #: because one chunk can yield a long entity list.
 EXTRACT_NUM_PREDICT = 1024
@@ -170,6 +183,12 @@ def capped_call_budgets(
             input_knob="BRAIN_AUDIO_MAX_INPUT_TOKENS",
             input_tokens=audio_max_input_tokens,
             num_predict=AUDIO_NUM_PREDICT,
+        ),
+        CallBudget(
+            caller="tag summary",
+            input_knob="TAG_SUMMARY_MAX_INPUT_TOKENS",
+            input_tokens=TAG_SUMMARY_MAX_INPUT_TOKENS,
+            num_predict=TAG_SUMMARY_NUM_PREDICT,
         ),
     )
 
