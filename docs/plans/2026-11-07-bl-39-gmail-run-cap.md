@@ -260,7 +260,7 @@ run there, and the copy is deleted afterwards.
 | M | Mutation in `gmail._run` | Must fail |
 |---|---|---|
 | M1 | drop `timeout=` (falls back to 30 s) | T1, T6 (the 20 s stub finishes, then the JSON fails) |
-| M2 | drop `max_stdout_bytes=` (the uncapped `subprocess.run` path) | T2 (returned, not refused); T1 (the grandchild holds the pipe after the kill) |
+| M2 | drop `max_stdout_bytes=` (the uncapped `subprocess.run` path) | T2 (returned, not refused). *Measured:* not T1. On a timeout, Python 3.11's `subprocess.run` kills the child and `wait()`s for it on POSIX, so it does not wait out the grandchild that holds the pipe. T2 alone kills M2. |
 | M3 | restore master's bare `subprocess.run` body | T1, T2, T5, T6, T7 |
 | M4 | `from exc` instead of `from None` | T5 (`__cause__`) |
 | M5 | message built from `str(exc)` instead of `exc.log_detail` | T6 (the address and `--params` appear) |
