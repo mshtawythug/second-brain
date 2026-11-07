@@ -17,13 +17,17 @@ synthesis, or a title.
 **Untrusted text both ways.** Titles and summaries come from email, web pages and chat, and the
 synthesis is model output that has read them. Every one goes through
 :func:`brain.preview_filter.strip_sequences` and :func:`brain.ingest.text_safety.one_line` before it
-reaches the prompt, a terminal or an MCP caller.
+reaches the prompt, a terminal or an MCP caller. Inside the prompt, a stored ``[N]`` becomes
+``(N)`` and a run of three or more double quotes becomes one, so a summary cannot pose as a
+citation or close the fence around the entries. What is echoed back (a cited title, the tag) is cut
+to :data:`TAG_SUMMARY_DISPLAY_CHARS`.
 
 The fetch and the chat call are separate functions so the surfaces can close the database
 connection before the model runs.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -66,6 +70,10 @@ TAG_SUMMARY_LIMIT_CEILING = 50
 #: The synthesis is cut here, at a line or word boundary.
 TAG_SUMMARY_MAX_CHARS = 4000
 
+#: A cited title or the echoed tag is cut here: the 200 that ``search_pick`` and the UI's
+#: ``MAX_TITLE_CHARS`` use for a title.
+TAG_SUMMARY_DISPLAY_CHARS = 200
+
 #: The failures both surfaces map to one fixed sentence. ``EnrichmentError`` covers
 #: ``OllamaUnavailable``, ``OllamaContextOverflow`` and ``ChatOutputTruncated``.
 TAG_SUMMARY_FAILURES: tuple[type[BaseException], ...] = (EnrichmentError,)
@@ -95,6 +103,13 @@ _FETCH_SQL = (
     "ORDER BY coalesce(d.doc_date, d.ingested_at) DESC, d.id "
     "LIMIT %s"
 )
+
+
+#: A bracketed run of digits: what :mod:`brain.citations` would read as (or strip like) a citation.
+_MARKER_RE = re.compile(r"\[(\d+)\]")
+
+#: Three or more double quotes: the template fences the entries with three.
+_QUOTE_RUN_RE = re.compile(r'"{3,}')
 
 
 class TagSummaryInputError(BrainError):
@@ -158,6 +173,16 @@ def clean_field(text: str) -> str:
     return " ".join(one_line(strip_sequences(text)).split())
 
 
+def _display(text: str) -> str:
+    """:func:`clean_field`, cut to :data:`TAG_SUMMARY_DISPLAY_CHARS`."""
+    return clean_field(text)[:TAG_SUMMARY_DISPLAY_CHARS].rstrip()
+
+
+def _prompt_field(text: str) -> str:
+    """:func:`clean_field`; no ``[N]`` to pose as a citation, no quotes to close the fence."""
+    return _QUOTE_RUN_RE.sub('"', _MARKER_RE.sub(r"(\1)", clean_field(text)))
+
+
 def resolve_tag(raw: str) -> str:
     """The canonical tag to look up.
 
@@ -187,8 +212,8 @@ def fetch_tag_documents(
 
 def _entry(ref: int, doc: TagDocument, cost: TokenCost) -> str:
     """``[ref] title: summary`` (or ``[ref] title``), cut to the per-document budget."""
-    title = clean_field(doc.title)
-    summary = clean_field(doc.summary or "")
+    title = _prompt_field(doc.title)
+    summary = _prompt_field(doc.summary or "")
     text = f"[{ref}] {title}: {summary}" if summary else f"[{ref}] {title}"
     return truncate_to_token_budget(text, cost=cost, budget=TAG_SUMMARY_DOC_TOKENS) + "\n"
 
@@ -197,7 +222,7 @@ def build_prompt(tag: str, docs: Sequence[TagDocument], *, cost: TokenCost) -> t
     """The chat prompt and how many of ``docs`` (a prefix, in order) it numbers."""
     entries = [_entry(ref, doc, cost) for ref, doc in enumerate(docs, start=1)]
     packed = pack_greedy(entries, cost=cost, budget=TAG_SUMMARY_MAX_INPUT_TOKENS)
-    shown = truncate_to_token_budget(clean_field(tag), cost=cost, budget=TAG_SUMMARY_TAG_TOKENS)
+    shown = truncate_to_token_budget(_prompt_field(tag), cost=cost, budget=TAG_SUMMARY_TAG_TOKENS)
     prompt = _PROMPT.format(tag=shown, entries="".join(entries[i] for i in packed.indices))
     return prompt, len(packed.indices)
 
@@ -246,7 +271,7 @@ def synthesize(
         EnrichmentError: from the chat call, or a malformed reply (see
             :data:`TAG_SUMMARY_FAILURES`).
     """
-    shown = clean_field(tag)
+    shown = _display(tag)
     if not docs:
         return TagSummary(tag=shown, summary="", citations=(), considered=0, dropped=0)
     prompt, packed = build_prompt(tag, docs, cost=cost)
@@ -259,7 +284,7 @@ def synthesize(
         TagCitation(
             ref=ref,
             document_id=docs[ref - 1].document_id,
-            title=clean_field(docs[ref - 1].title),
+            title=_display(docs[ref - 1].title),
             date=docs[ref - 1].date,
         )
         for ref in cited_refs(text, packed)
