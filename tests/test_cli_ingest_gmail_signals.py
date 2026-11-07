@@ -7,7 +7,8 @@ reaches it, and the timer that would kill it dies with Python. Only the command'
 Each test runs ``brain ingest-gmail`` as a subprocess against a throwaway ``gws`` stub that
 records its pid and hangs (``tests/gws_stub_fixtures.py``). The list call hangs before the
 command connects (the database URL is unreachable), so the file is ``nodb``. Every wait is
-bounded; the stub's group is SIGKILLed in ``finally`` whatever happens.
+bounded (``tests.thread_wait.wait_for``'s backstop, and the process waits' own timeouts); the
+stub's group is SIGKILLed in ``finally`` whatever happens.
 """
 from __future__ import annotations
 
@@ -16,27 +17,14 @@ import os
 import signal
 import subprocess
 import sys
-import time
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from tests.gws_stub_fixtures import FAST_SECONDS, HUNG, SYNTH_ADDRESS
+from tests.thread_wait import wait_for
 
 pytestmark = pytest.mark.nodb
-
-_POLL_SECONDS = 0.05
-
-
-def _wait_for(predicate: Callable[[], object], what: str) -> None:
-    deadline = time.monotonic() + FAST_SECONDS
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(_POLL_SECONDS)
-    raise AssertionError(f"timed out waiting for {what}")
-
 
 def _group_has_live_members(pgid: int) -> bool:
     try:
@@ -71,14 +59,14 @@ def test_a_signal_during_a_hung_list_kills_the_gws_group(
     )
     pgid = None
     try:
-        _wait_for(lambda: pidfile.exists() and pidfile.read_text().strip(), "the stub to start")
+        wait_for(lambda: pidfile.exists() and pidfile.read_text().strip())  # the stub started
         pgid = int(pidfile.read_text().strip())  # its own session: the pid is the group id
 
         proc.send_signal(signum)
         returncode = proc.wait(timeout=FAST_SECONDS)
 
         assert returncode == 128 + signum, f"brain died of the signal itself ({returncode})"
-        _wait_for(lambda: not _group_has_live_members(pgid), "the gws group to be killed")
+        wait_for(lambda: not _group_has_live_members(pgid))  # the gws group was killed
     finally:
         if pgid is not None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
