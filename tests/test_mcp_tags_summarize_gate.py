@@ -1,20 +1,30 @@
-"""Over HTTP without ``--include-confidential``, brain_tags_summarize keeps its lens (RM-55).
+"""brain_tags_summarize over HTTP: it keeps its lens, and it stops at the call deadline (RM-55).
 
-The confidential gate refuses the argument before the tool runs, so the hosted caller gets the
-default lens (``"normal"``), which keeps confidential summaries out of the prompt. That half is
-pinned against the test DB in ``tests/test_mcp_tools_tags.py``. Pure ASGI here: no SDK, no socket,
-no database.
+Without ``--include-confidential`` the confidential gate refuses the argument before the tool runs,
+so the hosted caller gets the default lens (``"normal"``), which keeps confidential summaries out
+of the prompt. That half is pinned against the test DB in ``tests/test_mcp_tools_tags.py``.
+
+The HTTP guard answers 504 at ``--call-timeout`` but the call keeps its worker (and its Ollama
+slot) until the tool returns (sec-124 LOW-1). So the tool's chat gets only the time left after the
+fetch, split across ``chat_json``'s attempts, and none at all once the deadline has passed.
+
+No SDK, no socket, no database, no real clock.
 """
 from __future__ import annotations
 
 import json
 from typing import Any
 
+import httpx
 import pytest
 from starlette.testclient import TestClient
 
+from brain import chat
+from brain.ask_deadline import Deadline
+from brain.errors import EnrichmentError
 from brain.mcp_http_guard import ConfidentialGateMiddleware
 from brain.mcp_tool_classes import READ_ONLY_TOOLS
+from brain.mcp_tools.tags import SummaryDeadlineError, chat_timeout
 
 pytestmark = pytest.mark.nodb
 
@@ -87,3 +97,51 @@ def test_a_default_lens_call_reaches_the_tool_unchanged(arguments: dict[str, Any
     _post(app, body)
 
     assert app.bodies == [body]
+
+
+# --- the call deadline (sec-124 LOW-1) --------------------------------------------------------
+
+
+class _Clock:
+    """Answers each reading in turn, then repeats the last one: a bounded, fake clock."""
+
+    def __init__(self, *readings: float) -> None:
+        self._readings = list(readings)
+
+    def __call__(self) -> float:
+        return self._readings.pop(0) if len(self._readings) > 1 else self._readings[0]
+
+
+def test_stdio_has_no_deadline_and_keeps_the_chat_default() -> None:
+    assert chat_timeout(60.0, None) is None
+
+
+def test_the_time_left_after_the_fetch_is_split_across_the_attempts() -> None:
+    deadline = Deadline(_Clock(0.0, 1.0), 5.0)  # created at 0; the fetch took 1 second
+    assert chat_timeout(60.0, deadline) == (5.0 - 1.0) / chat.CHAT_ATTEMPTS == 2.0
+
+
+def test_a_generous_call_timeout_is_capped_by_the_enrich_timeout() -> None:
+    assert chat_timeout(60.0, Deadline(_Clock(0.0, 0.5), 1000.0)) == 60.0
+
+
+@pytest.mark.parametrize("after_fetch", [5.0, 6.0, 1e9])
+def test_no_time_left_refuses_before_any_chat_call(after_fetch: float) -> None:
+    with pytest.raises(SummaryDeadlineError):
+        chat_timeout(60.0, Deadline(_Clock(0.0, after_fetch), 5.0))
+
+
+def test_the_split_matches_how_many_attempts_chat_json_makes() -> None:
+    calls: list[httpx.Request] = []
+
+    def malformed(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"message": {"content": "not json"}, "done": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(malformed), base_url="http://x")
+    with pytest.raises(EnrichmentError):
+        chat.chat_json_with_client(
+            client, model="m", messages=[{"role": "user", "content": "q"}],
+            required_keys=("summary",), keep_alive="0", num_ctx=8192,
+        )
+    assert len(calls) == chat.CHAT_ATTEMPTS == 2

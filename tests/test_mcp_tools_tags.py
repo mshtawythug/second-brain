@@ -395,18 +395,48 @@ def test_summarize_writes_nothing(
     assert summarized.execute("SELECT count(*) FROM interactions").fetchone() == interactions
 
 
-@pytest.mark.parametrize(("call_timeout_s", "expected"), [(5.0, 5.0), (1000.0, 60.0)])
-def test_summarize_timeout_is_capped_by_call_timeout(
+class _Clock:
+    """Answers each reading in turn, then repeats the last one: a bounded, fake clock."""
+
+    def __init__(self, *readings: float) -> None:
+        self._readings = list(readings)
+
+    def __call__(self) -> float:
+        return self._readings.pop(0) if len(self._readings) > 1 else self._readings[0]
+
+
+@pytest.mark.parametrize(
+    ("call_timeout_s", "expected"),
+    [(5.0, (5.0 - 1.0) / chat.CHAT_ATTEMPTS), (1000.0, 60.0)],
+)
+def test_summarize_chat_gets_the_time_left_after_the_fetch(
     mcp_state: mcp_server._State, summarized: psycopg.Connection[Any],
     monkeypatch: pytest.MonkeyPatch, call_timeout_s: float, expected: float,
 ) -> None:
     capped = dataclasses.replace(mcp_state, call_timeout_s=call_timeout_s)
     monkeypatch.setattr(mcp_server, "_state", capped)
+    monkeypatch.setattr(tags_tool, "_clock", _Clock(100.0, 101.0))  # the fetch takes 1 second
     fake = _use(monkeypatch, _FakeChat("Routine [1]."))
 
     tags_tool.brain_tags_summarize("nebula")
 
     assert fake.kwargs[0]["timeout"] == expected
+
+
+def test_summarize_past_its_deadline_refuses_without_calling_the_chat(
+    mcp_state: mcp_server._State, summarized: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mcp_server, "_state", dataclasses.replace(mcp_state, call_timeout_s=5.0))
+    monkeypatch.setattr(tags_tool, "_clock", _Clock(100.0, 106.0))  # the fetch took 6 seconds
+    fake = _use(monkeypatch, _FakeChat("Routine [1]."))
+
+    with pytest.raises(MCPError) as excinfo:
+        tags_tool.brain_tags_summarize("nebula")
+
+    assert excinfo.value.error.code == INTERNAL_ERROR  # type: ignore[attr-defined]
+    assert tags_tool.DEADLINE_PASSED in str(excinfo.value)
+    assert fake.prompts == []
 
 
 def test_summarize_without_a_call_timeout_keeps_the_chat_default(

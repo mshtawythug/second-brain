@@ -18,13 +18,21 @@ suggestions are all computed over the visible tier only.
 **``brain_tags_summarize`` lenses its INPUT** (RM-55). A document's summary is derived from its body
 and the synthesis comes back as prose derived from the summaries, so redacting the output could
 never be enough: the lens is in the fetch predicate, and a confidential summary never reaches the
-prompt. The fetch's READ ONLY transaction is over before the chat model runs, and over HTTP the
-chat timeout is capped at the server's ``--call-timeout``.
+prompt. The fetch's READ ONLY transaction is over before the chat model runs.
+
+**Over HTTP it stops at the call deadline** (sec-124 LOW-1). The guard answers 504 at
+``--call-timeout``, but the call keeps its worker, and the chat its Ollama slot, until the tool
+returns. So the deadline starts when the tool does. After the fetch, the chat gets only the time
+left, split across ``chat_json``'s :data:`~brain.chat.CHAT_ATTEMPTS` (each attempt's wait for the
+model gets its share, at most ``enrich_timeout_seconds``). Once no time is left, the tool refuses
+without calling the chat. The fetch itself is not cut short; it runs on the database's own
+timeouts, and a slow one simply leaves the chat less time, or none. On stdio there is no deadline.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -32,6 +40,8 @@ import psycopg
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
 from .. import chat
+from ..ask_deadline import Deadline
+from ..errors import BrainError
 from ..mcp_compat import MCPServerProtocol
 from ..tag_mapping import read_document_tags, suggest_merges, tag_counts
 from ..tag_summary import (
@@ -47,6 +57,12 @@ from ..tag_summary import (
 from ._context import ContextSlot, ToolContext
 
 _CONTEXT = ContextSlot(__name__)
+
+#: The clock the HTTP call deadline is read on. A module global so a test can pass a fake one.
+_clock: Callable[[], float] = time.monotonic
+
+#: ``brain_tags_summarize``'s answer once the server's call deadline has passed, as ``brain_ask``'s.
+DEADLINE_PASSED = "brain_tags_summarize passed this server's call deadline"
 
 #: ``brain_tags_list``'s default and ceiling for ``limit``.
 LIST_LIMIT_DEFAULT = 200
@@ -114,10 +130,22 @@ def brain_tags_suggest_merges(
     return {"suggestions": [s.to_json() for s in suggest_merges(doc_tags, limit=limit)]}
 
 
-def _chat_timeout(state: Any) -> float | None:
-    """The chat timeout for one call: the server's ``--call-timeout`` when it is lower (HTTP)."""
-    cap: float | None = state.call_timeout_s
-    return None if cap is None else min(state.cfg.enrich_timeout_seconds, cap)
+class SummaryDeadlineError(BrainError):
+    """No time is left on the call deadline to give the chat."""
+
+
+def chat_timeout(enrich_timeout_s: float, deadline: Deadline | None) -> float | None:
+    """The timeout for each ``chat_json`` attempt, or ``None`` for the chat's default (stdio).
+
+    Raises:
+        SummaryDeadlineError: the deadline has been reached or passed.
+    """
+    if deadline is None:
+        return None
+    left = deadline.remaining()
+    if left <= 0:
+        raise SummaryDeadlineError("the call deadline passed before the chat could run")
+    return min(enrich_timeout_s, left / chat.CHAT_ATTEMPTS)
 
 
 def brain_tags_summarize(
@@ -140,11 +168,17 @@ def brain_tags_summarize(
     except TagSummaryInputError as exc:
         raise ctx.error(INVALID_PARAMS, str(exc)) from exc
     state = ctx.get_state()
+    cap: float | None = state.call_timeout_s
+    deadline = None if cap is None else Deadline(_clock, cap)
     with _read_only(ctx, state) as conn:
         docs = fetch_tag_documents(
             conn, canonical, limit=limit, sensitivity=ctx.confidential_lens(include_confidential)
         )
     # The transaction is over (a per-call connection closed) before the model runs.
+    try:
+        timeout = chat_timeout(state.cfg.enrich_timeout_seconds, deadline)
+    except SummaryDeadlineError:
+        raise ctx.error(INTERNAL_ERROR, DEADLINE_PASSED) from None
     try:
         result = synthesize(
             canonical,
@@ -152,7 +186,7 @@ def brain_tags_summarize(
             chat=chat.chat_json,
             cfg=state.cfg,
             cost=state.embedder.count_tokens,
-            timeout=_chat_timeout(state),
+            timeout=timeout,
         )
     except TAG_SUMMARY_FAILURES as exc:
         raise ctx.error(INTERNAL_ERROR, describe_tag_summary_failure(exc)) from exc
