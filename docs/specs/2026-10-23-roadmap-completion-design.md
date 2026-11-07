@@ -3674,7 +3674,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-52 | `brain search --pick` | XS | 9 | RM-09 | TODO |
 | RM-53 | `brain examples` | XS | 9 | RM-06 | TODO |
 | RM-54 | Opt-in `--rewrite` | S | 9 | RM-09 | TODO |
-| RM-55 | Summarize a tag | S | 9 | RM-21, RM-02 | TODO |
+| RM-55 | Summarize a tag | S | 9 | RM-21, RM-02 | DONE (#124) |
 | RM-56 | MCP twin of `brain eval` (trigger-gated) | S | 9 | RM-06 | TODO |
 | RM-57 | `--tier` filter (trigger-gated) | XS | 9 | — | TODO |
 | RM-58 | Prune `interactions` (trigger-gated) | S | 9 | RM-22a, RM-06 | TODO |
