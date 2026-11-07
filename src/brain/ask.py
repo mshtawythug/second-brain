@@ -14,7 +14,6 @@ head-only truncation policy so no transcript/email body is sent to the LLM.
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -24,6 +23,7 @@ import psycopg
 
 from .ask_history import AskTurn, cap_history, history_block
 from .chat import coerce_bool
+from .citations import cited_refs, strip_dangling_citations
 from .search import SearchResult, hybrid_search
 from .search_fallback import SearchFallback, fallback_json
 from .search_pipeline import PipelineResult, run_search
@@ -61,14 +61,6 @@ _MAX_FOLLOW_UPS = 2
 _REFLECT_SNIPPET_CHARS = 120
 # Snippet truncation for the synthesize step (privacy / context-window safety).
 _SYNTH_SNIPPET_CHARS = 400
-
-# Matches a ``[N]`` citation marker (1+ digits) in a synthesized answer.
-_CITATION_RE = re.compile(r"\[(\d+)\]")
-
-# Matches a ``[N]`` marker plus any leading whitespace, for sanitizing dangling
-# (out-of-range) markers out of the final answer text — the marker AND the space
-# that precedes it are removed so " foo [99] bar" collapses cleanly to "foo bar".
-_MARKER_WITH_LEAD_RE = re.compile(r"\s*\[(\d+)\]")
 
 
 #: Called with ``("plan" | "retrieve" | "reflect" | "synthesize", iteration)`` before
@@ -307,23 +299,10 @@ def _call_synthesize_step(
 # ---------------------------------------------------------------------------
 
 
-def _sanitize_answer(answer: str, doc_count: int) -> str:
-    """Strip out-of-range ``[N]`` markers from the answer text.
-
-    Citation integrity: a marker whose number has no backing source (``N`` >
-    ``doc_count`` or ``N`` < 1) is a dangling citation. Removing it — along with
-    its leading whitespace — keeps the displayed/returned answer free of
-    references that resolve to nothing, while valid in-range markers are kept
-    verbatim so :func:`_build_citations` still maps them.
-    """
-
-    def _replace(match: re.Match[str]) -> str:
-        ref = int(match.group(1))
-        if 1 <= ref <= doc_count:
-            return match.group(0)  # keep the valid marker (and its lead space)
-        return ""
-
-    return _MARKER_WITH_LEAD_RE.sub(_replace, answer).strip()
+#: Strip out-of-range ``[N]`` markers from the answer text (citation integrity). The rule lives
+#: in :mod:`brain.citations`, shared with ``brain tags summarize`` (RM-55); the old name stays
+#: because ``tests/test_ask.py`` and the UI wire-contract notes name it.
+_sanitize_answer = strip_dangling_citations
 
 
 def _build_citations(answer: str, docs: list[SearchResult]) -> list[Citation]:
@@ -335,26 +314,16 @@ def _build_citations(answer: str, docs: list[SearchResult]) -> list[Citation]:
     hallucinated marker (out of range) is silently dropped, never emitted as a
     citation (citation integrity).
     """
-    citations: list[Citation] = []
-    seen: set[int] = set()
-    for match in _CITATION_RE.finditer(answer):
-        ref = int(match.group(1))
-        if ref in seen:
-            continue
-        if ref < 1 or ref > len(docs):
-            continue
-        seen.add(ref)
-        doc = docs[ref - 1]
-        citations.append(
-            Citation(
-                ref=ref,
-                document_id=doc.document_id,
-                title=doc.title,
-                source_kind=doc.source_kind,
-                snippet=_truncate(doc.snippet, _SYNTH_SNIPPET_CHARS),
-            )
+    return [
+        Citation(
+            ref=ref,
+            document_id=docs[ref - 1].document_id,
+            title=docs[ref - 1].title,
+            source_kind=docs[ref - 1].source_kind,
+            snippet=_truncate(docs[ref - 1].snippet, _SYNTH_SNIPPET_CHARS),
         )
-    return citations
+        for ref in cited_refs(answer, len(docs))
+    ]
 
 
 # ---------------------------------------------------------------------------
