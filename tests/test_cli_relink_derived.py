@@ -9,7 +9,7 @@ These tests run through Typer's ``CliRunner`` against the real Postgres
 test DB (per ``conftest.test_db``). The ``gws`` shell-out is neutralized
 in two complementary ways:
 
-* ``mocker.patch("brain.vault.derived_links.gws.shutil.which", …)`` makes
+* ``mocker.patch("brain.gws.shutil.which", …)`` makes
   the production ``real_gws_runner`` raise ``DirectoryRefreshError`` on
   every call — ``refresh_calendar`` / ``refresh_contacts`` already catch
   that and downgrade it to a soft warning, so the directory rescan and
@@ -174,7 +174,7 @@ def _stub_gws(mocker: MockerFixture) -> None:
     ``mocker.patch`` is a managed test double with auto-cleanup (CLAUDE.md
     rule 13 explicitly allows this pattern).
     """
-    mocker.patch("brain.vault.derived_links.gws.shutil.which", return_value=None)
+    mocker.patch("brain.gws.shutil.which", return_value=None)
 
 
 def test_relink_derived_runs_on_empty_corpus(

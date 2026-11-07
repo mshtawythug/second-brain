@@ -36,6 +36,10 @@ and the wiring are here (reasoned inline at the ``DirSync`` start).
 thread); the rules are in :mod:`brain.cli_gmail_attachments`, and only the option and the
 calls are here (reasoned inline at the option).
 
+**BL-39 grew it:** ``ingest_gmail`` turns a failed ``list_messages`` into one class-only line and
+exit 1, and stops after three ``gws`` timeouts in a row (:mod:`brain.ingest.gmail_timeouts`);
+only the catch and the calls are here (reasoned inline at both).
+
 That this module cannot import from ``cli`` -- the cycle described above -- is
 exactly why the kind set now lives in :mod:`brain.source_kinds` rather than in
 either file.
@@ -64,6 +68,7 @@ from .ingest import gmail as gmail_ingest
 from .ingest.dispatch import default_sensitivity, extract_path, supported_extensions
 from .ingest.gmail import GmailError
 from .ingest.gmail_brief_skip import read_thread_messages
+from .ingest.gmail_timeouts import STOP_MESSAGE, ConsecutiveTimeouts
 from .ingest.outcome import IngestOutcome, classify
 from .ingest.stdin import make_doc as _stdin_make_doc
 from .queries import (
@@ -583,14 +588,18 @@ def ingest_gmail(
 
     cfg = Config.load()
     attachments = gmail_attachments.AttachmentPass(with_attachments, vault_root=cfg.vault_path)
-    stubs = gmail_ingest.list_messages(
-        query=query,
-        label=label,
-        since=since,
-        until=until,
-        from_addr=from_addr,
-        max_results=max_results,
-    )
+    try:
+        stubs = gmail_ingest.list_messages(
+            query=query,
+            label=label,
+            since=since,
+            until=until,
+            from_addr=from_addr,
+            max_results=max_results,
+        )
+    except GmailError as e:  # BL-39: a timeout now raises here; a line and exit 1, no traceback
+        typer.secho(f"ingest-gmail: could not list messages: {e}", fg="red", err=True)
+        raise typer.Exit(code=1) from None
     typer.echo(f"found {len(stubs)} message(s)")
     if not stubs:
         typer.echo("no messages matched")
@@ -631,11 +640,13 @@ def ingest_gmail(
     ingested_draft = 0
     skipped = 0
     failed = 0
+    timeouts = ConsecutiveTimeouts()
     with connect(cfg.database_url) as conn, attachments.session():
         conn.autocommit = True
         for tid, ts in threads.items():
             try:
                 messages = read_thread_messages(ts, owner=cfg.user_email)
+                timeouts.read_returned()
                 if not messages:  # RM-16: only the owner's own delivered briefs; never ingested
                     continue
                 doc = attachments.augment(conn, tid, messages)
@@ -702,6 +713,9 @@ def ingest_gmail(
                     fg="red",
                 )
                 failed += 1
+                if timeouts.failed(e):  # BL-39: a gws that keeps timing out costs 60 s a thread
+                    typer.secho(STOP_MESSAGE, fg="red", err=True)
+                    break
                 continue
     draft_note = f" ({ingested_draft} draft)" if ingested_draft else ""
     typer.echo(
@@ -709,6 +723,8 @@ def ingest_gmail(
         f"{failed} failed"
     )
     attachments.report()
+    if timeouts.tripped:
+        raise typer.Exit(code=1)
 
 
 def _gmail_thread_subject_for_dry_run(stubs: list[dict[str, Any]], *, owner: str | None) -> str:

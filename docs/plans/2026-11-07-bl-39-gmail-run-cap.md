@@ -6,6 +6,34 @@ Backlog row: BL-39 in `docs/plans/2026-10-23-backlog-reconciliation.md` (MEDIUM;
 RM-45 plan, D2, PR #117). Base: `second-brain/master` at `862c5cdc`. Branch
 `fix/bl-39-gmail-run-cap`.
 
+## Rulings (team-lead, 2026-11-07): approved, with changes
+
+These override the decisions below where they differ.
+
+- **D1:** reuse `real_gws_runner`, but an ingest module must not import `vault`. The runner lived
+  in `vault/derived_links/gws.py`, so it moved to the neutral leaf `src/brain/gws.py` (`git mv`),
+  and the old module re-exports it. `DirectoryRefreshError` already lived in the neutral
+  `brain/errors.py`. Tests that patched `brain.vault.derived_links.gws.shutil.which` /
+  `.subprocess.run` now patch `brain.gws.…`, the module the code lives in. A re-export module
+  importing `shutil` just to keep a patch string resolving would be dead code.
+- **D3:** 48 MiB, with the 25 MB × 4/3 evidence beside the constant.
+- **D5:** per-thread failure stays, plus a breaker: three CONSECUTIVE timeouts (timeouts only)
+  stop the run with one class-only line and exit 1, after the counts so far. To tell a timeout
+  apart without matching message text, `real_gws_runner` raises `brain.errors.GwsTimeoutError`
+  (a `DirectoryRefreshError` subclass, so every existing catch holds), and `gmail._run`
+  translates it to `GmailTimeoutError` (a `GmailError` subclass). The rule is the leaf
+  `src/brain/ingest/gmail_timeouts.py` (`ConsecutiveTimeouts`); a read that returned, or another
+  failure, resets the count. The dry-run report's per-thread reads are not covered (it is a
+  separate helper that swallows each failure); that is recorded as a residual.
+- **D8:** include the catch in `cli_ingest.py`: a failed `list_messages` is one class-only line and
+  exit 1. That growth and the breaker's calls are recorded inline, in the module docstring, and as
+  a `docs/ceiling-table.md` hop (with RM-45's descriptive hop promoted to `120ffc9c`).
+- D2, D4, D6, D7, D9: as written. `"brain.gws"` also joins `ENTRY_MODULES`.
+
+New tests beyond T1–T9: `tests/test_gmail_timeouts.py` (nodb: the rule's pairs) and
+`tests/test_cli_ingest_gmail_bl39.py` (the list catch and its ordinary pair are nodb, because they
+end before `connect`; the three CLI stop-rule tests need the database).
+
 ## The bug (read from source at `862c5cdc`)
 
 `src/brain/ingest/gmail.py:657` `_run(cmd, runner=None)` is the one shell-out behind

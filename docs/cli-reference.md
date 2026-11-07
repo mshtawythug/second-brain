@@ -732,6 +732,14 @@ Dates passed to `--since` / `--until` are converted into Gmail `after:` /
 `before:` query terms, so use Gmail's `YYYY/MM/DD` shape. Raw `--query` is
 passed through and can use any Gmail search syntax.
 
+Each `gws` call has a 60 s timeout and a 48 MiB answer cap (BL-39). A thread
+whose read times out or is too large fails with a one-line reason and the run
+goes on, but after three timeouts in a row the run stops with exit 1, once it
+has printed the counts so far. A failed message list exits 1 with one line. The
+line names the call and the reason (`timed out after 60s`, `stdout over …
+bytes`, `exit N`), never your query or `gws`'s own error text: run `gws`
+directly to see that.
+
 ### Receipts: `--with-attachments` (RM-45)
 
 `--with-attachments` also reads each thread's PDF, PNG and JPEG attachments and

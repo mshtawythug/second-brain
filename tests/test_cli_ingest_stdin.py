@@ -614,7 +614,7 @@ def test_cli_krisp_ingest_threads_real_runner(
     # Force the real runner's PATH check to fail → DirectoryRefreshError
     # which the refresh helpers catch → soft warning, ingest continues.
     monkeypatch.setattr(
-        "brain.vault.derived_links.gws.shutil.which", lambda _: None
+        "brain.gws.shutil.which", lambda _: None
     )
 
     result = CliRunner().invoke(
