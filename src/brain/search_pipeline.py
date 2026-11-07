@@ -6,9 +6,13 @@ search through :func:`run_search`. It composes, in one order, what used to be
 wired per surface: the search itself (``hybrid_search`` or a surface's patch
 point), the text-only fallback (:mod:`brain.search_fallback`), and the ranking
 STAGES a later ticket adds (a reranker, RM-14a; a document leg, RM-20;
-engagement, RM-22b; a query rewrite, RM-54). A new stage is wired once, in
-:func:`build_stages`, and reaches every surface. No stage edits the ranking code
-in :mod:`brain.search`.
+engagement, RM-22b). A new stage is wired once, in :func:`build_stages`, and
+reaches every surface. No stage edits the ranking code in :mod:`brain.search`.
+
+The opt-in query rewrite (RM-54) is not a stage: a stage sees rows and cannot
+search, and a stage would reach every surface when only the CLI asks for it. It
+is the ``rewriter`` argument of :func:`run_search`, and it still reports through
+a :class:`StageReport`.
 
 Stages see :class:`~brain.search.SearchResult` rows, not chunks (RM-09.D1): a
 stage that needs chunk text reads the snippet, which already carries
@@ -37,6 +41,16 @@ import psycopg
 
 from .errors import describe_failure
 from .ingest import Embedder
+from .query_rewrite import (
+    NO_USABLE_PARAPHRASES,
+    REWRITE_FETCH_FACTOR,
+    REWRITE_STAGE_NAME,
+    FusedDocs,
+    QueryRanking,
+    Rewriter,
+    clean_paraphrases,
+    fuse_rankings,
+)
 from .search import SearchResult
 from .search_fallback import (
     SearchFallback,
@@ -46,6 +60,12 @@ from .search_fallback import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Search kwargs only the original query gets. Everything else, every filter included, goes to
+#: each paraphrase too: a denylist, so a filter added later cannot be missed and widen a
+#: paraphrase's set. A paraphrase writing to the holder would corrupt what ``brain gaps`` and the
+#: footer read.
+_ORIGINAL_ONLY_KWARGS = frozenset({"diagnostics", "total_count"})
 
 
 @dataclass(frozen=True)
@@ -102,11 +122,16 @@ class SearchStage(Protocol):
 
 @dataclass(frozen=True)
 class PipelineResult:
-    """A search's rows, the fallback that produced them, and each stage's report."""
+    """A search's rows, the fallback that produced them, and each stage's report.
+
+    ``fused`` is each query's part in the ranking, only when a rewriter was passed (RM-54).
+    :func:`pipeline_json` does not read it, so MCP and ``brain ui`` payloads cannot carry it.
+    """
 
     results: list[SearchResult]
     fallback: SearchFallback | None
     stages: tuple[StageReport, ...]
+    fused: FusedDocs | None = None
 
 
 def build_stages(
@@ -264,6 +289,105 @@ def apply_stages(
     return results, tuple(reports)
 
 
+def _search_paraphrases(
+    search_fn: SearchFn,
+    conn: psycopg.Connection[Any],
+    *,
+    paraphrases: Sequence[str],
+    embedder: Embedder,
+    limit: int,
+    fell_back: bool,
+    kwargs: Mapping[str, Any],
+) -> tuple[list[tuple[str, list[SearchResult]]], str | None]:
+    """Search each paraphrase; a failure costs that paraphrase. Returns the failure's class too.
+
+    Under the original's filters, without its diagnostics. If the original fell back, the embedder
+    is down, so each goes text-only rather than waiting out another timeout. A paraphrase whose own
+    embed fails is dropped, not fallen back: the fallback notice says semantic ranking is off for
+    this search, which would be false of the original.
+
+    The savepoint is because ``brain explain`` is not in autocommit: one failed statement would
+    otherwise abort the transaction under everything after it. Broad for the reason
+    :func:`apply_stages` gives: an optional improvement never costs the search.
+    """
+    forwarded = {k: v for k, v in kwargs.items() if k not in _ORIGINAL_ONLY_KWARGS}
+    if fell_back:
+        forwarded["fts_only"] = True
+    found: list[tuple[str, list[SearchResult]]] = []
+    failure: str | None = None
+    for paraphrase in paraphrases:
+        try:
+            with conn.transaction():
+                rows = search_fn(
+                    conn, embedder=embedder, query=paraphrase, limit=limit, **forwarded
+                )
+        except Exception as exc:  # noqa: BLE001
+            failure = describe_failure(exc)
+            logger.info("paraphrase search dropped: %s", failure)
+        else:
+            found.append((paraphrase, rows))
+    return found, failure
+
+
+def _rewrite_leg(
+    search_fn: SearchFn,
+    conn: psycopg.Connection[Any],
+    *,
+    rewriter: Rewriter,
+    embedder: Embedder,
+    query: str,
+    limit: int,
+    results: list[SearchResult],
+    fell_back: bool,
+    kwargs: Mapping[str, Any],
+) -> tuple[list[SearchResult], FusedDocs, StageReport]:
+    """Ask for paraphrases, search them, and fuse. Never raises; the worst case is ``results``.
+
+    The report's clock covers the chat call and the extra searches, so the footer's total is true.
+    """
+    started = perf_counter()
+    found: list[tuple[str, list[SearchResult]]] = []
+    reason: str | None = None
+    try:
+        paraphrases = clean_paraphrases(rewriter(query), original=query)
+    # Broad for the reason ``apply_stages`` gives: an optional improvement never costs the search.
+    except Exception as exc:  # noqa: BLE001
+        reason = describe_failure(exc)
+        logger.info("query rewrite skipped: %s", reason)
+    else:
+        found, reason = _search_paraphrases(
+            search_fn,
+            conn,
+            paraphrases=paraphrases,
+            embedder=embedder,
+            limit=limit,
+            fell_back=fell_back,
+            kwargs=kwargs,
+        )
+        if not paraphrases:
+            reason = NO_USABLE_PARAPHRASES
+    fused = fuse_rankings(
+        [
+            QueryRanking(query, True, tuple(r.document_id for r in results)),
+            *(
+                QueryRanking(text, False, tuple(r.document_id for r in rows))
+                for text, rows in found
+            ),
+        ]
+    )
+    # The original's row wins for a document both found: its snippet is about what was asked.
+    rows_by_id: dict[str, SearchResult] = {}
+    for row in (row for rows in (results, *(rows for _, rows in found)) for row in rows):
+        rows_by_id.setdefault(row.document_id, row)
+    report = StageReport(
+        name=REWRITE_STAGE_NAME,
+        applied=bool(found),
+        skipped_reason=reason,
+        ms=(perf_counter() - started) * 1000.0,
+    )
+    return [rows_by_id[document_id] for document_id in fused], fused, report
+
+
 def run_search(
     search_fn: SearchFn,
     conn: psycopg.Connection[Any],
@@ -274,6 +398,7 @@ def run_search(
     session_id: str | None = None,
     fallback: bool = True,
     stages: Sequence[SearchStage] | None = None,
+    rewriter: Rewriter | None = None,
     **kwargs: Any,
 ) -> PipelineResult:
     """Search, fall back if asked to, apply the stages, and truncate to ``limit``.
@@ -292,10 +417,16 @@ def run_search(
     Never raises from a stage. A stage whose ``candidate_limit`` raises
     contributes ``limit`` to the fetch, is NOT applied, and is reported as
     skipped (class-only), like a stage whose ``apply`` raises (:func:`size_stages`).
+
+    ``rewriter`` (RM-54, ``--rewrite``) adds paraphrases fused with the original before the
+    stages, which then see the fused rows and the ORIGINAL query. ``None`` is the path without it,
+    unchanged.
     """
     stages, fetch = size_stages(
         build_stages(os.environ) if stages is None else stages, limit
     )
+    if rewriter is not None:
+        fetch = max(fetch, limit * REWRITE_FETCH_FACTOR)
     if fallback:
         searched = search_with_fts_fallback(
             search_fn, conn, embedder=embedder, query=query, limit=fetch, **kwargs
@@ -306,10 +437,27 @@ def run_search(
             conn, embedder=embedder, query=query, limit=fetch, **kwargs
         )
         fell_back = None
+    fused: FusedDocs | None = None
+    leading: tuple[StageReport, ...] = ()
+    if rewriter is not None:
+        results, fused, rewrite_report = _rewrite_leg(
+            search_fn,
+            conn,
+            rewriter=rewriter,
+            embedder=embedder,
+            query=query,
+            limit=fetch,
+            results=results,
+            fell_back=fell_back is not None,
+            kwargs=kwargs,
+        )
+        leading = (rewrite_report,)
     results, reports = apply_stages(
         conn, query=query, session_id=session_id, results=results, stages=stages
     )
-    return PipelineResult(results=results[:limit], fallback=fell_back, stages=reports)
+    return PipelineResult(
+        results=results[:limit], fallback=fell_back, stages=(*leading, *reports), fused=fused
+    )
 
 
 def stage_reports_json(reports: Sequence[StageReport]) -> dict[str, Any]:

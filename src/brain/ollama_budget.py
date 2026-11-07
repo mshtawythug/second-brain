@@ -66,6 +66,10 @@ NUM_PREDICT_RETRY_FACTOR = 2
 #: bucket synthesis, elicit drafts, brief suggestions).
 CHAT_DEFAULT_NUM_PREDICT = 256
 
+#: ``brain search --rewrite`` sends at most this much of the query to the chat model (RM-54). Here,
+#: not in ``query_rewrite``, because this module defines every number the load-time check reads.
+REWRITE_MAX_INPUT_TOKENS = 256
+
 #: Completion budget for GraphRAG concept extraction — larger than the default
 #: because one chunk can yield a long entity list.
 EXTRACT_NUM_PREDICT = 1024
@@ -170,6 +174,12 @@ def capped_call_budgets(
             input_knob="BRAIN_AUDIO_MAX_INPUT_TOKENS",
             input_tokens=audio_max_input_tokens,
             num_predict=AUDIO_NUM_PREDICT,
+        ),
+        CallBudget(
+            caller="query rewrite",
+            input_knob="REWRITE_MAX_INPUT_TOKENS",
+            input_tokens=REWRITE_MAX_INPUT_TOKENS,
+            num_predict=CHAT_DEFAULT_NUM_PREDICT,
         ),
     )
 
