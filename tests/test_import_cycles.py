@@ -45,13 +45,17 @@ import pytest
 # Every module that is a real entry point into the package: the two that formed
 # the 2026-07-26 cycle, the module conftest reaches first (``brain.db``), and
 # the two console-script/server entry points. Each must be importable as the
-# very first brain module in a fresh interpreter.
+# very first brain module in a fresh interpreter. ``brain.ingest.gmail`` and
+# ``brain.gws`` (BL-39): an ingest module now imports the ``gws`` runner that
+# ``brain.vault``'s own initialization re-exports (the rev-117 cycle's ground).
 ENTRY_MODULES = (
     "brain.ingest",
     "brain.embeddings",
     "brain.db",
     "brain.cli",
     "brain.mcp_server",
+    "brain.ingest.gmail",
+    "brain.gws",
 )
 
 

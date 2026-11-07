@@ -14,7 +14,9 @@ import subprocess
 import pytest
 from pytest_mock import MockerFixture
 
-from brain.errors import DirectoryRefreshError
+from brain import gws
+from brain.errors import DirectoryRefreshError, GwsTimeoutError
+from brain.vault.derived_links import gws as derived_links_gws
 from brain.vault.derived_links.gws import real_gws_runner
 
 
@@ -28,10 +30,10 @@ def _completed(stdout: str = "", stderr: str = "") -> subprocess.CompletedProces
 def test_real_gws_runner_returns_stdout(mocker: MockerFixture) -> None:
     """Happy path: ``subprocess.run`` succeeds → stdout returned verbatim."""
     mocker.patch(
-        "brain.vault.derived_links.gws.shutil.which", return_value="/usr/bin/gws"
+        "brain.gws.shutil.which", return_value="/usr/bin/gws"
     )
     mocker.patch(
-        "brain.vault.derived_links.gws.subprocess.run",
+        "brain.gws.subprocess.run",
         return_value=_completed(stdout='[{"id": "evt1"}]'),
     )
     out = real_gws_runner(["gws", "calendar", "list-events"])
@@ -41,7 +43,7 @@ def test_real_gws_runner_returns_stdout(mocker: MockerFixture) -> None:
 def test_real_gws_runner_raises_on_missing_binary(mocker: MockerFixture) -> None:
     """``shutil.which`` returning ``None`` → ``DirectoryRefreshError``."""
     mocker.patch(
-        "brain.vault.derived_links.gws.shutil.which", return_value=None
+        "brain.gws.shutil.which", return_value=None
     )
     with pytest.raises(DirectoryRefreshError, match="not found on PATH"):
         real_gws_runner(["gws", "calendar", "list-events"])
@@ -58,10 +60,10 @@ def test_real_gws_runner_translates_called_process_error(
 ) -> None:
     """Non-zero exit → ``DirectoryRefreshError`` with exit code + stderr snippet."""
     mocker.patch(
-        "brain.vault.derived_links.gws.shutil.which", return_value="/usr/bin/gws"
+        "brain.gws.shutil.which", return_value="/usr/bin/gws"
     )
     mocker.patch(
-        "brain.vault.derived_links.gws.subprocess.run",
+        "brain.gws.subprocess.run",
         side_effect=subprocess.CalledProcessError(
             returncode=42,
             cmd=["gws", "calendar", "list-events"],
@@ -78,27 +80,33 @@ def test_real_gws_runner_translates_called_process_error(
 def test_real_gws_runner_translates_timeout(mocker: MockerFixture) -> None:
     """Timeout → ``DirectoryRefreshError`` mentioning the timeout duration."""
     mocker.patch(
-        "brain.vault.derived_links.gws.shutil.which", return_value="/usr/bin/gws"
+        "brain.gws.shutil.which", return_value="/usr/bin/gws"
     )
     mocker.patch(
-        "brain.vault.derived_links.gws.subprocess.run",
+        "brain.gws.subprocess.run",
         side_effect=subprocess.TimeoutExpired(
             cmd=["gws", "calendar", "list-events"], timeout=30
         ),
     )
-    with pytest.raises(DirectoryRefreshError) as exc:
+    with pytest.raises(GwsTimeoutError) as exc:
         real_gws_runner(["gws", "calendar", "list-events"])
+    assert isinstance(exc.value, DirectoryRefreshError)  # every existing catch still holds
     assert "timed out" in str(exc.value)
     assert "30s" in str(exc.value)
+
+
+def test_the_old_import_path_re_exports_the_moved_runner() -> None:
+    """BL-39 moved the runner to the neutral leaf ``brain.gws``; the old path still works."""
+    assert derived_links_gws.real_gws_runner is gws.real_gws_runner
 
 
 def test_real_gws_runner_translates_oserror(mocker: MockerFixture) -> None:
     """Generic ``OSError`` (e.g. EMFILE) → ``DirectoryRefreshError``."""
     mocker.patch(
-        "brain.vault.derived_links.gws.shutil.which", return_value="/usr/bin/gws"
+        "brain.gws.shutil.which", return_value="/usr/bin/gws"
     )
     mocker.patch(
-        "brain.vault.derived_links.gws.subprocess.run",
+        "brain.gws.subprocess.run",
         side_effect=OSError("Too many open files"),
     )
     with pytest.raises(DirectoryRefreshError, match="Too many open files"):
@@ -108,11 +116,11 @@ def test_real_gws_runner_translates_oserror(mocker: MockerFixture) -> None:
 def test_real_gws_runner_includes_stderr_snippet(mocker: MockerFixture) -> None:
     """Long stderr is truncated to ~200 chars in the translated error message."""
     mocker.patch(
-        "brain.vault.derived_links.gws.shutil.which", return_value="/usr/bin/gws"
+        "brain.gws.shutil.which", return_value="/usr/bin/gws"
     )
     long_err = "x" * 5000
     mocker.patch(
-        "brain.vault.derived_links.gws.subprocess.run",
+        "brain.gws.subprocess.run",
         side_effect=subprocess.CalledProcessError(
             returncode=1, cmd=["gws"], output="", stderr=long_err
         ),
@@ -129,10 +137,10 @@ def test_real_gws_runner_includes_stderr_snippet(mocker: MockerFixture) -> None:
 def test_real_gws_runner_passes_args_through(mocker: MockerFixture) -> None:
     """Args list is forwarded to ``subprocess.run`` exactly as supplied."""
     mocker.patch(
-        "brain.vault.derived_links.gws.shutil.which", return_value="/usr/bin/gws"
+        "brain.gws.shutil.which", return_value="/usr/bin/gws"
     )
     run_mock = mocker.patch(
-        "brain.vault.derived_links.gws.subprocess.run",
+        "brain.gws.subprocess.run",
         return_value=_completed(stdout="[]"),
     )
     args = [
@@ -163,10 +171,10 @@ def test_real_gws_runner_handles_empty_stderr_on_failure(
 ) -> None:
     """``CalledProcessError`` with no stderr produces a clean message (no None)."""
     mocker.patch(
-        "brain.vault.derived_links.gws.shutil.which", return_value="/usr/bin/gws"
+        "brain.gws.shutil.which", return_value="/usr/bin/gws"
     )
     mocker.patch(
-        "brain.vault.derived_links.gws.subprocess.run",
+        "brain.gws.subprocess.run",
         side_effect=subprocess.CalledProcessError(
             returncode=2, cmd=["gws"], output=None, stderr=None
         ),
