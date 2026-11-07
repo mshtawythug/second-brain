@@ -20,7 +20,7 @@ from typer.testing import CliRunner
 from brain import cli, demo
 from brain.db import ensure_embedding_column, ensure_relational_embedding_columns
 from brain.errors import BrainError
-from tests.conftest import FakeEmbedder
+from tests.conftest import TEST_DATABASE_URL, FakeEmbedder
 
 
 def _dim(conn: psycopg.Connection[Any], table: str) -> str:
@@ -113,15 +113,19 @@ def test_both_empty_columns_are_resized_together(test_db: psycopg.Connection[Any
 
 
 @pytest.mark.fresh_schema
-def test_brain_init_reconciles_the_document_table(
-    test_db: psycopg.Connection[Any], patch_embedder: Any
+def test_brain_init_on_a_qwen3_dim_database_resizes_the_document_table(
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    patch_embedder(FakeEmbedder(dim=4096))
+    # ``init`` builds its embedder with ``make_embedder(cfg)``; qwen3 is 4096
+    # dims and constructing it opens no connection.
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_EMBEDDER", "qwen3")
     assert _dim(test_db, "document_embeddings") == "vector(1024)"
 
     result = CliRunner().invoke(cli.app, ["init"])
 
     assert result.exit_code == 0, result.output
+    assert "dim=4096" in result.output
     assert _dim(test_db, "document_embeddings") == "vector(4096)"
 
 

@@ -72,7 +72,10 @@ def cli_embedder(patch_embedder: Any, fake_embedder: Any) -> None:
 
 def _install(monkeypatch: pytest.MonkeyPatch, *stages: Any) -> None:
     """Configure ``stages`` the way a shipped stage will be: in ``build_stages``."""
-    monkeypatch.setattr(search_pipeline, "build_stages", lambda env: tuple(stages))
+    # ``embedder`` is the search's own, which the document leg binds to (RM-20).
+    monkeypatch.setattr(
+        search_pipeline, "build_stages", lambda env, *, embedder: tuple(stages)
+    )
 
 
 @pytest.fixture

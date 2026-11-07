@@ -85,12 +85,13 @@ def test_a_second_run_embeds_nothing(
     test_db: psycopg.Connection[Any], word: WordEmbedder
 ) -> None:
     seed(test_db, word)
-    backfill(test_db, word)
     counting = CountingEmbedder(word)
+    backfill(test_db, counting)  # the rows carry the counting wrapper's identity
+    before = counting.embed_calls
 
     assert backfill(test_db, counting).embedded == 0
     assert backfill(test_db, counting, stale=True).embedded == 0
-    assert counting.embed_calls == 0
+    assert counting.embed_calls == before
 
 
 def test_limit_caps_one_run_and_the_rest_remains(
