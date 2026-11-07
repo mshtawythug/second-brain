@@ -273,7 +273,7 @@ that records prompts:
 | `test_each_entry_is_cut_to_120_tokens` (a 500-word summary) | `test_short_entries_pass_whole` |
 | `test_input_stops_at_3000_tokens_and_reports_dropped` (40 × 120-token entries → 25 packed, 15 dropped) | `test_twenty_short_documents_all_fit` |
 | `test_missing_or_blank_summary_falls_back_to_title` | `test_summary_is_used_when_present` |
-| `test_escape_sequences_and_controls_are_removed_from_the_synthesis` (CSI, OSC 8 with payload, C1 `\x9b`, `‮`, a lone `\ud800`, `\x00`) | `test_newlines_and_ordinary_unicode_survive` (accents, CJK, an emoji) |
+| `test_escape_sequences_and_controls_are_removed_from_the_synthesis` (CSI, OSC 8 with payload, C1 `\x9b`, `\u202e`, a lone `\ud800`, `\x00`) | `test_newlines_and_ordinary_unicode_survive` (accents, CJK, an emoji) |
 | `test_escape_sequences_in_titles_and_summaries_never_reach_the_prompt` | `test_titles_reach_the_prompt` |
 | `test_a_non_string_summary_raises_enrichment_error` | — |
 | `test_synthesis_is_capped_at_4000_chars` | — |
