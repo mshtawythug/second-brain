@@ -65,6 +65,7 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         "brain_orphans",
         "brain_tags_list",
         "brain_tags_suggest_merges",
+        "brain_tags_summarize",  # one chat call over lensed input; writes and caches nothing
         "brain_dedup_list",
         "brain_watch_list",
         "brain_watch_check",  # "WITHOUT recording it"

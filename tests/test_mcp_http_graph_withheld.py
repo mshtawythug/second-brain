@@ -65,9 +65,9 @@ def test_the_registry_graph_family_is_the_pinned_one() -> None:
     assert hide_mode_withheld(names) == tuple(
         sorted((*GRAPH_TOOLS, "brain_review_weekly", "brain_gaps"))
     )
-    assert len(names) == 51
-    # Read-only and confidential-excluded (the default) serves 28 - 6 = 22 tools.
-    assert len(READ_ONLY_TOOLS - set(GRAPH_TOOLS)) == 22
+    assert len(names) == 52
+    # Read-only and confidential-excluded (the default) serves 29 - 6 = 23 tools.
+    assert len(READ_ONLY_TOOLS - set(GRAPH_TOOLS)) == 23
     # brain_timeline and brain_explain stay: their output is built from gated
     # documents only (plan, "round 5").
     assert {"brain_timeline", "brain_explain"} <= READ_ONLY_TOOLS - set(GRAPH_TOOLS)
