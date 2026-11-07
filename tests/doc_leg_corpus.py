@@ -24,6 +24,10 @@ FIT_SUMMARY = "harbour lighthouse"
 #: One query word among gardening words: a vector match only, no text match.
 FIT_BODY = "lighthouse compost soil mulch"
 OTHERS = 4
+#: A document whose chunk IS the query: a text hit and the top vector match, so plain
+#: hybrid search ranks it above the fit document (never last). Seeded only on request.
+LEAD_TITLE = "Beacon register"
+LEAD_BODY = "harbour lighthouse"
 
 
 class HostedWordEmbedder(WordEmbedder):
@@ -59,8 +63,13 @@ def seed(
     *,
     fit_source: str = "manual",
     fit_sensitivity: str | None = None,
+    lead_sensitivity: str | None = None,
 ) -> dict[str, str]:
-    """Ingest the corpus; return ``{"fit": id, "other-0": id, ...}``."""
+    """Ingest the corpus; return ``{"fit": id, "other-0": id, ...}``.
+
+    ``lead_sensitivity`` also seeds the :data:`LEAD_TITLE` document (as ``"lead"``)
+    at that sensitivity.
+    """
     ids = {
         "fit": ingest(
             conn,
@@ -78,5 +87,9 @@ def seed(
             embedder,
             title=f"Harbour log {i}",
             content=f"harbour lighthouse rota shift {i}",
+        )
+    if lead_sensitivity is not None:
+        ids["lead"] = ingest(
+            conn, embedder, title=LEAD_TITLE, content=LEAD_BODY, sensitivity=lead_sensitivity
         )
     return ids

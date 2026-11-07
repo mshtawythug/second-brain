@@ -62,22 +62,23 @@ def test_a_matching_dim_is_a_no_op(test_db: psycopg.Connection[Any]) -> None:
 
 
 @pytest.mark.fresh_schema
-def test_populated_document_vectors_at_another_dim_are_refused_and_nothing_moves(
+def test_populated_document_vectors_at_another_dim_are_refused_with_the_reset_hint(
     test_db: psycopg.Connection[Any],
 ) -> None:
-    # The document table holds a 1024 vector; chunks are empty at 4096. A
-    # 1024 embedder could resize chunks, but must not, because the document
-    # table refuses: the preflight checks every target first.
+    # The document table holds a 1024 vector; chunks are at 4096, so a 4096
+    # embedder leaves chunks alone and only the document table must refuse.
+    # The preflight itself (chunks would otherwise be resized first) is the
+    # next test's subject.
     test_db.execute(
         "INSERT INTO document_embeddings (document_id, embedding, basis, basis_hash, embedder) "
         "VALUES (%s, %s, 'title_head', 'h', 'synthetic|m|1024')",
         (_doc(test_db), [0.1] * 1024),
     )
 
-    with pytest.raises(BrainError, match="document_embeddings.embedding"):
+    with pytest.raises(BrainError, match="document_embeddings.embedding") as refused:
         ensure_relational_embedding_columns(test_db, FakeEmbedder(dim=4096))
-    with pytest.raises(BrainError, match="destructive reset"):
-        ensure_relational_embedding_columns(test_db, FakeEmbedder(dim=4096))
+
+    assert "destructive reset" in str(refused.value)
 
     assert _dim(test_db, "chunks") == "vector(4096)"
     assert _dim(test_db, "document_embeddings") == "vector(1024)"

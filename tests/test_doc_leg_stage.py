@@ -42,11 +42,17 @@ def word(test_db: psycopg.Connection[Any]) -> WordEmbedder:
 
 
 def _search(
-    conn: psycopg.Connection[Any], embedder: Any, *, staged: bool, query: str = QUERY, **kw: Any
+    conn: psycopg.Connection[Any],
+    embedder: Any,
+    *,
+    staged: bool,
+    query: str = QUERY,
+    limit: int = LIMIT,
+    **kw: Any,
 ) -> PipelineResult:
     stages = (DocLegStage(embedder=embedder, weight=WEIGHT),) if staged else ()
     return run_search(
-        hybrid_search, conn, embedder=embedder, query=query, limit=LIMIT, stages=stages, **kw
+        hybrid_search, conn, embedder=embedder, query=query, limit=limit, stages=stages, **kw
     )
 
 
@@ -114,19 +120,25 @@ def test_the_sensitivity_lens_still_excludes_the_fitting_document(
 def test_a_confidential_document_without_a_vector_keeps_its_index(
     test_db: psycopg.Connection[Any], word: WordEmbedder
 ) -> None:
-    # AC3, second half: under a hosted embedder the confidential document has
-    # no vector, and the stage neither promotes nor demotes it.
-    ids = seed(test_db, word, fit_sensitivity="confidential")
+    # AC3, second half: under a hosted embedder the confidential lead document
+    # has no vector, and the stage neither promotes nor demotes it. It ranks
+    # above the fit document in plain order (never last), and the fit document
+    # (which has a vector) is lifted past it, so a demotion would show.
+    ids = seed(test_db, word, lead_sensitivity="confidential")
     hosted = HostedWordEmbedder()
     reconcile(test_db, hosted)
     backfill(test_db, hosted)
 
-    plain = _ids(_search(test_db, hosted, staged=False))
-    staged_result = _search(test_db, hosted, staged=True)
+    plain = _ids(_search(test_db, hosted, staged=False, limit=LIMIT + 1))
+    staged_result = _search(test_db, hosted, staged=True, limit=LIMIT + 1)
     staged = _ids(staged_result)
 
+    assert len(plain) == LIMIT + 1
+    assert plain.index(ids["lead"]) < len(plain) - 1
+    assert plain[-1] == ids["fit"]
     assert staged_result.stages[0].applied
-    assert staged.index(ids["fit"]) == plain.index(ids["fit"])
+    assert staged.index(ids["fit"]) < plain.index(ids["fit"])
+    assert staged.index(ids["lead"]) == plain.index(ids["lead"])
 
 
 def test_zero_vectors_is_a_skip_and_keeps_the_order(

@@ -16,7 +16,14 @@ from typer.testing import CliRunner
 from brain.cli import app
 from brain.cli_registry import EXTENSION_REGISTRARS
 from brain.embeddings import NullEmbedder, OllamaEmbedError
-from tests.doc_leg_corpus import FIT_SUMMARY, FIT_TITLE, HostedWordEmbedder, reconcile, seed
+from tests.doc_leg_corpus import (
+    FIT_SUMMARY,
+    FIT_TITLE,
+    HostedWordEmbedder,
+    ModelWordEmbedder,
+    reconcile,
+    seed,
+)
 from tests.saved_search_fakes import WordEmbedder
 
 SECRET = "synthetic-cli-docembed-detail-3b7a"
@@ -118,3 +125,51 @@ def test_an_embed_failure_exits_1_class_only(
 
 def test_a_bad_limit_is_a_usage_error() -> None:
     assert _run("backfill", "--limit", "0").exit_code == 2
+
+
+def test_a_switched_model_gets_the_stale_hint(
+    test_db: psycopg.Connection[Any], patch_embedder: Any
+) -> None:
+    # rev-127 3: after a same-dim model switch a plain backfill embeds nothing;
+    # without the hint "still without a vector" would repeat with no way out.
+    first, second = ModelWordEmbedder("model-one"), ModelWordEmbedder("model-two")
+    reconcile(test_db, first)
+    ids = seed(test_db, first)
+    patch_embedder(first)
+    _run("backfill")
+    patch_embedder(second)
+
+    result = _run("backfill")
+
+    assert result.exit_code == 0, result.output
+    assert "embedded 0 documents" in result.stdout
+    assert f"{len(ids)} documents still without a vector from the " in result.stdout
+    assert "another embedder or model" in result.stdout
+    assert "brain docembed backfill --stale" in result.stdout
+
+
+def test_no_stale_hint_without_foreign_vectors(
+    test_db: psycopg.Connection[Any], word: WordEmbedder
+) -> None:
+    seed(test_db, word)
+
+    result = _run("backfill", "--limit", "1")
+
+    assert result.exit_code == 0, result.output
+    assert "still without a vector from the " in result.stdout
+    assert "--stale" not in result.stdout
+
+
+def test_stale_itself_never_prints_the_hint(
+    test_db: psycopg.Connection[Any], patch_embedder: Any
+) -> None:
+    first, second = ModelWordEmbedder("model-one"), ModelWordEmbedder("model-two")
+    reconcile(test_db, first)
+    seed(test_db, first)
+    patch_embedder(first)
+    _run("backfill")
+    patch_embedder(second)
+
+    result = _run("backfill", "--stale", "--limit", "1")
+
+    assert "--stale" not in result.stdout

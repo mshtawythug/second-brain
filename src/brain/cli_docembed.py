@@ -51,14 +51,25 @@ def _embedder(cfg: Config) -> Embedder:
     return embedder
 
 
-def _echo_report(report: BackfillReport) -> None:
+def _echo_report(report: BackfillReport, *, backend: str, stale: bool) -> None:
     typer.echo(f"embedded {_plural(report.embedded, 'document')}")
     if report.skipped_confidential:
         typer.echo(
             f"{_plural(report.skipped_confidential, 'confidential document')} skipped "
             f"(hosted embedder: their text is not sent off-machine)"
         )
-    typer.echo(f"{_plural(report.remaining, 'document')} still without a vector")
+    typer.echo(
+        f"{_plural(report.remaining, 'document')} still without a vector "
+        f"from the {backend} embedder"
+    )
+    # A missing-only run never replaces another embedder's or model's vector, so
+    # after a same-dim switch the line above would repeat forever without this.
+    if report.foreign and not stale:
+        typer.echo(
+            f"another embedder or model wrote the vector of "
+            f"{_plural(report.foreign, 'document')}; "
+            f"run `brain docembed backfill --stale` to replace them"
+        )
 
 
 @docembed_app.command("backfill")
@@ -89,7 +100,7 @@ def backfill_cmd(
                 analyze_tables(conn, ["document_embeddings"])
     except DocEmbeddingError as exc:
         _fail(str(exc))
-    _echo_report(report)
+    _echo_report(report, backend=cfg.embedder, stale=stale)
     if report.stopped_by is not None:
         _fail(
             f"docembed: the embedder failed ({report.stopped_by}); the run stopped. "

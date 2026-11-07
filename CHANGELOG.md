@@ -26,7 +26,9 @@ git tag scheme:
 
 - Migration 031 adds `document_embeddings`: one vector per document, from its title and summary
   (or its title and the head of its content). `brain docembed backfill [--stale] [--limit N]`
-  writes them; under a hosted embedder confidential documents are skipped. `brain init`,
+  writes them; under a hosted embedder confidential documents are skipped, and each batch is
+  re-checked just before it is sent. After an embedder or model switch, a plain run says how many
+  vectors another embedder wrote and points at `--stale`. `brain init`,
   `brain restore` and the demo size the new column for the active embedder, as they do
   `chunks.embedding`, checking every column before resizing any.
 - A new search stage, `doc_leg`, re-scores the rows a search already returned by each document's

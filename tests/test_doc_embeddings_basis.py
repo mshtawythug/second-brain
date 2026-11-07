@@ -15,6 +15,8 @@ from brain.doc_embeddings import (
     DOC_BASIS_MAX_TOKENS,
     DOC_HEAD_CHAR_CAP,
     DOC_HEAD_TOKENS,
+    DOC_SUMMARY_CHAR_CAP,
+    DOC_TITLE_CHAR_CAP,
     DocEmbeddingError,
     backfill,
     document_basis,
@@ -72,13 +74,14 @@ def test_the_head_is_read_from_the_first_8192_characters_only() -> None:
 
 
 def test_the_whole_basis_is_capped_at_the_chunk_bound() -> None:
-    # A title far longer than a chunk must not make the basis longer than the
-    # embed window is validated for.
-    basis = document_basis(_body(3000), "A synthetic summary.", "", count_tokens=_words)
+    # A summary far longer than a chunk (still past the cut after its
+    # character cap) must not make the basis longer than the embed window is
+    # validated for.
+    basis = document_basis("T", _body(3000), "", count_tokens=_words)
 
     assert DOC_BASIS_MAX_TOKENS == INGEST_CHUNK_TARGET_TOKENS + INGEST_CHUNK_OVERLAP_TOKENS
     assert _words(basis.text) == DOC_BASIS_MAX_TOKENS
-    assert basis.text == _body(DOC_BASIS_MAX_TOKENS)
+    assert basis.text == "T\n" + _body(DOC_BASIS_MAX_TOKENS - 1)
 
 
 def test_a_short_basis_is_not_cut() -> None:
@@ -104,3 +107,22 @@ def test_an_embedder_without_vectors_is_refused_before_the_database_is_touched()
 
 def test_an_embedder_with_vectors_passes_the_refusal() -> None:
     refuse_without_vectors(FakeEmbedder(dim=8))
+
+
+def test_only_the_first_characters_of_the_summary_and_title_are_read() -> None:
+    # sec-127 L3: a several-megabyte summary or title is never tokenized whole.
+    # A single unbroken "word" past each cap shows exactly where the cut falls.
+    seen: list[int] = []
+
+    def cost(text: str) -> int:
+        seen.append(len(text))
+        return 1
+
+    basis = document_basis(
+        "t" * (DOC_TITLE_CHAR_CAP + 50), "s" * (DOC_SUMMARY_CHAR_CAP + 50), "", count_tokens=cost
+    )
+
+    assert DOC_TITLE_CHAR_CAP == 2048
+    assert DOC_SUMMARY_CHAR_CAP == 8192
+    assert basis.text == "t" * DOC_TITLE_CHAR_CAP + "\n" + "s" * DOC_SUMMARY_CHAR_CAP
+    assert max(seen) == DOC_TITLE_CHAR_CAP + 1 + DOC_SUMMARY_CHAR_CAP

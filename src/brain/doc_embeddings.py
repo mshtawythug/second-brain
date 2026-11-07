@@ -12,7 +12,9 @@ Two boundaries (plan ``docs/plans/2026-11-07-rm-20-document-embeddings.md``):
 
 - **F6 egress.** Under a hosted embedder a confidential document's text is never
   sent: every selection statement carries the confidential exclusion, as
-  ``brain reembed`` does. It stays vectorless, which the stage treats as neutral.
+  ``brain reembed`` does, and each batch is re-checked just before the embed call,
+  so a document marked confidential after its page was read is dropped. It stays
+  vectorless, which the stage treats as neutral.
 - **No content in logs or output.** Ids and counts only; a failure is reported
   by its class (:func:`brain.errors.describe_failure`).
 
@@ -29,6 +31,7 @@ from typing import Any
 
 import psycopg
 
+from .confidential_lookup import confidential_document_ids
 from .embeddings import is_hosted_embedder
 from .errors import BrainError, EmbedError, describe_failure
 from .ingest import Embedder
@@ -49,6 +52,11 @@ DOC_HEAD_TOKENS = 512
 #: is never pulled whole; the basis is defined on that prefix, so it stays
 #: deterministic (D13).
 DOC_HEAD_CHAR_CAP = 8192
+#: The title and summary are read from their leading characters only, too, so a
+#: several-megabyte hand-edited value is never pulled or tokenized whole. Both
+#: comfortably exceed what survives :data:`DOC_BASIS_MAX_TOKENS` (sec-127 L3).
+DOC_TITLE_CHAR_CAP = 2048
+DOC_SUMMARY_CHAR_CAP = 8192
 #: The whole basis is cut to the longest chunk ingest produces, the size the
 #: embed window is validated for (``MIN_OLLAMA_EMBED_NUM_CTX``), so a long title
 #: cannot make one document overflow on every run (D13).
@@ -66,7 +74,7 @@ _TABLE_PRESENT_SQL = "SELECT to_regclass('public.document_embeddings') IS NOT NU
 # too, and the stage only re-scores rows the search predicate already admitted.
 # Under a hosted embedder the confidential exclusion is added (F6).
 _PAGE_SQL = """
-    SELECT d.id::text, d.title, d.summary,
+    SELECT d.id::text, left(d.title, %s), left(d.summary, %s),
            CASE WHEN d.summary IS NULL OR btrim(d.summary) = ''
                 THEN left(d.content, %s) ELSE '' END,
            e.basis_hash, e.embedder
@@ -89,6 +97,14 @@ _UPSERT_SQL = """
         basis_hash = EXCLUDED.basis_hash,
         embedder = EXCLUDED.embedder,
         created_at = NOW()
+"""
+
+# Documents whose one vector another embedder or model wrote: a missing-only run
+# never replaces them, so the CLI points at ``--stale``. Same exclusion.
+_FOREIGN_SQL = """
+    SELECT count(*) FROM documents d
+    JOIN document_embeddings e ON e.document_id = d.id
+    WHERE e.embedder <> %s{where}
 """
 
 # Documents with no vector from the active embedder. Same exclusion under a
@@ -117,11 +133,16 @@ class Basis:
 
 @dataclass(frozen=True)
 class BackfillReport:
-    """What one run did. ``stopped_by`` is a failure's class name, or ``None``."""
+    """What one run did. ``stopped_by`` is a failure's class name, or ``None``.
+
+    ``foreign`` counts the ``remaining`` documents whose vector another embedder or
+    model wrote; only ``stale=True`` replaces those.
+    """
 
     embedded: int
     skipped_confidential: int
     remaining: int
+    foreign: int = 0
     stopped_by: str | None = None
 
 
@@ -130,10 +151,14 @@ def document_basis(
 ) -> Basis:
     """``title + "\\n" + summary``, or the title plus the head of the content.
 
-    ``head`` is the content's leading text; only its first
-    :data:`DOC_HEAD_CHAR_CAP` characters are read. ``count_tokens`` is
+    Only the first :data:`DOC_TITLE_CHAR_CAP`, :data:`DOC_SUMMARY_CHAR_CAP` and
+    :data:`DOC_HEAD_CHAR_CAP` characters of the title, summary and ``head`` (the
+    content's leading text) are read, as :data:`_PAGE_SQL` reads them, so the
+    basis is the same whichever side cut them. ``count_tokens`` is
     ``Embedder.count_tokens``.
     """
+    title = title[:DOC_TITLE_CHAR_CAP]
+    summary = None if summary is None else summary[:DOC_SUMMARY_CHAR_CAP]
     if summary is not None and summary.strip():
         kind, body = BASIS_TITLE_SUMMARY, summary
     else:
@@ -185,11 +210,27 @@ def _pages(
     query = _PAGE_SQL.format(where=_where(*conditions))
     last_id = _FIRST_ID
     while True:
-        rows = conn.execute(query, (DOC_HEAD_CHAR_CAP, last_id, batch_size)).fetchall()
+        rows = conn.execute(
+            query,
+            (DOC_TITLE_CHAR_CAP, DOC_SUMMARY_CHAR_CAP, DOC_HEAD_CHAR_CAP, last_id, batch_size),
+        ).fetchall()
         if not rows:
             return
         last_id = str(rows[-1][0])
         yield rows
+
+
+def _withhold_confidential(
+    conn: psycopg.Connection[Any], items: list[tuple[str, Basis]]
+) -> list[tuple[str, Basis]]:
+    """Drop the batch's documents marked confidential since their page was read.
+
+    Run just before a hosted embed call: the page read and the call are moments
+    apart, and a concurrent ``brain edit`` could mark a document confidential in
+    between (sec-127 L1). One round trip.
+    """
+    withheld = confidential_document_ids(conn, [document_id for document_id, _ in items])
+    return [item for item in items if item[0] not in withheld]
 
 
 def _write(
@@ -234,6 +275,8 @@ def backfill(
         items = _due(page, embedder, identity)
         if limit is not None:
             items = items[: limit - embedded]
+        if hosted:
+            items = _withhold_confidential(conn, items)
         if not items:
             continue
         try:
@@ -245,12 +288,15 @@ def backfill(
         _write(conn, items, vectors, identity)
         embedded += len(items)
         logger.info("docembed: %d document(s) embedded so far", embedded)
-    remaining_row = conn.execute(
-        _REMAINING_SQL.format(where=_where(*gate)), (identity,)
-    ).fetchone()
     return BackfillReport(
         embedded=embedded,
         skipped_confidential=count_confidential_documents(conn) if hosted else 0,
-        remaining=int(remaining_row[0]) if remaining_row is not None else 0,
+        remaining=_count(conn, _REMAINING_SQL.format(where=_where(*gate)), identity),
+        foreign=_count(conn, _FOREIGN_SQL.format(where=_where(*gate)), identity),
         stopped_by=stopped_by,
     )
+
+
+def _count(conn: psycopg.Connection[Any], query: str, identity: str) -> int:
+    row = conn.execute(query, (identity,)).fetchone()
+    return int(row[0]) if row is not None else 0

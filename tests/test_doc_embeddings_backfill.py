@@ -16,6 +16,8 @@ import pytest
 from brain.doc_embeddings import (
     BASIS_TITLE_HEAD,
     BASIS_TITLE_SUMMARY,
+    DOC_BASIS_MAX_TOKENS,
+    DOC_SUMMARY_CHAR_CAP,
     DocEmbeddingError,
     backfill,
 )
@@ -169,19 +171,24 @@ def test_rows_from_another_embedder_count_as_remaining(
     report = backfill(test_db, second, limit=1)
 
     # Missing-only: every document already has a row, so nothing is embedded,
-    # and all of them are still without a vector from THIS embedder.
+    # and all of them are still without a vector from THIS embedder, each
+    # because another model wrote it (the CLI's ``--stale`` hint reads this).
     assert report.embedded == 0
     assert report.remaining == len(ids)
+    assert report.foreign == len(ids)
+    assert backfill(test_db, second, stale=True).foreign == 0
 
 
+@pytest.mark.parametrize("stale", [False, True], ids=["default", "stale"])
 def test_a_hosted_embedder_is_never_sent_a_confidential_document(
-    test_db: psycopg.Connection[Any], word: WordEmbedder
+    test_db: psycopg.Connection[Any], word: WordEmbedder, stale: bool
 ) -> None:
-    # AC3, first half: assert on what the hosted fake received.
+    # AC3, first half: assert on what the hosted fake received, on the default
+    # (missing-only) path users run and on ``--stale``.
     ids = seed(test_db, word, fit_sensitivity="confidential")
     hosted = HostedWordEmbedder()
 
-    report = backfill(test_db, hosted, stale=True)
+    report = backfill(test_db, hosted, stale=stale)
 
     assert hosted.sent
     assert not any(FIT_TITLE in text for text in hosted.sent)
@@ -270,3 +277,69 @@ def test_logs_carry_counts_and_never_text(
 
     assert caplog.records
     assert MARKER not in caplog.text
+
+
+def test_no_foreign_rows_is_reported_as_zero(
+    test_db: psycopg.Connection[Any], word: WordEmbedder
+) -> None:
+    seed(test_db, word)
+
+    report = backfill(test_db, word, limit=1)
+
+    assert report.foreign == 0
+    assert report.remaining > 0
+
+
+class _FlipsToConfidential(HostedWordEmbedder):
+    """Marks ``target`` confidential the first time a basis is measured.
+
+    That is after the page was read and before the batch is sent: the window a
+    concurrent ``brain edit`` would hit (sec-127 L1).
+    """
+
+    def __init__(self, conn: psycopg.Connection[Any], target: str) -> None:
+        super().__init__()
+        self._conn = conn
+        self._target = target
+        self._flipped = False
+
+    def count_tokens(self, text: str) -> int:
+        if not self._flipped:
+            self._flipped = True
+            self._conn.execute(
+                "UPDATE documents SET sensitivity = 'confidential' WHERE id = %s",
+                (self._target,),
+            )
+        return super().count_tokens(text)
+
+
+def test_a_document_marked_confidential_mid_batch_is_not_sent(
+    test_db: psycopg.Connection[Any], word: WordEmbedder
+) -> None:
+    ids = seed(test_db, word)
+    flipping = _FlipsToConfidential(test_db, ids["fit"])
+
+    report = backfill(test_db, flipping)
+
+    # Refuses: the flipped document's text never reached the hosted embedder.
+    assert not any(FIT_TITLE in text for text in flipping.sent)
+    assert ids["fit"] not in _rows(test_db)
+    # Keeps: the rest of the same batch is embedded as usual.
+    assert report.embedded == len(ids) - 1
+    assert {ids[f"other-{i}"] for i in range(4)} <= set(_rows(test_db))
+
+
+def test_a_huge_summary_is_cut_and_the_run_succeeds(
+    test_db: psycopg.Connection[Any], word: WordEmbedder
+) -> None:
+    doc = ingest(test_db, word, title="Synthetic long summary", content="short body")
+    huge = " ".join(f"word{i}" for i in range(DOC_SUMMARY_CHAR_CAP))  # far past the cap
+    test_db.execute("UPDATE documents SET summary = %s WHERE id = %s", (huge, doc))
+    hosted = HostedWordEmbedder()
+
+    report = backfill(test_db, hosted)
+
+    assert report.embedded == 1
+    (sent,) = hosted.sent
+    assert hosted.count_tokens(sent) <= DOC_BASIS_MAX_TOKENS
+    assert _rows(test_db)[doc][0] == BASIS_TITLE_SUMMARY

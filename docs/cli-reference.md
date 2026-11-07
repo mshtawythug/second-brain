@@ -1517,8 +1517,11 @@ changed since its vector was written, or whose vector another embedder or model
 wrote. Re-runnable: a second run with nothing to do embeds nothing.
 
 Output is counts only (`embedded N documents`, `N documents still without a
-vector`), never a title or text. Under a hosted embedder confidential documents
-are skipped and counted, because their text is never sent off-machine. Exit 1
+vector from the <backend> embedder`), never a title or text. After switching
+embedder or model, a plain run embeds nothing for documents that already hold
+the old vector; it says how many and points at `--stale`. Under a hosted
+embedder confidential documents are skipped and counted, because their text is
+never sent off-machine (each batch is re-checked just before it is sent). Exit 1
 under `BRAIN_EMBEDDER=none` (no vectors to make), when migration 031 is missing
 (run `brain init`), or when the embedder fails mid-run; the documents already
 embedded are kept, so re-running resumes.

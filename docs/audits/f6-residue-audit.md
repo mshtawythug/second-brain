@@ -135,3 +135,23 @@ audit already look.
   and the timeline's entity match and co-topics (`timeline_entities`, HTTP hide mode, where
   the timeline's other public filter already lives). Measured worst case: 50 entities each
   mentioned by 40 documents of 20 KB with the name only in the last, 162 ms against 1 ms.
+
+**RM-20 statements, judged (2026-11-07, PR #127).** None filters `draft`, so the grep above does not
+select them; recorded here so the next audit need not re-derive them. Each carries its reason
+inline.
+
+- `doc_embeddings._PAGE_SQL` (the backfill's page read): **gated under a hosted embedder**
+  (`not_confidential_sql("d")` in both the default and `--stale` condition lists), and each batch
+  is re-checked by `confidential_lookup.confidential_document_ids` just before the hosted embed
+  call, so a document marked confidential after its page was read is dropped (sec-127 L1). Drafts
+  are included on purpose: their chunks are embedded too, and the stage re-scores only rows the
+  search predicate admitted. Title, summary and content head are read through `left()` caps.
+- `doc_embeddings._REMAINING_SQL` / `_FOREIGN_SQL` (counts only): the same hosted gate, so withheld
+  documents are reported apart. They return no content.
+- `doc_embeddings._UPSERT_SQL`: reads `documents.id` only (an existence guard); no content, no
+  reason needed.
+- `search_doc_leg._COSINES_SQL`: **ungated, with a reason**. It reads vectors for ids the gated
+  search already returned, returns no content, and computes the cosine in Postgres.
+- Residue, accepted: a document marked confidential *after* a hosted embed keeps that old vector,
+  as its chunks keep theirs. The vector never leaves the machine again, and the stage compares it
+  only inside Postgres. A future `--stale`-on-sensitivity rule could drop it (plan D15 follow-up).

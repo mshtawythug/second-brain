@@ -11,6 +11,7 @@ from typing import Any
 
 import psycopg
 
+from ..confidential_lookup import confidential_document_ids as _confidential_document_ids
 from ..sensitivity import CONFIDENTIAL
 
 #: One indexed pass over the exported corpus. ``documents_vault_path_idx`` is a
@@ -114,30 +115,10 @@ def iter_tree_rows(
     return list(conn.execute(sql).fetchall())
 
 
-#: Which of a set of documents are confidential. Used to redact search snippets
-#: — snippet text comes straight out of ``chunks``, so it is body text by
-#: another name and is the least obvious place a withheld body leaks.
-_CONFIDENTIAL_IDS_SQL = """
-    SELECT id::text
-    FROM documents
-    WHERE id = ANY(%s) AND sensitivity = %s
-"""
-
-
-def confidential_document_ids(
-    conn: psycopg.Connection[Any], document_ids: list[str]
-) -> set[str]:
-    """Return the subset of ``document_ids`` marked confidential.
-
-    One round trip for a whole result page rather than one per row. An empty
-    input short-circuits without touching the database.
-    """
-    if not document_ids:
-        return set()
-    rows = conn.execute(
-        _CONFIDENTIAL_IDS_SQL, (list(document_ids), CONFIDENTIAL)
-    ).fetchall()
-    return {str(row[0]) for row in rows}
+#: Which of a set of documents are confidential, used to redact search snippets
+#: (snippet text is body text by another name). Re-exported from the shared
+#: leaf so ``routes_search`` keeps its ``ui_queries.`` call site.
+confidential_document_ids = _confidential_document_ids
 
 
 def note_meta(

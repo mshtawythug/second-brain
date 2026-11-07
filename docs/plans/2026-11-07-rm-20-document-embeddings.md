@@ -379,6 +379,8 @@ ordinary path still works (so the guard is not "refuse everything").
 - **D15 follow-ups (for the adopting PR):** an ingest-time hook or a daemon line
   (`brain docembed backfill --stale`), and a `brain doctor` coverage line (vectors / eligible
   documents for the active embedder).
+  A document that becomes confidential after a hosted embed keeps its old vector (as its chunks
+  do); a future `--stale`-on-sensitivity rule could drop or refresh it.
 
 Spec items made explicit:
 
@@ -391,6 +393,24 @@ Spec items made explicit:
   the confidential row keeps its index when the stage runs.
 - (e) Backfill logs and output carry ids and counts only, never titles, summaries or content
   (caplog + output assertion with a synthetic marker in all three fields).
+
+## Review round 1 (rev-127 3 LOW, sec-127 3 LOW + INFO, on `7d9df323`)
+
+- rev 1: the AC3 index test now uses a confidential **lead** document (its chunk is the query, so
+  it ranks above the fit document in plain order) that the fit document is lifted past; M3 now
+  demotes it to last (simulated offline for every lead position; the DB run is owed).
+- rev 2: the refusal test's comment says what it does (only the document table refuses), and the
+  duplicate `pytest.raises` is gone; the preflight's own proof is the next test (M6).
+- rev 3: `BackfillReport.foreign` counts documents whose vector another embedder or model wrote;
+  the CLI prints a `--stale` hint when a missing-only run leaves any, and says "still without a
+  vector from the <backend> embedder" (`cfg.embedder`), restoring the plan's wording.
+- sec L1: each hosted batch is re-checked just before the embed call
+  (`confidential_lookup.confidential_document_ids`, a new shared leaf that the reranker and the UI's
+  snippet redaction now use too, replacing two copies of the same statement).
+- sec L2: the hosted received-texts test runs on the default and `--stale` paths.
+- sec L3: `_PAGE_SQL` reads `left(title, 2048)` and `left(summary, 8192)`; `document_basis` applies
+  the same caps, so the basis is defined on those prefixes.
+- INFO: the F6 residue audit records the RM-20 statements; D15 gains the sensitivity-flip residue.
 
 ## Execution while Docker is down
 
