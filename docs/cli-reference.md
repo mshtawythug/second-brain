@@ -672,6 +672,7 @@ brain tags rename old-tag new-tag --apply            # write it
 brain tags merge widgets widget-ui --into widget     # dry run
 brain tags merge widgets widget-ui --into widget --apply
 brain tags suggest-merges [--limit 50] [--json]      # ranked, with evidence
+brain tags summarize planning [--limit 20] [--json]  # a cited synthesis of one tag
 ```
 
 - **Dry run by default.** Without `--apply`, `rename` and `merge` print the
@@ -704,9 +705,24 @@ brain tags suggest-merges [--limit 50] [--json]      # ranked, with evidence
   shared documents). Each line names the tag to keep (the more used one), the
   reasons, the counts, the ratio and the overlap, and the command to run. It
   writes nothing.
-- The MCP twins, `brain_tags_list` and `brain_tags_suggest_merges`, are
-  read-only and leave confidential documents out by default. There is no MCP
-  rename or merge: a corpus-wide rewrite is done here.
+- **`summarize`** reads the `--limit` (default 20, at most 50) most recent
+  non-draft documents carrying the tag, newest first by document date. It
+  takes each one's stored summary (`brain enrich`), or its title when there is
+  none, cuts each to 120 tokens, and packs them into a 3,000-token input. One
+  chat call returns a short synthesis with `[N]` citations; a number that names
+  no document the model was given is removed, and only cited documents are
+  listed under the summary. The footer says how many documents were considered
+  and how many did not fit. The tag is normalized first (`Nebula Notes` finds
+  `nebula-notes`). It reads confidential documents too, as `brain ask` does,
+  and **their summaries go to the chat model at `OLLAMA_HOST`**. It writes and
+  caches nothing. A tag no document carries makes no chat call and exits 0.
+  Ollama down, a context overflow and a cut-off reply each print their own
+  sentence and exit 1. The text is printed plain: escape sequences and control
+  characters are removed from the model's reply and from titles.
+- The MCP twins, `brain_tags_list`, `brain_tags_suggest_merges` and
+  `brain_tags_summarize`, are read-only and leave confidential documents out by
+  default (`brain_tags_summarize` leaves them out of what it sends the model).
+  There is no MCP rename or merge: a corpus-wide rewrite is done here.
 
 ## Gmail ingest
 

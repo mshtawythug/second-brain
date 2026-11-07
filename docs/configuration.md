@@ -896,6 +896,7 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `brain_dedup_list` | Near-duplicate document pairs (`brain dedup`), most similar first. **Read-only**: it never scans or labels. Params: `status` (`open`\|`dismissed`\|`confirmed`, default `open`), `limit` (1 to 200, default 50), `include_confidential`. Without `include_confidential`, a pair is listed only when neither document is confidential. |
 | `brain_tags_list` | Every tag and its document count, most used first (`brain tags list`). **Read-only.** Params: `include_confidential`, `limit` (default 200, at most 1000); `truncated` says more tags exist. Without `include_confidential`, confidential documents are left out of the counts and a tag found only on them is not listed. |
 | `brain_tags_suggest_merges` | Pairs of tags that are probably one tag, ranked, with evidence (`keep`, `merge`, counts, `reasons`, `ratio`, `overlap`, `shared`): close spelling, singular/plural, or co-occurrence. **Read-only**: merging is `brain tags merge` at the terminal. Params: `include_confidential`, `limit` (default 25, at most 100). |
+| `brain_tags_summarize` | A short synthesis of what one tag's most recent non-draft documents say, from their stored summaries (titles where there is none), with `[N]` citations: `{tag, summary, citations: [{ref, document_id, title, date}], considered, dropped}`. One call to the local chat model (`OLLAMA_HOST`); over HTTP its timeout is capped at `--call-timeout`. **Read-only**, served over HTTP; nothing is cached. F6: confidential documents are left out of what the model is sent unless `include_confidential`. Params: `tag`, `include_confidential`, `limit` (default 20, at most 50). |
 | `brain_review_weekly` | Synthesize a week's activity into a review page. Params: `week` (ISO `YYYY-Www`), `no_graph`, `emit`. |
 | `brain_review_scan` | Run a contradiction / staleness scan into the review queue. Params: `scan_type` (`conflicts`\|`stale`\|`all`), `dry_run`, `limit`. |
 | `brain_review_findings_list` | Read the contradiction + staleness queue without scanning. Params: `kind` (`all`\|`conflicts`\|`stale`), `limit`. |
@@ -949,7 +950,7 @@ Desktop if a tool call fails.
 
 `brain mcp serve` serves the same tools over streamable HTTP, for another device on a
 private network (RM-46). It is off until you run it. By default it binds loopback, needs a
-bearer token, serves the 28 read tools only, and refuses `include_confidential`. A non-loopback
+bearer token, serves the 29 read tools only, and refuses `include_confidential`. A non-loopback
 bind needs `--allow-remote` **and** a token. `--allow-writes` and `--include-confidential` widen
 it, and the startup banner says when they do. It needs the mcp 2.x SDK
 (`pip install 'secondbrain-py[http]'`); stdio does not.

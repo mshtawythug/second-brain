@@ -26,6 +26,9 @@ brain list --source gmail --limit 20
 
 # One answer with citations, from a local model
 brain ask "What did we decide about the vendor renewal?"
+
+# What one tag's most recent documents say, with citations, from a local model
+brain tags summarize vendor
 ```
 
 ## ingest: Add new content
