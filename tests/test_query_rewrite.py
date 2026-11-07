@@ -84,12 +84,14 @@ class _Search:
         return [_row(d) for d in self.rankings.get(kwargs["query"], [])[: kwargs["limit"]]]
 
 
-def _run(search: _Search, rewriter: Any, *, limit: int = 5, **kwargs: Any) -> Any:
+def _run(
+    search: _Search, rewriter: Any, *, query: str = "original", limit: int = 5, **kwargs: Any
+) -> Any:
     return run_search(
         search,
         _Conn(),  # type: ignore[arg-type]
         embedder=None,  # type: ignore[arg-type]
-        query="original",
+        query=query,
         limit=limit,
         stages=(),
         rewriter=rewriter,
@@ -488,6 +490,25 @@ def test_a_rewriter_that_raises_costs_only_itself_and_stays_class_only() -> None
     assert [(h.query, h.is_original, h.rank) for h in outcome.fused["a"].hits] == [
         ("original", True, 1)
     ]
+
+
+def test_a_failed_rewrite_logs_its_class_not_the_query_or_the_reply(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Arrange
+    def down(_query: str) -> object:
+        raise OllamaUnavailable("synthetic reply text")
+
+    search = _Search({"privatequeryterm": ["a"]})
+
+    # Act
+    with caplog.at_level(logging.DEBUG, logger="brain"):
+        _run(search, down, query="privatequeryterm")
+
+    # Assert
+    assert "OllamaUnavailable" in caplog.text
+    assert "privatequeryterm" not in caplog.text
+    assert "synthetic reply text" not in caplog.text
 
 
 def test_a_failed_paraphrase_drops_alone_and_says_so() -> None:
