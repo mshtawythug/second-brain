@@ -390,18 +390,30 @@ def test_maintenance_skill_names_no_wiki_rebuild() -> None:
     assert "watcher B (vault→Quartz)" not in text
 
 
+#: The release that removed the wiki. Its heading is unbracketed until the ``v0.4.0`` tag
+#: exists and bracketed after, so the match takes both.
+_R3_RELEASE_HEADING = re.compile(r"(?m)^## \[?0\.4\.0\]?(?= |$)")
+
+
+def _r3_release_notes() -> str:
+    """The body of the 0.4.0 section, up to the next ``## `` heading."""
+    text = CHANGELOG.read_text(encoding="utf-8")
+    match = _R3_RELEASE_HEADING.search(text)
+    assert match is not None, "CHANGELOG.md has no 0.4.0 section"
+    end = text.find("\n## ", match.end())
+    return text[match.end() : end if end != -1 else len(text)]
+
+
 def test_changelog_warns_that_the_next_brain_up_removes_the_build_daemon() -> None:
     """Plan §3: the migration runs itself on the next ``brain-up``, so it must not surprise."""
-    unreleased = CHANGELOG.read_text(encoding="utf-8").split("## [Unreleased]", 1)[1]
-    unreleased = unreleased.split("\n## [", 1)[0]
-    assert "next `brain-up` after upgrading removes the `com.brain.build`" in unreleased
-    assert "**The way back:**" in unreleased and _REBUILD_ON_REQUEST in unreleased
+    notes = _r3_release_notes()
+    assert "next `brain-up` after upgrading removes the `com.brain.build`" in notes
+    assert "**The way back:**" in notes and _REBUILD_ON_REQUEST in notes
 
 
 def test_changelog_says_the_way_back_to_the_daemon_is_not_durable() -> None:
     """T7 review (LOW): this release's ``brain-up`` reruns ``brain-install-launchd``, which
     removes ``com.brain.build`` again, so a reinstall from an earlier release does not stick."""
-    unreleased = CHANGELOG.read_text(encoding="utf-8").split("## [Unreleased]", 1)[1]
-    unreleased = " ".join(unreleased.split("\n## [", 1)[0].split())
-    assert "This release's next `brain-up` removes it again" in unreleased
-    assert "keeping the daemon means staying on the earlier release" in unreleased
+    notes = " ".join(_r3_release_notes().split())
+    assert "This release's next `brain-up` removes it again" in notes
+    assert "keeping the daemon means staying on the earlier release" in notes

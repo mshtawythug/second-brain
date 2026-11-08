@@ -83,7 +83,8 @@ graph queries find nothing.
 ### What `brain doctor` shows
 
 Every successful `brain restore` writes `restored-from.json` into `$BRAIN_HOME/state` (that is
-`~/.brain/state` when `BRAIN_HOME` is not set). The file records
+`~/.brain/state` when `BRAIN_HOME` is not set; run from a source checkout, `$BRAIN_HOME` is the
+checkout itself, so it is `<checkout>/state`). The file records
 when the restored backup was taken, the archive's file name (never its full path), and when the
 restore ran. `brain doctor` reads it and prints:
 

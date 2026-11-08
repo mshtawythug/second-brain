@@ -22,6 +22,35 @@ git tag scheme:
 
 ## [Unreleased]
 
+## 0.4.0 - 2026-11-08
+
+<!-- Unbracketed until the `v0.4.0` tag exists: a bracketed heading needs a link definition, and a
+link to a tag that has not been pushed 404s (tests/test_repo_hygiene_files.py). Once the tag is
+pushed, bracket this heading, add `[0.4.0]: .../releases/tag/v0.4.0` and retarget `[Unreleased]`
+to `compare/v0.4.0...HEAD`. -->
+
+### Upgrading from 0.3.0
+
+1. Take a backup with `brain backup` while everything is still running, then stop the watcher with
+   `brain-down`.
+2. Run `brain init` once. It applies migrations 028 to 031 in order. All four are additive: they
+   add tables and columns and change no existing row. 028 waits at most 3 s for a lock
+   (`lock_timeout`); **031 sets no `lock_timeout`**. It is a single `CREATE TABLE IF NOT EXISTS`,
+   and the reason to stop the watcher first is so nothing is writing while it runs.
+3. Start again with `brain-up`. Its first run also removes the `com.brain.build` LaunchAgent (see
+   *Removed — the Quartz wiki* below).
+4. **The document leg ships off** (`BRAIN_DOC_LEG=false`), and so does the reranker. Turn the leg
+   on only after `brain init` has applied 031, then fill it with `brain docembed backfill`.
+5. Some entries below carry their own **Upgrade** line (for example 030 and the launchd daemons in
+   RM-19). `brain init` and `brain-up` cover each of them.
+
+### Not in this release
+
+- RM-14c, measuring the reranker on the owner's corpus: deferred to a later release. The reranker
+  ships off.
+- RM-22b, the engagement-ranking stage: deferred to a later release, until `brain usage
+  --engagement` reports its gate met.
+
 ### Added — document-level embeddings as a re-scoring search stage, off by default (RM-20)
 
 - Migration 031 adds `document_embeddings`: one vector per document, from its title and summary
@@ -37,6 +66,9 @@ git tag scheme:
   and is skipped after a text-only search instead of embedding the query again. While off, every
   surface and `brain eval`'s `config_signature` are unchanged. Measuring it on the owner's corpus
   is a recorded step after RM-14c.
+- Known limitation: `brain ui`'s Agent tab wraps the embedder, and a wrapped embedder never
+  matches the identity the backfill wrote, so there the leg reports `no_document_vectors` and
+  leaves the order alone. It fails safe; the fix is backlog BL-49.
 
 ### Added — `brain tags summarize`, a cited synthesis of one tag (RM-55)
 
