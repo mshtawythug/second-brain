@@ -46,6 +46,7 @@ _READ_ONLY = frozenset(
         "search",
         "show",
         "status",
+        "tags summarize",  # one local chat call; writes and caches nothing (RM-55)
         "timeline",
         "todo",
         "usage",

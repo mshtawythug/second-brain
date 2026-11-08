@@ -22,6 +22,24 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — `brain tags summarize`, a cited synthesis of one tag (RM-55)
+
+- `brain tags summarize TAG [--limit 20] [--json]` reads the tag's most recent non-draft documents,
+  sends their stored summaries (titles where there is none) to the local chat model, and prints a
+  short synthesis with `[N]` citations and the documents it cites. The input is capped at 120 tokens
+  a document and 3,000 in all; a citation of a document the model was not given is removed.
+- The MCP twin, `brain_tags_summarize`, leaves confidential documents out of what it sends the
+  model unless `include_confidential`. It is read-only and served by `brain mcp serve` (52 tools, 29
+  of them read-only). There the chat gets only what is left of `--call-timeout` after the fetch,
+  split across its two attempts, and the tool refuses without calling it once an attempt would get
+  less than a second.
+- Escape sequences and control characters are removed from the reply and from titles. Ollama down,
+  a context overflow and a cut-off reply each give their own fixed sentence (exit 1;
+  `INTERNAL_ERROR` over MCP).
+- `brain ask`'s `[N]` citation rule moved to `brain.citations`, so both commands share it. A citation
+  number is now at most 6 ASCII digits: a longer or non-ASCII-digit marker is removed as dangling
+  (a 5,000-digit one no longer raises).
+
 ### Added — opt-in query rewriting, `--rewrite` (RM-54)
 
 - `brain search --rewrite` and `brain explain --rewrite` also search up to two paraphrases from the

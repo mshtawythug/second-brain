@@ -31,6 +31,10 @@ class Deadline:
         if self._clock() > self._ends:
             raise AskTimedOut("the ask job passed its deadline")
 
+    def remaining(self) -> float:
+        """Seconds left on ``clock`` before the deadline: zero or less once it is reached."""
+        return self._ends - self._clock()
+
 
 def deadline_on_step(deadline: Deadline) -> Callable[[str, int], None]:
     """An ``on_step`` hook for :func:`brain.ask.ask` that checks ``deadline``."""

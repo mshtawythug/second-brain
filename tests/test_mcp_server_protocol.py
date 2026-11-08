@@ -313,10 +313,10 @@ def test_brain_mcp_tools_list_advertises_all_tools() -> None:
         assert arg in edit_props, f"brain_edit missing {arg}"
 
 
-#: Every tool the server registers at RM-46: 42 in ``mcp_server`` plus 9
-#: extension tools. The HTTP transport's read-only mode withholds 23 of them;
-#: stdio must keep serving all of them.
-RM46_TOOL_COUNT = 51
+#: Every tool the server registers: 42 in ``mcp_server`` plus 10 extension
+#: tools (RM-46's 9, plus RM-55's ``brain_tags_summarize``). The HTTP transport's
+#: read-only mode withholds 23 of them; stdio must keep serving all of them.
+RM46_TOOL_COUNT = 52
 
 
 @pytest.mark.skipif(

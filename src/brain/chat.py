@@ -110,6 +110,12 @@ def _build_client(host: str, timeout: float) -> httpx.Client:
     return httpx.Client(base_url=host, timeout=httpx.Timeout(timeout))
 
 
+#: How many requests one ``chat_json`` call may make: the first, and one retry after a malformed
+#: or cut-off reply. Each gets the full ``timeout``, which is why a caller with a hard deadline
+#: divides by this (``brain_tags_summarize`` over HTTP).
+CHAT_ATTEMPTS = 2
+
+
 def chat_json(
     prompt: str,
     *,
@@ -202,7 +208,7 @@ def chat_json_with_client(
     # whether the caller gets :class:`ChatOutputTruncated` (with the prefix).
     truncated_text: str | None = None
     current_num_predict = num_predict
-    for attempt in (1, 2):
+    for attempt in range(1, CHAT_ATTEMPTS + 1):
         truncated_text = None
         try:
             response_text = _chat_once(
@@ -267,7 +273,7 @@ def chat_json_with_client(
         return parsed
     # Both attempts failed.
     assert last_error is not None
-    message = f"chat failed after 2 attempts: {last_error}"
+    message = f"chat failed after {CHAT_ATTEMPTS} attempts: {last_error}"
     if truncated_text is not None:
         # Cut off at the doubled budget too. Hand the caller the prefix -- a
         # JSON list reply's complete items are still usable (concept
