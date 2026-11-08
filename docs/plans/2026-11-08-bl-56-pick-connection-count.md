@@ -35,9 +35,13 @@ does remove.
 
 ## Evidence
 
-- Mutation proof, in a git-archive copy deleted afterwards: `cli_search.py` holds a second
-  connection open across `run_pick`. The fixed test goes red (`during` is `before + 1` after the
-  backstop), and green again without the mutation.
+- Mutation proof, in a git-archive copy deleted afterwards (run on 2026-11-08 at `6d4307af`):
+  `cli_search.py` wraps `run_pick` in `with connect(cfg.database_url) as _held:` plus one
+  `SELECT 1`, so a second connection is really open across the pick. The fixed test goes **red**
+  with `assert [3] == [2]` after the 10 s backstop (13.5 s run); the old test is red on it too; with
+  the mutation removed the fixed test is **green** (1.5 s). A first attempt that called `connect()`
+  without `with` opened nothing (`db.connect` is a `@contextmanager`) and so survived; it was
+  discarded as a broken mutation, not evidence.
 - The 20-run before/after loops were skipped: free disk was 6 GiB, under the 7 GiB set for them.
 - Targeted tests: `test_cli_search_pick`, `test_thread_wait`, `test_log_privacy_rules`,
   `test_log_privacy`. CI is the full-suite evidence.
