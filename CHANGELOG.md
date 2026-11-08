@@ -35,9 +35,11 @@ to `compare/v0.4.0...HEAD`. -->
    From a source checkout, also run `bin/brain-skills-sync`: the agent skills changed in this
    release.
 2. Take a backup with `brain backup` while everything is still running. Then stop the writers:
-   `brain-down` stops the vault watcher (`com.brain.watcher`) and nothing else, so also quit any
-   running `brain ui` and `brain mcp serve`, and run the next step outside the `com.brain.brief`
-   and `com.brain.dropfolders` schedules.
+   `brain-down` boots out only the vault watcher (`com.brain.watcher`) and a leftover
+   `com.brain.build`, so also quit any running `brain ui` and `brain mcp serve`, and run the next
+   step when neither the brief job (`com.brain.brief`) nor the drop-folder job
+   (`com.brain.dropfolders`) is running: `launchctl list | grep com.brain` shows a PID in the first
+   column for a job that is running.
 3. Run `brain init` once. It applies migrations 028 to 031 in order. All four are additive: they
    add tables and columns and change no existing row. 028 waits at most 3 s for a lock
    (`lock_timeout`); **031 sets no `lock_timeout`**. Its new table's foreign key takes a
