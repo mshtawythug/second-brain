@@ -6,6 +6,8 @@ Nothing here touches a database: a fake search function stands in for
 """
 from __future__ import annotations
 
+import contextlib
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -235,23 +237,41 @@ def test_run_search_applies_a_vector_stage_on_an_ordinary_search() -> None:
     assert _ids(out.results) == ["doc-4", "doc-3", "doc-2", "doc-1", "doc-0"]
 
 
+class _TxConn:
+    """A stand-in connection with the savepoint RM-54's paraphrase searches open."""
+
+    def transaction(self) -> contextlib.nullcontext[None]:
+        return contextlib.nullcontext()
+
+
+class _ParaphraseSearch:
+    """The original query finds ``doc-0..2``; only the paraphrase finds ``doc-para``."""
+
+    def __call__(self, conn: Any, **kwargs: Any) -> list[SearchResult]:
+        if kwargs["query"] == "a synthetic paraphrase":
+            return [replace(result(0), document_id="doc-para", title="Paraphrase only")]
+        return [result(n) for n in range(3)]
+
+
 def test_with_a_rewrite_the_vector_stage_runs_after_it_on_the_original_query() -> None:
     # RM-54 fuses the paraphrases' rankings BEFORE the stages; the document leg
     # then re-scores the fused rows against the ORIGINAL query, whose vector
-    # the original search cached. (The paraphrase search itself is dropped on
-    # this stand-in connection; the order and the query are what this pins.)
+    # the original search cached. ``doc-para`` exists only in the paraphrase's
+    # ranking, so the stage can see it only if it runs after the fusion.
     vector_stage = VectorReverseStage("vec")
 
     out = run_search(
-        _Search(),
-        _CONN,
+        _ParaphraseSearch(),
+        _TxConn(),  # type: ignore[arg-type]
         embedder=FakeEmbedder(),
         query="the original query",
-        limit=3,
+        limit=5,
         stages=(vector_stage,),
         rewriter=lambda _query: ["a synthetic paraphrase"],
     )
 
+    (call,) = vector_stage.calls
+    assert "doc-para" in [r.document_id for r in call["results"]]
+    assert call["query"] == "the original query"
     assert [r.name for r in out.stages] == ["rewrite", "vec"]
-    assert vector_stage.calls[0]["query"] == "the original query"
-    assert out.stages[1].applied
+    assert out.stages[0].applied and out.stages[1].applied

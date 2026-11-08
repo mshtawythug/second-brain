@@ -446,7 +446,11 @@ RM-55, RM-54, BL-39). `cli_search.py`'s two `run_search` calls pass both
 `run_search` both the text-only flag and the rewrite leg. **Order:** the rewrite fuses the
 paraphrases' rankings before the stages, so `doc_leg` (then the reranker) re-scores the fused rows
 against the original query, whose vector the original search cached; the rewrite's report leads
-`stages`. `tests/test_doc_leg_build_stages.py` pins that order.
+`stages`. Two tests guard that order: master's
+`tests/test_query_rewrite.py::test_stages_see_the_fused_rows_and_the_original_query`, and
+`tests/test_doc_leg_build_stages.py::test_with_a_rewrite_the_vector_stage_runs_after_it_on_the_original_query`,
+whose stand-in search returns `doc-para` only for the paraphrase and which asserts the vector stage
+saw it (so running the stages before the rewrite leg turns it red).
 
 ## Deviations from the spec
 
