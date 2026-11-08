@@ -42,6 +42,9 @@ does remove.
   the mutation removed the fixed test is **green** (1.5 s). A first attempt that called `connect()`
   without `with` opened nothing (`db.connect` is a `@contextmanager`) and so survived; it was
   discarded as a broken mutation, not evidence.
-- The 20-run before/after loops were skipped: free disk was 6 GiB, under the 7 GiB set for them.
+- 20-run loops (free disk had reached 9 GiB): the old test from master `11c12333` failed **0/20**
+  and the fixed test **0/20**, each run alone on an idle machine. The race did not reproduce in
+  isolation; it shows under CI's full-suite load. The probe above, not the loop, is the evidence
+  that the window exists.
 - Targeted tests: `test_cli_search_pick`, `test_thread_wait`, `test_log_privacy_rules`,
   `test_log_privacy`. CI is the full-suite evidence.
