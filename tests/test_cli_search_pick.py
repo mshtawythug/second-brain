@@ -5,6 +5,7 @@ runs in ``tests/test_search_pick_real_fzf.py``. All documents are synthetic.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import uuid
@@ -22,6 +23,7 @@ from brain.ingest import Embedder
 from brain.search_pick import NO_FZF_MESSAGE, NO_TERMINAL_MESSAGE, OLD_FZF_MESSAGE, FzfRun
 from brain.search_pipeline import run_search as real_run_search
 from tests.entity_filter_seed import SHARED_TERM, seed_document
+from tests.thread_wait import wait_for
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -358,23 +360,42 @@ def test_d2_no_results_is_exit_1_on_stderr_and_fzf_does_not_start(
 def test_no_connection_from_the_search_is_held_while_a_human_chooses(
     corpus: list[str], monkeypatch: pytest.MonkeyPatch, test_db: psycopg.Connection[Any]
 ) -> None:
+    # Client backends only: an autovacuum worker on the test database is not a held connection.
     count_sql = (
         "SELECT count(*) FROM pg_stat_activity "
-        "WHERE datname = current_database() AND pid <> pg_backend_pid()"
+        "WHERE datname = current_database() AND pid <> pg_backend_pid() "
+        "AND backend_type = 'client backend'"
     )
     observer = psycopg.connect(TEST_DATABASE_URL, autocommit=True, connect_timeout=5)
     try:
         row = observer.execute(count_sql).fetchone()
         assert row is not None
-        before = row[0]
+        before = int(row[0])
         during: list[int] = []
         rows_seen: list[int] = []
 
-        def runner(argv: list[str], stdin_text: str) -> FzfRun:
+        def count() -> int:
             found = observer.execute(count_sql).fetchone()
+            assert found is not None
+            return int(found[0])
+
+        def runner(argv: list[str], stdin_text: str) -> FzfRun:
+            # The search's connection closes just before fzf starts, and a client-side close()
+            # returns before its backend leaves pg_stat_activity (BL-56: 12 of 200 probes still
+            # listed it). So wait for the count to settle; a connection really held across the
+            # wait never leaves, and the backstop records the count it is stuck at.
+            seen: list[int] = []
+
+            def settled() -> bool:
+                seen.append(count())
+                return seen[-1] == before
+
+            # wait_for's backstop raises AssertionError when the count never settles.
+            with contextlib.suppress(AssertionError):
+                wait_for(settled)
             logged = observer.execute("SELECT count(*) FROM search_queries").fetchone()
-            assert found is not None and logged is not None
-            during.append(found[0])
+            assert logged is not None
+            during.append(seen[-1])
             rows_seen.append(logged[0])
             return _second_line(argv, stdin_text)
 
