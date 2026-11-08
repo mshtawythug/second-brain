@@ -281,8 +281,8 @@ def test_stages_none_means_the_configured_stages(
     # Arrange
     seen: list[Any] = []
 
-    def fake_build(env: Any) -> tuple[ReverseStage, ...]:
-        seen.append(env)
+    def fake_build(env: Any, *, embedder: Any) -> tuple[ReverseStage, ...]:
+        seen.append((env, embedder))
         return (ReverseStage(),)
 
     monkeypatch.setattr(search_pipeline, "build_stages", fake_build)
@@ -296,8 +296,8 @@ def test_stages_none_means_the_configured_stages(
 
 
 def test_build_stages_is_empty_while_the_reranker_is_off() -> None:
-    assert build_stages({}) == ()
-    assert build_stages({"BRAIN_RERANKER": "none"}) == ()
+    assert build_stages({}, embedder=_Embedder()) == ()
+    assert build_stages({"BRAIN_RERANKER": "none"}, embedder=_Embedder()) == ()
 
 
 # --- apply_stages --------------------------------------------------------

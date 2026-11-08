@@ -22,6 +22,22 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — document-level embeddings as a re-scoring search stage, off by default (RM-20)
+
+- Migration 031 adds `document_embeddings`: one vector per document, from its title and summary
+  (or its title and the head of its content). `brain docembed backfill [--stale] [--limit N]`
+  writes them; under a hosted embedder confidential documents are skipped, and each batch is
+  re-checked just before it is sent. After an embedder or model switch, a plain run says how many
+  vectors another embedder wrote and points at `--stale`. `brain init`,
+  `brain restore` and the demo size the new column for the active embedder, as they do
+  `chunks.embedding`, checking every column before resizing any.
+- A new search stage, `doc_leg`, re-scores the rows a search already returned by each document's
+  cosine to the query, fused with the search's own rank. It adds no results and leaves a document
+  without a vector in its place. It ships **off** (`BRAIN_DOC_LEG=false`, `BRAIN_DOC_LEG_WEIGHT=1.0`)
+  and is skipped after a text-only search instead of embedding the query again. While off, every
+  surface and `brain eval`'s `config_signature` are unchanged. Measuring it on the owner's corpus
+  is a recorded step after RM-14c.
+
 ### Added — `brain tags summarize`, a cited synthesis of one tag (RM-55)
 
 - `brain tags summarize TAG [--limit 20] [--json]` reads the tag's most recent non-draft documents,

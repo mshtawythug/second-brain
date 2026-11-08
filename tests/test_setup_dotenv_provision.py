@@ -306,6 +306,7 @@ def _invoke_init(monkeypatch: pytest.MonkeyPatch, brain_home: Path):
         patch("brain.cli.make_embedder", return_value=_FakeEmbedder()),
         patch("brain.cli.run_migrations", return_value=[]),
         patch("brain.cli.ensure_embedding_column"),
+        patch("brain.cli.ensure_relational_embedding_columns"),
         patch("brain.cli.age_extension_available", return_value=False),
     ):
         return CliRunner().invoke(app, ["init"])

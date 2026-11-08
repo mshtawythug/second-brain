@@ -104,6 +104,10 @@ after the last registration, with its reason inline. A new command module adds
 an ``EXTENSION_REGISTRARS`` entry in ``cli_registry.py`` instead of a
 ``register_*`` call here; plan ``docs/plans/2026-10-23-rm-06-registration-seams.md``.
 
+**Tenth growth (RM-20): one import name.** ``init`` reconciles ``chunks`` and
+``document_embeddings`` through ``db.ensure_relational_embedding_columns``; the
+AGE-gated graph call keeps ``ensure_embedding_column``, so both names are imported.
+
 The long-deferred split into per-domain command modules is unchanged by any of
 this; ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
@@ -143,6 +147,7 @@ from .db import (
     connect_age,
     connect_raw,
     ensure_embedding_column,
+    ensure_relational_embedding_columns,  # ceiling growth (RM-20): see the docstring
     load_age,
     run_migrations,
 )
@@ -708,7 +713,7 @@ def init() -> None:
                 err=True,
             )
             raise typer.Exit(code=1) from e
-        ensure_embedding_column(conn, embedder)
+        ensure_relational_embedding_columns(conn, embedder)
         # GraphRAG (wave G0): provision the Apache AGE extension + the canonical
         # ``brain_graph`` graph idempotently, after relational migrations — but
         # ONLY when the DB image actually ships AGE. A stock pgvector image (a

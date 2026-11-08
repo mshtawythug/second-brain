@@ -25,7 +25,13 @@ import psycopg
 from ..errors import EmbedError, describe_failure
 from ..ingest import Embedder
 from ..search import hybrid_search
-from ..search_pipeline import SearchStage, apply_stages, build_stages, size_stages
+from ..search_pipeline import (
+    SearchStage,
+    apply_stages,
+    build_stages,
+    search_was_text_only,
+    size_stages,
+)
 from .corpus import EvalQuery
 from .errors import EvalCorpusError
 from .metrics import (
@@ -195,7 +201,7 @@ def run_eval(
     """
     results: list[EvalResult] = []
     if stages is None:
-        stages = build_stages(os.environ if env is None else env)
+        stages = build_stages(os.environ if env is None else env, embedder=embedder)
     stages, fetch = size_stages(stages, limit_per_query)
 
     for q in queries:
@@ -218,7 +224,7 @@ def run_eval(
                 snippet_context_tokens=snippet_context_tokens,
             )
             search_results, stage_ms, skipped = _apply_stages(
-                conn, q.query, search_results, stages
+                conn, q.query, search_results, stages, embedder=embedder
             )
             actual_ids = [r.document_id for r in search_results[:limit_per_query]]
         except EmbedError as exc:
@@ -305,6 +311,8 @@ def _apply_stages(
     query: str,
     results: list[Any],
     stages: Sequence[SearchStage],
+    *,
+    embedder: Embedder,
 ) -> tuple[list[Any], dict[str, float], tuple[str, ...]]:
     """Run ``stages`` over one query's rows.
 
@@ -316,8 +324,16 @@ def _apply_stages(
     """
     if not stages:
         return results, {}, ()
+    # Eval never falls back and never runs ``fts_only``, so only an embedder
+    # with no vectors makes it text-only; a stage needing the query vector is
+    # then skipped and the row refused (RM-20).
     staged, reports = apply_stages(
-        conn, query=query, session_id=None, results=results, stages=stages
+        conn,
+        query=query,
+        session_id=None,
+        results=results,
+        stages=stages,
+        text_only=search_was_text_only(embedder, fallback=None, fts_only=False),
     )
     for report in reports:
         if not report.applied:

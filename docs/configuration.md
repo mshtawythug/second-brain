@@ -434,6 +434,41 @@ running), that row names it in `stages_skipped`, and the run is refused like one
 with a failed embed: `--record-baseline` writes nothing and `--fail-below` exits
 1. Start the reranker and run it again.
 
+### `BRAIN_DOC_LEG` — the document-level re-scoring stage (off by default)
+
+A ranking stage that re-scores the rows a search already returned by how well
+each **whole document** fits the query: every document gets one vector, made from
+its title and summary (or its title and the start of its content when it has no
+summary), and the stage ranks the candidates by that vector's cosine to the query
+and fuses that rank with the search's own (reciprocal rank, k = 60). It adds no
+results, so every filter and the sensitivity lens hold; it only reorders. It runs
+on every search surface, before the reranker. It ships **off**, and stays off until
+`brain eval` on your own corpus shows it helps (roadmap ticket RM-20). The knobs
+live in the feature settings leaf `brain/settings/doc_leg.py`.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BRAIN_DOC_LEG` | `false` | `true` turns the stage on. |
+| `BRAIN_DOC_LEG_WEIGHT` | `1.0` | How much the document rank counts against the search's own, 0 to 10. `0` runs the stage but leaves the order as it was. |
+
+The vectors are written by `brain docembed backfill` (see
+[docs/cli-reference.md](cli-reference.md)); run it with `--stale` after edits or
+after changing embedder or model. A document without a vector (not yet
+backfilled, written by another embedder, or confidential under a hosted
+embedder) keeps its exact place in the list. Under a hosted embedder (`voyage`)
+a **confidential** document's text is never sent, so it has no vector. Under
+`BRAIN_EMBEDDER=none` the backfill refuses, and the stage is always reported
+skipped (`text_only_search`). After a failed query embed (the text-only fallback)
+or with `--fts-only` the stage is skipped too, rather than embedding the query
+again.
+
+A bad value is a `ConfigError` the first time a search runs, even while the stage
+is off. `brain eval` adds `doc_leg_weight` to its `config_signature` only while
+the stage is on, so a baseline recorded with it off stays valid. If the stage
+finds no vectors among a query's candidates, it is reported skipped
+(`no_document_vectors`), and `brain eval` refuses that row as it does a failed
+embed: run the backfill first.
+
 ### `BRAIN_WATCH_MIN_COSINE` — saved searches matched by meaning
 
 | Env var | Default | Purpose |

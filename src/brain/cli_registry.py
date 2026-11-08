@@ -37,6 +37,7 @@ from collections.abc import Callable
 import typer
 
 from .cli_dedup import register as register_dedup
+from .cli_docembed import register as register_docembed
 from .cli_docs import register_lifecycle, register_list
 from .cli_examples import register as register_examples
 from .cli_ingest import register as register_ingest
@@ -93,6 +94,7 @@ REGISTRARS: tuple[tuple[str, Registrar], ...] = (
 EXTENSION_REGISTRARS: tuple[tuple[str, Registrar], ...] = (
     ("watch", register_watch),  # RM-15, saved searches
     ("dedup", register_dedup),  # RM-19, near-duplicate detection
+    ("docembed", register_docembed),  # RM-20, whole-document vectors (doc leg)
     ("tags", register_tags),  # RM-21, tag rename / merge / suggest-merges
     ("ingest-calendar", register_ingest_calendar),  # RM-30, calendar events as documents
     ("ingest-github", register_ingest_github),  # RM-31, code-host activity

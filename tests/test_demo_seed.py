@@ -9,10 +9,11 @@ autouse teardown restore the migrated-once baseline.
 import psycopg
 import pytest
 
+from brain.db import ensure_embedding_column
 from brain.demo import seed_demo
 from brain.demo.embedder import DemoEmbedder
 from brain.search import hybrid_search
-from tests.conftest import TEST_DATABASE_URL
+from tests.conftest import TEST_DATABASE_URL, FakeEmbedder
 
 HERO_QUERY = "compliance horror stories"
 
@@ -138,3 +139,20 @@ def test_seed_with_embeddings_finalizes_column(test_db: psycopg.Connection) -> N
         "SELECT count(*) FROM chunks WHERE embedding IS NULL"
     ).fetchone()
     assert null_row is not None and null_row[0] == 0
+
+
+@pytest.mark.fresh_schema
+def test_seed_reconciles_the_document_vectors_column_too(test_db: psycopg.Connection) -> None:
+    # RM-20 AC5: start the (empty) document table at a dim the demo does not
+    # use, so only the relational reconcile can bring it back.
+    ensure_embedding_column(
+        test_db, FakeEmbedder(dim=4096), "document_embeddings", "embedding"
+    )
+
+    seed_demo(TEST_DATABASE_URL)
+
+    row = test_db.execute(
+        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+        "WHERE attrelid = 'document_embeddings'::regclass AND attname = 'embedding'"
+    ).fetchone()
+    assert row == (f"vector({DemoEmbedder().dim})",)

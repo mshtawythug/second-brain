@@ -32,10 +32,10 @@ from typing import Any, Protocol
 
 import psycopg
 
+from .confidential_lookup import confidential_document_ids
 from .errors import BrainError, describe_failure
 from .search import SearchResult
 from .search_pipeline import StageOutcome, StageReport
-from .sensitivity import CONFIDENTIAL
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +44,6 @@ RERANK_STAGE_NAME = "rerank"
 
 #: The stderr line the CLI prints when the stage was skipped.
 RERANK_SKIPPED_NOTICE = "reranker unavailable; results are in hybrid order"
-
-_CONFIDENTIAL_IDS_SQL = """
-    SELECT id::text
-    FROM documents
-    WHERE id = ANY(%s::uuid[]) AND sensitivity = %s
-"""
-
 
 class RerankError(BrainError):
     """A reranker backend failed: transport, HTTP status, API error or a malformed reply.
@@ -79,14 +72,6 @@ class Reranker(Protocol):
     def score(self, query: str, passages: Sequence[str], *, timeout: float) -> list[float]:
         """One score per passage, in passage order. Higher is more relevant."""
         ...
-
-
-def _confidential_ids(conn: psycopg.Connection[Any], document_ids: list[str]) -> set[str]:
-    """The subset of ``document_ids`` marked confidential: one round trip."""
-    if not document_ids:
-        return set()
-    rows = conn.execute(_CONFIDENTIAL_IDS_SQL, (document_ids, CONFIDENTIAL)).fetchall()
-    return {str(row[0]) for row in rows}
 
 
 def _passage(result: SearchResult, max_chars: int) -> str:
@@ -142,7 +127,7 @@ class RerankStage:
         del session_id  # a reranker scores the query, not the session
         head, tail = results[: self.depth], results[self.depth :]
         withheld = (
-            _confidential_ids(conn, [r.document_id for r in head])
+            confidential_document_ids(conn, [r.document_id for r in head])
             if self.reranker.hosted_egress
             else set()
         )

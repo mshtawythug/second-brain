@@ -26,7 +26,7 @@ from ..config import Config
 from ..db import (
     bootstrap_age,
     connect,
-    ensure_embedding_column,
+    ensure_relational_embedding_columns,
     migrations_dir,
     run_migrations,
 )
@@ -664,7 +664,7 @@ def restore_backup(
             conn.autocommit = True
             applied = run_migrations(conn)
             active_embedder = embedder if embedder is not None else make_embedder(cfg)
-            ensure_embedding_column(conn, active_embedder)
+            ensure_relational_embedding_columns(conn, active_embedder)
             bootstrap_age(conn)
             report(f"brain init ({len(applied)} new migrations)")
             analyze_tables(conn, ["chunks", "documents"])

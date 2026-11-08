@@ -25,6 +25,11 @@ pipeline and never falls back (spec §2.7) and so applies stages itself with
 :func:`brain.demo.query_demo`. ``tests/test_search_pipeline_boundary.py`` fails
 on any other module that calls ``hybrid_search`` or ``search_with_fts_fallback``.
 
+A stage that needs the query's vector (RM-20's document leg) declares it
+(:class:`QueryVectorStage`), and :func:`apply_stages` skips it after a
+text-only search, so it never embeds the query a second time after the embed
+failed, or at all under ``--fts-only``.
+
 Every string here is class-only (:func:`brain.errors.describe_failure`): a
 stage's exception message can carry text the user did not choose to print.
 """
@@ -120,6 +125,48 @@ class SearchStage(Protocol):
         ...
 
 
+class QueryVectorStage(SearchStage, Protocol):
+    """A stage that needs the query's vector, which a text-only search never computed.
+
+    The flag is optional on a stage: :func:`stage_needs_query_vector` is its one
+    reader, and treats a stage that does not declare it as ``False``, so stages
+    with no use for the vector (the reranker, the test fakes) need not mention it.
+    :func:`build_stages` types the document leg as this Protocol, so mypy checks
+    that it declares the flag.
+    """
+
+    # Read-only, as ``SearchStage.name`` is, so a frozen dataclass conforms.
+    @property
+    def needs_query_vector(self) -> bool: ...
+
+
+#: The ``skipped_reason`` of a :class:`QueryVectorStage` after a text-only search.
+TEXT_ONLY_SKIP_REASON = "text_only_search"
+
+
+def stage_needs_query_vector(stage: object) -> bool:
+    """True when ``stage`` declares :attr:`QueryVectorStage.needs_query_vector`.
+
+    The only reader of the flag. ``getattr`` with a ``False`` default, the
+    ``embeddings.is_hosted_embedder`` precedent: a stage that does not declare
+    it does not need the vector.
+    """
+    return bool(getattr(stage, "needs_query_vector", False))
+
+
+def search_was_text_only(
+    embedder: Embedder, *, fallback: SearchFallback | None, fts_only: bool
+) -> bool:
+    """True when the search ran without a query vector.
+
+    It fell back after a failed embed, it was asked for ``fts_only``, or the
+    embedder produces no vectors (``NullEmbedder``, which ``hybrid_search``
+    coerces to ``fts_only`` itself).
+    """
+    produces = bool(getattr(embedder, "produces_embeddings", True))
+    return fallback is not None or fts_only or not produces
+
+
 @dataclass(frozen=True)
 class PipelineResult:
     """A search's rows, the fallback that produced them, and each stage's report.
@@ -135,52 +182,68 @@ class PipelineResult:
 
 
 def build_stages(
-    env: Mapping[str, str], *, rerank: bool | None = None
+    env: Mapping[str, str], *, embedder: Embedder, rerank: bool | None = None
 ) -> tuple[SearchStage, ...]:
     """The stages every surface applies, read from the settings leaves.
 
     ``env`` is ``os.environ`` after the surface's ``Config.load()`` has
-    published the dotenv chain into it (spec §2.3). The reranker (RM-14a) is
-    added when ``BRAIN_RERANKER`` names a backend; it ships ``none``, so by
-    default this is empty and every surface is unchanged.
+    published the dotenv chain into it (spec §2.3). The document leg (RM-20) is
+    added when ``BRAIN_DOC_LEG`` is on, bound to ``embedder`` (the search's own,
+    whose cached query vector it reads); the reranker (RM-14a) when
+    ``BRAIN_RERANKER`` names a backend. The leg comes first, so it can lift a
+    document into the head the reranker scores. Both ship off, so by default
+    this is empty and every surface is unchanged.
 
     ``rerank`` is a one-run override (``brain search --rerank/--no-rerank``):
     ``False`` drops the stage, ``True`` requires a configured backend (a
     ``ConfigError`` otherwise: picking one would choose between a local and a
-    hosted service for the user), and ``None`` follows the setting. A bad
-    rerank knob is a ``ConfigError`` here even while the stage is off.
+    hosted service for the user), and ``None`` follows the setting; it does not
+    touch the document leg. A bad rerank or document-leg knob is a
+    ``ConfigError`` here even while its stage is off.
     """
-    # Imported here: ``brain.rerank`` imports this module's ``StageOutcome``
-    # and ``StageReport``, so a top-level import would be a cycle.
+    # Imported here: ``brain.rerank`` and ``brain.search_doc_leg`` import this
+    # module's ``StageOutcome`` and ``StageReport``, so a top-level import
+    # would be a cycle.
     from . import rerank_backends
     from .config import ConfigError
     from .rerank import RerankStage
+    from .search_doc_leg import DocLegStage
+    from .settings.doc_leg import load_doc_leg_settings
     from .settings.rerank import load_rerank_settings
 
+    doc_leg = load_doc_leg_settings(env)
     settings = load_rerank_settings(env)
     if rerank is True and not settings.enabled:
         raise ConfigError(
             "--rerank needs BRAIN_RERANKER set to llamacpp or voyage (it is none)"
         )
-    if not settings.enabled or rerank is False:
-        return ()
-    return (
-        RerankStage(
-            reranker=rerank_backends.make_reranker(settings),
-            depth=settings.depth,
-            max_chars=settings.max_chars,
-            timeout=settings.timeout_s,
-        ),
-    )
+    stages: list[SearchStage] = []
+    if doc_leg.enabled:
+        leg: QueryVectorStage = DocLegStage(embedder=embedder, weight=doc_leg.weight)
+        stages.append(leg)
+    if settings.enabled and rerank is not False:
+        stages.append(
+            RerankStage(
+                reranker=rerank_backends.make_reranker(settings),
+                depth=settings.depth,
+                max_chars=settings.max_chars,
+                timeout=settings.timeout_s,
+            )
+        )
+    return tuple(stages)
 
 
-def override_stages(rerank: bool | None) -> tuple[SearchStage, ...] | None:
+def override_stages(
+    rerank: bool | None, *, embedder: Embedder
+) -> tuple[SearchStage, ...] | None:
     """A CLI run's stages for ``--rerank/--no-rerank``: ``None`` follows the setting.
 
     ``None`` is passed through so ``run_search`` builds the configured stages
     itself, exactly as when the flag is absent.
     """
-    return None if rerank is None else build_stages(os.environ, rerank=rerank)
+    if rerank is None:
+        return None
+    return build_stages(os.environ, embedder=embedder, rerank=rerank)
 
 
 @dataclass(frozen=True)
@@ -247,6 +310,7 @@ def apply_stages(
     session_id: str | None,
     results: list[SearchResult],
     stages: Sequence[SearchStage],
+    text_only: bool = False,
 ) -> tuple[list[SearchResult], tuple[StageReport, ...]]:
     """Run ``stages`` over ``results`` in order. Never raises.
 
@@ -254,30 +318,22 @@ def apply_stages(
     measured the same way. A stage that reports ``applied=False`` has its INPUT
     passed on, whatever rows it returned: a stage that did not apply has not
     changed the ranking.
+
+    ``text_only`` (:func:`search_was_text_only`) skips every stage that needs
+    the query vector without calling it: after a failed embed it would embed
+    again (``lru_cache`` caches no exception), and under ``--fts-only`` the user
+    asked for no embed at all.
     """
     reports: list[StageReport] = []
     for stage in stages:
         started = perf_counter()
         skipped_reason: str | None
-        try:
-            outcome = stage.apply(
-                conn, query=query, session_id=session_id, results=results
-            )
-        # The one broad catch in the search path, and deliberate: a stage is an
-        # optional improvement, so ANY failure inside one (a timeout, a dead
-        # backend, a bug) must cost that stage, never the search (RM-09).
-        except Exception as exc:  # noqa: BLE001
-            reason = describe_failure(exc)
-            # INFO, not WARNING, for the reason ``search_with_fts_fallback``
-            # gives: the CLI configures no logging, so a WARNING would print an
-            # unformatted line to stderr.
-            logger.info("search stage %s skipped: %s", stage.name, reason)
-            applied, skipped_reason = False, reason
+        if text_only and stage_needs_query_vector(stage):
+            applied, skipped_reason = False, TEXT_ONLY_SKIP_REASON
         else:
-            applied = outcome.report.applied
-            skipped_reason = outcome.report.skipped_reason
-            if applied:
-                results = outcome.results
+            applied, skipped_reason, results = _apply_one(
+                stage, conn, query=query, session_id=session_id, results=results
+            )
         reports.append(
             StageReport(
                 name=stage.name,
@@ -287,6 +343,36 @@ def apply_stages(
             )
         )
     return results, tuple(reports)
+
+
+def _apply_one(
+    stage: SearchStage,
+    conn: psycopg.Connection[Any],
+    *,
+    query: str,
+    session_id: str | None,
+    results: list[SearchResult],
+) -> tuple[bool, str | None, list[SearchResult]]:
+    """Apply one stage: ``(applied, skipped_reason, rows)``. Never raises.
+
+    The rows are the stage's only when it applied; otherwise its input.
+    """
+    try:
+        outcome = stage.apply(conn, query=query, session_id=session_id, results=results)
+    # The one broad catch in the search path, and deliberate: a stage is an
+    # optional improvement, so ANY failure inside one (a timeout, a dead
+    # backend, a bug) must cost that stage, never the search (RM-09).
+    except Exception as exc:  # noqa: BLE001
+        reason = describe_failure(exc)
+        # INFO, not WARNING, for the reason ``search_with_fts_fallback``
+        # gives: the CLI configures no logging, so a WARNING would print an
+        # unformatted line to stderr.
+        logger.info("search stage %s skipped: %s", stage.name, reason)
+        return False, reason, results
+    skipped_reason = outcome.report.skipped_reason
+    if outcome.report.applied:
+        return True, skipped_reason, outcome.results
+    return False, skipped_reason, results
 
 
 def _search_paraphrases(
@@ -410,9 +496,12 @@ def run_search(
     --answer``, spec §2.7). ``limit`` is named, so it cannot also arrive in
     ``kwargs``; the rest of ``kwargs`` goes to ``search_fn`` unchanged.
 
-    ``stages=None`` means :func:`build_stages` of ``os.environ``, so a surface
-    that passes nothing gets every configured stage rather than silently none;
-    ``stages=()`` runs none. With no stages the rows are exactly ``search_fn``'s.
+    ``stages=None`` means :func:`build_stages` of ``os.environ`` and
+    ``embedder``, so a surface that passes nothing gets every configured stage
+    rather than silently none; ``stages=()`` runs none. With no stages the rows
+    are exactly ``search_fn``'s. After a text-only search (a fallback,
+    ``fts_only=True``, an embedder with no vectors) a stage that needs the query
+    vector is reported skipped and not called (:func:`apply_stages`).
 
     Never raises from a stage. A stage whose ``candidate_limit`` raises
     contributes ``limit`` to the fetch, is NOT applied, and is reported as
@@ -423,7 +512,7 @@ def run_search(
     unchanged.
     """
     stages, fetch = size_stages(
-        build_stages(os.environ) if stages is None else stages, limit
+        build_stages(os.environ, embedder=embedder) if stages is None else stages, limit
     )
     if rewriter is not None:
         fetch = max(fetch, limit * REWRITE_FETCH_FACTOR)
@@ -437,6 +526,9 @@ def run_search(
             conn, embedder=embedder, query=query, limit=fetch, **kwargs
         )
         fell_back = None
+    text_only = search_was_text_only(
+        embedder, fallback=fell_back, fts_only=bool(kwargs.get("fts_only"))
+    )
     fused: FusedDocs | None = None
     leading: tuple[StageReport, ...] = ()
     if rewriter is not None:
@@ -453,7 +545,12 @@ def run_search(
         )
         leading = (rewrite_report,)
     results, reports = apply_stages(
-        conn, query=query, session_id=session_id, results=results, stages=stages
+        conn,
+        query=query,
+        session_id=session_id,
+        results=results,
+        stages=stages,
+        text_only=text_only,
     )
     return PipelineResult(
         results=results[:limit], fallback=fell_back, stages=(*leading, *reports), fused=fused
