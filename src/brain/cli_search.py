@@ -38,8 +38,9 @@ from .facets import SearchFacets, compute_facets
 from .format import console, emit_json, explain_table, search_table
 from .format_search import (
     NO_FACETS_MESSAGE,
-    explanation_json,
+    explain_rows_json,
     facets_renderable,
+    found_by_table,
     search_envelope_json,
     search_meta_line,
     search_results_brief_json,
@@ -48,6 +49,7 @@ from .format_search import (
 from .gaps import record_search_query
 from .ingest import Embedder
 from .queries import PersonMatch
+from .query_rewrite import REWRITE_HELP, make_rewriter, rewrite_notice
 from .rerank import rerank_notice
 from .search import SearchDiagnostics, build_tsquery
 from .search_pick import refuse_unpickable, run_pick
@@ -58,6 +60,7 @@ from .token_report import count_results_tokens
 
 # One option object for both commands: the reranker's one-run override (RM-14a).
 _RERANK = typer.Option(None, "--rerank/--no-rerank", help="Override BRAIN_RERANKER for this run.")
+_REWRITE = typer.Option(False, "--rewrite", help=REWRITE_HELP)  # And the rewrite's (RM-54).
 # Rich console bound to stderr, for the facet panel. Rich resolves ``file``
 # lazily, so a module-level instance still honours a redirected ``sys.stderr``
 # — which is what keeps this assertable under ``CliRunner``.
@@ -230,7 +233,7 @@ def _warn_if_fts_only_degraded(embedder: Embedder) -> None:
 
 
 def _warn_if_fell_back(outcome: PipelineResult) -> None:
-    """Print the text-only fallback notice, then a skipped reranker's, on stderr.
+    """Print the text-only fallback notice, then a skipped reranker's and rewrite's, on stderr.
 
     Stderr, like :func:`_warn_if_fts_only_degraded`, so ``--json`` stdout stays
     parseable and the exit code stays 0: the results are real, only weaker.
@@ -240,6 +243,8 @@ def _warn_if_fell_back(outcome: PipelineResult) -> None:
     if outcome.fallback is not None:
         typer.echo(outcome.fallback.note, err=True)
     if (note := rerank_notice(outcome.stages)) is not None:
+        typer.echo(note, err=True)
+    if (note := rewrite_notice(outcome.stages)) is not None:
         typer.echo(note, err=True)
 
 
@@ -356,6 +361,7 @@ def search(
     ),
     rerank: bool | None = _RERANK,
     pick: bool = typer.Option(False, "--pick", help="Choose a result in fzf; prints its id."),
+    rewrite: bool = _REWRITE,
 ) -> None:
     """Hybrid search across the brain.
 
@@ -415,6 +421,7 @@ def search(
             query=query,
             limit=limit,
             stages=override_stages(rerank, embedder=embedder),
+            rewriter=make_rewriter(cfg, cost=embedder.count_tokens, enabled=rewrite),
             source_kind=source,
             tag=effective_tag,
             since_days=since_days,
@@ -660,6 +667,7 @@ def explain(
         help="Exclude docs carrying this tag.",
     ),
     rerank: bool | None = _RERANK,
+    rewrite: bool = _REWRITE,
 ) -> None:
     """Show per-result ranking diagnostics for a query.
 
@@ -685,6 +693,7 @@ def explain(
             query=query,
             limit=limit,
             stages=override_stages(rerank, embedder=embedder),
+            rewriter=make_rewriter(cfg, cost=embedder.count_tokens, enabled=rewrite),
             source_kind=source,
             tag=effective_tag,
             since_days=since_days,
@@ -713,19 +722,15 @@ def explain(
     if json_output:
         # The seven public keys come from the one shared projection; ``explain``
         # adds an eighth on top, from the projection MCP ``brain_explain`` shares
-        # (RM-12). Key ORDER is preserved (``**base`` first), so the emitted
-        # payload is byte-identical to the previous inline literal.
-        emit_json(
-            [
-                {**base, "explain": explanation_json(r.explain)}
-                for r, base in zip(results, search_results_json(results), strict=True)
-            ]
-        )
+        # (RM-12). ``--rewrite`` adds two more.
+        emit_json(explain_rows_json(results, outcome.fused))
         return
     if not results:
         typer.echo("(no results)")
         return
     console.print(explain_table(results, verbose=verbose))
+    if outcome.fused is not None:
+        console.print(found_by_table(results, outcome.fused))
 
 
 def register(app: typer.Typer) -> None:

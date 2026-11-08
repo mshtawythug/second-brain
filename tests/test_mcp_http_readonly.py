@@ -24,9 +24,10 @@ from brain.mcp_tools import related, saved_search
 
 pytestmark = pytest.mark.nodb
 
-#: The registry at RM-46: 42 tools in ``mcp_server`` plus 9 extension tools.
-REGISTERED = 51
-READS = 28
+#: The registry: 42 tools in ``mcp_server`` plus 10 extension tools (RM-55 added
+#: brain_tags_summarize).
+REGISTERED = 52
+READS = 29
 WRITES = 23
 
 

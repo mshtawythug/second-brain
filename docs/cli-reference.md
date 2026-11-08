@@ -196,6 +196,39 @@ brain search "platform migration" --rerank      # needs BRAIN_RERANKER set; else
   `applied: false` and the failure's class.
 - MCP and `brain ui` follow the setting; they have no per-call switch.
 
+**Query rewriting (`--rewrite`, off by default).** For a vague query, `brain search` and `brain
+explain` can also search up to two paraphrases from the chat model (`BRAIN_ENRICH_MODEL`), for that
+one run. It is never a default, because paraphrases can hurt exact-name lookups, and MCP and `brain
+ui` have no way to ask for it.
+
+```bash
+brain search "that thing about renewing" --rewrite
+brain explain "that thing about renewing" --rewrite   # names the query that found each result
+```
+
+- **Ranking.** The document rankings are fused with Reciprocal Rank Fusion, the original weighted 1.0
+  and each paraphrase 0.5. Every filter applies to every query, including `brain search`'s
+  `--sensitivity`. A reranker then sees the fused rows and the original query. `score` stays the
+  hybrid score, so the list can be out of order by `score`.
+- **`brain explain --rewrite`** adds a "Found by" table; with `--json`, each row gains `fused_score` and
+  `found_by` (`query`, `is_original`, 1-indexed `rank`). Both are present whenever the flag was passed.
+- **Cost.** One chat call plus two more searches, possibly with a cold model load. The footer gains a
+  `rewrite …ms` segment, and `--json --meta` a `rewrite` entry in `stages`.
+- **What stays about the original.** `N matched`, `--facets`, and the query text and `fts_count` in
+  `search_queries` (so `brain gaps` too) describe the original query only, so a fused row can sit
+  outside `N matched`. That row's `result_count` and token counts describe the fused rows. Paraphrases
+  are never stored or logged.
+- **Where the text goes.** The query, up to 256 tokens of it, goes to the chat model at `OLLAMA_HOST`.
+  That is local by default; if you point `OLLAMA_HOST` at another machine, that machine receives the
+  query. The paraphrases go to your embedder like any query, so with `BRAIN_EMBEDDER=voyage`, Voyage
+  receives them. With `BRAIN_RERANKER=voyage`, passages found only by a paraphrase can also go to
+  Voyage; confidential rows never do.
+- **If it fails.** Chat down, a context overflow, a malformed reply, a model that is not pulled, or no
+  usable paraphrases: you get the original search, exit 0, and one line on stderr: `query rewrite
+  skipped (<failure class>); showing the original search only.` If one paraphrase's search fails and
+  another works, the results use the rest, and the line is `a paraphrase search failed (<failure
+  class>); results use the original query and the other paraphrases.`
+
 `brain explain` runs the same query as `brain search` but prints per-result
 ranking diagnostics — FTS rank, vector cosine, RRF contributions, and the
 recency boost — so you can see *why* a result surfaced and in what order. Add
@@ -672,6 +705,7 @@ brain tags rename old-tag new-tag --apply            # write it
 brain tags merge widgets widget-ui --into widget     # dry run
 brain tags merge widgets widget-ui --into widget --apply
 brain tags suggest-merges [--limit 50] [--json]      # ranked, with evidence
+brain tags summarize planning [--limit 20] [--json]  # a cited synthesis of one tag
 ```
 
 - **Dry run by default.** Without `--apply`, `rename` and `merge` print the
@@ -704,9 +738,24 @@ brain tags suggest-merges [--limit 50] [--json]      # ranked, with evidence
   shared documents). Each line names the tag to keep (the more used one), the
   reasons, the counts, the ratio and the overlap, and the command to run. It
   writes nothing.
-- The MCP twins, `brain_tags_list` and `brain_tags_suggest_merges`, are
-  read-only and leave confidential documents out by default. There is no MCP
-  rename or merge: a corpus-wide rewrite is done here.
+- **`summarize`** reads the `--limit` (default 20, at most 50) most recent
+  non-draft documents carrying the tag, newest first by document date. It
+  takes each one's stored summary (`brain enrich`), or its title when there is
+  none, cuts each to 120 tokens, and packs them into a 3,000-token input. One
+  chat call returns a short synthesis with `[N]` citations; a number that names
+  no document the model was given is removed, and only cited documents are
+  listed under the summary. The footer says how many documents were considered
+  and how many did not fit. The tag is normalized first (`Nebula Notes` finds
+  `nebula-notes`). It reads confidential documents too, as `brain ask` does,
+  and **their summaries go to the chat model at `OLLAMA_HOST`**. It writes and
+  caches nothing. A tag no document carries makes no chat call and exits 0.
+  Ollama down, a context overflow and a cut-off reply each print their own
+  sentence and exit 1. The text is printed plain: escape sequences and control
+  characters are removed from the model's reply and from titles.
+- The MCP twins, `brain_tags_list`, `brain_tags_suggest_merges` and
+  `brain_tags_summarize`, are read-only and leave confidential documents out by
+  default (`brain_tags_summarize` leaves them out of what it sends the model).
+  There is no MCP rename or merge: a corpus-wide rewrite is done here.
 
 ## Gmail ingest
 

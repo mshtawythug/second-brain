@@ -931,6 +931,7 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `brain_dedup_list` | Near-duplicate document pairs (`brain dedup`), most similar first. **Read-only**: it never scans or labels. Params: `status` (`open`\|`dismissed`\|`confirmed`, default `open`), `limit` (1 to 200, default 50), `include_confidential`. Without `include_confidential`, a pair is listed only when neither document is confidential. |
 | `brain_tags_list` | Every tag and its document count, most used first (`brain tags list`). **Read-only.** Params: `include_confidential`, `limit` (default 200, at most 1000); `truncated` says more tags exist. Without `include_confidential`, confidential documents are left out of the counts and a tag found only on them is not listed. |
 | `brain_tags_suggest_merges` | Pairs of tags that are probably one tag, ranked, with evidence (`keep`, `merge`, counts, `reasons`, `ratio`, `overlap`, `shared`): close spelling, singular/plural, or co-occurrence. **Read-only**: merging is `brain tags merge` at the terminal. Params: `include_confidential`, `limit` (default 25, at most 100). |
+| `brain_tags_summarize` | A short synthesis of what one tag's most recent non-draft documents say, from their stored summaries (titles where there is none), with `[N]` citations: `{tag, summary, citations: [{ref, document_id, title, date}], considered, dropped}`. One call to the local chat model (`OLLAMA_HOST`); over HTTP the chat gets only what is left of `--call-timeout` after the fetch, split across its two attempts, and is not called once an attempt would get less than a second. **Read-only**, served over HTTP; nothing is cached. F6: confidential documents are left out of what the model is sent unless `include_confidential`. Params: `tag`, `include_confidential`, `limit` (default 20, at most 50). |
 | `brain_review_weekly` | Synthesize a week's activity into a review page. Params: `week` (ISO `YYYY-Www`), `no_graph`, `emit`. |
 | `brain_review_scan` | Run a contradiction / staleness scan into the review queue. Params: `scan_type` (`conflicts`\|`stale`\|`all`), `dry_run`, `limit`. |
 | `brain_review_findings_list` | Read the contradiction + staleness queue without scanning. Params: `kind` (`all`\|`conflicts`\|`stale`), `limit`. |
@@ -952,7 +953,7 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 |---|---|---|
 | `DATABASE_URL` | (required) | Postgres connection string. Same value used by the CLI. |
 | `BRAIN_EMBEDDER` | `arctic` | Embedder backend: `arctic`, `voyage`, or `qwen3`. Must match the dim baked into the database by `brain init`. |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL. Used by `arctic` and `qwen3`; ignored by `voyage`. |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL. Used by the `arctic` and `qwen3` embedders and by every chat feature (`brain ask`, `brain brief`, `--rewrite`), under `voyage` too. |
 | `QWEN3_MODEL` | `qwen3-embedding:8b` | Ollama model tag for the qwen3 backend. |
 | `BRAIN_OLLAMA_NUM_CTX` | `8192` | Context window the brain requests on every Ollama chat call (`options.num_ctx`), instead of inheriting the server's `OLLAMA_CONTEXT_LENGTH`. The KV cache scales with it (llama3.1:8b, q8_0: 544 MiB at 8192 vs 4352 MiB at 65536). Unset, it grows past 8192 only as far as a raised `BRAIN_ENRICH_MAX_INPUT_TOKENS` / `BRAIN_AUDIO_MAX_INPUT_TOKENS` needs; an explicit value too small for a capped call (those two caps, or the GraphRAG extract chunk) fails at startup; an over-window prompt is refused by Ollama, never silently truncated. |
 | `BRAIN_OLLAMA_EMBED_NUM_CTX` | `2048` | Context window the Ollama embedders (`arctic`, `qwen3`) request on every `/api/embed` call (`options.num_ctx`), instead of inheriting `OLLAMA_CONTEXT_LENGTH`. It is independent of `BRAIN_OLLAMA_NUM_CTX` because the embedder is a different model and runner. The default `2048` holds the largest stored chunk (1,689 model tokens, measured) and equals Ollama's embedding batch size, so arctic keeps its per-input capacity. arctic has no KV cache, so the window costs it nothing. On a server whose `OLLAMA_CONTEXT_LENGTH` is ≥ 40,960, qwen3-embedding:8b loaded at its trained 40,960, a ~3 GiB q8_0 KV cache; at `2048` it is ~153 MiB. Values below `1400` fail at startup, under every backend (the knob has no effect under `voyage` / `none`). An over-window input is refused by Ollama, never silently truncated. |
@@ -984,7 +985,8 @@ Desktop if a tool call fails.
 
 `brain mcp serve` serves the same tools over streamable HTTP, for another device on a
 private network (RM-46). It is off until you run it. By default it binds loopback, needs a
-bearer token, serves the 28 read tools only, and refuses `include_confidential`. A non-loopback
+bearer token, serves the read tools only (23 by default; the 6 graph read tools need
+`--include-confidential`), and refuses `include_confidential`. A non-loopback
 bind needs `--allow-remote` **and** a token. `--allow-writes` and `--include-confidential` widen
 it, and the startup banner says when they do. It needs the mcp 2.x SDK
 (`pip install 'secondbrain-py[http]'`); stdio does not.

@@ -42,7 +42,7 @@ in front of it on the private network.
 brain mcp serve — streamable HTTP
   endpoint      http://127.0.0.1:8787/mcp
   health        http://127.0.0.1:8787/healthz
-  mode          READ-ONLY (22 of 51 tools; 23 write tools withheld; 6 graph and search-log tools withheld)
+  mode          READ-ONLY (23 of 52 tools; 23 write tools withheld; 6 graph and search-log tools withheld)
   confidential  EXCLUDED (pass --include-confidential to serve)
   auth          bearer token from /Users/you/.brain/mcp_token (fp 4f9a2c71)
   allow-host    127.0.0.1, ::1, [::1], localhost
@@ -88,7 +88,7 @@ Without the flag, confidential METADATA stays home too:
   graph output carrying that, so the server withholds the family rather than filtering it.
   Start the server with `--include-confidential` to use the graph remotely.
 - The withheld set is every `brain_graphrag_*` tool (6 read, 6 write) plus two pinned
-  write tools, which matter only with `--allow-writes` (it then serves 37 of 51):
+  write tools, which matter only with `--allow-writes` (it then serves 38 of 52):
   `brain_review_weekly`, whose themes are graph communities under another name, and
   `brain_gaps`, which clusters the terms of your logged searches, including searches made
   while reading confidential documents. The name prefix alone would not catch a future

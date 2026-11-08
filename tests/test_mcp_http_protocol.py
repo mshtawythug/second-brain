@@ -35,12 +35,12 @@ pytestmark = pytest.mark.skipif(MCP_MAJOR < 2, reason="the HTTP transport needs 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql://brain:brain@localhost:5434/second_brain_test"
 )
-#: The registry at RM-46 and its read-only slice.
-ALL_TOOLS = 51
-READ_TOOLS = 28
+#: The registry and its read-only slice (RM-46; RM-55 added brain_tags_summarize, a read).
+ALL_TOOLS = 52
+READ_TOOLS = 29
 #: Round 5: without --include-confidential the graph family (6 read tools; 12
 #: prefixed) plus brain_review_weekly and brain_gaps (sec-118e/f) are withheld, so
-#: the default serves 22 and --allow-writes serves 37.
+#: the default serves 23 and --allow-writes serves 38.
 GRAPH_READ_TOOLS = 6
 GRAPH_TOOLS = 14
 STARTUP_DEADLINE_S = 60.0

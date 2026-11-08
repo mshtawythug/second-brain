@@ -233,3 +233,25 @@ def test_run_search_applies_a_vector_stage_on_an_ordinary_search() -> None:
     assert len(vector_stage.calls) == 1
     assert out.stages[0].applied
     assert _ids(out.results) == ["doc-4", "doc-3", "doc-2", "doc-1", "doc-0"]
+
+
+def test_with_a_rewrite_the_vector_stage_runs_after_it_on_the_original_query() -> None:
+    # RM-54 fuses the paraphrases' rankings BEFORE the stages; the document leg
+    # then re-scores the fused rows against the ORIGINAL query, whose vector
+    # the original search cached. (The paraphrase search itself is dropped on
+    # this stand-in connection; the order and the query are what this pins.)
+    vector_stage = VectorReverseStage("vec")
+
+    out = run_search(
+        _Search(),
+        _CONN,
+        embedder=FakeEmbedder(),
+        query="the original query",
+        limit=3,
+        stages=(vector_stage,),
+        rewriter=lambda _query: ["a synthetic paraphrase"],
+    )
+
+    assert [r.name for r in out.stages] == ["rewrite", "vec"]
+    assert vector_stage.calls[0]["query"] == "the original query"
+    assert out.stages[1].applied

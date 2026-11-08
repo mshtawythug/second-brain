@@ -1,4 +1,4 @@
-"""``brain tags``: list, rename, merge and suggest-merges (RM-21).
+"""``brain tags``: list, rename, merge, suggest-merges (RM-21) and summarize (RM-55).
 
 Thin Typer orchestration over :mod:`brain.tag_mapping`, the engine ``brain backfill
 normalize-tags`` also runs. ``rename`` and ``merge`` build a ``{old: new}`` mapping and run the
@@ -14,13 +14,17 @@ Registered through :data:`brain.cli_registry.EXTENSION_REGISTRARS` (RM-06), so `
 not edited for it. The terminal is inside the F6 trust boundary, so ``list`` and
 ``suggest-merges`` count both tiers. The MCP twins (:mod:`brain.mcp_tools.tags`) are read-only
 and lens-filtered.
+
+``summarize`` reads both tiers, as ``brain ask`` does, and sends the tag's document summaries to
+the chat model at ``OLLAMA_HOST`` (:mod:`brain.tag_summary`). Its database connection is closed
+before the model runs.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import psycopg
 import typer
@@ -41,6 +45,21 @@ from .tag_mapping import (
     suggest_merges,
     tag_counts,
 )
+from .tag_summary import (
+    TAG_SUMMARY_DEFAULT_LIMIT,
+    TAG_SUMMARY_FAILURES,
+    TAG_SUMMARY_LIMIT_CEILING,
+    TagSummary,
+    TagSummaryInputError,
+    describe_tag_summary_failure,
+    fetch_tag_documents,
+    resolve_tag,
+    synthesize,
+)
+
+if TYPE_CHECKING:
+    from .ask import ChatJson
+    from .ingest import Embedder
 
 tags_app = typer.Typer(
     name="tags",
@@ -216,6 +235,74 @@ def suggest_merges_cmd(
             f"overlap {s.overlap:.2f} ({s.shared} shared)"
         )
         typer.echo(f"  brain tags merge {s.merge} --into {s.keep}")
+
+
+def _build_chat(cfg: Config) -> ChatJson:
+    """The chat callable, via the ``brain.cli`` patch point ``brain ask`` uses."""
+    from . import cli as _cli
+
+    return _cli._build_chat(cfg)
+
+
+def _build_embedder(cfg: Config) -> Embedder:
+    """The embedder (for its offline ``count_tokens``), via the ``brain.cli`` patch point."""
+    from . import cli as _cli
+
+    return _cli._build_embedder(cfg)  # type: ignore[attr-defined]
+
+
+def _print_summary(result: TagSummary) -> None:
+    """The synthesis, its cited sources, and how much of the tag it read. Plain text, no markup."""
+    typer.echo(result.summary or "(no summary)")
+    if result.citations:
+        typer.echo("\n━ Sources\n")
+        for c in result.citations:
+            typer.echo(f"[{c.ref}]  {c.title} ({c.document_id[:8]}, {c.date.date().isoformat()})")
+    left_out = f", {result.dropped} left out by the input budget" if result.dropped else ""
+    typer.secho(f"\n{result.considered} document(s) considered{left_out}", dim=True)
+
+
+@tags_app.command("summarize")
+def summarize(
+    tag: str = typer.Argument(..., help="The tag to summarize."),
+    limit: int = typer.Option(
+        TAG_SUMMARY_DEFAULT_LIMIT,
+        "--limit",
+        min=1,
+        max=TAG_SUMMARY_LIMIT_CEILING,
+        help="Read at most this many of the tag's most recent documents.",
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit JSON: {tag, summary, citations, considered, dropped}."
+    ),
+) -> None:
+    """A short, cited synthesis of what a tag's most recent documents say.
+
+    Summaries of the tag's documents (confidential ones too) go to the chat model at OLLAMA_HOST.
+    """
+    try:
+        canonical = resolve_tag(tag)
+    except TagSummaryInputError as exc:
+        _fail(str(exc))
+    cfg = _config()
+    try:
+        with _session(cfg) as conn:
+            docs = fetch_tag_documents(conn, canonical, limit=limit, sensitivity=None)
+    except psycopg.Error as exc:
+        _fail(f"tags summarize: {describe_failure(exc)}")
+    # The connection is closed: a model call can take a while, and holds no database resource.
+    try:
+        result = synthesize(
+            canonical, docs, chat=_build_chat(cfg), cfg=cfg, cost=_build_embedder(cfg).count_tokens
+        )
+    except TAG_SUMMARY_FAILURES as exc:
+        _fail(f"tags summarize: {describe_tag_summary_failure(exc)}")
+    if json_out:
+        emit_json(result.to_json())
+    elif not docs:
+        typer.secho(f"no documents tagged '{result.tag}'", err=True)
+    else:
+        _print_summary(result)
 
 
 def register(app: typer.Typer) -> None:

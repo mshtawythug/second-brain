@@ -437,6 +437,17 @@ real Typer app: `brain init` (qwen3) resized `document_embeddings.embedding` 102
 document went from last to first with `doc_leg` applied; `--fts-only` reported it skipped
 (`text_only_search`).
 
+## Merge with master at `cfcf327d` (RM-54, RM-55, BL-39 merged)
+
+Three conflicts, each resolved as a union. `CHANGELOG.md` [Unreleased] keeps every entry (RM-20,
+RM-55, RM-54, BL-39). `cli_search.py`'s two `run_search` calls pass both
+`stages=override_stages(rerank, embedder=embedder)` and RM-54's `rewriter=make_rewriter(...)`.
+`search_pipeline.py` keeps `_apply_one` and RM-54's `_search_paraphrases` / `_rewrite_leg`, and in
+`run_search` both the text-only flag and the rewrite leg. **Order:** the rewrite fuses the
+paraphrases' rankings before the stages, so `doc_leg` (then the reranker) re-scores the fused rows
+against the original query, whose vector the original search cached; the rewrite's report leads
+`stages`. `tests/test_doc_leg_build_stages.py` pins that order.
+
 ## Deviations from the spec
 
 D5, D6 (the exact meaning of "neutral"), D8, D12, D13 and D14 fill in or tighten points the ticket

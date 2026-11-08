@@ -38,6 +38,36 @@ git tag scheme:
   surface and `brain eval`'s `config_signature` are unchanged. Measuring it on the owner's corpus
   is a recorded step after RM-14c.
 
+### Added — `brain tags summarize`, a cited synthesis of one tag (RM-55)
+
+- `brain tags summarize TAG [--limit 20] [--json]` reads the tag's most recent non-draft documents,
+  sends their stored summaries (titles where there is none) to the local chat model, and prints a
+  short synthesis with `[N]` citations and the documents it cites. The input is capped at 120 tokens
+  a document and 3,000 in all; a citation of a document the model was not given is removed.
+- The MCP twin, `brain_tags_summarize`, leaves confidential documents out of what it sends the
+  model unless `include_confidential`. It is read-only and served by `brain mcp serve` (52 tools, 29
+  of them read-only). There the chat gets only what is left of `--call-timeout` after the fetch,
+  split across its two attempts, and the tool refuses without calling it once an attempt would get
+  less than a second.
+- Escape sequences and control characters are removed from the reply and from titles. Ollama down,
+  a context overflow and a cut-off reply each give their own fixed sentence (exit 1;
+  `INTERNAL_ERROR` over MCP).
+- `brain ask`'s `[N]` citation rule moved to `brain.citations`, so both commands share it. A citation
+  number is now at most 6 ASCII digits: a longer or non-ASCII-digit marker is removed as dangling
+  (a 5,000-digit one no longer raises).
+
+### Added — opt-in query rewriting, `--rewrite` (RM-54)
+
+- `brain search --rewrite` and `brain explain --rewrite` also search up to two paraphrases from the
+  chat model for that one run, and fuse the rankings (original 1.0, paraphrases 0.5). Off by default;
+  MCP and `brain ui` have no way to ask for it. `brain explain` names the query that found each result.
+- Every filter applies to every query. A chat failure means the original search, one line on stderr,
+  and exit 0. Paraphrases are cleaned as untrusted output, capped in count and length, and never
+  logged or stored; `search_queries` and `brain gaps` keep the original query only.
+- The query goes to `OLLAMA_HOST`. With `BRAIN_EMBEDDER=voyage`, Voyage embeds the paraphrases; with
+  `BRAIN_RERANKER=voyage`, passages they find can go to Voyage, confidential rows excepted.
+  The new fixed-ceiling chat call is declared in `capped_call_budgets()`. No new setting.
+
 ### Fixed — `brain ingest-gmail` cannot hang on, or hold, an unbounded `gws` answer (BL-39)
 
 - Every `messages list` / `messages get` call now runs through the shared `gws` runner with a 60 s
