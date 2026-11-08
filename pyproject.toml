@@ -123,7 +123,8 @@ dependencies = [
   # (`brotli_maximum_output_length` and `stream_decoding_work_maximum_length`
   # missing); all 8 in 6.21.4. So on 6.14-6.17 the attachment child keeps
   # pypdf's own defaults and only its CPU, memory and wall-clock limits bound
-  # a parse. Not measured: 6.19.0-6.21.3 field by field.
+  # a parse. Not measured: 6.19.0-6.21.3 field by field. Raising the floor is
+  # backlog BL-55.
   "pypdf>=6.14",
   "pdfplumber>=0.11",
   "pdfminer.six>=20251230",

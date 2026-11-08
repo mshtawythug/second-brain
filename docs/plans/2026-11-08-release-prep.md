@@ -137,7 +137,9 @@ The backlog's §3 rank-12 row (3.6, document-level embeddings) gets a pointer to
 ## 5. Code fixes, ruled
 
 **Ruling (coordinator, 2026-11-08):** A and B are backlog rows BL-49 and BL-47, not in this PR; the
-optional docstrings (#24) are dropped; BL-54 is recorded.
+optional docstrings (#24) are dropped; BL-54 is recorded. The pypdf floor stays at `>=6.14`; raising it
+is backlog BL-55 (measured: no `apply_configuration` in 6.14.0–6.17.0, 6 of 8 fields at 6.18.0, all 8 at
+6.21.4).
 
 ### As proposed
 

@@ -31,18 +31,27 @@ to `compare/v0.4.0...HEAD`. -->
 
 ### Upgrading from 0.3.0
 
-1. Take a backup with `brain backup` while everything is still running, then stop the watcher with
-   `brain-down`.
-2. Run `brain init` once. It applies migrations 028 to 031 in order. All four are additive: they
+1. Install 0.4.0: `pip install --upgrade secondbrain-py`, or pull a source checkout and reinstall it.
+   From a source checkout, also run `bin/brain-skills-sync`: the agent skills changed in this
+   release.
+2. Take a backup with `brain backup` while everything is still running. Then stop the writers:
+   `brain-down` stops the vault watcher (`com.brain.watcher`) and nothing else, so also quit any
+   running `brain ui` and `brain mcp serve`, and run the next step outside the `com.brain.brief`
+   and `com.brain.dropfolders` schedules.
+3. Run `brain init` once. It applies migrations 028 to 031 in order. All four are additive: they
    add tables and columns and change no existing row. 028 waits at most 3 s for a lock
-   (`lock_timeout`); **031 sets no `lock_timeout`**. It is a single `CREATE TABLE IF NOT EXISTS`,
-   and the reason to stop the watcher first is so nothing is writing while it runs.
-3. Start again with `brain-up`. Its first run also removes the `com.brain.build` LaunchAgent (see
-   *Removed — the Quartz wiki* below).
-4. **The document leg ships off** (`BRAIN_DOC_LEG=false`), and so does the reranker. Turn the leg
+   (`lock_timeout`); **031 sets no `lock_timeout`**. Its new table's foreign key takes a
+   `SHARE ROW EXCLUSIVE` lock on `documents`, so it waits behind any open writer, and every writer
+   after it waits behind it. That is why the writers stop first.
+4. Start again with `brain-up`. It reinstalls the launchd daemons, and its first run removes the
+   `com.brain.build` LaunchAgent (see *Removed — the Quartz wiki* below).
+5. **The document leg ships off** (`BRAIN_DOC_LEG=false`), and so does the reranker. Turn the leg
    on only after `brain init` has applied 031, then fill it with `brain docembed backfill`.
-5. Some entries below carry their own **Upgrade** line (for example 030 and the launchd daemons in
-   RM-19). `brain init` and `brain-up` cover each of them.
+6. Some entries below carry their own upgrade line. Steps 1, 3 and 4 cover the migration, launchd
+   and skills ones (for example 030 and the daemon reinstall in RM-19, and the `sources/` skill
+   recipes). One is separate and optional: a `brain setup --profile full` install that wants the
+   corrected AGE image re-runs setup with the stack stopped (*Fixed — the `full` profile pulled
+   the old AGE image*).
 
 ### Not in this release
 
