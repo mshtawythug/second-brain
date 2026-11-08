@@ -425,6 +425,18 @@ Spec items made explicit:
 3. The DB mutation proofs (M1, M2, M4, M6, M8–M12) and the DoD-17 end-to-end transcript are
    **owed (Docker down)** and listed so in the PR body, as in #123 and #124.
 
+**DB round (2026-11-08, own test DB `second_brain_test_rm20` on 5434, fakes only).** Every owed
+DB mutation was run in a `git archive` copy (anchor applied once, `brain` imported from the copy,
+copy deleted), each a refuses/keeps pair, and every one held: M1 (the hosted gate), M2
+(`embedder = %s`), M3 against the rev-1 DB test, M6 (the preflight), M8 (the `--stale` embedder
+comparison), M9 (the upsert's existence guard), M18a/M18b (the page filter on the default and
+`--stale` paths, killed by the new sec-127b I1 never-read test while the never-sent test stays
+green), M19 (the pre-embed re-check) and M20 (the `--stale` hint). The DoD-17 transcript ran the
+real Typer app: `brain init` (qwen3) resized `document_embeddings.embedding` 1024 → 4096;
+`brain docembed backfill` embedded 5, `--stale` 0; with `BRAIN_DOC_LEG=true` the fitting
+document went from last to first with `doc_leg` applied; `--fts-only` reported it skipped
+(`text_only_search`).
+
 ## Deviations from the spec
 
 D5, D6 (the exact meaning of "neutral"), D8, D12, D13 and D14 fill in or tighten points the ticket
