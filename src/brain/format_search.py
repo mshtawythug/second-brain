@@ -16,8 +16,10 @@ from collections.abc import Sequence
 from typing import Any
 
 from rich.table import Table
+from rich.text import Text
 
 from .facets import SearchFacets
+from .query_rewrite import FusedDoc, FusedDocs, QueryHit
 from .search import SearchDiagnostics, SearchExplanation, SearchResult
 from .search_fallback import SearchFallback, fallback_json
 from .search_pipeline import StageReport, stage_reports_json
@@ -153,6 +155,61 @@ def _is_fts_only(diag: SearchDiagnostics) -> bool:
     for both ``--fts-only`` and the auto-degrading ``NullEmbedder``.
     """
     return diag.embed_ms is None
+
+
+def _found_by_json(doc: FusedDoc) -> dict[str, Any]:
+    """The two keys ``explain --rewrite --json`` adds to a row."""
+    return {
+        "fused_score": doc.fused_score,
+        "found_by": [
+            {"query": hit.query, "is_original": hit.is_original, "rank": hit.rank}
+            for hit in doc.hits
+        ],
+    }
+
+
+def explain_rows_json(
+    results: list[SearchResult], fused: FusedDocs | None = None
+) -> list[dict[str, Any]]:
+    """The ``brain explain --json`` rows: the seven public keys plus ``explain``.
+
+    ``--rewrite`` adds ``fused_score`` and ``found_by`` to every row, even when the chat failed,
+    so a consumer reads one shape. Without it (``fused`` is ``None``) neither key exists, and key
+    ORDER is preserved (``**base`` first).
+    """
+    return [
+        {
+            **base,
+            "explain": explanation_json(r.explain),
+            **({} if fused is None else _found_by_json(fused[r.document_id])),
+        }
+        for r, base in zip(results, search_results_json(results), strict=True)
+    ]
+
+
+def _hit_line(hit: QueryHit) -> str:
+    """One query in the "Found by" table. The user's own query is named, not echoed."""
+    return f"original #{hit.rank}" if hit.is_original else f'"{hit.query}" #{hit.rank}'
+
+
+def found_by_table(results: list[SearchResult], fused: FusedDocs) -> Table:
+    """``brain explain --rewrite``: which query found each result, and its fused score.
+
+    Every row is in ``fused``: stages reorder or filter what the fusion produced, and never add.
+
+    ``format.py`` is at its ceiling, and paraphrases would crush the 11-column explain table, so
+    this is a second table. Cells are :class:`~rich.text.Text`: paraphrases are model output, and
+    ``[/]`` in a plain cell raises ``MarkupError``.
+    """
+    table = Table(title="Found by")
+    table.add_column("ID", style="dim")
+    table.add_column("Fused", justify="right")
+    table.add_column("Query")
+    for r in results:
+        doc = fused[r.document_id]
+        lines = "\n".join(_hit_line(hit) for hit in doc.hits)
+        table.add_row(r.document_id[:8], f"{doc.fused_score:.5f}", Text(lines))
+    return table
 
 
 def search_meta_line(

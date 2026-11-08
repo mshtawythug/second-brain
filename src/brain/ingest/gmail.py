@@ -5,19 +5,22 @@ accepts a JSON-encoded ``--params`` blob that mirrors the underlying Gmail
 REST API. Message bodies returned by the ``get`` call are base64url-encoded
 and may live either on ``payload.body.data`` or inside ``payload.parts[]``
 (multi-part messages) — this module normalises both shapes into plain text.
+
+Every call runs through :func:`brain.gws.real_gws_runner` under :data:`GWS_TIMEOUT_SECONDS` and
+:data:`GWS_MAX_STDOUT_BYTES`, and fails as a class-only :class:`GmailError` (BL-39).
 """
 import base64
 import html
 import json
 import re
-import shutil
-import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 
 from brain.config import BOILERPLATE_PATTERNS
+from brain.errors import DirectoryRefreshError, GwsTimeoutError
+from brain.gws import call_label, real_gws_runner
 
 # Re-using the shared Re/Fwd-prefix helper from vault.slug rather than
 # duplicating the regex — it's marked private (leading underscore) but the
@@ -42,10 +45,22 @@ _COLLAPSE_MIN_LINE_LEN = 40
 
 
 class GmailError(RuntimeError):
-    """Raised when the `gws` CLI is missing or returns a non-zero exit."""
+    """Raised when the `gws` CLI is missing, fails, times out or answers past the cap."""
+
+
+class GmailTimeoutError(GmailError):
+    """A ``gws gmail`` call killed at :data:`GWS_TIMEOUT_SECONDS`; ``ingest-gmail`` counts these."""
 
 
 Runner = Callable[[list[str]], str]
+
+#: One ``gws gmail`` call's time limit; its process group is killed past it (BL-39).
+GWS_TIMEOUT_SECONDS = 60.0
+#: The most stdout one ``gws gmail`` call may write (BL-39). A ``messages list`` page is small
+#: (Gmail's 500-id ceiling is ~40 KB), so a ``messages get`` with ``format=full`` sets it: Gmail's
+#: 25 MB message limit with every part inlined as base64url is 25 MB x 4/3 ~ 33.3 MB, just over
+#: 32 MiB, so 48 MiB leaves room for the JSON around it. Past it the read is refused, not held.
+GWS_MAX_STDOUT_BYTES = 48 * 1024 * 1024
 
 
 def _build_query(
@@ -655,14 +670,21 @@ def to_extracted_thread(messages: list[dict[str, Any]]) -> ExtractedDoc:
 
 
 def _run(cmd: list[str], runner: Runner | None = None) -> str:
-    """Execute ``cmd`` and return stdout; delegate to ``runner`` when supplied (tests)."""
+    """Execute ``cmd`` and return stdout; delegate to ``runner`` when supplied (tests).
+
+    Without one, ``cmd`` runs through :func:`brain.gws.real_gws_runner`, with the limits read
+    here at call time: no stdin, stderr discarded, and its process group killed at the timeout,
+    past the cap or on an interrupt. A failure names the call and the runner's content-free
+    ``log_detail``, never the ``--params`` (the query, an address, a message id) or ``gws``'s
+    stderr, and is raised ``from None`` so a traceback prints only this message.
+    """
     if runner is not None:
         return runner(cmd)
-    if not shutil.which(cmd[0]):  # pragma: no cover - requires missing gws on PATH
-        raise GmailError(f"`{cmd[0]}` CLI not found on PATH")
-    proc = subprocess.run(  # pragma: no cover - exercised only against the real gws CLI
-        cmd, capture_output=True, text=True, check=False
-    )
-    if proc.returncode != 0:  # pragma: no cover - requires real gws failure
-        raise GmailError(f"{' '.join(cmd)} failed: {proc.stderr.strip()}")
-    return proc.stdout  # pragma: no cover - requires real gws success
+    try:
+        return real_gws_runner(
+            cmd, timeout=GWS_TIMEOUT_SECONDS, max_stdout_bytes=GWS_MAX_STDOUT_BYTES
+        )
+    except GwsTimeoutError as exc:
+        raise GmailTimeoutError(f"{call_label(cmd)} {exc.log_detail}") from None
+    except DirectoryRefreshError as exc:
+        raise GmailError(f"{call_label(cmd)} {exc.log_detail}") from None

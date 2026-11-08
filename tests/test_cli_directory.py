@@ -52,12 +52,12 @@ def _stub_gws(mocker: MockerFixture) -> None:
 
     ``directory refresh`` hard-codes ``real_gws_runner`` for Calendar /
     Contacts. Patching ``shutil.which`` short-circuits the PATH check
-    inside ``brain.vault.derived_links.gws.real_gws_runner`` so it raises
+    inside ``brain.gws.real_gws_runner`` so it raises
     ``DirectoryRefreshError`` — exactly the "gws unavailable" path we
     want to exercise across the test matrix without relying on real
     Google Workspace auth.
     """
-    mocker.patch("brain.vault.derived_links.gws.shutil.which", return_value=None)
+    mocker.patch("brain.gws.shutil.which", return_value=None)
 
 
 @pytest.fixture(autouse=True)

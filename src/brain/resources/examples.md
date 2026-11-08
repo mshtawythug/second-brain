@@ -15,6 +15,9 @@ brain search "invoice 1042" --fts-only
 # More results, as JSON for a script
 brain search "vendor renewal" --limit 10 --json
 
+# A vague query: also search paraphrases from the chat model at OLLAMA_HOST, this run only
+brain search "that thing about renewing" --rewrite
+
 # Why a result ranked where it did
 brain explain "vendor renewal"
 

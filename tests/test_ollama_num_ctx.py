@@ -113,14 +113,14 @@ def test_default_capped_call_requirements_are_pinned() -> None:
     """Each capped call's worst case, from the spec's arithmetic.
 
     enrich 1200 + 1024 + 256x2; extract (1500 + 100) + 1024 + 1024x2;
-    audio 3000 + 1024 + 2048x2; tag summary 3000 + 1024 + 512x2 (RM-55). A dropped
-    term in any budget moves a number.
+    audio 3000 + 1024 + 2048x2; query rewrite 256 + 1024 + 256x2 (RM-54); tag summary
+    3000 + 1024 + 512x2 (RM-55). A dropped term in any budget moves a number.
     """
     budgets = capped_call_budgets(
         enrich_max_input_tokens=config_module.DEFAULT_ENRICH_MAX_INPUT_TOKENS,
         audio_max_input_tokens=config_module.DEFAULT_AUDIO_MAX_INPUT_TOKENS,
     )
-    assert [b.required_num_ctx for b in budgets] == [2736, 4672, 8120, 5048]
+    assert [b.required_num_ctx for b in budgets] == [2736, 4672, 8120, 1792, 5048]
 
 
 def test_default_num_ctx_fits_every_default_capped_call() -> None:
@@ -132,6 +132,7 @@ def test_default_num_ctx_fits_every_default_capped_call() -> None:
         "enrich summarize",
         "graphrag concept extract (one chunk)",
         "audio script",
+        "query rewrite",
         "tag summary",
     }
     assert num_ctx_violations(DEFAULT_OLLAMA_NUM_CTX, budgets) == []

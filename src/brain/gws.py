@@ -1,0 +1,154 @@
+"""Production ``gws`` subprocess runner conforming to the GwsRunner Protocol.
+
+Every ``gws`` read in the package runs here: Calendar and Contacts refreshes,
+``ingest-calendar``, receipt attachments, and ``ingest-gmail``'s ``messages list`` / ``get``
+(``brain.ingest.gmail._run``, BL-39). The one ``gws`` call that does not is a write:
+``brain.brief_delivery.run_gws`` sends the brief with ``gws gmail +send`` under its own timeout,
+because its argv holds the message body. It lived in ``brain.vault.derived_links.gws``, which
+still re-exports it; it moved to this neutral leaf so an ``ingest`` module can use it without
+importing ``vault``. All expected
+subprocess failures (missing binary, non-zero exit, timeout, unexpected ``OSError``) are routed
+through :class:`brain.errors.DirectoryRefreshError`, a timeout as its subclass
+:class:`brain.errors.GwsTimeoutError`, so the refresh helpers in
+``vault/derived_links/directory.py`` can downgrade them to soft warnings (``refresh_calendar`` /
+``refresh_contacts`` already catch ``DirectoryRefreshError`` from the runner).
+
+CLAUDE.md security rules: explicit timeout (30s by default), narrow
+exception catch, no ``shell=True``, output truncation in error messages so logs
+stay readable when ``gws`` chatters on stderr.
+
+A caller whose read is large (``brain ingest-calendar``'s ``--page-all`` over up
+to 92 days, RM-30) passes its own ``timeout`` and a ``max_stdout_bytes`` cap.
+With a cap, the read goes through ``capped_process.run_capped`` (sec-117 F6): stdout is
+read in chunks and the process group is killed as soon as the cap is passed, at the
+timeout, or on an interrupt, so an oversized answer is refused instead of held in
+memory; stdin is ``/dev/null`` and stderr is discarded.
+"""
+import itertools
+import os
+import shutil
+import subprocess
+
+from brain.errors import DirectoryRefreshError, GwsTimeoutError
+
+# Hard cap on stderr included in the translated error message — keeps logs
+# readable when ``gws`` panics with a long Python traceback.
+_STDERR_SNIPPET_LIMIT = 200
+
+# Default subprocess timeout. ``gws`` calendar / people calls are I/O bound
+# against Google APIs; 30s is generous for a single page.
+_DEFAULT_TIMEOUT_SECONDS = 30
+
+
+def call_label(args: list[str]) -> str:
+    """``args``' words before the first flag, in backticks: ``gws calendar events list``.
+
+    What a message may name of a ``gws`` call. Everything after the first flag (the
+    ``--params`` JSON: a Gmail query, an address, a message id) stays out (BL-39, sec-126 I3).
+    """
+    return f"`{' '.join(itertools.takewhile(lambda word: not word.startswith('--'), args))}`"
+
+
+def real_gws_runner(
+    args: list[str],
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    max_stdout_bytes: int | None = None,
+) -> str:
+    """Shell out to the ``gws`` CLI; return stdout, translate failures.
+
+    Translates ``FileNotFoundError`` (gws missing), ``CalledProcessError``
+    (non-zero exit), ``TimeoutExpired`` (timeout, as ``GwsTimeoutError``), and any other
+    ``OSError`` into :class:`DirectoryRefreshError` so the refresh helpers
+    in ``directory.py`` log them as warnings and return 0.
+
+    Conforms to the :class:`brain.vault.derived_links.directory.GwsRunner`
+    Protocol so it can be passed straight into
+    ``refresh_calendar`` / ``refresh_contacts``. ``timeout`` and
+    ``max_stdout_bytes`` are for callers with larger reads (module docstring);
+    the defaults keep the original behaviour.
+    """
+    if not args:
+        raise DirectoryRefreshError("gws runner invoked with empty args", log_detail="empty args")
+    if not shutil.which(args[0]):
+        raise DirectoryRefreshError(
+            f"`{args[0]}` CLI not found on PATH", log_detail="gws CLI not found on PATH"
+        )
+    if max_stdout_bytes is not None:
+        return _run_capped(args, timeout=timeout, max_stdout_bytes=max_stdout_bytes)
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=timeout,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr_snippet = (exc.stderr or "").strip()[:_STDERR_SNIPPET_LIMIT]
+        raise DirectoryRefreshError(
+            f"gws command failed (exit {exc.returncode}): {stderr_snippet}",
+            log_detail=f"exit {exc.returncode}",
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise GwsTimeoutError(
+            f"{call_label(args)} timed out after {timeout:g}s",
+            log_detail=f"timed out after {timeout:g}s",
+        ) from exc
+    except OSError as exc:
+        raise DirectoryRefreshError(
+            f"gws command failed: {exc}", log_detail="could not run gws"
+        ) from exc
+    return proc.stdout
+
+
+def _run_capped(args: list[str], *, timeout: float, max_stdout_bytes: int) -> str:
+    """:func:`real_gws_runner` with stdout read in chunks and refused past the cap.
+
+    Runs through :func:`brain.ingest.capped_process.run_capped` (sec-117 F6): ``gws`` gets
+    its own process group, which is killed at ``timeout``, when the cap is passed and on
+    any exception in this process (Ctrl-C, or SIGTERM under ``sigterm_as_system_exit``),
+    so a helper ``gws`` started cannot keep the read open past the timeout. stdin is
+    ``/dev/null`` (an auth prompt cannot wait for input) and stderr is discarded unread,
+    so no account text it might quote is ever kept.
+    """
+    # Imported here, not at module level: ``brain.ingest/__init__`` imports
+    # ``brain.vault.export``, and this module loads during ``brain.vault``'s own
+    # initialization (vault -> link_rewrite -> frontmatter -> derived_links, whose
+    # ``gws`` re-exports this one), so a module-level import made a cold
+    # ``import brain.vault`` circular (rev-117, CI).
+    from brain.ingest.capped_process import run_capped
+
+    binary = shutil.which(args[0])
+    if binary is None:  # pragma: no cover - real_gws_runner checked it just before
+        raise DirectoryRefreshError(
+            f"`{args[0]}` CLI not found on PATH", log_detail="gws CLI not found on PATH"
+        )
+    try:
+        run = run_capped(
+            [binary, *args[1:]],
+            timeout=timeout,
+            max_stdout_bytes=max_stdout_bytes,
+            env=os.environ,
+        )
+    except OSError as exc:
+        raise DirectoryRefreshError(
+            f"gws command failed: {exc}", log_detail="could not run gws"
+        ) from exc
+    if run.timed_out:
+        raise GwsTimeoutError(
+            f"{call_label(args)} timed out after {timeout:g}s",
+            log_detail=f"timed out after {timeout:g}s",
+        )
+    if run.oversized:
+        raise DirectoryRefreshError(
+            f"gws output exceeded {max_stdout_bytes} bytes; "
+            "narrow the --since/--until window",
+            log_detail=f"stdout over {max_stdout_bytes} bytes",
+        )
+    if run.returncode != 0:
+        raise DirectoryRefreshError(
+            f"gws command failed (exit {run.returncode})",
+            log_detail=f"exit {run.returncode}",
+        )
+    return run.stdout.decode("utf-8", errors="replace")

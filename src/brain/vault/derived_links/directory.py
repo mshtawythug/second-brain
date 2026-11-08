@@ -93,9 +93,9 @@ def _score_directory_rows(
 class GwsRunner(Protocol):
     """Subprocess shell-out for the `gws` CLI used to mine Calendar / Contacts.
 
-    Production runner shells out to `gws` (must be on PATH); tests pass a
-    fake. See `src/brain/ingest/gmail.py:179` for the parallel pattern,
-    but note: that pattern raises ``GmailError`` — the refresh helpers
+    Production runner is ``brain.gws.real_gws_runner`` (`gws` must be on PATH);
+    tests pass a fake. ``ingest/gmail._run`` wraps the same runner but raises
+    ``GmailError`` — the refresh helpers
     here only catch ``(OSError, DirectoryRefreshError, RuntimeError)``.
 
     **Implementations must raise ``DirectoryRefreshError``, ``OSError``,
