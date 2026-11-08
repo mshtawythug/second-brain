@@ -3643,7 +3643,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-22a | Engagement readout and gate | S | 5 | — | DONE (#88) |
 | RM-22b | Engagement ranking stage (off; built when RM-22a's gate is met) | M | 5 | RM-22a, RM-09, RM-14c | TODO |
 | RM-23 | Copy-path affordance | XS | 5 | — | DONE (#89) |
-| RM-24 | `--entity` search filter (NEEDS USER CONFIRMATION) | S | 5 | RM-09 | DONE (#91) |
+| RM-24 | `--entity` search filter (NEEDS USER CONFIRMATION) | S | 5 | RM-09 | DONE (#91; user confirmed §5 U4 as recommended on 2026-10-30) |
 | RM-25 | H-1 move identity | S | 6 | RM-19 | DONE (#90) |
 | RM-26 | H-2 + H-4 owed watcher work | S | 6 | — | DONE (#95) |
 | RM-27 | H-3 graph-lock residuals | S | 6 | — | DONE (#93) |
@@ -3666,13 +3666,13 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-44 | Social bookmarks | S | 8 | RM-06, RM-07 | DONE (#116) |
 | RM-45 | Receipts (Gmail attachments) | M | 8 | RM-32 | DONE (#117) |
 | RM-46 | MCP over HTTP | L | 9 | RM-06 | DONE (#118) |
-| RM-47 | Multi-host via one brain + read replica | S | 9 | RM-46 | TODO |
-| RM-48 | Split `cli.py` / `mcp_server.py` (NEEDS USER CONFIRMATION) | XL | 9 | RM-06 | TODO |
-| RM-49 | Hermetic CI eval gate (NEEDS USER CONFIRMATION) | M | 9 | — | TODO |
-| RM-50 | Self-hosted fonts | S | 9 | RM-05 | TODO |
-| RM-51 | Retire the tab strip (NEEDS USER CONFIRMATION; closure note if answered as recommended) | XS | 9 | RM-18b | CLOSED AS MOOT (#85; coordinator's ruling adopting §5 U3's recommendation, no user answer yet: after RM-11 and RM-18b (#83) all three tabs are real) |
-| RM-52 | `brain search --pick` | XS | 9 | RM-09 | TODO |
-| RM-53 | `brain examples` | XS | 9 | RM-06 | TODO |
+| RM-47 | Multi-host via one brain + read replica | S | 9 | RM-46 | DONE (#119) |
+| RM-48 | Split `cli.py` / `mcp_server.py` (NEEDS USER CONFIRMATION) | XL | 9 | RM-06 | CLOSED, NOT SPLIT (#125; user confirmed §5 U1 as recommended on 2026-10-30: RM-06's seam stops the growth; extract a sub-app only when a ticket already changes most of it) |
+| RM-49 | Hermetic CI eval gate (NEEDS USER CONFIRMATION) | M | 9 | — | CLOSED, KEPT LOCAL (#125; user confirmed §5 U2 as recommended on 2026-10-30: the local gate covers every ranking change here) |
+| RM-50 | Self-hosted fonts | S | 9 | RM-05 | DONE (#120) |
+| RM-51 | Retire the tab strip (NEEDS USER CONFIRMATION; closure note if answered as recommended) | XS | 9 | RM-18b | CLOSED AS MOOT (#85; coordinator's ruling adopting §5 U3's recommendation, which the user confirmed on 2026-10-30: after RM-11 and RM-18b (#83) all three tabs are real) |
+| RM-52 | `brain search --pick` | XS | 9 | RM-09 | DONE (#121) |
+| RM-53 | `brain examples` | XS | 9 | RM-06 | DONE (#122) |
 | RM-54 | Opt-in `--rewrite` | S | 9 | RM-09 | DONE (#123) |
 | RM-55 | Summarize a tag | S | 9 | RM-21, RM-02 | TODO |
 | RM-56 | MCP twin of `brain eval` (trigger-gated) | S | 9 | RM-06 | TODO |
@@ -3680,4 +3680,4 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-58 | Prune `interactions` (trigger-gated) | S | 9 | RM-22a, RM-06 | TODO |
 | RM-59 | Auto-tag vocabulary cap (trigger-gated) | S | 9 | RM-21 | TODO |
 | RM-60 | `documents.parent_document_id` (trigger-gated) | S | 9 | — | TODO |
-| RM-61 | Background enrichment daemon (closure note, no code) | XS | 9 | — | TODO |
+| RM-61 | Background enrichment daemon (closure note, no code) | XS | 9 | — | CLOSED, NOT NEEDED (#125; RM-61.D1: the post-ingest hook writes summaries and `brain enrich --backfill` repairs the tail) |

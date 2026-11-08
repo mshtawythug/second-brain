@@ -63,6 +63,14 @@ class DirectoryRefreshError(BrainError):
         self.log_detail = log_detail
 
 
+class GwsTimeoutError(DirectoryRefreshError):
+    """A ``gws`` call killed at its timeout by :func:`brain.gws.real_gws_runner`.
+
+    A subclass, so every ``except DirectoryRefreshError`` still catches it; ``ingest-gmail``
+    tells it apart to stop a run whose ``gws`` keeps timing out (BL-39).
+    """
+
+
 class EmbedError(BrainError):
     """Base class for embedding-backend failures (network / transport / API / shape).
 
