@@ -3385,7 +3385,10 @@ user, and are listed in §5: RM-24 (in Wave 5), RM-48, RM-49 and RM-51.
   `rank_fusion.rrf_contribution`, the original weighted 1.0 and the paraphrases 0.5. `explain` shows,
   per result, which query found it. Chat down → the original search alone, plus a one-line notice;
   `OllamaContextOverflow` (impossible within the budget, but mapped anyway) → the same.
-- **Security / privacy:** the query goes only to the local chat model.
+- **Security / privacy:** the query goes to the chat model at `OLLAMA_HOST`. With
+  `BRAIN_EMBEDDER=voyage`, Voyage embeds the paraphrases; with `BRAIN_RERANKER=voyage`,
+  passages they find can go to Voyage, confidential rows excepted. (Amended 2026-11-08 to what
+  #123 shipped; this line used to say "only to the local chat model".)
 - **Ceiling:** `cli_search.py` +≤ 12 (budget, §2.2).
 - **Acceptance criteria:**
   1. Off unless `--rewrite`.
@@ -3630,7 +3633,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-13 | Ingest tab phase 3: file upload | M | 3 | RM-11, RM-07 | DONE (#77) |
 | RM-14a | Reranker stage, backends, eval wiring (off) | M | 4 | RM-08, RM-09 | DONE (#76) |
 | RM-14b | Local reranker runtime | S | 4 | RM-14a | DONE (#98) |
-| RM-14c | Reranker measurement and adoption | S | 4 | RM-14b | TODO |
+| RM-14c | Reranker measurement and adoption | S | 4 | RM-14b | TODO (deferred past 0.4.0; owner decision) |
 | RM-15 | Saved searches and watch lists (with the `brief --wiki` extraction) | M | 4 | RM-06, RM-09 | DONE (#78) |
 | RM-16 | Brief delivery (email to self / Slack webhook) | S | 4 | RM-08, RM-15 | DONE (#82) |
 | RM-17 | Brief "new this week" entities | S | 4 | — | DONE (#84) |
@@ -3641,7 +3644,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-20 | Document-level embedding stage (off) | M | 5 | RM-09, RM-14c | DONE (#127; measurement owed after RM-14c) |
 | RM-21 | Tag rename, merge, suggest-merges | S | 5 | RM-06 | DONE (#87) |
 | RM-22a | Engagement readout and gate | S | 5 | — | DONE (#88) |
-| RM-22b | Engagement ranking stage (off; built when RM-22a's gate is met) | M | 5 | RM-22a, RM-09, RM-14c | TODO |
+| RM-22b | Engagement ranking stage (off; built when RM-22a's gate is met) | M | 5 | RM-22a, RM-09, RM-14c | TODO (deferred past 0.4.0; owner decision) |
 | RM-23 | Copy-path affordance | XS | 5 | — | DONE (#89) |
 | RM-24 | `--entity` search filter (NEEDS USER CONFIRMATION) | S | 5 | RM-09 | DONE (#91; user confirmed §5 U4 as recommended on 2026-10-30) |
 | RM-25 | H-1 move identity | S | 6 | RM-19 | DONE (#90) |

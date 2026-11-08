@@ -22,6 +22,48 @@ git tag scheme:
 
 ## [Unreleased]
 
+## 0.4.0 - 2026-11-08
+
+<!-- Unbracketed until the `v0.4.0` tag exists: a bracketed heading needs a link definition, and a
+link to a tag that has not been pushed 404s (tests/test_repo_hygiene_files.py). Once the tag is
+pushed, bracket this heading, add `[0.4.0]: .../releases/tag/v0.4.0` and retarget `[Unreleased]`
+to `compare/v0.4.0...HEAD`. -->
+
+### Upgrading from 0.3.0
+
+1. Take a backup with `brain backup` while everything is still running.
+2. Stop the writers. `brain-down` stops the vault watcher (`com.brain.watcher`), plus the retired
+   `com.brain.build` if a 0.3.0 install still runs it, and nothing else. So also quit any running
+   `brain ui` and `brain mcp serve`, and avoid 07:00, when the daily brief (`com.brain.brief`)
+   runs. If `com.brain.dropfolders` is installed it runs every 10 minutes, so unload it first with
+   `launchctl bootout gui/$UID/com.brain.dropfolders`. Its plist stays, and `brain-up` reloads it.
+   `launchctl list | grep com.brain` shows a PID in the first column for a job that is running.
+3. Install 0.4.0: `pip install --upgrade secondbrain-py`, or pull a source checkout and reinstall
+   it. From a source checkout, also run `bin/brain-skills-sync`: the agent skills changed in this
+   release.
+4. Run `brain init` once. It applies migrations 028 to 031 in order. All four are additive: they
+   add tables and columns and change no existing row. 028 waits at most 3 s for a lock
+   (`lock_timeout`); **031 sets no `lock_timeout`**. Its new table's foreign key takes a
+   `SHARE ROW EXCLUSIVE` lock on `documents`, so it waits behind any open writer, and every writer
+   after it waits behind it. That is why the writers stop first.
+5. Start again with `brain-up`. It reinstalls the launchd daemons (reloading `com.brain.dropfolders`
+   if its plist is there), and its first run removes the `com.brain.build` LaunchAgent (see
+   *Removed — the Quartz wiki* below).
+6. **The document leg ships off** (`BRAIN_DOC_LEG=false`), and so does the reranker. Turn the leg
+   on only after step 4 has applied 031, then fill it with `brain docembed backfill`.
+7. Some entries below carry their own upgrade line. Steps 3, 4 and 5 cover the skills, migration
+   and launchd ones (for example the `sources/` skill recipes, and 030 and the daemon reinstall in
+   RM-19). One is separate and optional: a `brain setup --profile full` install that wants the
+   corrected AGE image re-runs setup with the stack stopped (*Fixed — the `full` profile pulled
+   the old AGE image*).
+
+### Not in this release
+
+- RM-14c, measuring the reranker on the owner's corpus: deferred to a later release. The reranker
+  ships off.
+- RM-22b, the engagement-ranking stage: deferred to a later release, until `brain usage
+  --engagement` reports its gate met.
+
 ### Added — document-level embeddings as a re-scoring search stage, off by default (RM-20)
 
 - Migration 031 adds `document_embeddings`: one vector per document, from its title and summary
@@ -37,6 +79,9 @@ git tag scheme:
   and is skipped after a text-only search instead of embedding the query again. While off, every
   surface and `brain eval`'s `config_signature` are unchanged. Measuring it on the owner's corpus
   is a recorded step after RM-14c.
+- Known limitation: `brain ui`'s Agent tab wraps the embedder, and a wrapped embedder never
+  matches the identity the backfill wrote, so there the leg reports `no_document_vectors` and
+  leaves the order alone. It fails safe; the fix is backlog BL-49.
 
 ### Added — `brain tags summarize`, a cited synthesis of one tag (RM-55)
 

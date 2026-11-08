@@ -1,6 +1,6 @@
 [project]
 name = "secondbrain-py"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local personal knowledge base with hybrid search, queryable by Claude"
 readme = "README.md"
 license = "MIT"
@@ -115,6 +115,16 @@ dependencies = [
   # Still unbounded above, for the reason given above. The residual risk (a
   # hostile PDF can exhaust memory or wedge the one job worker; no subprocess
   # sandbox) is recorded in the Ingest spec §7.4 and the backlog.
+  # NOT floored for `pypdf.apply_configuration` (RM-45's per-parse stream
+  # limits, `ingest/attachment_worker.pdf_limits`): the code feature-detects it
+  # and sets only the `Configuration` fields that exist. Measured 2026-11-08 in
+  # throwaway uv venvs (Python 3.11): absent in 6.14.0, 6.15.0, 6.16.0 and
+  # 6.17.0; present from 6.18.0 with 6 of the 8 fields `pdf_limits` sets
+  # (`brotli_maximum_output_length` and `stream_decoding_work_maximum_length`
+  # missing); all 8 in 6.21.4. So on 6.14-6.17 the attachment child keeps
+  # pypdf's own defaults and only its CPU, memory and wall-clock limits bound
+  # a parse. Not measured: 6.19.0-6.21.3 field by field. Raising the floor is
+  # backlog BL-55.
   "pypdf>=6.14",
   "pdfplumber>=0.11",
   "pdfminer.six>=20251230",

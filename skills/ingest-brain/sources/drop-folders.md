@@ -44,7 +44,9 @@ re-checked, adding nothing),
 `vanished`, `rejected` (a failure every run would repeat, such as an unreadable image, an
 OCR timeout or the secret guard: the file stays in `imported/` and is not retried), `failed`
 (a transient failure: the file is moved back; the reason is a class name). Exit 1 means a
-file failed or a folder was skipped. The usual cause is that OCR is off or `tesseract` is
+file failed or a folder could not be used (OCR or transcription unavailable, an unsafe
+`imported/`, a folder it cannot read); a missing configured folder only warns, with exit 0.
+The usual cause of an unusable folder is that OCR is off or `tesseract` is
 missing (or, for a voice folder, `BRAIN_WHISPER_MODEL` is unset or `whisper-cli` is missing), and
 the command prints the fix. A memo longer than `BRAIN_WHISPER_MAX_MINUTES` is `rejected`; a
 `warning: … was not transcribed (…, failure N of 3)` line means whisper failed and the memo goes back to be retried; the third failure on the same memo rejects it.

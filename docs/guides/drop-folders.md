@@ -159,8 +159,15 @@ whisper loads the model into its own process, so the model file has to be yours:
 you (or root), not writable by your group or by everyone (`chmod go-w` it), and not inside
 a drop folder. The same goes for every directory above it (owned by you or root, not
 group- or world-writable; a sticky directory such as `/tmp` is fine), because whisper
-opens the file by path after the check, so a shared folder is out. Otherwise voice memos stay off and `brain doctor` says
-which rule failed.
+opens the file by path after the check, so a shared folder is out. Otherwise voice memos stay
+off and `brain doctor` says which rule failed.
+
+Keep the model in a folder of your own, such as `~/models`. Homebrew's prefix
+(`/opt/homebrew/share`, `/opt/homebrew/Cellar`) and `/Applications` are group-writable (group
+`admin`), so a model there is refused; don't `chmod` Homebrew's prefix to get around it. The
+check reads ownership and mode bits only: a macOS ACL that lets someone else write is not
+detected, and a model on an external volume mounted with "ignore ownership" (every file owned
+by uid 99) is refused.
 `whisper-cli` must be found through an absolute `PATH` entry.
 
 ### 2. Configure a folder
