@@ -381,6 +381,10 @@ ordinary path still works (so the guard is not "refuse everything").
   documents for the active embedder).
   A document that becomes confidential after a hosted embed keeps its old vector (as its chunks
   do); a future `--stale`-on-sensitivity rule could drop or refresh it.
+  Known limitation (sec-127 I6): the UI's wrapped embedders (`ui/ask_service.py`,
+  `ui/ingest_progress.py`) carry their own class identity, so `embedder_identity` never matches the
+  backfill's rows and the leg would be inert (reported `no_document_vectors`) on those paths. It
+  fails safe. The adopting PR unwraps to the inner embedder's identity.
 
 Spec items made explicit:
 

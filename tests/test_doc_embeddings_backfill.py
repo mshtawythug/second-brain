@@ -199,6 +199,26 @@ def test_a_hosted_embedder_is_never_sent_a_confidential_document(
     assert report.remaining == 0
 
 
+@pytest.mark.parametrize("stale", [False, True], ids=["default", "stale"])
+def test_a_hosted_embedder_never_reads_a_confidential_document(
+    test_db: psycopg.Connection[Any], word: WordEmbedder, stale: bool
+) -> None:
+    # sec-127b I1: the page statement's own filter, apart from the re-check
+    # just before the embed call (which would also keep the text from being
+    # SENT). The confidential row must not even be read: no basis is built
+    # from it, so ``count_tokens`` never sees its title.
+    ids = seed(test_db, word, fit_sensitivity="confidential")
+    hosted = HostedWordEmbedder()
+
+    report = backfill(test_db, hosted, stale=stale)
+
+    # Refuses: the confidential document was never measured.
+    assert not any(FIT_TITLE in text for text in hosted.measured)
+    # Keeps: every other document was read and embedded as usual.
+    assert any("Harbour log 0" in text for text in hosted.measured)
+    assert report.embedded == len(ids) - 1
+
+
 def test_a_local_embedder_does_embed_the_confidential_document(
     test_db: psycopg.Connection[Any], word: WordEmbedder
 ) -> None:

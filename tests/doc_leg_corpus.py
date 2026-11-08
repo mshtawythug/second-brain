@@ -31,17 +31,27 @@ LEAD_BODY = "harbour lighthouse"
 
 
 class HostedWordEmbedder(WordEmbedder):
-    """A :class:`WordEmbedder` that declares hosted egress and records every text it was sent."""
+    """A :class:`WordEmbedder` that declares hosted egress and records what it handled.
+
+    ``sent`` is every text passed to ``embed``; ``measured`` is every text passed
+    to ``count_tokens``, which the backfill calls on each document it READ while
+    building its basis, before anything is sent.
+    """
 
     hosted_egress = True
 
     def __init__(self, dim: int = 4096) -> None:
         super().__init__(dim)
         self.sent: list[str] = []
+        self.measured: list[str] = []
 
     def embed(self, texts: list[str], input_type: str = "document") -> list[list[float]]:
         self.sent.extend(texts)
         return super().embed(texts, input_type)
+
+    def count_tokens(self, text: str) -> int:
+        self.measured.append(text)
+        return super().count_tokens(text)
 
 
 class ModelWordEmbedder(WordEmbedder):
