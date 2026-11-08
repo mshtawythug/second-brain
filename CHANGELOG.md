@@ -22,6 +22,18 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Added — opt-in query rewriting, `--rewrite` (RM-54)
+
+- `brain search --rewrite` and `brain explain --rewrite` also search up to two paraphrases from the
+  chat model for that one run, and fuse the rankings (original 1.0, paraphrases 0.5). Off by default;
+  MCP and `brain ui` have no way to ask for it. `brain explain` names the query that found each result.
+- Every filter applies to every query. A chat failure means the original search, one line on stderr,
+  and exit 0. Paraphrases are cleaned as untrusted output, capped in count and length, and never
+  logged or stored; `search_queries` and `brain gaps` keep the original query only.
+- The query goes to `OLLAMA_HOST`. With `BRAIN_EMBEDDER=voyage`, Voyage embeds the paraphrases; with
+  `BRAIN_RERANKER=voyage`, passages they find can go to Voyage, confidential rows excepted.
+  The new fixed-ceiling chat call is declared in `capped_call_budgets()`. No new setting.
+
 ### Fixed — `brain ingest-gmail` cannot hang on, or hold, an unbounded `gws` answer (BL-39)
 
 - Every `messages list` / `messages get` call now runs through the shared `gws` runner with a 60 s

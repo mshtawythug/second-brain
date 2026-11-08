@@ -3673,7 +3673,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-51 | Retire the tab strip (NEEDS USER CONFIRMATION; closure note if answered as recommended) | XS | 9 | RM-18b | CLOSED AS MOOT (#85; coordinator's ruling adopting §5 U3's recommendation, which the user confirmed on 2026-10-30: after RM-11 and RM-18b (#83) all three tabs are real) |
 | RM-52 | `brain search --pick` | XS | 9 | RM-09 | DONE (#121) |
 | RM-53 | `brain examples` | XS | 9 | RM-06 | DONE (#122) |
-| RM-54 | Opt-in `--rewrite` | S | 9 | RM-09 | TODO |
+| RM-54 | Opt-in `--rewrite` | S | 9 | RM-09 | DONE (#123) |
 | RM-55 | Summarize a tag | S | 9 | RM-21, RM-02 | TODO |
 | RM-56 | MCP twin of `brain eval` (trigger-gated) | S | 9 | RM-06 | TODO |
 | RM-57 | `--tier` filter (trigger-gated) | XS | 9 | — | TODO |
