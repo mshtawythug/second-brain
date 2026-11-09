@@ -329,7 +329,7 @@ dependencies = [
   # `tests/test_cli_config_error_presentation.py`: it goes red on a broken
   # pairing (shown above), so a future floor change that reopens this hole
   # fails the suite rather than shipping quietly.
-  "typer>=0.26,<0.28",
+  "typer>=0.26,<0.29",
   "rich>=13.9",
   "python-dotenv>=1.0",
   "tiktoken>=0.8",
