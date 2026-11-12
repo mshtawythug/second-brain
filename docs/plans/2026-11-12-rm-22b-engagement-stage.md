@@ -414,3 +414,10 @@ document), 8.7 ms with cold reads. The ask-citation probe now costs about 4 ms i
   - Its statement text is pinned to `_ENGAGEMENT_SQL` by `tests/test_engagement_explain_script.py`
     (nodb), so the two cannot drift. A DB test runs it on 5434 and checks that it changes no row.
   - No agent runs it against prod.
+- **Runs:**
+  - Nodb half: RED at `7782114c` (test only, no script) gave `2 failed`. GREEN gave `2 passed`.
+  - Mutation M18 (the module's statement counts `pinned` instead of `rated_useful`) was KILLED by
+    the drift test. M19 (`BEGIN READ ONLY` becomes `BEGIN`) was KILLED by the read-only test.
+  - DB half (`the script prints its timing and plan and changes nothing`, `nothing to time`): the
+    local 5434 container was stopped by the disk emergency stop when this was written, so CI's
+    pytest job is its first run of record.
