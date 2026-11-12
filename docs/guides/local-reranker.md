@@ -11,9 +11,9 @@ checks both, and optionally keeps the server running under launchd.
 
 The reranker ships **off**. RM-14c measured it on the owner's corpus on 2026-11-12: a large
 quality gain, but about 2.6–2.8 s of added p95 latency per search, over the 1.0 s limit, so it
-stays off (`docs/plans/2026-11-12-reranker-measurement.md`). Running it costs memory and time. Search never fails because of it: when it is not
-running, results stay in hybrid order and the CLI prints one line, `reranker unavailable;
-results are in hybrid order`.
+stays off (`docs/plans/2026-11-12-reranker-measurement.md`). Running it costs memory and
+time. Search never fails because of it: when it is not running, results stay in hybrid order
+and the CLI prints one line, `reranker unavailable; results are in hybrid order`.
 
 ## What was tested
 

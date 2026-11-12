@@ -421,8 +421,11 @@ because nothing leaves the machine.
 `--batch-size 2048 --ubatch-size 2048`, as the launchd job does. Each query+passage
 pair must fit in one physical batch. At llama.cpp's default of 512 tokens, a longer
 pair fails the whole call, and the search stays in hybrid order. 2048 holds a
-default 1,500-character passage. Raising `BRAIN_RERANK_MAX_CHARS` much past about
-1,800 can bring that failure back for dense text. Installing it, the tested
+default 1,500-character passage plus a query of up to a few hundred characters.
+A much longer query (the CLI and MCP do not cap it; the UI caps it at 512), NFKC
+expansion, or `BRAIN_RERANK_MAX_CHARS` raised much past about 1,800 can still
+exceed it. That rerank is then skipped and the results stay in hybrid order
+(BL-58). Installing it, the tested
 version and model, its measured memory, and the opt-in launchd job
 (`brain-install-launchd --with-reranker`) are in
 [docs/guides/local-reranker.md](guides/local-reranker.md). `brain doctor`'s

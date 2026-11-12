@@ -122,8 +122,10 @@ def test_plist_runs_llama_server_on_loopback_with_the_three_flags() -> None:
     assert data["StandardErrorPath"] == "/fake/brain/logs/com.brain.reranker.err.log"
 
 
-#: Room for the query and the pair's special tokens on top of a full passage. Queries are a
-#: sentence or two; 256 tokens is generous.
+#: Room for the query and the pair's special tokens on top of a full passage: enough for a
+#: query of up to a few hundred characters. A much longer query (the CLI and MCP do not cap
+#: it; the UI caps it at 512) or NFKC expansion can still exceed the batch, and that rerank is
+#: then skipped, so the search stays in hybrid order (BL-58).
 RERANK_QUERY_TOKEN_HEADROOM = 256
 
 

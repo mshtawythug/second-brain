@@ -21,7 +21,10 @@
      batch, and at llama.cpp's default ubatch of 512 any pair over 512 tokens
      got HTTP 500, which skipped the whole rerank. 2048 holds a full
      BRAIN_RERANK_MAX_CHARS passage (1500 characters, so at most 1500 tokens)
-     plus the query. /usr/bin/env resolves llama-server through the PATH
+     plus a query of up to a few hundred characters. A much longer query (the
+     CLI and MCP do not cap it; the UI caps it at 512) or NFKC expansion can
+     still exceed it; that rerank is then skipped and the search stays in
+     hybrid order (BL-58). /usr/bin/env resolves llama-server through the PATH
      below (Homebrew's prefix on Apple Silicon and on Intel). Guide:
      docs/guides/local-reranker.md. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

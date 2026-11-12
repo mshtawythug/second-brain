@@ -21,6 +21,8 @@ or per-query row is recorded here or anywhere else in this PR.
 | Document set | `brain status`: **2,114 documents / 22,322 chunks / 1,243 sources**, equal to the backup manifest's counts. 0 chunks had a NULL embedding. Migration head was `030_near_duplicates.sql`. The set was re-checked after a container restart mid-session, with the same counts. The database is frozen, so it did not move between runs. |
 | Retrieval config | Pinned to `ci.json`'s `config_signature`: `embedder` arctic, `recency_halflife_days` 180.0, `snippet_context_tokens` 200, `vector_sim_floor` 0.25. `BRAIN_DOC_LEG` off and graph off. |
 | Reranker | `llamacpp`: `llama-server` **0.7.0** (build 11669, commit 620d2225c, Homebrew), serving `bge-reranker-v2-m3-Q8_0.gguf` (the guide's file) on `127.0.0.1:8091`, because 8081 is LanguageTool's. Stage knobs at their defaults: depth 20, `max_chars` 1,500, timeout 5.0 s. |
+| Model file | sha256 of `~/.brain/models/bge-reranker-v2-m3-Q8_0.gguf`, computed read-only on 2026-11-12: `a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3`. **This matches** the value in `docs/guides/local-reranker.md`. |
+| Voyage | Not run: no key is configured (plan O5). |
 | Golden corpus | 31 queries in 7 categories (email 4, interview 5, meeting 5, people 2, recency 2, semantic 9, source-specific 4). |
 | Machine state | One model workload at a time, under the shared model lock, with 10–12 GiB of free disk at each start. Swap was heavily used throughout the session (about 16–17 GB), which probably inflated the latencies (§6). |
 
@@ -101,7 +103,11 @@ reranker on with hybrid order on most searches, plus a one-line stderr notice.
 
 **Fix (this PR):** `com.brain.reranker.plist.j2` now passes `--batch-size 2048 --ubatch-size
 2048`. A passage is capped at `BRAIN_RERANK_MAX_CHARS` (default 1,500 characters, so at most
-1,500 tokens), and 2048 holds that plus the query. The model's context per slot is 8,192.
+1,500 tokens), and 2048 holds that plus a query of up to a few hundred characters. It is not
+an absolute bound. A much longer query (the CLI and MCP do not cap query length; only the UI
+caps it, at 512) or NFKC expansion can still push a pair past 2048, and that rerank is then
+skipped gracefully: hybrid order plus the stderr notice. That case is filed as BL-58. The
+model's context per slot is 8,192.
 `tests/test_bin_launchd_reranker.py` pins both values and the invariant that the physical batch
 is at least `DEFAULT_MAX_CHARS` plus 256 tokens of headroom, and at most the logical batch. The
 proof:
@@ -180,7 +186,8 @@ whoever reopens the question:
 - The roadmap spec's Appendix B: RM-14c done. The RM-20 and RM-22b notes now say their
   measurements stack on the pipeline with the reranker off.
 - `docs/plans/2026-10-23-backlog-reconciliation.md`: BL-5 and roadmap 5 marked "built, measured,
-  not adopted (latency)".
+  not adopted (latency)". BL-58 is filed: the reranker's query length is uncapped on the
+  CLI and MCP (§3).
 - **Not changed:** `setup.py`, `ci.json`, the code default, and the owner's `.env`.
 
 ## 8. Owner step
