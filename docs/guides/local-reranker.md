@@ -9,8 +9,9 @@ llama.cpp, serving the **`bge-reranker-v2-m3`** cross-encoder over loopback HTTP
 rerank endpoint, so Ollama cannot run it. This guide installs the server, downloads the model,
 checks both, and optionally keeps the server running under launchd.
 
-The reranker ships **off**. Until `brain eval` shows it helps on your corpus (roadmap ticket
-RM-14c), running it only costs memory. Search never fails because of it: when it is not
+The reranker ships **off**. RM-14c measured it on the owner's corpus on 2026-11-12: a large
+quality gain, but about 2.6–2.8 s of added p95 latency per search, over the 1.0 s limit, so it
+stays off (`docs/plans/2026-11-12-reranker-measurement.md`). Running it costs memory and time. Search never fails because of it: when it is not
 running, results stay in hybrid order and the CLI prints one line, `reranker unavailable;
 results are in hybrid order`.
 
@@ -25,6 +26,8 @@ Measured on 2026-10-30, on an Apple Silicon Mac running macOS 26.
 | Model size | **635,676,416 bytes** (606 MiB). sha256 `a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3`, which matches the file's Hugging Face LFS id. |
 | Resident memory | **822,896 KiB (≈ 804 MiB)** once `/health` answered, and 825,200 KiB after one 3-passage rerank (`ps -o rss -p <pid>`). The server ran with its defaults: 4 slots, an 8,192-token context per slot. |
 | Request shape | `POST /v1/rerank` with `{model, query, documents, top_n}` returned `{"results": [{"index", "relevance_score"}, ...]}`, the shape the `llamacpp` backend (`brain/rerank_backends.py`) parses. |
+| Batch size | **`--batch-size 2048 --ubatch-size 2048`** (added 2026-11-12, RM-14c). At llama.cpp's default physical batch of 512 tokens, any query+passage pair over 512 tokens got HTTP 500 (`input (840 tokens) is too large to process. increase the physical batch size`). That one pair failed the whole call, so the search stayed in hybrid order. Against the golden corpus this skipped **17 of 31** queries. At 2048 none were skipped, and resident memory did not measurably change (742–790 MB). |
+| Latency | Measured 2026-11-12 on the owner's corpus (2,114 documents), depth 20, passages up to 1,500 characters, on a machine under heavy swap: about **2.1–2.3 s p50 and 2.6–2.8 s p95** per search. That is why RM-14c did not turn the reranker on; see `docs/plans/2026-11-12-reranker-measurement.md`. |
 
 Only the Q8_0 file was measured. The same repository has smaller quantizations (`Q4_K_M` is
 438,376,864 bytes), whose resident memory and ranking quality were not measured here. A newer
@@ -55,13 +58,15 @@ shasum -a 256 bge-reranker-v2-m3-Q8_0.gguf
 ## 3. Try it by hand
 
 All three model flags are required. `--reranking` only enables the endpoint; it is
-`--embedding --pooling rank` that makes the model score query–passage pairs. Bind to
+`--embedding --pooling rank` that makes the model score query–passage pairs. The two batch
+flags let a full-length passage fit in one physical batch (see "What was tested"). Bind to
 `127.0.0.1`: the passages are your documents' text, and `BRAIN_RERANK_URL` refuses any
 non-loopback host.
 
 ```bash
 llama-server -m ~/.brain/models/bge-reranker-v2-m3-Q8_0.gguf \
-  --embedding --pooling rank --reranking --host 127.0.0.1 --port 8081
+  --embedding --pooling rank --reranking --batch-size 2048 --ubatch-size 2048 \
+  --host 127.0.0.1 --port 8081
 ```
 
 In another terminal:

@@ -403,7 +403,7 @@ These knobs live in the feature settings leaf `brain/settings/rerank.py`.
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `BRAIN_RERANKER` | `none` | `none`, `llamacpp` (a local `llama-server` from llama.cpp, serving `bge-reranker-v2-m3`), or `voyage` (hosted). |
+| `BRAIN_RERANKER` | `none` | `none`, `llamacpp` (a local `llama-server` from llama.cpp, serving `bge-reranker-v2-m3`), or `voyage` (hosted). Measured 2026-11-12 (RM-14c): a large quality gain, but about 2.6–2.8 s of added p95 latency per search, so it stays off by default ([measurement](plans/2026-11-12-reranker-measurement.md)). |
 | `BRAIN_RERANK_DEPTH` | `20` | How many top results are rescored, 2 to 50. The rest keep their order after them. |
 | `BRAIN_RERANK_TIMEOUT_S` | `5.0` | Per-call timeout, 0.1 to 120 seconds. On a timeout the results stay in hybrid order. |
 | `BRAIN_RERANK_URL` | `http://127.0.0.1:8081` | Where `llama-server` listens. **Loopback only** (`127.0.0.1`, `::1`, `localhost`): the passages are your documents' text, so any other host is a `ConfigError`. The opt-in `com.brain.reranker` job binds `127.0.0.1` at this URL's port; for it the URL must be `http://127.0.0.1:PORT` or `http://localhost:PORT`, PORT in 1024–65535 (read by `brain-install-launchd`). |
@@ -417,7 +417,12 @@ rows are not sent and keep their places in the list. The local backend sees them
 because nothing leaves the machine.
 
 `llama-server` must be started with `--embedding --pooling rank --reranking`
-(the request is `POST {BRAIN_RERANK_URL}/v1/rerank`). Installing it, the tested
+(the request is `POST {BRAIN_RERANK_URL}/v1/rerank`), and with
+`--batch-size 2048 --ubatch-size 2048`, as the launchd job does. Each query+passage
+pair must fit in one physical batch. At llama.cpp's default of 512 tokens, a longer
+pair fails the whole call, and the search stays in hybrid order. 2048 holds a
+default 1,500-character passage. Raising `BRAIN_RERANK_MAX_CHARS` much past about
+1,800 can bring that failure back for dense text. Installing it, the tested
 version and model, its measured memory, and the opt-in launchd job
 (`brain-install-launchd --with-reranker`) are in
 [docs/guides/local-reranker.md](guides/local-reranker.md). `brain doctor`'s
