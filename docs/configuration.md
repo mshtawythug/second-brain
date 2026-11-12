@@ -490,10 +490,16 @@ settings leaf `brain/settings/engagement.py`.
 The stage is on when **either** weight is above zero. Two kinds of read never
 count: one made in the current search's own session, and the `opened` row
 `brain ask` records for each citation (its session names no logged search), so
-the stage cannot boost what it made you see. Turn it on only once
-`brain usage --engagement` reports its gate met (see
-[docs/cli-reference.md](cli-reference.md)), and measure it with `brain eval` on
-and off in the same session.
+the stage cannot boost what it made you see. Turn it on only once all three hold:
+
+1. `brain usage --engagement` reports its gate met (see
+   [docs/cli-reference.md](cli-reference.md));
+2. `brain eval` on and off in the same session shows no mean regressing;
+3. the stage's one statement takes at most **20 ms at p95** on your data. Measure
+   it read-only with
+   `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/engagement_explain.sql`
+   (it runs in a read-only transaction and prints only timings and a plan); read
+   its `p95` line.
 
 A bad value is a `ConfigError` the first time a search runs, even while the
 stage is off. `brain eval` adds `engagement_alpha` and `engagement_beta` to its

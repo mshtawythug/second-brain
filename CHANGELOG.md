@@ -94,7 +94,8 @@ to `compare/v0.4.0...HEAD`. -->
   logged for a citation (its session names no search), so the stage cannot feed itself.
 - It ships **off** (`BRAIN_ENGAGEMENT_ALPHA=0`, `BRAIN_ENGAGEMENT_BETA=0`; either above zero turns
   it on). While off, every surface and `brain eval`'s `config_signature` are unchanged. Turning it
-  on waits for `brain usage --engagement` to report its gate met and for an eval on and off.
+  on waits for `brain usage --engagement` to report its gate met, for an eval on and off, and for
+  `scripts/engagement_explain.sql` (read-only) to time its statement at p95 ≤ 20 ms on your data.
 - Migration 032 indexes `search_queries.session_id`, which the stage looks up for each read. Without
   it, a synthetic 1,000,000-interaction table took 11.7 s per search at p95.
 

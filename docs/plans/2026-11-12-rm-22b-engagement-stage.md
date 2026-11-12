@@ -379,3 +379,38 @@ its own sensitivity lens.
 | M15 | isolation plugin a no-op | KILLED (2) |
 | M16 | no upper bound on the knobs | KILLED (2) |
 | M17 | malformed session raises | KILLED (1) |
+
+## D5 benchmark (2026-11-12, synthetic `rm22b_bench` on 5434, dropped by exact name after each run)
+
+Data: 20,000 documents; 1,000,000 `interactions` (221 MB), at the RM-58 prune trigger. Session
+mix: 40% NULL, 40% a logged search's session, 20% an ask session. 300,000 `search_queries`
+(62–74 MB), each with its own session. Load: 50 random candidate ids × 200 runs, the session a
+logged one half the time, after 5 warm-up runs. Both runs started at ≥ 11 GiB free.
+
+| Run | p50 | p95 | max | Plan of the probe |
+|---|---|---|---|---|
+| Without 032 | 8,751 ms | 11,716 ms | 12,993 ms | `SubPlan 1`: **Seq Scan on search_queries**, 649 loops × 8.9 ms, 1.6M buffer hits |
+| With 032 | 14.6 ms | 33.8 ms | 71.4 ms | `SubPlan 1`: Index Only Scan using `search_queries_session_idx`, 634 loops × 0.006 ms |
+
+With 032, the statement's own execution time was 14.9 ms. Most of it is the bitmap heap scan on
+`interactions`: 2,419 rows for 50 documents (the synthetic density is about 50 interactions per
+document), 8.7 ms with cold reads. The ask-citation probe now costs about 4 ms in total.
+
+- **032 is required** (D5): without it the probe is a sequential scan per read row.
+- **D2 (the materialized table)** is triggered by "20 ms at p95 on the owner's data". This synthetic
+  worst case is 33.8 ms. The ruling is recorded below.
+
+### Ruling on D2 after the benchmark (team-lead, 2026-11-12)
+
+- **No materialized table now.** "p95 ≤ 20 ms on the owner's data" joins the adoption conditions,
+  beside the RM-22a data gate and RM-14c. The tracker reads "DONE (#131; off; adoption owed: data
+  gate + RM-14c + owner-data p95 ≤ 20 ms)".
+- **The owner measures it, read-only:**
+  `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/engagement_explain.sql`.
+  - The script runs inside `BEGIN READ ONLY … ROLLBACK` and creates nothing.
+  - It times the module's statement 200 times over 50 random documents that have interactions,
+    with a NULL session, the costliest case. It prints p50/p95/max and one
+    `EXPLAIN (ANALYZE, BUFFERS)` as NOTICEs.
+  - Its statement text is pinned to `_ENGAGEMENT_SQL` by `tests/test_engagement_explain_script.py`
+    (nodb), so the two cannot drift. A DB test runs it on 5434 and checks that it changes no row.
+  - No agent runs it against prod.
