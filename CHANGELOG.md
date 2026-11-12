@@ -50,7 +50,8 @@ to `compare/v0.4.0...HEAD`. -->
    if its plist is there), and its first run removes the `com.brain.build` LaunchAgent (see
    *Removed — the Quartz wiki* below).
 6. **The document leg ships off** (`BRAIN_DOC_LEG=false`), and so does the reranker. Turn the leg
-   on only after step 4 has applied 031, then fill it with `brain docembed backfill`.
+   on only after step 4 has applied 031, then fill it with `brain docembed backfill`. So does the
+   engagement stage (`BRAIN_ENGAGEMENT_ALPHA=0`, `BRAIN_ENGAGEMENT_BETA=0`).
 7. Some entries below carry their own upgrade line. Steps 3, 4 and 5 cover the skills, migration
    and launchd ones (for example the `sources/` skill recipes, and 030 and the daemon reinstall in
    RM-19). One is separate and optional: a `brain setup --profile full` install that wants the
@@ -61,8 +62,6 @@ to `compare/v0.4.0...HEAD`. -->
 
 - RM-14c, measuring the reranker on the owner's corpus: deferred to a later release. The reranker
   ships off.
-- RM-22b, the engagement-ranking stage: deferred to a later release, until `brain usage
-  --engagement` reports its gate met.
 
 ### Added — document-level embeddings as a re-scoring search stage, off by default (RM-20)
 
@@ -82,6 +81,19 @@ to `compare/v0.4.0...HEAD`. -->
 - Known limitation: `brain ui`'s Agent tab wraps the embedder, and a wrapped embedder never
   matches the identity the backfill wrote, so there the leg reports `no_document_vectors` and
   leaves the order alone. It fails safe; the fix is backlog BL-49.
+
+### Added — engagement-aware ranking stage, off by default (RM-22b)
+
+- A new search stage, `engagement`, ranks a little higher the documents you open and rate
+  useful, and a little lower the ones you rate irrelevant. It multiplies each row's reciprocal
+  rank by `1 + α·log1p(decayed opens) + β·(useful − irrelevant)`, clamped to 0.8–1.25, and
+  re-sorts. Opens halve in weight every 30 days; ratings do not decay. It runs last, after the
+  reranker, adds no results, and never changes a result's `score`.
+- Two kinds of read never count: one from the current search's own session, and one `brain ask`
+  logged for a citation (its session names no search), so the stage cannot feed itself.
+- It ships **off** (`BRAIN_ENGAGEMENT_ALPHA=0`, `BRAIN_ENGAGEMENT_BETA=0`; either above zero turns
+  it on). While off, every surface and `brain eval`'s `config_signature` are unchanged. Turning it
+  on waits for `brain usage --engagement` to report its gate met and for an eval on and off.
 
 ### Added — `brain tags summarize`, a cited synthesis of one tag (RM-55)
 
