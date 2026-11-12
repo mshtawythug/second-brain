@@ -71,11 +71,14 @@ to `compare/v0.4.0...HEAD`. -->
   written, no document appears for it in `brain ui`. Empty means: no captures, open todos, pins,
   watch hits or watch notes, new entities, or possible duplicates. These are counted as the page
   counts them, with confidential documents excluded, so a brief whose only content is
-  confidential writes no page either. The command prints `No page written for <date>: nothing to
-  publish` and exits 0. `--json` keeps its shape.
+  confidential writes no page either. The command prints the line
+  `No page written for <date>: nothing to publish (confidential documents excluded).` and exits
+  0. `--json` keeps its shape.
 - The decision is made before any model call. An empty brief asks the model for no next steps,
   so invented suggestions can never fill an empty page, and it sends nothing through
   `BRAIN_BRIEF_DELIVERY`. MCP `brain_brief` also skips the model for an empty payload.
+- A page whose only content is draft documents is still written, but nothing is delivered, so no
+  contentless message goes out at 07:00.
 - Existing pages are left alone. A page already written for the same date is not overwritten by
   an empty re-run. **Empty pages written by earlier versions stay in the vault**, and brain never
   deletes vault files, so remove them by hand if you want them gone.

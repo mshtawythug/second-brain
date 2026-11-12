@@ -32,7 +32,8 @@ decides, on the published payload once its watch view is swapped in, and BEFORE 
 so suggestions can never rescue an otherwise-empty page. An empty page is not written, sent or
 enriched, and an existing page for the date is left untouched. Its unnotified watch hits, which
 the page could never list, are still marked, as after a written page. A brief whose terminal
-payload is empty asks the model nothing. Plan: ``docs/plans/2026-11-12-empty-daily-brief.md``.
+payload is empty asks the model nothing. A page whose only content is drafts is written but not
+sent (review rev-132). Plan: ``docs/plans/2026-11-12-empty-daily-brief.md``.
 
 The :mod:`brain.brief` functions are looked up on the module at call time, as ``cli.brief`` did
 through its function-local import, so a test double on ``brain.brief.suggest_next_steps`` still
@@ -210,9 +211,11 @@ def _deliver(
 ) -> bool:
     """Send the published payload; return whether its watch hits may be marked notified.
 
-    True when delivery is off or succeeded. False when the owner asked for delivery and it did
-    not happen: a knob that does not load, a recipient other than ``cfg.user_email``, the draft
-    lookup failing, or a failed send. Each is one WARNING, never a raise.
+    True when delivery is off or succeeded, or when nothing is left to send once drafts are
+    removed (a send would have dropped the same drafts, so the hits resolve as after a send).
+    False when the owner asked for delivery and it did not happen: a knob that does not load, a
+    recipient other than ``cfg.user_email``, the draft lookup failing, or a failed send. Each is
+    one WARNING, never a raise.
     """
     source = os.environ if env is None else env
     try:
@@ -238,7 +241,13 @@ def _deliver(
         # Fail closed: without the lookup a draft could be sent.
         _logger.warning("brief delivery skipped (%s): drafts unchecked", describe_failure(exc))
         return False
-    return deliver_brief(without_drafts(published, drafts), settings, channel).status != "failed"
+    sendable = without_drafts(published, drafts)
+    if brief_mod.is_empty(sendable):
+        # rev-132 ruling: a page whose only content is drafts is kept, but no contentless message
+        # goes out at 07:00.
+        _logger.info("brief delivery skipped: nothing to send once drafts are removed")
+        return True
+    return deliver_brief(sendable, settings, channel).status != "failed"
 
 
 def _draft_ids(connect: Connect, cfg: Config, brief: BriefData) -> frozenset[str]:

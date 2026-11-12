@@ -15,6 +15,7 @@ import json
 import logging
 import os
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import fields, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -27,7 +28,7 @@ from typer.testing import CliRunner
 from brain import chat, cli, mcp_server
 from brain.brief import BriefData, PinnedDoc, is_empty
 from brain.brief_entities import NewEntity
-from brain.brief_publish import build_brief
+from brain.brief_publish import _deliver, build_brief
 from brain.config import Config
 from brain.errors import OllamaUnavailable
 from brain.queries import DocumentRow
@@ -426,3 +427,99 @@ def test_mcp_brain_brief_still_asks_the_model_once_for_a_real_item(
 
     assert len(calls) == 1
     assert payload["suggestions"] == ["Review the open memo"]
+
+
+# ---------------------------------------------------------------------------
+# D: a page whose only published content is drafts is kept, but nothing is sent (rev-132 ruling)
+# ---------------------------------------------------------------------------
+
+
+class _DraftLookup:
+    """Stands in for the draft lookup's connection: every id it is told about is a draft."""
+
+    def __init__(self, drafts: list[str]) -> None:
+        self._drafts = drafts
+
+    def execute(self, _sql: str, _params: object) -> _DraftLookup:
+        return self
+
+    def fetchall(self) -> list[tuple[str]]:
+        return [(doc_id,) for doc_id in self._drafts]
+
+
+def _draft_connect(drafts: list[str]) -> Callable[[str], Any]:
+    @contextmanager
+    def _open(_url: str) -> Iterator[_DraftLookup]:
+        yield _DraftLookup(drafts)
+
+    return _open
+
+
+def _capture(doc_id: str, title: str) -> DocumentRow:
+    return DocumentRow(doc_id, title, "note", [], "manual", WHEN)
+
+
+def test_deliver_sends_nothing_when_only_drafts_remain(tmp_path: Path) -> None:
+    published = replace(_empty(), captures=[_capture("d1", "Draft memo")])
+    channel = _FakeChannel()
+
+    resolved = _deliver(published, _cfg(tmp_path), EMAIL_ENV, channel, _draft_connect(["d1"]))
+
+    assert channel.sent == []
+    assert resolved is True  # resolved as a send would be: its hits may be marked
+
+
+def test_deliver_still_sends_once_when_a_non_draft_item_remains(tmp_path: Path) -> None:
+    published = replace(
+        _empty(), captures=[_capture("d1", "Draft memo"), _capture("d2", "Open memo")]
+    )
+    channel = _FakeChannel()
+
+    resolved = _deliver(published, _cfg(tmp_path), EMAIL_ENV, channel, _draft_connect(["d1"]))
+
+    assert resolved is True
+    [(_subject, body)] = channel.sent
+    assert "Open memo" in body and "Draft memo" not in body
+
+
+def _draft_watch_hit(conn: psycopg.Connection, vault: Path) -> str:
+    """A watch hit on a document that is a draft by the time the page is built."""
+    _lexical_watch(conn, "zephyr", "zephyr")
+    doc = ingest(conn, WordEmbedder(), title="Zephyr draft", content="zephyr draft plan")
+    build_brief(  # records the hit and marks nothing
+        _cfg(vault), on_date=ON_DATE, since_hours=24, todo_since_days=7,
+        enrich=False, wiki=False,
+    )
+    conn.execute("UPDATE documents SET draft = TRUE WHERE id = %s", (doc,))
+    return doc
+
+
+def test_a_drafts_only_page_is_written_but_not_sent(
+    test_db: psycopg.Connection, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _draft_watch_hit(test_db, tmp_path)
+    channel = _FakeChannel()
+
+    with caplog.at_level(logging.WARNING, logger="brain"):
+        _, written = _build(tmp_path, delivery_env=EMAIL_ENV, delivery_channel=channel)
+
+    assert written == _page_path(tmp_path)
+    assert "Zephyr draft" in written.read_text(encoding="utf-8")
+    assert channel.sent == []
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert _unnotified(test_db) == 0
+
+
+def test_a_draft_beside_a_non_draft_item_is_sent_once_without_the_draft(
+    test_db: psycopg.Connection, seed_doc: Callable[..., str], tmp_path: Path
+) -> None:
+    _draft_watch_hit(test_db, tmp_path)
+    seed_doc(title="Open memo", content="open memo body")
+    channel = _FakeChannel()
+
+    _, written = _build(tmp_path, delivery_env=EMAIL_ENV, delivery_channel=channel)
+
+    assert written == _page_path(tmp_path)
+    [(_subject, body)] = channel.sent
+    assert "Open memo" in body and "Zephyr draft" not in body
+    assert _unnotified(test_db) == 0

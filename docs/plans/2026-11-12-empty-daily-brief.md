@@ -233,9 +233,10 @@ The results (the mutant, the failing tests, and the run date) are recorded in th
     pointer and a trail update in `docs/ceiling-table.md`. The trailing descriptive hop is
     promoted to a real SHA and count first, then a new descriptive hop is added, following the
     table's trail rules.
-  - `mcp_server.py` is 5,174 lines. The edit is net zero, so it needs no growth record. The
-    table rule still asks for the hop promotion when a file in the table is touched, so that is
-    done.
+  - `mcp_server.py` is 5,174 lines. The edit is net zero, so it needs no growth record. Its
+    trail already ends on a SHA-bound hop (`0f9f28b0`), so there is nothing to promote. The
+    first pass of this change left its row untouched; review rev-132 asked for a descriptive hop
+    recording the net-zero touch, which the review-round commit adds.
   - `brief.py` (414 lines, growing by about 15) and `brief_publish.py` (258, growing by about 15)
     stay far under 800.
   - `scripts/check_ceiling_table.py` is run.
