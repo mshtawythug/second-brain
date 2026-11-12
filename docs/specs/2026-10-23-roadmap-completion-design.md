@@ -2012,6 +2012,18 @@ adopted, which is why both depend on it.
   clamp. RM-22b.D2, a materialized table: **only if** the per-search query exceeds 20 ms at p95 on
   the owner's data; it then takes the next free migration number at merge (§2.8) and is refreshed by
   the brief daemon.
+- *(As shipped in PR #131, off; plan `docs/plans/2026-11-12-rm-22b-engagement-stage.md`. Four
+  rulings differ from the text above. **D2:** the multiplier scales each row's positional reciprocal
+  rank (k = 60), not `SearchResult.score`, which the reranker, the document leg and `--rewrite`
+  leave out of step with the order; `score` is never overwritten, and the stage runs last, after
+  the reranker. **D4:** a read with a session counts only when that session names a logged search,
+  so `brain ask`'s per-citation `opened` rows (written under the ask's own session) cannot feed the
+  boost; the same-session exclusion above still applies. **D5 / 032:** that rule's probe needed an
+  index, `032_search_queries_session_idx.sql`; a synthetic 1,000,000-interaction benchmark measured
+  p95 11.7 s without it and 33.8 ms with it. **Adoption:** instead of the materialized-table trigger
+  in RM-22b.D2, "p95 ≤ 20 ms on the owner's data", measured read-only with
+  `scripts/engagement_explain.sql`, is an adoption condition beside the RM-22a data gate and RM-14c;
+  no materialized table was built.)*
 
 #### RM-23 — Copy the note's path (external-editor affordance)
 
