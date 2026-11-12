@@ -59,11 +59,6 @@ to `compare/v0.4.0...HEAD`. -->
    corrected AGE image re-runs setup with the stack stopped (*Fixed — the `full` profile pulled
    the old AGE image*).
 
-### Not in this release
-
-- RM-14c, measuring the reranker on the owner's corpus: deferred to a later release. The reranker
-  ships off.
-
 ### Changed — an empty daily brief writes no page
 
 - `brain brief --wiki`, and so the 07:00 `com.brain.brief` job, writes no
@@ -82,6 +77,16 @@ to `compare/v0.4.0...HEAD`. -->
 - Existing pages are left alone. A page already written for the same date is not overwritten by
   an empty re-run. **Empty pages written by earlier versions stay in the vault**, and brain never
   deletes vault files, so remove them by hand if you want them gone.
+
+### Fixed — the reranker's launchd job no longer refuses long passages (RM-14c)
+
+- The `com.brain.reranker` template now starts `llama-server` with `--batch-size 2048
+  --ubatch-size 2048`. With llama.cpp's default 512-token physical batch, a token-dense passage
+  (ids, versions, symbols) made `llama-server` answer HTTP 500, and that search stayed in hybrid
+  order. An installed job picks up the new template at upgrade step 5: `brain-up` re-renders it.
+- RM-14c measured the reranker on the owner's corpus: quality rises sharply (nDCG@5 and MRR about
+  +0.36), but the added p95 latency is about 2.6–2.8 s against a 1.0 s limit, so it stays off by
+  default (`BRAIN_RERANKER=none`). See `docs/plans/2026-11-12-reranker-measurement.md`.
 
 ### Added — document-level embeddings as a re-scoring search stage, off by default (RM-20)
 
