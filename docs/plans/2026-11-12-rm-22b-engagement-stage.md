@@ -315,3 +315,67 @@ its own sensitivity lens.
 - **Process:** plan committed first; TDD only at ≥ 6.5 GiB free, under `.claude/full-suite.lock`, in
   my own uv venv; targeted tests plus the named repo-rule tests; never concurrently with another
   teammate's run (the lock serialises them).
+
+## Deviations from this plan (recorded during execution)
+
+- **`saved_search_check` is not a surface.** It calls `run_search(..., stages=())` on purpose: a
+  watch is a match set, not a ranking. No stage ever applies there, so it was dropped from
+  `tests/test_engagement_surfaces.py`. Every surface that passes `stages=None` or
+  `override_stages(...)` is covered.
+- **Order key.** `engagement_order` sorts on `m / (k + i + 1)`, one division, rather than
+  `m * rrf_contribution(i)`. The two are mathematically equal. The division makes the exact
+  boundary tie (`1.25/125` against `0.8/80`, limit 20) round to the same float, so the stable sort
+  keeps the incoming order, as `engagement_reach`'s exact `Fraction` bound assumes.
+- **Decay in `float8`.** `EXTRACT(EPOCH …)` returns `numeric` on PG 16, and `power(numeric,
+  numeric)` is slow. The statement casts to `float8`, and `GREATEST(…, 0)` still makes a
+  future-dated row weigh exactly 1.0.
+- **conftest growth record.** `tests/conftest.py` keeps its own growth trail in its docstring. The
+  plugin is its eighth entry, added there.
+- **Commit order for RED.** The tests are committed on their own (`2dc6790a`), then the leaves
+  (`bbf4de81`), then the wiring (`08ee7cce`). Each RED is run in a `git archive` copy of the SHA
+  before the code it proves: collection errors at `2dc6790a`, assertion failures in the
+  pipeline, surface, eval and isolation tests at `bbf4de81`.
+
+## Runs of record (2026-11-12, own uv venv, Python 3.11.15, own DB `rm22b_test` on 5434, under `.claude/full-suite.lock`)
+
+- **RED 1, at `2dc6790a` (tests only):** `4 errors during collection`. Each of
+  `test_settings_engagement`, `test_engagement_order`, `test_engagement_build_stages` and
+  `test_engagement_stage` fails on `ModuleNotFoundError` for the new leaves.
+- **RED 2, at `bbf4de81` (leaves, not wired):** `21 failed, 76 passed`. Every wiring, surface, eval
+  and isolation test fails: `build_stages` builds no engagement stage, the surfaces show no lift,
+  and `_engagement_off` is not a fixture. The pure and aggregate tests already pass, which is the
+  expected split.
+- **GREEN, at `08ee7cce`:** `97 passed` across the seven new files.
+- **ruff check:** clean. **mypy src/:** `no issues found in 371 source files`.
+  **scripts/check_ceiling_table.py:** agrees (16 files over 800, one row each; none of them new).
+- **Named repo rules, src-wide scans and every neighbour** that reads `build_stages`,
+  `pytest_plugins`, CHANGELOG or the config docs. That is 33 files: `test_log_privacy_rules`,
+  `test_log_privacy`, `test_vault_delete`, `test_import_hygiene`, `test_settings_leaf_guards`,
+  `test_search_pipeline_boundary`, `test_repo_hygiene_files`, `test_ceiling_table_check`, the
+  rerank and doc-leg build/surface/isolation suites, `test_eval_runner_stages`, `test_engagement`,
+  and the others listed in the PR. Result: `1002 passed, 1 skipped`.
+- **Mutation proofs:** each ran in a `git archive` copy of HEAD. Each anchor was asserted to match
+  exactly once and checked as applied before the run, and every named test had to fail. All 17
+  were **KILLED**. M12 (`engagement_reach` returns `limit`) first survived in one test of three,
+  `test_the_stage_asks_for_at_least_its_reach`, which compared the stage with its own helper. The
+  test now pins the value (49) as well (`670a46b5`), and M12 then failed 7 tests.
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | upper clamp dropped | KILLED (1) |
+| M2 | lower clamp dropped | KILLED (1) |
+| M3 | same-session predicate dropped | KILLED (2) |
+| M4 | NULL-session branch dropped | KILLED (1) |
+| M5 | ask-citation `EXISTS` dropped | KILLED (2) |
+| M6 | `GREATEST(age, 0)` dropped | KILLED (1) |
+| M7 | 300-day window dropped | KILLED (1) |
+| M8 | read-action filter dropped | KILLED (2) |
+| M9 | `enabled` = alpha only | KILLED (2) |
+| M10 | stage always appended | KILLED (3) |
+| M11 | sort on `score` | KILLED (1) |
+| M12 | reach = `limit` | KILLED (7, after `670a46b5`) |
+| M13 | engagement appended first | KILLED (1) |
+| M14 | skip when no data | KILLED (2) |
+| M15 | isolation plugin a no-op | KILLED (2) |
+| M16 | no upper bound on the knobs | KILLED (2) |
+| M17 | malformed session raises | KILLED (1) |
