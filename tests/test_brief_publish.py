@@ -114,9 +114,12 @@ def test_build_brief_with_wiki_writes_the_gated_page_and_returns_the_permissive_
 
 def test_build_brief_enrich_off_never_calls_the_model(
     test_db: psycopg.Connection,  # noqa: ARG001 — schema reset
+    seed_doc: Callable[..., str],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # One real item: an empty brief writes, sends and asks nothing (empty-daily-brief plan).
+    seed_doc(title="Open memo", content="open memo body")
     calls: list[object] = []
     monkeypatch.setattr("brain.brief.suggest_next_steps", lambda b, c: calls.append(b) or [])
 
@@ -178,8 +181,11 @@ def _page_watch_lines(page: str) -> list[str]:
 
 
 def test_no_watches_means_no_section(
-    test_db: psycopg.Connection, tmp_path: Path
+    test_db: psycopg.Connection, seed_doc: Callable[..., str], tmp_path: Path
 ) -> None:
+    # One capture, so the page is written: an empty brief writes none (empty-daily-brief plan).
+    seed_doc(title="Open memo", content="open memo body")
+
     data, written = _build(tmp_path, wiki=True)
 
     assert data.watch_hits == [] and data.watch_notes == []
@@ -373,11 +379,14 @@ def test_a_check_over_the_limit_is_noted_in_the_terminal_and_never_on_the_page(
 
 def test_enrich_without_wiki_calls_the_model_once_and_keeps_empty_suggestions(
     test_db: psycopg.Connection,  # noqa: ARG001 — schema reset
+    seed_doc: Callable[..., str],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The two enrich branches with no page: an empty answer leaves ``suggestions`` empty, and
     no second call is made for a published payload that does not exist (aud-78)."""
+    # One real item: an empty brief writes, sends and asks nothing (empty-daily-brief plan).
+    seed_doc(title="Open memo", content="open memo body")
     calls: list[object] = []
     monkeypatch.setattr("brain.brief.suggest_next_steps", lambda b, c: calls.append(b) or [])
 

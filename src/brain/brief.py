@@ -148,6 +148,25 @@ class BriefData:
         }
 
 
+def is_empty(brief: BriefData) -> bool:
+    """True when ``brief``'s assembled (pre-model) data is empty; ``suggestions`` is never read.
+
+    The one place emptiness is decided. ``brief_publish.build_brief`` asks it BEFORE any model
+    call, and an empty published payload writes no page, so model output can never rescue an
+    otherwise-empty brief. The fixed sections' placeholder lines are rendering, not data. A watch
+    note counts: "watch X was skipped" is news for the owner.
+    """
+    return not (
+        brief.captures
+        or brief.open_todos
+        or brief.pinned
+        or brief.watch_hits
+        or brief.watch_notes
+        or brief.new_entities
+        or brief.possible_duplicates
+    )
+
+
 def assemble_brief(
     conn: psycopg.Connection[Any],
     cfg: Config,

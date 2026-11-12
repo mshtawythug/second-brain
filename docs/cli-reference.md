@@ -2042,6 +2042,14 @@ document bodies**. On macOS the installer wires a launchd agent
 (`com.brain.brief`) that runs `brain brief --wiki` once at **07:00 local** each
 day and writes the digest to `<vault>/daily/<YYYY>/<date>-brief.md`.
 
+**An empty brief writes no page.** When the page would carry nothing (no captures,
+open todos, pins, watch hits or watch notes, new entities or possible duplicates,
+counted with confidential documents excluded), `--wiki` writes and sends nothing,
+asks the model for no suggestions, and prints the line
+`No page written for <date>: nothing to publish (confidential documents excluded).`;
+the exit code is 0. A page already written for that date is
+left as it is. `--json` keeps its shape (empty lists, a `0` count).
+
 ```bash
 brain brief                          # today's digest to the terminal
 brain brief --since 48 --todo-since 14   # widen the capture / todo windows

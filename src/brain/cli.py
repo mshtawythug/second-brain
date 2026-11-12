@@ -108,6 +108,11 @@ an ``EXTENSION_REGISTRARS`` entry in ``cli_registry.py`` instead of a
 ``document_embeddings`` through ``db.ensure_relational_embedding_columns``; the
 AGE-gated graph call keeps ``ensure_embedding_column``, so both names are imported.
 
+**Eleventh growth (empty daily brief, 0.4.0): the skip line.** ``brief`` prints one
+line when ``--wiki`` wrote no page because the brief was empty. Only this caller
+knows ``--wiki`` was asked for (``build_brief`` returns ``None`` either way), so the
+line lives beside the ``Wrote`` line; plan ``docs/plans/2026-11-12-empty-daily-brief.md``.
+
 The long-deferred split into per-domain command modules is unchanged by any of
 this; ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
@@ -4999,6 +5004,9 @@ def brief(
         # See ``review_weekly``: the policy is stated unconditionally, because
         # the page the operator just published is not the brief they just read.
         typer.echo(f"\nWrote {written_path} (confidential documents excluded)")
+    elif wiki:  # Eleventh growth (module docstring): an empty brief writes no page.
+        typer.echo(f"\nNo page written for {on_date.isoformat()}: nothing to publish "
+                   "(confidential documents excluded).")
 
 
 def _build_chat(cfg: Config) -> ChatJson:
