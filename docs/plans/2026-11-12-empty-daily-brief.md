@@ -243,7 +243,7 @@ The results (the mutant, the failing tests, and the run date) are recorded in th
 ## 8. Verification (owner's standing rules)
 
 - Every shell exports `BRAIN_PROD_DATABASE_URL=postgresql://localhost:1/none BRAIN_SKIP_CANARY=1`.
-- The test DB is `postgresql://brain:brain@localhost:5434/brain_test_brief_empty`.
+- The test DB is `postgresql://brain:brain@localhost:5434/brief_empty_test`.
 - Each run uses its own uv venv, and **never connects to 55432**.
 - Every pytest run holds `.claude/full-suite.lock`, and `df -h /` must show at least 6.5 GiB
   first. Only named files run locally:
@@ -302,4 +302,68 @@ pre-model predicate alone decides; I8 and U3 pin it.
 
 ## Proof record
 
-(Filled in during implementation: RED runs, mutation runs, dates.)
+The runs below happened on 2026-11-12. Every run held `.claude/full-suite.lock` and started only
+with free disk at or above 6.5 GiB. Each used its own uv venv (Python 3.11.15) and the test
+database `brief_empty_test` on 5434. No real Ollama call was made.
+
+**RED.** This ran against a `git archive` copy of `2aea107d`, which is the plan commit and still
+has master's code. The new `tests/test_brief_empty.py` was added to the copy, plus an inert
+stub `def is_empty(...): return False` so the file imports. Nothing in the copy calls the stub.
+Result: **11 failed, 11 passed.**
+
+- 10 tests failed for a behavioural reason:
+  - an empty or confidential-only brief wrote a page;
+  - the model was called on an empty brief, through the CLI or MCP;
+  - a confidential-only watch hit was left unmarked;
+  - an existing page was overwritten;
+  - the CLI printed no skip line;
+  - `--json --wiki` wrote a page.
+- I4 (`test_an_old_unnotified_hit_…`) failed first on its `is_empty` precondition, so it was red
+  only through the stub. Mutant M6 below is its real proof.
+- The 11 tests that passed are the characterization and one-item cases:
+  - U2, which has 7 parameter cases;
+  - the field-classification guard;
+  - I2, the page exactly as before;
+  - C3, the `Wrote` line;
+  - the MCP real-item test.
+
+**GREEN.** This ran on `0f32826d` and gave **531 passed.** It covered:
+
+- `test_brief_empty`, every `test_brief*`, `test_mcp_brief` and both `*_vault_emit_confidential`;
+- `test_examples_rot`, `test_delivery_isolation`, `test_doctor_runtime` and
+  `test_repo_hygiene_files`;
+- `test_log_privacy_rules`, `test_log_privacy`, `test_vault_delete` and `test_import_hygiene`.
+
+`ruff check` was clean, `mypy src/` was clean (369 files), and `scripts/check_ceiling_table.py`
+agreed (16 files, one row each).
+
+**Mutation.** Each mutant ran in its own `git archive` copy of `0f32826d`. The mutation script (kept
+outside the repo) refuses unless its target text occurs exactly once, and the diff was counted before
+every run. The test file was `tests/test_brief_empty.py`. **Every mutant was killed.**
+
+| Mutant | Failing tests |
+|---|---|
+| M1 `is_empty` → False | 11, including U1, U3, I1, I3, I5, I7, I8, C1, C2 and M |
+| M2 `is_empty` → True | 12, including U2 (all 7), I2, I3, I4, C3 and the MCP real-item test |
+| M3 captures | U2[captures], I2, I3, C3 and the MCP real-item test |
+| M3 open_todos / pinned / watch_notes / new_entities / possible_duplicates | the matching U2 case (one each) |
+| M3 watch_hits | U2[watch_hits] and I4 |
+| M3s `or brief.suggestions` | U3 |
+| M4 terminal model call ungated | I1, I8 and I4 |
+| M5 page keyed on the terminal payload | I3, I5 and I4 |
+| M6 view swap after the check | I4 |
+| M7 no marking on a skipped page | I5 |
+| M8 the skip keeps the published payload | I1, I3, I5, I7, I8, C1 and C2 |
+| M9 MCP ignores the predicate | M (empty) |
+| M10 CLI skip line removed | C1 |
+
+**Scans.** These are the src-wide scans plus every test that reads the docs, skills, plist or
+CHANGELOG (`tests/` files that name them).
+`test_skills_token_routing.py::test_skills_sync_is_not_drifted` fails locally by design. It
+compares the repo's skills with the copies installed on this machine, and this change edits
+`skills/brain-proactivity/SKILL.md`. `bin/brain-skills-sync --check` names that skill alone as
+STALE. CI has no installed skills and skips the test. The owner's `bin/brain-skills-sync`
+clears it, and it is not run on their behalf. The `test_bin_scripts` launchd failures in the
+worktree come from the wrappers exec-ing `<repo>/.venv/bin/…`, and a worktree has no `.venv`.
+A re-run in an archive copy with a `.venv` was stopped for a disk hold. On team-lead's ruling,
+**CI's full suite is the run of record for the scan set** and replaces that local re-run.
