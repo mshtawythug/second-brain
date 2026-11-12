@@ -3633,7 +3633,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-13 | Ingest tab phase 3: file upload | M | 3 | RM-11, RM-07 | DONE (#77) |
 | RM-14a | Reranker stage, backends, eval wiring (off) | M | 4 | RM-08, RM-09 | DONE (#76) |
 | RM-14b | Local reranker runtime | S | 4 | RM-14a | DONE (#98) |
-| RM-14c | Reranker measurement and adoption | S | 4 | RM-14b | DONE (this PR): built, measured, not adopted (latency, p95 ≈ 2.6–2.8 s against a 1.0 s limit); the reranker plist's batch fix shipped (`docs/plans/2026-11-12-reranker-measurement.md`) |
+| RM-14c | Reranker measurement and adoption | S | 4 | RM-14b | DONE (#133): built, measured, not adopted (latency, p95 ≈ 2.6–2.8 s against a 1.0 s limit); the reranker plist's batch fix shipped (`docs/plans/2026-11-12-reranker-measurement.md`) |
 | RM-15 | Saved searches and watch lists (with the `brief --wiki` extraction) | M | 4 | RM-06, RM-09 | DONE (#78) |
 | RM-16 | Brief delivery (email to self / Slack webhook) | S | 4 | RM-08, RM-15 | DONE (#82) |
 | RM-17 | Brief "new this week" entities | S | 4 | — | DONE (#84) |
