@@ -71,6 +71,8 @@ _SECONDS_PER_DAY = 86400
 #
 # GREATEST(age, 0): a future-dated row (clock skew) weighs no more than a fresh one.
 # ``IS DISTINCT FROM`` a NULL session (``brain eval``) is true, so it excludes nothing.
+# The EXISTS probe uses ``search_queries_session_idx`` (migration 032); without it the
+# probe seq-scans search_queries per read row (plan D5: p95 11.7 s at 1M interactions).
 _ENGAGEMENT_SQL = """
     SELECT i.document_id::text,
            COALESCE(SUM(

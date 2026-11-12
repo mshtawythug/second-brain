@@ -403,6 +403,7 @@ Head at `02c2abc` is `028_search_query_tokens.sql`. Applied migrations are recor
 | 029 | `029_saved_searches.sql` | RM-15 | 4 |
 | 030 | `030_near_duplicates.sql` | RM-19 | 5 |
 | 031 | `031_document_embeddings.sql` | RM-20 | 5 |
+| 032 | `032_search_queries_session_idx.sql` | RM-22b (D5: index, not the materialized table) | 5 |
 
 **Conditional tickets are not pre-allocated.** RM-22b (a materialized engagement table, only if its
 query budget is exceeded) and RM-60 (`documents.parent_document_id`, trigger-gated) take **the next
@@ -3534,7 +3535,7 @@ Two separate rules govern ordering:
 | `bin/launchd.py`, `bin/brain-install-launchd`, `bin/brain-uninstall-launchd` | RM-14b, RM-33 |
 | `docs/configuration.md` | every ticket with a knob or an MCP tool: RM-08, RM-12, RM-14a, RM-15, RM-16, RM-19, RM-20, RM-21, RM-22b, RM-32, RM-33, RM-38, RM-46, RM-55 |
 | `CHANGELOG.md` (Unreleased) | every ticket; conflicts are routine, and the rebase resolves them |
-| Migrations | RM-15 (029), RM-19 (030), RM-20 (031); conditional tickets take the next free number at merge (§2.8) |
+| Migrations | RM-15 (029), RM-19 (030), RM-20 (031), RM-22b (032); conditional tickets take the next free number at merge (§2.8) |
 | The live machine (eval runs, daemon reinstall) | RM-14c, RM-20, RM-22b and RM-43's eval steps; every `src/` merge's reinstall. One at a time, by the team lead, never during another ticket's run of record. |
 
 **Parallel development sets**, by wave, once their dependencies have merged. Members of a set may be
@@ -3555,7 +3556,7 @@ merge-order file above.
 
 ### 4.3 Migration allocation
 
-§2.8 is authoritative: 029 (RM-15), 030 (RM-19), 031 (RM-20). Conditional tickets (RM-22b, RM-60) and
+§2.8 is authoritative: 029 (RM-15), 030 (RM-19), 031 (RM-20), 032 (RM-22b). Conditional tickets (RM-22b, RM-60) and
 any other ticket that discovers a need take the next free number when they merge, and update §2.8 in
 that PR; no number is held in reserve.
 

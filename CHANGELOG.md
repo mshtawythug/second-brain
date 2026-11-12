@@ -41,11 +41,12 @@ to `compare/v0.4.0...HEAD`. -->
 3. Install 0.4.0: `pip install --upgrade secondbrain-py`, or pull a source checkout and reinstall
    it. From a source checkout, also run `bin/brain-skills-sync`: the agent skills changed in this
    release.
-4. Run `brain init` once. It applies migrations 028 to 031 in order. All four are additive: they
-   add tables and columns and change no existing row. 028 waits at most 3 s for a lock
-   (`lock_timeout`); **031 sets no `lock_timeout`**. Its new table's foreign key takes a
-   `SHARE ROW EXCLUSIVE` lock on `documents`, so it waits behind any open writer, and every writer
-   after it waits behind it. That is why the writers stop first.
+4. Run `brain init` once. It applies migrations 028 to 032 in order. All five are additive: they
+   add tables, columns and an index and change no existing row. 028 and 032 wait at most 3 s for
+   a lock (`lock_timeout`); 032 builds an index on `search_queries.session_id`, which holds back a
+   search's log row (not a read) while it builds. **031 sets no `lock_timeout`**. Its new table's
+   foreign key takes a `SHARE ROW EXCLUSIVE` lock on `documents`, so it waits behind any open
+   writer, and every writer after it waits behind it. That is why the writers stop first.
 5. Start again with `brain-up`. It reinstalls the launchd daemons (reloading `com.brain.dropfolders`
    if its plist is there), and its first run removes the `com.brain.build` LaunchAgent (see
    *Removed — the Quartz wiki* below).
@@ -94,6 +95,8 @@ to `compare/v0.4.0...HEAD`. -->
 - It ships **off** (`BRAIN_ENGAGEMENT_ALPHA=0`, `BRAIN_ENGAGEMENT_BETA=0`; either above zero turns
   it on). While off, every surface and `brain eval`'s `config_signature` are unchanged. Turning it
   on waits for `brain usage --engagement` to report its gate met and for an eval on and off.
+- Migration 032 indexes `search_queries.session_id`, which the stage looks up for each read. Without
+  it, a synthetic 1,000,000-interaction table took 11.7 s per search at p95.
 
 ### Added — `brain tags summarize`, a cited synthesis of one tag (RM-55)
 
