@@ -421,3 +421,21 @@ document), 8.7 ms with cold reads. The ask-citation probe now costs about 4 ms i
   - DB half (`the script prints its timing and plan and changes nothing`, `nothing to time`): the
     local 5434 container was stopped by the disk emergency stop when this was written, so CI's
     pytest job is its first run of record.
+
+## Review round rev-131 (fd2ef3e7: AUDIT PASSED, 2 LOW, 2 nits) and the merge of master
+
+- **L1:** the spec's RM-22b section carries an "*(As shipped in PR #131 …)*" note. It covers D2,
+  D4, D5/032, and the owner-data p95 adoption condition that replaces the materialized-table
+  trigger. The ticket text is otherwise untouched (`47fd2788`).
+- **L2:** the script's bound values are pinned to the module's constants (`READ_ACTIONS`,
+  `ENGAGEMENT_HALF_LIFE_DAYS * 86400`, `ENGAGEMENT_WINDOW_DAYS`), in `72c6ca12`. GREEN on the nodb
+  half: `3 passed`. Mutation M20 (the script's window becomes 301) is KILLED by
+  `test_the_script_binds_the_modules_parameters`.
+- **Nits:** RM-14c is named among the adoption conditions. CHANGELOG step 6 reads "The engagement
+  stage ships off too".
+- **Merge of master `554abd7b` (PR #133, RM-14c)** is `646cb4fd`, a merge commit (no rebase). The
+  union kept RM-14c's tracker row and BL-58 beside RM-22b's row, BL-57 and rank 14. RM-14c is now
+  done (measured, not adopted for latency), so RM-22b's adoption wording names "an eval on and off
+  on the pipeline RM-14c left (reranker off)" instead of RM-14c as a pending step.
+- **CHANGELOG:** `9eca7b97` drops the stale "Not in this release" RM-14c bullet (its section's
+  only bullet) and records #133's reranker template fix under `### Fixed`.
