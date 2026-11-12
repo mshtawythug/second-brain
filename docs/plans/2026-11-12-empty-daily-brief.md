@@ -368,3 +368,39 @@ clears it, and it is not run on their behalf. The `test_bin_scripts` launchd fai
 worktree come from the wrappers exec-ing `<repo>/.venv/bin/…`, and a worktree has no `.venv`.
 A re-run in an archive copy with a `.venv` was stopped for a disk hold. On team-lead's ruling,
 **CI's full suite is the run of record for the scan set** and replaces that local re-run.
+
+## Review round rev-132 (2026-11-12)
+
+The audit passed, with two LOW findings and one ruling. All three are fixed in `683b67c2`.
+
+1. **LOW: ceiling table.** The `mcp_server.py` row now carries a descriptive hop for the
+   net-zero touch, and §7 says so.
+2. **LOW: the skip line.** The CHANGELOG and `docs/cli-reference.md` quote the full line,
+   `No page written for <date>: nothing to publish (confidential documents excluded).`
+3. **Ruling: a drafts-only page is written but not delivered.**
+   - The behaviour:
+     - `_deliver` sends nothing when `is_empty(without_drafts(published))`.
+     - The page is still written.
+     - It returns True, so the pending watch hits follow the existing `resolved` rule and are
+       marked notified. A send would have dropped the same draft hits and marked them too.
+     - One INFO line is logged.
+   - Tests:
+     - Two `_deliver` unit tests use an injected fake draft lookup: drafts-only gives 0 sends
+       and `resolved`; a draft beside a non-draft item gives exactly 1 send without the draft.
+     - Two `build_brief` twins against the DB: the drafts-only page is written, nothing is sent,
+       there is no WARNING, and the hit is marked; with a non-draft item there is exactly 1 send
+       without the draft.
+   - **Docker was down** (the test container was stopped by the disk emergency), and conftest's
+     session fixtures need the DB. So the unit tests ran under `pytest --noconftest`; they need
+     only `tmp_path`. The DB-backed twins have CI as their evidence.
+   - **RED** (archive of `5759430c` plus the new tests): the drafts-only unit test failed because
+     one message was sent; its twin passed. **GREEN** on the worktree: 2 passed. ruff, mypy and
+     the ceiling check are clean.
+   - **Mutation** (each in a `git archive` copy of `683b67c2`; all killed):
+
+     | Mutant | Failing test |
+     |---|---|
+     | D1 guard removed | drafts-only |
+     | D2 guard on `published` instead of the draft-free payload | drafts-only |
+     | D3 the skip returns False (hits left pending) | drafts-only (`resolved`) |
+     | D4 guard always true | the non-draft twin |
