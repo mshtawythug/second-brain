@@ -30,7 +30,7 @@ from brain.bin.launchd import (
     uninstall_plists,
 )
 from brain.doctor_runtime import daemon_doctor_check
-from brain.settings.rerank import DEFAULT_RERANK_GGUF_NAME
+from brain.settings.rerank import DEFAULT_MAX_CHARS, DEFAULT_RERANK_GGUF_NAME
 
 _RERANKER = "com.brain.reranker"
 
@@ -108,6 +108,10 @@ def test_plist_runs_llama_server_on_loopback_with_the_three_flags() -> None:
         "--pooling",
         "rank",
         "--reranking",
+        "--batch-size",
+        "2048",
+        "--ubatch-size",
+        "2048",
         "--host",
         "127.0.0.1",
         "--port",
@@ -116,6 +120,28 @@ def test_plist_runs_llama_server_on_loopback_with_the_three_flags() -> None:
     assert data["KeepAlive"] is True
     assert "/opt/homebrew/bin" in data["EnvironmentVariables"]["PATH"]
     assert data["StandardErrorPath"] == "/fake/brain/logs/com.brain.reranker.err.log"
+
+
+#: Room for the query and the pair's special tokens on top of a full passage. Queries are a
+#: sentence or two; 256 tokens is generous.
+RERANK_QUERY_TOKEN_HEADROOM = 256
+
+
+def _flag_value(args: list[str], flag: str) -> int:
+    return int(args[args.index(flag) + 1])
+
+
+def test_the_physical_batch_fits_a_full_length_passage() -> None:
+    """RM-14c regression: at ``llama-server``'s default ``--ubatch-size`` of 512, a reranker
+    pair longer than 512 tokens got HTTP 500 ("input (840 tokens) is too large to process"),
+    and the whole rerank call was skipped. A non-causal reranker must fit each query+passage
+    pair in one physical batch, and a passage is at most ``DEFAULT_MAX_CHARS`` characters,
+    which is at most that many tokens."""
+    args = plistlib.loads(_render(Path("/fake/m.gguf")).encode())["ProgramArguments"]
+
+    ubatch = _flag_value(args, "--ubatch-size")
+    assert ubatch >= DEFAULT_MAX_CHARS + RERANK_QUERY_TOKEN_HEADROOM
+    assert _flag_value(args, "--batch-size") >= ubatch  # llama.cpp caps ubatch at batch
 
 
 def test_the_model_path_is_xml_escaped() -> None:
