@@ -77,7 +77,7 @@ brain brief --date 2026-06-09 --json
 | `--todo-since <str>` | Open-todo window. **A bare number is DAYS** — the units differ from `--since`; do not assume they match. |
 | `--date YYYY-MM-DD` | ISO date for the header (default: today). |
 | `--no-enrich` | Skip LLM next-step suggestions. |
-| `--wiki` / `--no-wiki` | Write `<vault>/daily/<YYYY>/<date>-brief.md` (default `--no-wiki`). |
+| `--wiki` / `--no-wiki` | Write `<vault>/daily/<YYYY>/<date>-brief.md` (default `--no-wiki`). An empty brief writes no page and sends nothing. |
 | `--json` | Machine-readable instead of the table. |
 
 **Delivery** (opt-in, `BRAIN_BRIEF_DELIVERY=email|slack`) sends the page's titles to you, never

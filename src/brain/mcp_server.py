@@ -3035,8 +3035,8 @@ def brain_brief(
     ``cfg.brief_since_hours`` / ``cfg.brief_todo_since_days`` (themselves 24 / 7
     unless overridden) so the tool honors config exactly like ``brain brief
     --json``. Best-effort LLM next-step suggestions are included unless
-    ``no_enrich`` is true or Ollama is unavailable (then ``suggestions`` is
-    empty).
+    ``no_enrich`` is true, the brief is empty, or Ollama is unavailable (then
+    ``suggestions`` is empty).
 
     F6: confidential documents are excluded from captures, open todos, pins,
     ``watch_hits`` (this tool checks no watch), ``new_entities`` and the
@@ -3055,7 +3055,7 @@ def brain_brief(
     """
     from dataclasses import replace
 
-    from .brief import assemble_brief, suggest_next_steps
+    from .brief import assemble_brief, is_empty, suggest_next_steps
 
     state = _get_state()
     logger.debug("brain_brief: include_confidential=%s", include_confidential)
@@ -3079,7 +3079,7 @@ def brain_brief(
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    if not no_enrich:
+    if not no_enrich and not is_empty(data):  # an empty brief asks the model nothing
         suggestions = suggest_next_steps(data, state.cfg)
         if suggestions:
             data = replace(data, suggestions=suggestions)

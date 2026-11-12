@@ -64,6 +64,25 @@ to `compare/v0.4.0...HEAD`. -->
 - RM-14c, measuring the reranker on the owner's corpus: deferred to a later release. The reranker
   ships off.
 
+### Changed — an empty daily brief writes no page
+
+- `brain brief --wiki`, and so the 07:00 `com.brain.brief` job, writes no
+  `<vault>/daily/<YYYY>/<date>-brief.md` page when the brief is empty. Because no page is
+  written, no document appears for it in `brain ui`. Empty means: no captures, open todos, pins,
+  watch hits or watch notes, new entities, or possible duplicates. These are counted as the page
+  counts them, with confidential documents excluded, so a brief whose only content is
+  confidential writes no page either. The command prints the line
+  `No page written for <date>: nothing to publish (confidential documents excluded).` and exits
+  0. `--json` keeps its shape.
+- The decision is made before any model call. An empty brief asks the model for no next steps,
+  so invented suggestions can never fill an empty page, and it sends nothing through
+  `BRAIN_BRIEF_DELIVERY`. MCP `brain_brief` also skips the model for an empty payload.
+- A page whose only content is draft documents is still written, but nothing is delivered, so no
+  contentless message goes out at 07:00.
+- Existing pages are left alone. A page already written for the same date is not overwritten by
+  an empty re-run. **Empty pages written by earlier versions stay in the vault**, and brain never
+  deletes vault files, so remove them by hand if you want them gone.
+
 ### Added — document-level embeddings as a re-scoring search stage, off by default (RM-20)
 
 - Migration 031 adds `document_embeddings`: one vector per document, from its title and summary
@@ -94,9 +113,9 @@ to `compare/v0.4.0...HEAD`. -->
   logged for a citation (its session names no search), so the stage cannot feed itself.
 - It ships **off** (`BRAIN_ENGAGEMENT_ALPHA=0`, `BRAIN_ENGAGEMENT_BETA=0`; either above zero turns
   it on). While off, every surface and `brain eval`'s `config_signature` are unchanged. Turning it
-  on waits for `brain usage --engagement` to report its gate met, for the reranker's measurement
-  (RM-14c), for an eval on and off, and for `scripts/engagement_explain.sql` (read-only) to time its
-  statement at p95 ≤ 20 ms on your data.
+  on waits for `brain usage --engagement` to report its gate met, for an eval on and off on the
+  pipeline RM-14c left (the reranker off), and for `scripts/engagement_explain.sql` (read-only) to
+  time its statement at p95 ≤ 20 ms on your data.
 - Migration 032 indexes `search_queries.session_id`, which the stage looks up for each read. Without
   it, a synthetic 1,000,000-interaction table took 11.7 s per search at p95.
 

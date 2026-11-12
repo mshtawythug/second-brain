@@ -403,7 +403,7 @@ These knobs live in the feature settings leaf `brain/settings/rerank.py`.
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `BRAIN_RERANKER` | `none` | `none`, `llamacpp` (a local `llama-server` from llama.cpp, serving `bge-reranker-v2-m3`), or `voyage` (hosted). |
+| `BRAIN_RERANKER` | `none` | `none`, `llamacpp` (a local `llama-server` from llama.cpp, serving `bge-reranker-v2-m3`), or `voyage` (hosted). Measured 2026-11-12 (RM-14c): a large quality gain, but about 2.6–2.8 s of added p95 latency per search, so it stays off by default ([measurement](plans/2026-11-12-reranker-measurement.md)). |
 | `BRAIN_RERANK_DEPTH` | `20` | How many top results are rescored, 2 to 50. The rest keep their order after them. |
 | `BRAIN_RERANK_TIMEOUT_S` | `5.0` | Per-call timeout, 0.1 to 120 seconds. On a timeout the results stay in hybrid order. |
 | `BRAIN_RERANK_URL` | `http://127.0.0.1:8081` | Where `llama-server` listens. **Loopback only** (`127.0.0.1`, `::1`, `localhost`): the passages are your documents' text, so any other host is a `ConfigError`. The opt-in `com.brain.reranker` job binds `127.0.0.1` at this URL's port; for it the URL must be `http://127.0.0.1:PORT` or `http://localhost:PORT`, PORT in 1024–65535 (read by `brain-install-launchd`). |
@@ -417,7 +417,15 @@ rows are not sent and keep their places in the list. The local backend sees them
 because nothing leaves the machine.
 
 `llama-server` must be started with `--embedding --pooling rank --reranking`
-(the request is `POST {BRAIN_RERANK_URL}/v1/rerank`). Installing it, the tested
+(the request is `POST {BRAIN_RERANK_URL}/v1/rerank`), and with
+`--batch-size 2048 --ubatch-size 2048`, as the launchd job does. Each query+passage
+pair must fit in one physical batch. At llama.cpp's default of 512 tokens, a longer
+pair fails the whole call, and the search stays in hybrid order. 2048 holds a
+default 1,500-character passage plus a query of up to a few hundred characters.
+A much longer query (the CLI and MCP do not cap it; the UI caps it at 512), NFKC
+expansion, or `BRAIN_RERANK_MAX_CHARS` raised much past about 1,800 can still
+exceed it. That rerank is then skipped and the results stay in hybrid order
+(BL-58). Installing it, the tested
 version and model, its measured memory, and the opt-in launchd job
 (`brain-install-launchd --with-reranker`) are in
 [docs/guides/local-reranker.md](guides/local-reranker.md). `brain doctor`'s
@@ -490,14 +498,14 @@ settings leaf `brain/settings/engagement.py`.
 The stage is on when **either** weight is above zero. Two kinds of read never
 count: one made in the current search's own session, and the `opened` row
 `brain ask` records for each citation (its session names no logged search), so
-the stage cannot boost what it made you see. Turn it on only once all four hold:
+the stage cannot boost what it made you see. Turn it on only once all three hold:
 
 1. `brain usage --engagement` reports its gate met (see
    [docs/cli-reference.md](cli-reference.md));
-2. the reranker has been measured on your corpus (roadmap ticket RM-14c), because
-   this stage is measured on top of whatever that adopts;
-3. `brain eval` on and off in the same session shows no mean regressing;
-4. the stage's one statement takes at most **20 ms at p95** on your data. Measure
+2. `brain eval` on and off in the same session shows no mean regressing, measured
+   on the pipeline the reranker measurement left (roadmap ticket RM-14c: the
+   reranker stays off, see `BRAIN_RERANKER` above);
+3. the stage's one statement takes at most **20 ms at p95** on your data. Measure
    it read-only with
    `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/engagement_explain.sql`
    (it runs in a read-only transaction and prints only timings and a plan); read
@@ -630,7 +638,7 @@ the model by file name only. The tools inherit only `PATH`, `HOME`, `LANG` and `
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `BRAIN_BRIEF_DELIVERY` | `none` | Where `brain brief --wiki` (the 07:00 job) sends the brief once the page is written: `none`, `email` (through `gws gmail +send`, to `BRAIN_USER_EMAIL` only) or `slack` (an incoming webhook). Roadmap ticket RM-16. |
+| `BRAIN_BRIEF_DELIVERY` | `none` | Where `brain brief --wiki` (the 07:00 job) sends the brief once the page is written (an empty brief writes no page and sends nothing): `none`, `email` (through `gws gmail +send`, to `BRAIN_USER_EMAIL` only) or `slack` (an incoming webhook). Roadmap ticket RM-16. |
 | `BRAIN_BRIEF_SLACK_WEBHOOK_URL` | unset | The Slack incoming-webhook URL, needed by `slack`. **A secret** (its path is the credential): it must start `https://hooks.slack.com/` (that exact host, no port, no credentials, no whitespace or control characters, at most 65,536 characters), it is never logged, and `brain doctor` says only that it is set. Bind it to a private channel or a DM, never a shared channel. |
 | `BRAIN_BRIEF_DELIVERY_INCLUDE_TODOS` | `false` | Also send the open todo items and the suggested next steps. Both come from document text, so they are a second opt-in; by default the message carries the todo count only. |
 

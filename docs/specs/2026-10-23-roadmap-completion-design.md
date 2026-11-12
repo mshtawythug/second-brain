@@ -2022,8 +2022,9 @@ adopted, which is why both depend on it.
   index, `032_search_queries_session_idx.sql`; a synthetic 1,000,000-interaction benchmark measured
   p95 11.7 s without it and 33.8 ms with it. **Adoption:** instead of the materialized-table trigger
   in RM-22b.D2, "p95 ≤ 20 ms on the owner's data", measured read-only with
-  `scripts/engagement_explain.sql`, is an adoption condition beside the RM-22a data gate and RM-14c;
-  no materialized table was built.)*
+  `scripts/engagement_explain.sql`, is an adoption condition beside the RM-22a data gate and an
+  eval on and off on the pipeline RM-14c left (the reranker off: measured, not adopted for latency,
+  PR #133); no materialized table was built.)*
 
 #### RM-23 — Copy the note's path (external-editor affordance)
 
@@ -3646,7 +3647,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-13 | Ingest tab phase 3: file upload | M | 3 | RM-11, RM-07 | DONE (#77) |
 | RM-14a | Reranker stage, backends, eval wiring (off) | M | 4 | RM-08, RM-09 | DONE (#76) |
 | RM-14b | Local reranker runtime | S | 4 | RM-14a | DONE (#98) |
-| RM-14c | Reranker measurement and adoption | S | 4 | RM-14b | TODO (deferred past 0.4.0; owner decision) |
+| RM-14c | Reranker measurement and adoption | S | 4 | RM-14b | DONE (#133): built, measured, not adopted (latency, p95 ≈ 2.6–2.8 s against a 1.0 s limit); the reranker plist's batch fix shipped (`docs/plans/2026-11-12-reranker-measurement.md`) |
 | RM-15 | Saved searches and watch lists (with the `brief --wiki` extraction) | M | 4 | RM-06, RM-09 | DONE (#78) |
 | RM-16 | Brief delivery (email to self / Slack webhook) | S | 4 | RM-08, RM-15 | DONE (#82) |
 | RM-17 | Brief "new this week" entities | S | 4 | — | DONE (#84) |
@@ -3654,10 +3655,10 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-18b | Agent tab front end and output hardening | M | 4 | RM-18a, RM-11 | DONE (#83) |
 | RM-18c | Agent tab follow-up questions | S | 4 | RM-18b | DONE (#85) |
 | RM-19 | Near-duplicate detection | M | 5 | RM-06 | DONE (#86) |
-| RM-20 | Document-level embedding stage (off) | M | 5 | RM-09, RM-14c | DONE (#127; measurement owed after RM-14c) |
+| RM-20 | Document-level embedding stage (off) | M | 5 | RM-09, RM-14c | DONE (#127; measurement owed, on the pipeline RM-14c left: reranker off) |
 | RM-21 | Tag rename, merge, suggest-merges | S | 5 | RM-06 | DONE (#87) |
 | RM-22a | Engagement readout and gate | S | 5 | — | DONE (#88) |
-| RM-22b | Engagement ranking stage (off; built when RM-22a's gate is met) | M | 5 | RM-22a, RM-09, RM-14c | DONE (#131; off; adoption owed: data gate + RM-14c + owner-data p95 ≤ 20 ms) |
+| RM-22b | Engagement ranking stage (off; built when RM-22a's gate is met) | M | 5 | RM-22a, RM-09, RM-14c | DONE (#131; off; measured on the pipeline RM-14c left: reranker off; adoption owed: data gate + eval on/off + owner-data p95 ≤ 20 ms) |
 | RM-23 | Copy-path affordance | XS | 5 | — | DONE (#89) |
 | RM-24 | `--entity` search filter (NEEDS USER CONFIRMATION) | S | 5 | RM-09 | DONE (#91; user confirmed §5 U4 as recommended on 2026-10-30) |
 | RM-25 | H-1 move identity | S | 6 | RM-19 | DONE (#90) |

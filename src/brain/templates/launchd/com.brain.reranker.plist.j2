@@ -16,7 +16,15 @@
      unset): a deviation from the ticket, which fixed 8081, made because 8081
      was LanguageTool's on the owner's machine. The "reranking" flag
      only enables the endpoint; "embedding" with "pooling rank" is what makes
-     the model score pairs. /usr/bin/env resolves llama-server through the PATH
+     the model score pairs. The "batch size" and "ubatch size" flags are 2048
+     (RM-14c): a reranker scores each query and passage pair in ONE physical
+     batch, and at llama.cpp's default ubatch of 512 any pair over 512 tokens
+     got HTTP 500, which skipped the whole rerank. 2048 holds a full
+     BRAIN_RERANK_MAX_CHARS passage (1500 characters, so at most 1500 tokens)
+     plus a query of up to a few hundred characters. A much longer query (the
+     CLI and MCP do not cap it; the UI caps it at 512) or NFKC expansion can
+     still exceed it; that rerank is then skipped and the search stays in
+     hybrid order (BL-58). /usr/bin/env resolves llama-server through the PATH
      below (Homebrew's prefix on Apple Silicon and on Intel). Guide:
      docs/guides/local-reranker.md. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -34,6 +42,10 @@
         <string>--pooling</string>
         <string>rank</string>
         <string>--reranking</string>
+        <string>--batch-size</string>
+        <string>2048</string>
+        <string>--ubatch-size</string>
+        <string>2048</string>
         <string>--host</string>
         <string>127.0.0.1</string>
         <string>--port</string>
