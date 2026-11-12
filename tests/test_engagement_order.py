@@ -131,8 +131,8 @@ def test_the_reach_values_the_plan_records() -> None:
 def test_the_stage_asks_for_at_least_its_reach() -> None:
     stage = EngagementStage(alpha=1.0, beta=0.0)
 
-    assert stage.candidate_limit(10) == engagement_reach(10)
-    assert stage.candidate_limit(10) >= 10
+    assert stage.candidate_limit(10) == engagement_reach(10) == 49
+    assert stage.candidate_limit(1000) >= 1000
 
 
 # --- the stage over a fake connection ---------------------------------------------------
