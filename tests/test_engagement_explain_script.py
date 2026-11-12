@@ -17,7 +17,12 @@ from typing import Any
 import psycopg
 import pytest
 
-from brain.search_engagement import _ENGAGEMENT_SQL
+from brain.engagement import READ_ACTIONS
+from brain.search_engagement import (
+    _ENGAGEMENT_SQL,
+    ENGAGEMENT_HALF_LIFE_DAYS,
+    ENGAGEMENT_WINDOW_DAYS,
+)
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "engagement_explain.sql"
 PLACEHOLDERS = {
@@ -54,6 +59,33 @@ def test_the_script_times_exactly_the_modules_statement() -> None:
         expected = expected.replace(named, positional)
 
     assert _normalized(_script_statement()) == _normalized(expected)
+
+
+def _constant(name: str) -> str:
+    """The right-hand side of the script's ``<name> CONSTANT <type> := <value>;``."""
+    match = re.search(rf"^\s*{name}\s+CONSTANT\s+\S+\s*:=\s*(.+?);\s*$", SCRIPT.read_text(), re.M)
+    assert match is not None, f"the script declares {name} as a CONSTANT"
+    return match.group(1)
+
+
+def _product(expression: str) -> int:
+    """``30 * 86400`` -> 2592000: the only arithmetic the script's constants use."""
+    assert re.fullmatch(r"\d+(\s*\*\s*\d+)*", expression), expression
+    result = 1
+    for factor in expression.split("*"):
+        result *= int(factor)
+    return result
+
+
+@pytest.mark.nodb
+def test_the_script_binds_the_modules_parameters() -> None:
+    # The statement text is pinned above; these are the values it is run with,
+    # which the module passes from its own constants (``fetch_engagement``).
+    reads = re.findall(r"'([^']*)'", _constant("reads"))
+
+    assert reads == list(READ_ACTIONS)
+    assert _product(_constant("half_life_s")) == ENGAGEMENT_HALF_LIFE_DAYS * 86400
+    assert _product(_constant("window_days")) == ENGAGEMENT_WINDOW_DAYS
 
 
 @pytest.mark.nodb
