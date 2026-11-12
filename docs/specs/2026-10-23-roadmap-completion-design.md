@@ -3644,7 +3644,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-20 | Document-level embedding stage (off) | M | 5 | RM-09, RM-14c | DONE (#127; measurement owed after RM-14c) |
 | RM-21 | Tag rename, merge, suggest-merges | S | 5 | RM-06 | DONE (#87) |
 | RM-22a | Engagement readout and gate | S | 5 | — | DONE (#88) |
-| RM-22b | Engagement ranking stage (off; built when RM-22a's gate is met) | M | 5 | RM-22a, RM-09, RM-14c | DONE (#PR; off; adoption owed: data gate + RM-14c) |
+| RM-22b | Engagement ranking stage (off; built when RM-22a's gate is met) | M | 5 | RM-22a, RM-09, RM-14c | DONE (#131; off; adoption owed: data gate + RM-14c) |
 | RM-23 | Copy-path affordance | XS | 5 | — | DONE (#89) |
 | RM-24 | `--entity` search filter (NEEDS USER CONFIRMATION) | S | 5 | RM-09 | DONE (#91; user confirmed §5 U4 as recommended on 2026-10-30) |
 | RM-25 | H-1 move identity | S | 6 | RM-19 | DONE (#90) |
