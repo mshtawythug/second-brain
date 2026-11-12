@@ -403,6 +403,7 @@ Head at `02c2abc` is `028_search_query_tokens.sql`. Applied migrations are recor
 | 029 | `029_saved_searches.sql` | RM-15 | 4 |
 | 030 | `030_near_duplicates.sql` | RM-19 | 5 |
 | 031 | `031_document_embeddings.sql` | RM-20 | 5 |
+| 032 | `032_search_queries_session_idx.sql` | RM-22b (D5: index, not the materialized table) | 5 |
 
 **Conditional tickets are not pre-allocated.** RM-22b (a materialized engagement table, only if its
 query budget is exceeded) and RM-60 (`documents.parent_document_id`, trigger-gated) take **the next
@@ -2011,6 +2012,19 @@ adopted, which is why both depend on it.
   clamp. RM-22b.D2, a materialized table: **only if** the per-search query exceeds 20 ms at p95 on
   the owner's data; it then takes the next free migration number at merge (§2.8) and is refreshed by
   the brief daemon.
+- *(As shipped in PR #131, off; plan `docs/plans/2026-11-12-rm-22b-engagement-stage.md`. Four
+  rulings differ from the text above. **D2:** the multiplier scales each row's positional reciprocal
+  rank (k = 60), not `SearchResult.score`, which the reranker, the document leg and `--rewrite`
+  leave out of step with the order; `score` is never overwritten, and the stage runs last, after
+  the reranker. **D4:** a read with a session counts only when that session names a logged search,
+  so `brain ask`'s per-citation `opened` rows (written under the ask's own session) cannot feed the
+  boost; the same-session exclusion above still applies. **D5 / 032:** that rule's probe needed an
+  index, `032_search_queries_session_idx.sql`; a synthetic 1,000,000-interaction benchmark measured
+  p95 11.7 s without it and 33.8 ms with it. **Adoption:** instead of the materialized-table trigger
+  in RM-22b.D2, "p95 ≤ 20 ms on the owner's data", measured read-only with
+  `scripts/engagement_explain.sql`, is an adoption condition beside the RM-22a data gate and an
+  eval on and off on the pipeline RM-14c left (the reranker off: measured, not adopted for latency,
+  PR #133); no materialized table was built.)*
 
 #### RM-23 — Copy the note's path (external-editor affordance)
 
@@ -3534,7 +3548,7 @@ Two separate rules govern ordering:
 | `bin/launchd.py`, `bin/brain-install-launchd`, `bin/brain-uninstall-launchd` | RM-14b, RM-33 |
 | `docs/configuration.md` | every ticket with a knob or an MCP tool: RM-08, RM-12, RM-14a, RM-15, RM-16, RM-19, RM-20, RM-21, RM-22b, RM-32, RM-33, RM-38, RM-46, RM-55 |
 | `CHANGELOG.md` (Unreleased) | every ticket; conflicts are routine, and the rebase resolves them |
-| Migrations | RM-15 (029), RM-19 (030), RM-20 (031); conditional tickets take the next free number at merge (§2.8) |
+| Migrations | RM-15 (029), RM-19 (030), RM-20 (031), RM-22b (032); conditional tickets take the next free number at merge (§2.8) |
 | The live machine (eval runs, daemon reinstall) | RM-14c, RM-20, RM-22b and RM-43's eval steps; every `src/` merge's reinstall. One at a time, by the team lead, never during another ticket's run of record. |
 
 **Parallel development sets**, by wave, once their dependencies have merged. Members of a set may be
@@ -3555,7 +3569,7 @@ merge-order file above.
 
 ### 4.3 Migration allocation
 
-§2.8 is authoritative: 029 (RM-15), 030 (RM-19), 031 (RM-20). Conditional tickets (RM-22b, RM-60) and
+§2.8 is authoritative: 029 (RM-15), 030 (RM-19), 031 (RM-20), 032 (RM-22b). Conditional tickets (RM-22b, RM-60) and
 any other ticket that discovers a need take the next free number when they merge, and update §2.8 in
 that PR; no number is held in reserve.
 
@@ -3644,7 +3658,7 @@ in its ticket; a *closure note* ticket is done when its PR records the closure.
 | RM-20 | Document-level embedding stage (off) | M | 5 | RM-09, RM-14c | DONE (#127; measurement owed, on the pipeline RM-14c left: reranker off) |
 | RM-21 | Tag rename, merge, suggest-merges | S | 5 | RM-06 | DONE (#87) |
 | RM-22a | Engagement readout and gate | S | 5 | — | DONE (#88) |
-| RM-22b | Engagement ranking stage (off; built when RM-22a's gate is met) | M | 5 | RM-22a, RM-09, RM-14c | TODO (deferred past 0.4.0; owner decision; measured on the pipeline RM-14c left: reranker off) |
+| RM-22b | Engagement ranking stage (off; built when RM-22a's gate is met) | M | 5 | RM-22a, RM-09, RM-14c | DONE (#131; off; measured on the pipeline RM-14c left: reranker off; adoption owed: data gate + eval on/off + owner-data p95 ≤ 20 ms) |
 | RM-23 | Copy-path affordance | XS | 5 | — | DONE (#89) |
 | RM-24 | `--entity` search filter (NEEDS USER CONFIRMATION) | S | 5 | RM-09 | DONE (#91; user confirmed §5 U4 as recommended on 2026-10-30) |
 | RM-25 | H-1 move identity | S | 6 | RM-19 | DONE (#90) |

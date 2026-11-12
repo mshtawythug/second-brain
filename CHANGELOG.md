@@ -41,28 +41,23 @@ to `compare/v0.4.0...HEAD`. -->
 3. Install 0.4.0: `pip install --upgrade secondbrain-py`, or pull a source checkout and reinstall
    it. From a source checkout, also run `bin/brain-skills-sync`: the agent skills changed in this
    release.
-4. Run `brain init` once. It applies migrations 028 to 031 in order. All four are additive: they
-   add tables and columns and change no existing row. 028 waits at most 3 s for a lock
-   (`lock_timeout`); **031 sets no `lock_timeout`**. Its new table's foreign key takes a
-   `SHARE ROW EXCLUSIVE` lock on `documents`, so it waits behind any open writer, and every writer
-   after it waits behind it. That is why the writers stop first.
+4. Run `brain init` once. It applies migrations 028 to 032 in order. All five are additive: they
+   add tables, columns and an index and change no existing row. 028 and 032 wait at most 3 s for
+   a lock (`lock_timeout`); 032 builds an index on `search_queries.session_id`, which holds back a
+   search's log row (not a read) while it builds. **031 sets no `lock_timeout`**. Its new table's
+   foreign key takes a `SHARE ROW EXCLUSIVE` lock on `documents`, so it waits behind any open
+   writer, and every writer after it waits behind it. That is why the writers stop first.
 5. Start again with `brain-up`. It reinstalls the launchd daemons (reloading `com.brain.dropfolders`
    if its plist is there), and its first run removes the `com.brain.build` LaunchAgent (see
    *Removed — the Quartz wiki* below).
 6. **The document leg ships off** (`BRAIN_DOC_LEG=false`), and so does the reranker. Turn the leg
-   on only after step 4 has applied 031, then fill it with `brain docembed backfill`.
+   on only after step 4 has applied 031, then fill it with `brain docembed backfill`. The
+   engagement stage ships off too (`BRAIN_ENGAGEMENT_ALPHA=0`, `BRAIN_ENGAGEMENT_BETA=0`).
 7. Some entries below carry their own upgrade line. Steps 3, 4 and 5 cover the skills, migration
    and launchd ones (for example the `sources/` skill recipes, and 030 and the daemon reinstall in
    RM-19). One is separate and optional: a `brain setup --profile full` install that wants the
    corrected AGE image re-runs setup with the stack stopped (*Fixed — the `full` profile pulled
    the old AGE image*).
-
-### Not in this release
-
-- RM-14c, measuring the reranker on the owner's corpus: deferred to a later release. The reranker
-  ships off.
-- RM-22b, the engagement-ranking stage: deferred to a later release, until `brain usage
-  --engagement` reports its gate met.
 
 ### Changed — an empty daily brief writes no page
 
@@ -83,6 +78,16 @@ to `compare/v0.4.0...HEAD`. -->
   an empty re-run. **Empty pages written by earlier versions stay in the vault**, and brain never
   deletes vault files, so remove them by hand if you want them gone.
 
+### Fixed — the reranker's launchd job no longer refuses long passages (RM-14c)
+
+- The `com.brain.reranker` template now starts `llama-server` with `--batch-size 2048
+  --ubatch-size 2048`. With llama.cpp's default 512-token physical batch, a token-dense passage
+  (ids, versions, symbols) made `llama-server` answer HTTP 500, and that search stayed in hybrid
+  order. An installed job picks up the new template at upgrade step 5: `brain-up` re-renders it.
+- RM-14c measured the reranker on the owner's corpus: quality rises sharply (nDCG@5 and MRR about
+  +0.36), but the added p95 latency is about 2.6–2.8 s against a 1.0 s limit, so it stays off by
+  default (`BRAIN_RERANKER=none`). See `docs/plans/2026-11-12-reranker-measurement.md`.
+
 ### Added — document-level embeddings as a re-scoring search stage, off by default (RM-20)
 
 - Migration 031 adds `document_embeddings`: one vector per document, from its title and summary
@@ -101,6 +106,23 @@ to `compare/v0.4.0...HEAD`. -->
 - Known limitation: `brain ui`'s Agent tab wraps the embedder, and a wrapped embedder never
   matches the identity the backfill wrote, so there the leg reports `no_document_vectors` and
   leaves the order alone. It fails safe; the fix is backlog BL-49.
+
+### Added — engagement-aware ranking stage, off by default (RM-22b)
+
+- A new search stage, `engagement`, ranks a little higher the documents you open and rate
+  useful, and a little lower the ones you rate irrelevant. It multiplies each row's reciprocal
+  rank by `1 + α·log1p(decayed opens) + β·(useful − irrelevant)`, clamped to 0.8–1.25, and
+  re-sorts. Opens halve in weight every 30 days; ratings do not decay. It runs last, after the
+  reranker, adds no results, and never changes a result's `score`.
+- Two kinds of read never count: one from the current search's own session, and one `brain ask`
+  logged for a citation (its session names no search), so the stage cannot feed itself.
+- It ships **off** (`BRAIN_ENGAGEMENT_ALPHA=0`, `BRAIN_ENGAGEMENT_BETA=0`; either above zero turns
+  it on). While off, every surface and `brain eval`'s `config_signature` are unchanged. Turning it
+  on waits for `brain usage --engagement` to report its gate met, for an eval on and off on the
+  pipeline RM-14c left (the reranker off), and for `scripts/engagement_explain.sql` (read-only) to
+  time its statement at p95 ≤ 20 ms on your data.
+- Migration 032 indexes `search_queries.session_id`, which the stage looks up for each read. Without
+  it, a synthetic 1,000,000-interaction table took 11.7 s per search at p95.
 
 ### Added — `brain tags summarize`, a cited synthesis of one tag (RM-55)
 

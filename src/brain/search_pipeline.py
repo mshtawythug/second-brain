@@ -5,9 +5,9 @@
 search through :func:`run_search`. It composes, in one order, what used to be
 wired per surface: the search itself (``hybrid_search`` or a surface's patch
 point), the text-only fallback (:mod:`brain.search_fallback`), and the ranking
-STAGES a later ticket adds (a reranker, RM-14a; a document leg, RM-20;
-engagement, RM-22b). A new stage is wired once, in :func:`build_stages`, and
-reaches every surface. No stage edits the ranking code in :mod:`brain.search`.
+STAGES (a reranker, RM-14a; a document leg, RM-20; engagement, RM-22b). A new
+stage is wired once, in :func:`build_stages`, and reaches every surface. No
+stage edits the ranking code in :mod:`brain.search`.
 
 The opt-in query rewrite (RM-54) is not a stage: a stage sees rows and cannot
 search, and a stage would reach every surface when only the CLI asks for it. It
@@ -190,29 +190,35 @@ def build_stages(
     published the dotenv chain into it (spec §2.3). The document leg (RM-20) is
     added when ``BRAIN_DOC_LEG`` is on, bound to ``embedder`` (the search's own,
     whose cached query vector it reads); the reranker (RM-14a) when
-    ``BRAIN_RERANKER`` names a backend. The leg comes first, so it can lift a
-    document into the head the reranker scores. Both ship off, so by default
-    this is empty and every surface is unchanged.
+    ``BRAIN_RERANKER`` names a backend; the engagement stage (RM-22b) when
+    ``BRAIN_ENGAGEMENT_ALPHA`` or ``BRAIN_ENGAGEMENT_BETA`` is above zero. The leg
+    comes first, so it can lift a document into the head the reranker scores;
+    engagement comes last, because a reranker re-sorts its whole head and would
+    erase a boost applied before it. All three ship off, so by default this is
+    empty and every surface is unchanged.
 
     ``rerank`` is a one-run override (``brain search --rerank/--no-rerank``):
     ``False`` drops the stage, ``True`` requires a configured backend (a
     ``ConfigError`` otherwise: picking one would choose between a local and a
     hosted service for the user), and ``None`` follows the setting; it does not
-    touch the document leg. A bad rerank or document-leg knob is a
-    ``ConfigError`` here even while its stage is off.
+    touch the document leg or engagement. A bad rerank, document-leg or
+    engagement knob is a ``ConfigError`` here even while its stage is off.
     """
-    # Imported here: ``brain.rerank`` and ``brain.search_doc_leg`` import this
-    # module's ``StageOutcome`` and ``StageReport``, so a top-level import
-    # would be a cycle.
+    # Imported here: ``brain.rerank``, ``brain.search_doc_leg`` and
+    # ``brain.search_engagement`` import this module's ``StageOutcome`` and
+    # ``StageReport``, so a top-level import would be a cycle.
     from . import rerank_backends
     from .config import ConfigError
     from .rerank import RerankStage
     from .search_doc_leg import DocLegStage
+    from .search_engagement import EngagementStage
     from .settings.doc_leg import load_doc_leg_settings
+    from .settings.engagement import load_engagement_settings
     from .settings.rerank import load_rerank_settings
 
     doc_leg = load_doc_leg_settings(env)
     settings = load_rerank_settings(env)
+    engagement = load_engagement_settings(env)
     if rerank is True and not settings.enabled:
         raise ConfigError(
             "--rerank needs BRAIN_RERANKER set to llamacpp or voyage (it is none)"
@@ -230,6 +236,8 @@ def build_stages(
                 timeout=settings.timeout_s,
             )
         )
+    if engagement.enabled:
+        stages.append(EngagementStage(alpha=engagement.alpha, beta=engagement.beta))
     return tuple(stages)
 
 

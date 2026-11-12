@@ -559,7 +559,9 @@ brain usage --engagement --json
 ```
 
 Is there enough engagement data for an interactions-aware ranking stage to
-learn from? The readout counts **document** interactions over `--days`:
+learn from? That stage is `BRAIN_ENGAGEMENT_ALPHA` / `BRAIN_ENGAGEMENT_BETA`
+(off by default; see [docs/configuration.md](configuration.md)), and the gate
+below is the precondition for turning it on. The readout counts **document** interactions over `--days`:
 
 - reads, split by surface (`cli` / `mcp` / `ui` / `wiki`) into opens
   (`opened`) and clicks (`clicked`)

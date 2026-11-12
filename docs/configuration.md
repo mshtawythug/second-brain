@@ -477,6 +477,46 @@ finds no vectors among a query's candidates, it is reported skipped
 (`no_document_vectors`), and `brain eval` refuses that row as it does a failed
 embed: run the backfill first.
 
+### `BRAIN_ENGAGEMENT_ALPHA` / `BRAIN_ENGAGEMENT_BETA` — rank what you read a little higher (off by default)
+
+A ranking stage that nudges the rows a search already returned by how you have
+used each document: the ones you open, and rate useful, move up a little; the
+ones you rate irrelevant move down a little. Each row's reciprocal rank (k = 60)
+is multiplied by `1 + α·log1p(opens) + β·(useful − irrelevant)`, clamped to
+**0.8–1.25**, and the rows are re-sorted. `opens` counts opens and clicks, each
+weighing half as much every 30 days (reads older than 300 days are ignored);
+ratings do not decay. It adds no results, so every filter and the sensitivity
+lens hold. It runs on every search surface, **after** the reranker, and never
+changes a result's `score` (roadmap ticket RM-22b). The knobs live in the feature
+settings leaf `brain/settings/engagement.py`.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BRAIN_ENGAGEMENT_ALPHA` | `0` | Weight of decayed opens, 0 to 1. |
+| `BRAIN_ENGAGEMENT_BETA` | `0` | Weight of net ratings (useful − irrelevant), 0 to 1. |
+
+The stage is on when **either** weight is above zero. Two kinds of read never
+count: one made in the current search's own session, and the `opened` row
+`brain ask` records for each citation (its session names no logged search), so
+the stage cannot boost what it made you see. Turn it on only once all three hold:
+
+1. `brain usage --engagement` reports its gate met (see
+   [docs/cli-reference.md](cli-reference.md));
+2. `brain eval` on and off in the same session shows no mean regressing, measured
+   on the pipeline the reranker measurement left (roadmap ticket RM-14c: the
+   reranker stays off, see `BRAIN_RERANKER` above);
+3. the stage's one statement takes at most **20 ms at p95** on your data. Measure
+   it read-only with
+   `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/engagement_explain.sql`
+   (it runs in a read-only transaction and prints only timings and a plan); read
+   its `p95` line.
+
+A bad value is a `ConfigError` the first time a search runs, even while the
+stage is off. `brain eval` adds `engagement_alpha` and `engagement_beta` to its
+`config_signature` only while the stage is on, so a baseline recorded with it off
+stays valid. While it is on, the baseline depends on the `interactions` table,
+so any open or rating can move it.
+
 ### `BRAIN_WATCH_MIN_COSINE` — saved searches matched by meaning
 
 | Env var | Default | Purpose |

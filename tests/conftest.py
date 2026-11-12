@@ -26,8 +26,10 @@ fifth, tests/ocr_isolation_plugin.py (OCR forced off for every test), with its o
 comment. Its growth on feat/rm-38-voice-memos is a sixth, tests/voice_isolation_plugin.py
 (voice memos forced off for every test), with its one-line comment. Its growth on
 feat/rm-20-document-embeddings is a seventh, tests/docleg_isolation_plugin.py (the document-leg
-stage forced off for every test), with its one-line comment. No line count is given here: it
-would be stale as soon as written (``wc -l tests/conftest.py``).
+stage forced off for every test), with its one-line comment. Its growth on
+feat/rm-22b-engagement-stage is an eighth, tests/engagement_isolation_plugin.py (the
+engagement stage forced off for every test), with its one-line comment. No line count is
+given here: it would be stale as soon as written (``wc -l tests/conftest.py``).
 """
 
 import hashlib
@@ -61,6 +63,7 @@ from tests.db_lock import concurrent_suite_message, try_acquire_suite_lock
 # tests.voice_isolation_plugin forces voice memos off per test (RM-38, that module).
 # tests.browser_isolation_plugin keeps ingest-web off real profiles and the network (RM-41).
 # tests.docleg_isolation_plugin forces the document-leg stage off per test (RM-20, that module).
+# tests.engagement_isolation_plugin forces the engagement stage off per test (RM-22b).
 pytest_plugins = (
     "tests.browser_timeout",
     "tests.env_isolation",
@@ -70,6 +73,7 @@ pytest_plugins = (
     "tests.voice_isolation_plugin",
     "tests.browser_isolation_plugin",
     "tests.docleg_isolation_plugin",
+    "tests.engagement_isolation_plugin",
 )
 
 load_dotenv()
