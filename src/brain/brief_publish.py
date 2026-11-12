@@ -27,6 +27,13 @@ and did not happen, the watch hits are NOT marked notified, so the next brief se
 decided by ``BRAIN_BRIEF_DELIVERY`` alone, so a malformed other knob cannot make it warn. Draft
 documents stay on the page and are removed from what is sent (plan D13).
 
+**Empty (owner request, 0.4.0).** An empty brief is not created. :func:`brain.brief.is_empty`
+decides, on the published payload once its watch view is swapped in, and BEFORE any model call,
+so suggestions can never rescue an otherwise-empty page. An empty page is not written, sent or
+enriched, and an existing page for the date is left untouched. Its unnotified watch hits, which
+the page could never list, are still marked, as after a written page. A brief whose terminal
+payload is empty asks the model nothing. Plan: ``docs/plans/2026-11-12-empty-daily-brief.md``.
+
 The :mod:`brain.brief` functions are looked up on the module at call time, as ``cli.brief`` did
 through its function-local import, so a test double on ``brain.brief.suggest_next_steps`` still
 reaches this code.
@@ -88,8 +95,9 @@ def build_brief(
     """Build the terminal brief and, under ``wiki``, write the published page.
 
     Returns the terminal (permissive) payload and the written page's path, or ``None`` when
-    ``wiki`` is false. The page is written whatever the caller does with the payload, so
-    ``brain brief --json --wiki`` still writes it.
+    ``wiki`` is false or the published payload is empty (:func:`brain.brief.is_empty`). The page
+    is written whatever the caller does with the payload, so ``brain brief --json --wiki`` still
+    writes it.
 
     ``embedder`` serves semantic watches; ``None`` builds the configured one, and only if an
     enabled semantic watch is checked.
@@ -134,6 +142,21 @@ def build_brief(
         if published is not None and watches_on:
             view = unnotified_view(conn)
     data = replace(data, watch_notes=_check_notes(checks, published=False))
+    # The published watch fields are final BEFORE the emptiness check, so an old unnotified hit
+    # still makes a page. Swapping ahead of ``withheld`` changes nothing there: the comparison
+    # strips the watch fields (``_suggestion_inputs``).
+    if published is not None and view is not None:
+        published = replace(
+            published,
+            watch_hits=view.hits,
+            watch_notes=[*view.notes, *_check_notes(checks, published=True)],
+        )
+    # The page decision: made on the PUBLISHED payload (F6: a page's presence depends on gated
+    # data alone) and BEFORE any model call, so model output never rescues an empty page.
+    skipped = published is not None and brief_mod.is_empty(published)
+    if skipped:
+        _logger.info("brief page skipped for %s: nothing to publish", on_date.isoformat())
+        published = None
     # Compared while BOTH still carry ``suggestions=[]``, so this is a straight
     # question about the assembled rows. It decides only whether the published
     # page needs its OWN LLM round-trip: ``suggest_next_steps`` feeds action-item
@@ -149,7 +172,7 @@ def build_brief(
         data
     )
     if enrich:
-        suggestions = brief_mod.suggest_next_steps(data, cfg)
+        suggestions = [] if brief_mod.is_empty(data) else brief_mod.suggest_next_steps(data, cfg)
         if suggestions:
             data = replace(data, suggestions=suggestions)
         if published is not None:
@@ -159,12 +182,6 @@ def build_brief(
                     brief_mod.suggest_next_steps(published, cfg) if withheld else suggestions
                 ),
             )
-    if published is not None and view is not None:
-        published = replace(
-            published,
-            watch_hits=view.hits,
-            watch_notes=[*view.notes, *_check_notes(checks, published=True)],
-        )
     written_path = (
         brief_mod.write_brief_to_vault(cfg.vault_path, on_date, published)
         if published is not None
@@ -175,7 +192,9 @@ def build_brief(
         if written_path is not None and published is not None
         else True
     )
-    if written_path is not None and delivered and view is not None and view.pending:
+    # A skipped page resolves its hits as a written, delivered one does: none could be listed.
+    resolved = skipped or (written_path is not None and delivered)
+    if resolved and view is not None and view.pending:
         with connect(cfg.database_url) as conn:
             conn.autocommit = True
             mark_notified(conn, view.pending)

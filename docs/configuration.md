@@ -590,7 +590,7 @@ the model by file name only. The tools inherit only `PATH`, `HOME`, `LANG` and `
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `BRAIN_BRIEF_DELIVERY` | `none` | Where `brain brief --wiki` (the 07:00 job) sends the brief once the page is written: `none`, `email` (through `gws gmail +send`, to `BRAIN_USER_EMAIL` only) or `slack` (an incoming webhook). Roadmap ticket RM-16. |
+| `BRAIN_BRIEF_DELIVERY` | `none` | Where `brain brief --wiki` (the 07:00 job) sends the brief once the page is written (an empty brief writes no page and sends nothing): `none`, `email` (through `gws gmail +send`, to `BRAIN_USER_EMAIL` only) or `slack` (an incoming webhook). Roadmap ticket RM-16. |
 | `BRAIN_BRIEF_SLACK_WEBHOOK_URL` | unset | The Slack incoming-webhook URL, needed by `slack`. **A secret** (its path is the credential): it must start `https://hooks.slack.com/` (that exact host, no port, no credentials, no whitespace or control characters, at most 65,536 characters), it is never logged, and `brain doctor` says only that it is set. Bind it to a private channel or a DM, never a shared channel. |
 | `BRAIN_BRIEF_DELIVERY_INCLUDE_TODOS` | `false` | Also send the open todo items and the suggested next steps. Both come from document text, so they are a second opt-in; by default the message carries the todo count only. |
 

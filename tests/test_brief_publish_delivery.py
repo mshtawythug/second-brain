@@ -144,6 +144,8 @@ def test_build_brief_delivers_the_gated_payload_only(
 
 
 def test_the_email_goes_only_to_the_owner(test_db: psycopg.Connection, tmp_path: Path) -> None:
+    # One real item: an empty brief writes, sends and asks nothing (empty-daily-brief plan).
+    _watch_with_one_hit(test_db)
     calls: list[list[str]] = []
     settings = load_brief_delivery_settings(EMAIL_ENV)
     channel = make_channel(settings, runner=lambda argv: calls.append(argv) or "")
@@ -208,6 +210,8 @@ def test_an_auth_failure_from_build_brief_names_gws_reauth(
     test_db: psycopg.Connection, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.WARNING)
+    # One real item: an empty brief writes, sends and asks nothing (empty-daily-brief plan).
+    _watch_with_one_hit(test_db)
 
     _, written = _build(
         tmp_path, delivery_env=EMAIL_ENV, delivery_channel=_FakeChannel(DeliveryAuthError())
@@ -252,6 +256,8 @@ def test_a_recipient_other_than_the_configured_owner_is_refused(
     test_db: psycopg.Connection, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.WARNING)
+    # One real item: an empty brief writes, sends and asks nothing (empty-daily-brief plan).
+    _watch_with_one_hit(test_db)
     channel = _FakeChannel()
 
     _build(

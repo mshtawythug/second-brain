@@ -203,6 +203,9 @@ def test_new_entities_alone_do_not_cost_a_second_suggestion_call(
     test_db: psycopg.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The payloads differ only in the section, which never reaches the suggestion prompt.
+    # "Open Example" keeps the page non-empty, so the reuse path is the one exercised: an empty
+    # published brief writes no page and asks nothing (empty-daily-brief plan).
+    _new(test_db, "Open Example")
     _new(test_db, "Sealed Example", sensitivity="confidential")
     calls: list[BriefData] = []
 

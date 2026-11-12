@@ -6,8 +6,9 @@
 
      Unlike the watcher/build agents this is a ONE-SHOT job: StartCalendarInterval
      fires the brief once at 07:00 local each day (no KeepAlive, no RunAtLoad).
-     The brief writes the daily digest page; LLM suggestions are best-effort and
-     skipped silently if Ollama is down. -->
+     The brief writes the daily digest page, unless the brief is empty (then it
+     writes nothing and exits 0); LLM suggestions are best-effort and skipped
+     silently if Ollama is down. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
