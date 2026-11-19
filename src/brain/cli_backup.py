@@ -259,11 +259,15 @@ def _read_line_on_stderr(prompt: str) -> str:
 
     Not ``typer.prompt(..., err=True)``: Click still writes the prompt's last
     character to stdout through ``input()`` (a readline workaround), which would
-    put stray text ahead of the ``--json`` object. End of input aborts, as it
-    does for Click's prompts.
+    put stray text ahead of the ``--json`` object. End of input and Ctrl-C both
+    raise ``typer.Abort``, as they do for Click's own prompts, so the caller
+    can answer either with the ``aborted`` JSON object.
     """
     typer.echo(prompt, nl=False, err=True)
-    line = sys.stdin.readline()
+    try:
+        line = sys.stdin.readline()
+    except KeyboardInterrupt as exc:
+        raise typer.Abort() from exc
     if not line:
         raise typer.Abort()
     return line.rstrip("\r\n")

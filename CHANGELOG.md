@@ -133,9 +133,10 @@ to `compare/v0.4.0...HEAD`. -->
   with no `docker exec`. Only host, port and user are read from the DSN, so a password is never
   printed, and every value is shell-quoted.
 - `restore --json` printed its confirmation prompts on stdout, so the output was not JSON. In
-  `--json` mode prompts and warnings now go to stderr and stdout carries one JSON object. The
+  `--json` mode prompts and warnings now go to stderr, and stdout carries nothing but JSON. The
   typed phrase still cannot be skipped by any flag, so a non-empty restore reads it from stdin as
-  before. A declined run prints `{"restored": false, "aborted": true}` and exits 1.
+  before. A declined or interrupted (Ctrl-C) run prints `{"restored": false, "aborted": true}`
+  and exits 1. A run that ends in any other error exits non-zero with stdout empty.
 - `restore --vault-only` listed the database under "WILL BE OVERWRITTEN". The preview now follows
   the scope, as `--db-only` already did for the vault. **Gate change:** `--vault-only` asks for the
   typed phrase only when the vault is non-empty. It no longer asks because the database is

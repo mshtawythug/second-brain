@@ -500,3 +500,4 @@ def test_blocked_restore_emits_json_issues(
     assert payload["restored"] is False
     assert payload["blocked"] is True
     assert any(issue["code"] == "dim" for issue in payload["issues"])
+    assert runner.calls == []

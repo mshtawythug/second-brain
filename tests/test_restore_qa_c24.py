@@ -264,6 +264,43 @@ def test_json_abort_emits_an_abort_object(
     assert _staging_dirs(cfg) == []
 
 
+
+class _InterruptingStdin:
+    """A stdin whose read is interrupted, as by Ctrl-C at the prompt."""
+
+    def readline(self) -> str:
+        raise KeyboardInterrupt
+
+
+def test_json_ctrl_c_at_the_prompt_emits_the_abort_object(
+    monkeypatch: pytest.MonkeyPatch,
+    archive: Path,  # noqa: F811 — the imported fixture
+    cfg: Config,  # noqa: F811 — the imported fixture
+    wired: RefusingConnectionFactory,  # noqa: F811 — the imported fixture
+    runner: RecordingRunner,  # noqa: F811 — the imported fixture
+    seed_live_doc: Callable[..., str],  # noqa: F811 — the imported fixture
+) -> None:
+    """F23: Ctrl-C at a `--json` prompt is an abort, not a traceback.
+
+    ``CliRunner`` only takes str/bytes input, so the interrupt is injected by
+    pointing ``brain.cli_backup``'s ``sys`` at a stdin that raises.
+    """
+    import json
+    from types import SimpleNamespace
+
+    seed_live_doc(title="Larkspur review", content="Synthetic body for the gate test.")
+    monkeypatch.setattr(
+        "brain.cli_backup.sys", SimpleNamespace(stdin=_InterruptingStdin())
+    )
+
+    result = _invoke(archive, "--json", stdin="y\n")
+
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout) == {"restored": False, "aborted": True}
+    assert runner.calls == []
+    assert live_document_count(TEST_DATABASE_URL) == 1
+    assert _staging_dirs(cfg) == []
+
 def test_json_missing_sidecar_warning_goes_to_stderr(
     archive: Path, wired: RefusingConnectionFactory, test_db: psycopg.Connection  # noqa: F811 — the imported fixture
 ) -> None:

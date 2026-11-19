@@ -326,8 +326,25 @@ tests/test_repo_hygiene_files.py --no-cov`. Then `ruff check`, `mypy src/` and
   `$BRAIN_HOME/run/restore-<ts>`, built at `src/brain/backup/restore.py:225`. `prepare_restore`
   `rmtree`s that path before unpacking, and the first run's `finally` removes the second run's
   unpack. Fix: add a unique suffix (pid or uuid), and widen `_STAGING_NAME_RE` to match.
-- **Generic `--json` error with empty stdout.** A `BrainError` raised before or after the gate
-  prints one line on stderr, exits 1, and leaves stdout empty. The sites are
-  `src/brain/cli_backup.py:367` (the unpack), `:442` (`restore_backup`) and `:468` (the
-  connect/preflight). Fix: emit `{"restored": false, "error": "<class-only message>"}`.
-  Messages can carry paths, so decide what is safe to print first.
+- **`--json` error paths with empty stdout.** These end non-zero with stdout empty and the
+  error on stderr. The docs and CHANGELOG now promise only "stdout carries nothing but JSON":
+  - the unpack `BrainError` at `src/brain/cli_backup.py:371`;
+  - the `--vault-only` on a no-vault archive `BadParameter` at `:403`;
+  - the generic `restore_backup` `BrainError` at `:446`;
+  - the connect/preflight `BrainError` at `:472`.
+
+  Fix: emit `{"restored": false, "error": "<class-only message>"}`. Messages can carry paths, so
+  decide what is safe to print first.
+
+## 9. Review round 1 (rev-139)
+
+- The `assert runner.calls == []` that `test_blocked_restore_emits_json_issues` lost when the
+  new tests were cut out of `test_restore_gate.py` is restored.
+- The docs and CHANGELOG no longer promise "exactly one JSON object" (see §8).
+- `_read_line_on_stderr` turns Ctrl-C into `typer.Abort`, so a `--json` run still prints the
+  `aborted` object. The test is `test_json_ctrl_c_at_the_prompt_emits_the_abort_object`.
+- Test-safety hardening. `tests/conftest._looks_like_prod_db` used to refuse a prod port only for
+  five literal local host spellings, and `127.1`, `localhost.`, `::ffff:127.0.0.1`,
+  `127.0.0.2` and `host.docker.internal` all passed on 55432. It now refuses a prod port on ANY
+  host. The two tests that pinned the old scoping are inverted. `test_restore_real_pg_tools.py`
+  refuses its `ADMIN_DSN` at import.

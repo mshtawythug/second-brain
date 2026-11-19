@@ -1636,9 +1636,11 @@ checks — those are what stop a restore from half-applying.
 Each leg previews and gates only on what it replaces: `--vault-only` never
 lists the database or asks for the typed phrase because of it, and `--db-only`
 does the same for the vault. With `--json`, prompts and warnings go to stderr
-and stdout carries exactly one JSON object; the typed phrase is still read from
-stdin when the target is not empty, and a declined run prints
-`{"restored": false, "aborted": true}` and exits 1.
+and stdout carries nothing but JSON. The typed phrase is still read from stdin
+when the target is not empty. A declined or interrupted run prints
+`{"restored": false, "aborted": true}` and exits 1, and a refused one prints the
+blocking issues. A run that ends in any other error exits non-zero with stdout
+empty and the error on stderr.
 
 A database restore keeps the replaced database as `<db>_replaced_<timestamp>`,
 and prints the command that drops it on the server the restore actually used:
