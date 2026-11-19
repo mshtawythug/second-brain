@@ -20,6 +20,11 @@ def parse_sent_at(raw: Any) -> datetime | None:
     ``"2026-05-04T14:23:01+00:00"``) inputs. Returns ``None`` for any input
     we can't parse — callers log + skip the column rather than crashing the
     ingest. Naive datetimes are treated as UTC.
+
+    An offset that pushes the instant past ``datetime.min`` / ``datetime.max`` in UTC
+    (``0001-01-01T00:00:00+05:00``) is ``None`` too: ``astimezone`` raises
+    ``OverflowError`` there, and that crashed ``--date`` and the pipeline's
+    ``sent_at`` promotion alike (review rev-137 #3).
     """
     if not isinstance(raw, str) or not raw.strip():
         return None
@@ -30,7 +35,7 @@ def parse_sent_at(raw: Any) -> datetime | None:
     # case for this codebase.
     try:
         parsed = parsedate_to_datetime(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         parsed = None
     if parsed is None:
         try:
@@ -41,4 +46,7 @@ def parse_sent_at(raw: Any) -> datetime | None:
 
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+    try:
+        return parsed.astimezone(UTC)
+    except OverflowError:
+        return None

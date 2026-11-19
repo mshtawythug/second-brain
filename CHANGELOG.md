@@ -96,17 +96,21 @@ to `compare/v0.4.0...HEAD`. -->
   the files already ingested. With `--sync`, a stopped run prunes nothing. Any other embedding error
   fails only that file, and the walk goes on.
 - When Postgres is down, every ingest command prints `cannot reach DATABASE_URL host:port` and the
-  error class, with exit 1, instead of a psycopg traceback. The password, user, database name and
-  URL are never printed.
-- `brain ingest-stdin --metadata` must be a JSON object, and `--date` must parse as ISO 8601 or
-  RFC 2822. Either mistake is a usage error (exit 2), caught before stdin is read. A bad `--date`
-  used to be stored with only a warning.
+  error class, with exit 1, instead of a psycopg traceback. The one exception is `brain ingest-code`,
+  which already printed one line. The password, user, database name and URL are never printed. A
+  host that does not look like a host name, an IP address or a socket path (for example, an
+  unescaped `@` in the password) prints as `(unparseable)`.
+- `brain ingest-stdin --metadata` must be a JSON object that Postgres can store: no `NaN`,
+  infinite or out-of-range numbers, and no NUL characters. `--date` must parse as ISO 8601 or
+  RFC 2822 and stay in range in UTC. Either mistake is a usage error (exit 2), caught before stdin
+  is read. A bad `--date` used to be stored with only a warning, and an out-of-range one crashed.
 - Tags given to `brain ingest`, `ingest-dir`, `ingest-stdin`, `ingest-gmail` and the MCP
   `brain_ingest_stdin` tool are normalized (lowercase, hyphenated, deduplicated), like every other
   tag write. `brain backfill normalize-tags` fixes rows stored before this release.
 - `brain ingest` on a file type it does not read prints one line: the types it does read, and a
-  pointer to `brain ingest-code` for source code. It exits 2. A malformed PDF or DOCX is one
-  `cannot read` line with the error class, exit 1.
+  pointer to `brain ingest-code` for source code. It exits 2. A malformed PDF or DOCX, including a
+  zip that is not a Word document, is one `cannot read` line with the error class, exit 1.
+  `brain ingest-dir` reports a file it cannot ingest by error class too, never the error text.
 - `brain reembed --batch-size` and `--limit` must be at least 1 (exit 2). `--batch-size 0` used to
   do nothing, and `--limit -1` reported "would embed -1".
 

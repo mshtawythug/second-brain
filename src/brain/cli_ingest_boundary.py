@@ -21,6 +21,8 @@ and database, and an Ollama message can quote a response body. A DSN is reduced 
 from __future__ import annotations
 
 import json
+import math
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -30,24 +32,48 @@ import typer
 
 from .backup.pgtool import dsn_target
 from .db import connect_raw
-from .errors import EmbedError, SecretGuardError, SensitivityError, describe_failure
+from .errors import (
+    BrainError,
+    EmbedError,
+    SecretGuardError,
+    SensitivityError,
+    describe_failure,
+)
 from .ingest.sent_at import parse_sent_at
 from .ingest.text_safety import one_line
 
 _DOCTOR_HINT = "Try: brain doctor"
 
+#: One libpq host: a host name or IPv4 address, a bare IPv6 address (an optional
+#: ``%zone``), or an absolute Unix-socket directory. Anything else is not printed.
+#: An unescaped ``@`` in a password parses as part of the host (review rev-137 #1),
+#: and a percent-encoded control character decodes into it.
+_HOST_RE = re.compile(
+    r"[A-Za-z0-9_](?:[A-Za-z0-9._-]*[A-Za-z0-9_])?"
+    r"|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*(?:%[A-Za-z0-9]+)?"
+    r"|/[A-Za-z0-9._/-]*"
+)
+_UNPARSEABLE = "(unparseable)"
+
 
 def db_address(database_url: str) -> str:
-    """``host:port`` of ``database_url``, or ``(unparseable)``. Never a credential."""
+    """``host:port`` of ``database_url``, or ``(unparseable)``. Never a credential.
+
+    A host list (``h1,h2``) is printed only when every entry is a well-formed host.
+    """
     try:
-        return dsn_target(database_url).address
+        target = dsn_target(database_url)
     except (psycopg.Error, ValueError):
-        return "(unparseable)"
+        return _UNPARSEABLE
+    hosts = (target.host or "").split(",")
+    if target.host is not None and not all(_HOST_RE.fullmatch(h) for h in hosts):
+        return _UNPARSEABLE
+    return target.address
 
 
 def unreachable_line(database_url: str, exc: BaseException) -> str:
     """The one line a failed connect prints: the address and the error class."""
-    return (
+    return one_line(
         f"cannot reach DATABASE_URL {db_address(database_url)} ({describe_failure(exc)}). "
         f"Is Postgres running? {_DOCTOR_HINT}"
     )
@@ -100,20 +126,24 @@ def exit_on_refusal(name: str) -> Iterator[None]:
         raise typer.Exit(code=1) from None
 
 
-def embed_failure_stops_walk(name: str, exc: EmbedError, *, index: int, total: int) -> bool:
-    """Report ``ingest-dir``'s embed failure on one file; True when the walk must stop.
+def file_failure_stops_walk(name: str, exc: Exception, *, index: int, total: int) -> bool:
+    """Report ``ingest-dir``'s failure on one file; True when the walk must stop.
 
-    The walk stops on a **transient** failure (a timeout, a dropped connection, HTTP
-    408/429/5xx). The embedder is a run-wide dependency: every file after this one
-    would wait out the full timeout and fail the same way. Stopping loses nothing. The
-    failed file stored nothing, and the walk is idempotent, so a re-run skips what
-    landed and resumes here.
+    The failure line names the error **class only** (review rev-137 #6). A parser's
+    message can quote the file's bytes, and a psycopg DETAIL can quote row values.
 
-    A **permanent** failure is plausibly file-specific and fails fast, so the walk goes
-    on. Stopping on it would block every re-run at the same file.
+    The walk stops only on a **transient** :class:`EmbedError` (QA F1): a timeout, a
+    dropped connection, HTTP 408/429/5xx. The embedder is a run-wide dependency, so
+    every file after this one would wait out the full timeout and fail the same way.
+    Stopping loses nothing: the failed file stored nothing, and the walk is idempotent,
+    so a re-run skips what landed and resumes here.
+
+    Every other failure is plausibly file-specific, so the walk goes on. That includes a
+    permanent embed error, which also fails fast. Stopping on it would block every re-run
+    at the same file.
     """
     typer.secho(f"  failed: {one_line(name)} ({describe_failure(exc)})", fg="red")
-    if not exc.transient:
+    if not (isinstance(exc, EmbedError) and exc.transient):
         return False
     typer.secho(
         f"ingest-dir: stopped at file {index} of {total}, the embedder is not answering "
@@ -126,20 +156,55 @@ def embed_failure_stops_walk(name: str, exc: EmbedError, *, index: int, total: i
     return True
 
 
+class MetadataValueError(BrainError):
+    """A ``--metadata`` value that parses as JSON but that Postgres would refuse."""
+
+
+def _reject_constant(name: str) -> Any:
+    raise MetadataValueError(f"{name} is not a finite number")
+
+
+def _check_storable(value: Any) -> None:
+    """Refuse what ``jsonb`` / ``text`` refuse: a non-finite float, a NUL (rev-137 #2).
+
+    Iterative, not recursive: a nesting depth ``json.loads`` accepted must not be the
+    one that overflows this walk's stack.
+    """
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, float) and not math.isfinite(item):
+            raise MetadataValueError("a number is not finite (out of range)")
+        if isinstance(item, str) and "\x00" in item:
+            raise MetadataValueError("a string contains a NUL character")
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+
+
 def _metadata_object(raw: str) -> dict[str, Any]:
+    """Parse ``--metadata``; every refusal is a ``BadParameter`` (exit 2), never a traceback.
+
+    ``JSONDecodeError`` is caught first, because it is a ``ValueError`` and keeps its
+    position. Any other ``ValueError`` (an integer literal past Python's digit limit) and
+    a ``RecursionError`` (deep nesting) are named by class only.
+    """
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(raw, parse_constant=_reject_constant)
+        _check_storable(parsed)
     except json.JSONDecodeError as e:
-        raise typer.BadParameter(
-            f"not valid JSON: {e.msg} (line {e.lineno}, column {e.colno})",
-            param_hint="--metadata",
-        ) from None
-    if not isinstance(parsed, dict):
-        kind = "null" if parsed is None else type(parsed).__name__
-        raise typer.BadParameter(
-            f"must be a JSON object, got {kind}", param_hint="--metadata"
-        )
-    return parsed
+        reason = f"not valid JSON: {e.msg} (line {e.lineno}, column {e.colno})"
+    except MetadataValueError as e:
+        reason = str(e)
+    except (ValueError, RecursionError) as e:
+        reason = f"not valid JSON ({type(e).__name__})"
+    else:
+        if isinstance(parsed, dict):
+            return parsed
+        reason = f"must be a JSON object, got {'null' if parsed is None else type(parsed).__name__}"
+    raise typer.BadParameter(reason, param_hint="--metadata")
 
 
 def stdin_metadata_or_exit(metadata: str | None, date: str | None) -> dict[str, Any]:

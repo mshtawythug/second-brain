@@ -99,16 +99,60 @@ def test_connect_or_exit_unparseable_dsn(capsys: pytest.CaptureFixture[str]) -> 
     assert SYNTHETIC_PASSWORD not in err
 
 
-def _imports_bare_connect(path: Path) -> bool:
-    """True when ``path`` imports ``connect`` from ``brain.db`` (relative or absolute)."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+#: The calls that open a connection with no refusal around it. ``connect_raw`` is not
+#: here: ``cli_ingest_code`` opens through it inside its own one-line handler.
+_BARE_CONNECTS = frozenset({"connect", "connect_age"})
+_DB_MODULES = frozenset({"db", "brain.db"})
+
+
+def _module_aliases(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """The dotted names bound to ``brain.db`` and to ``psycopg`` in ``tree``."""
+    db_names: set[str] = set()
+    pg_names: set[str] = set()
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.ImportFrom)
-            and node.module in ("db", "brain.db")
-            and any(alias.name == "connect" for alias in node.names)
-        ):
-            return True
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "brain.db":
+                    db_names.add(alias.asname or "brain.db")
+                elif alias.name == "psycopg":
+                    pg_names.add(alias.asname or "psycopg")
+        elif isinstance(node, ast.ImportFrom) and node.module in (None, "brain"):
+            db_names.update(a.asname or a.name for a in node.names if a.name == "db")
+    return db_names, pg_names
+
+
+def _dotted(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return None if base is None else f"{base}.{node.attr}"
+    return None
+
+
+def _imports_bare_connect(path: Path) -> bool:
+    """True when ``path`` can open a connection that is not ``connect_or_exit``.
+
+    Review rev-137 #5 widened this from ``from .db import connect`` to every spelling
+    of the same thing:
+    - ``connect`` / ``connect_age`` imported from ``brain.db`` (relative or absolute);
+    - the same names reached as attributes of a module bound to ``brain.db``
+      (``from . import db``, ``import brain.db [as x]``);
+    - ``psycopg.connect`` through any alias, and ``from psycopg import connect``.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    db_names, pg_names = _module_aliases(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in (*_DB_MODULES, "psycopg"):
+            wanted = _BARE_CONNECTS if node.module != "psycopg" else {"connect"}
+            if any(alias.name in wanted for alias in node.names):
+                return True
+        if isinstance(node, ast.Attribute):
+            owner = _dotted(node.value)
+            if owner in db_names and node.attr in _BARE_CONNECTS:
+                return True
+            if owner in pg_names and node.attr == "connect":
+                return True
     return False
 
 
@@ -158,7 +202,10 @@ def test_ingest_stdin_metadata_not_object_exits_2(offline_cli: Path, raw: str) -
     _assert_no_traceback(result)
 
 
-@pytest.mark.parametrize("raw", ["2026-13-45", "yesterday"])
+@pytest.mark.parametrize(
+    "raw",
+    ["2026-13-45", "yesterday", "0001-01-01T00:00:00+05:00", "9999-12-31T23:00:00-05:00"],
+)
 def test_ingest_stdin_bad_date_exits_2(offline_cli: Path, raw: str) -> None:
     result = _stdin(offline_cli, "--date", raw)
     assert result.exit_code == 2, result.output
@@ -250,3 +297,153 @@ def test_connect_error_class_is_reported_not_its_message() -> None:
     )
     assert line.startswith("cannot reach DATABASE_URL 127.0.0.1:1 (OperationalError)")
     assert SYNTHETIC_PASSWORD not in line
+
+
+# ---------------------------------------------------------------------------
+# Review round rev-137.
+# ---------------------------------------------------------------------------
+
+# Item 1: an unescaped '@' in the password, or a control character in the host, never
+# reaches the terminal through the "cannot reach" line.
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://synthetic_user:Synth@3ticPw@127.0.0.1:1/unreachable_test",
+        "postgresql://synthetic_user:pw@%1B%5B31mevil:1/unreachable_test",
+        "postgresql://synthetic_user:pw@host%0Aname:1/unreachable_test",
+    ],
+)
+def test_unreachable_line_never_prints_a_malformed_host(url: str) -> None:
+    from brain import cli_ingest_boundary
+
+    line = cli_ingest_boundary.unreachable_line(url, psycopg.OperationalError("synthetic"))
+    assert line.startswith("cannot reach DATABASE_URL (unparseable) (OperationalError)")
+    for fragment in ("Synth", "3ticPw", "evil", "\x1b", "\n"):
+        assert fragment not in line
+
+
+@pytest.mark.parametrize(
+    ("url", "address"),
+    [
+        ("postgresql://u:p@127.0.0.1:1/x_test", "127.0.0.1:1"),
+        ("postgresql://u:p@db-host_1.example.internal/x_test", "db-host_1.example.internal:5432"),
+        ("postgresql://u:p@[::1]:5434/x_test", "::1:5434"),
+        ("host=/var/run/postgresql port=5434 dbname=x_test", "/var/run/postgresql:5434"),
+        ("dbname=x_test", "localhost:5432"),
+    ],
+)
+def test_db_address_keeps_well_formed_hosts(url: str, address: str) -> None:
+    from brain import cli_ingest_boundary
+
+    assert cli_ingest_boundary.db_address(url) == address
+
+
+# Item 2: --metadata values Postgres would reject are usage errors too.
+
+_DEEP = "[" * 100_000 + "]" * 100_000
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('{"a": NaN}', "finite"),
+        ('{"a": Infinity}', "finite"),
+        ('{"a": -Infinity}', "finite"),
+        ('{"a": 1e400}', "finite"),
+        ('{"a": [1, {"b": 1e999}]}', "finite"),
+        ('{"a": "x\\u0000y"}', "NUL"),
+        ('{"k\\u0000": 1}', "NUL"),
+        ('{"a": [{"b": "\\u0000"}]}', "NUL"),
+        ('{"a": ' + "1" * 4400 + "}", "ValueError"),
+        ('{"a": ' + _DEEP + "}", "RecursionError"),
+    ],
+    ids=["nan", "inf", "-inf", "1e400", "nested-inf", "nul-value", "nul-key", "nested-nul",
+         "huge-int", "deep"],
+)
+def test_ingest_stdin_metadata_postgres_would_reject_exits_2(
+    offline_cli: Path, raw: str, expected: str
+) -> None:
+    result = _stdin(offline_cli, "--metadata", raw)
+    assert result.exit_code == 2, result.output[-500:]
+    assert "--metadata" in result.output
+    assert expected in result.output
+    assert "stdin was empty" not in result.output
+    _assert_no_traceback(result)
+
+
+def test_ingest_stdin_metadata_json_error_keeps_its_position(offline_cli: Path) -> None:
+    result = _stdin(offline_cli, "--metadata", '{"a": 1,}')
+    assert result.exit_code == 2, result.output
+    assert "not valid JSON" in result.output
+    assert "line 1, column" in result.output
+
+
+# Item 3: the parser never raises on an out-of-range offset.
+
+
+@pytest.mark.parametrize("raw", ["0001-01-01T00:00:00+05:00", "9999-12-31T23:00:00-05:00"])
+def test_parse_sent_at_returns_none_on_overflow(raw: str) -> None:
+    from brain.ingest.sent_at import parse_sent_at
+
+    assert parse_sent_at(raw) is None
+
+
+# Item 4: a zip-shaped DOCX that is not a document is one line too.
+
+
+@pytest.mark.parametrize(
+    "members",
+    [{"word/document.xml": "<x/>"}, {"[Content_Types].xml": "<not xml"}],
+    ids=["no-content-types", "bad-xml"],
+)
+def test_ingest_malformed_docx_one_line(offline_cli: Path, members: dict[str, str]) -> None:
+    import zipfile
+
+    target = offline_cli / "bad.docx"
+    with zipfile.ZipFile(target, "w") as archive:
+        for name, body in members.items():
+            archive.writestr(name, body)
+    result = CliRunner().invoke(app, ["ingest", str(target), "--no-enrich"])
+    assert result.exit_code == 1, result.output
+    assert "cannot read bad.docx: ValueError" in result.output
+    _assert_no_traceback(result)
+
+
+# Item 5: every spelling of a bare connection is caught, not only `from .db import connect`.
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from .db import connect\n",
+        "from brain.db import connect\n",
+        "from .db import connect_age\n",
+        "from . import db\n\ndef f(u):\n    return db.connect(u)\n",
+        "from brain import db as d\n\ndef f(u):\n    return d.connect_age(u)\n",
+        "import brain.db\n\ndef f(u):\n    return brain.db.connect(u)\n",
+        "import brain.db as bdb\n\ndef f(u):\n    return bdb.connect(u)\n",
+        "import psycopg\n\ndef f(u):\n    return psycopg.connect(u)\n",
+        "import psycopg as pg\n\ndef f(u):\n    return pg.connect(u)\n",
+        "from psycopg import connect\n",
+    ],
+)
+def test_bare_connect_guard_catches_every_spelling(tmp_path: Path, source: str) -> None:
+    module = tmp_path / "cli_ingest_synthetic.py"
+    module.write_text(source, encoding="utf-8")
+    assert _imports_bare_connect(module)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from .db import connect_raw\n",
+        "from .cli_ingest_boundary import connect_or_exit\n",
+        "import psycopg\n\ndef f(e):\n    return isinstance(e, psycopg.Error)\n",
+    ],
+)
+def test_bare_connect_guard_allows_the_sanctioned_paths(tmp_path: Path, source: str) -> None:
+    module = tmp_path / "cli_ingest_synthetic.py"
+    module.write_text(source, encoding="utf-8")
+    assert not _imports_bare_connect(module)

@@ -243,3 +243,22 @@ def test_mcp_ingest_stdin_tags_are_normalized(
     )
     assert payload["created"] is True
     assert _stored_tags(test_db) == [["team-notes", "source-mcp"]]
+
+
+# ---------------------------------------------------------------------------
+# Review round rev-137, item 6: ingest-dir's per-file failure line is class-only.
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_dir_failed_line_names_the_class_not_the_message(
+    monkeypatch: pytest.MonkeyPatch, test_db: psycopg.Connection, tmp_path: Path
+) -> None:
+    corpus = _corpus(tmp_path, 1)
+    (corpus / "bad.pdf").write_bytes(b"not-a-real-pdf synthetic-body-marker")
+    _use(monkeypatch, tmp_path, FakeEmbedder())
+    result = CliRunner().invoke(app, ["ingest-dir", str(corpus), "--no-enrich"])
+    assert result.exit_code == 0, result.output
+    assert "  failed: bad.pdf (ValueError from " in result.output
+    assert "malformed PDF" not in result.output  # the wrapped message is not printed
+    assert "synthetic-body-marker" not in result.output
+    assert "  ingested: note1.txt" in result.output

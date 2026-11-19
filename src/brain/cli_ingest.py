@@ -65,8 +65,8 @@ from .agent import resolve_agent_id
 from .cli_extract import extract_or_exit
 from .cli_ingest_boundary import (
     connect_or_exit,
-    embed_failure_stops_walk,
     exit_on_refusal,
+    file_failure_stops_walk,
     stdin_metadata_or_exit,
 )
 from .config import Config
@@ -403,11 +403,10 @@ def ingest_dir(
                 # already behaves.
                 typer.secho(f"  refused: {f.name}", fg="red", err=True)
                 typer.secho(str(e), fg="red", err=True)
-            except EmbedError as e:  # QA F1: a transient failure stops the walk (helper docstring)
-                if stopped := embed_failure_stops_walk(f.name, e, index=index, total=len(files)):
+            except (EmbedError, ValueError, OSError, psycopg.Error) as e:  # class-only line
+                # QA F1: only a transient embed failure stops the walk (helper docstring).
+                if stopped := file_failure_stops_walk(f.name, e, index=index, total=len(files)):
                     break
-            except (ValueError, OSError, psycopg.Error) as e:
-                typer.secho(f"  failed: {f.name} — {e}", fg="red")
         # A stopped walk prunes nothing: an aborted run must not delete.
         prune_run = None if stopped else sync_run
         pruned = prune_run.prune(conn, graph_syncer=graph_syncer) if prune_run else None

@@ -344,3 +344,33 @@ Line numbers are on this branch's head.
 5. **`cli_ingest_code` keeps its own refused-connect line** (`USAGE: database unavailable (...)`)
    rather than `connect_or_exit`. That is deliberate here, so its output stays the same. It
    could converge.
+
+## 8. Review round rev-137 (fixes in a second commit; each one was RED against `8be6e673` first)
+
+1. **F2 host leak.** An unescaped `@` in the password parsed into the host
+   (`3ticPw@127.0.0.1:1`), and a percent-encoded control character decoded into it.
+   `db_address` now prints `(unparseable)` unless every host is a host name, an IPv4
+   address, a bare IPv6 address or an absolute socket path. The whole line also goes
+   through `one_line`.
+2. **`--metadata` values Postgres refuses.**
+   - `NaN` / `Infinity` are refused through `parse_constant`.
+   - A non-finite float (`1e400`) and a NUL in any key or string are refused by an
+     iterative walk, so deep nesting cannot overflow the stack.
+   - Any other `ValueError` (the integer digit limit) and a `RecursionError` are named by
+     class only.
+   - `JSONDecodeError` is still caught first and keeps its position.
+   - Every case raises `BadParameter`, exit 2.
+3. **`--date` overflow.** `parse_sent_at` returns `None` on `OverflowError`. That covers
+   both `--date` and the pipeline's `sent_at` promotion.
+4. **Malformed DOCX.** `_docx_errors` also wraps `KeyError`, `zipfile.BadZipFile` and
+   `SyntaxError`, the base of lxml's `XMLSyntaxError`. lxml is only a transitive dependency
+   and ships no stubs.
+5. **The source-scan guard.** It now also catches `connect_age`, a `brain.db` bound as a
+   module (`from . import db`, `import brain.db [as x]`) and then `.connect` /
+   `.connect_age`, and `psycopg.connect` (any alias, or `from psycopg import connect`).
+   Each spelling is mutation-proven in a git-archive copy.
+6. **`ingest-dir`'s per-file `failed:` line** names the error class only, through the same
+   helper as the embed failure (`file_failure_stops_walk`). `cli_ingest.py` shrinks by one
+   more line.
+7. **CHANGELOG.** It names the `ingest-code` exception and the wider DOCX / metadata
+   refusals.
