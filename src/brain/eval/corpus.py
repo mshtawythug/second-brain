@@ -8,21 +8,22 @@ from typing import Any
 
 import yaml
 
+from ..install_paths import eval_data_dir
 from .errors import EvalCorpusError
 
-# Path to the local golden-corpus YAML, resolved relative to the package
-# install root.  From corpus.py: eval/ → brain/ → src/ → repo root, then
-# descend into tests/eval/.  The file is gitignored — each developer
-# authors their own set tailored to their brain's seeded documents (real
-# corpus = real doc IDs).  ``load_corpus`` raises ``EvalCorpusError`` when
-# the default path doesn't exist; callers that want to operate without a
-# local corpus should pass ``--corpus`` explicitly.
-_DEFAULT_CORPUS_PATH: Path = (
-    Path(__file__).resolve().parent.parent.parent.parent
-    / "tests"
-    / "eval"
-    / "golden_corpus.yaml"
-)
+
+def default_corpus_path() -> Path:
+    """The local golden-corpus YAML: ``tests/eval/`` in a checkout, ``$BRAIN_HOME/eval/`` installed.
+
+    Resolved per call by :func:`brain.install_paths.eval_data_dir` (F25: it
+    used to be package-relative, i.e. inside the virtualenv of an installed
+    ``brain``). The file is gitignored: each developer authors their own set
+    tailored to their brain's documents (real corpus = real doc IDs).
+    ``load_corpus`` raises ``EvalCorpusError`` when it is absent; pass
+    ``--corpus`` to run without one.
+    """
+    return eval_data_dir() / "golden_corpus.yaml"
+
 
 _VALID_CATEGORIES: frozenset[str] = frozenset(
     (
@@ -161,7 +162,7 @@ def load_corpus(path: Path | None = None) -> list[EvalQuery]:
     """Load and validate an eval corpus YAML file.
 
     Args:
-        path: Path to the YAML file.  Defaults to ``_DEFAULT_CORPUS_PATH``.
+        path: Path to the YAML file.  Defaults to :func:`default_corpus_path`.
 
     Returns:
         Parsed list of :class:`EvalQuery` objects.
@@ -177,7 +178,7 @@ def load_corpus(path: Path | None = None) -> list[EvalQuery]:
             ``since_days`` combined with either bound.
     """
     if path is None:
-        path = _DEFAULT_CORPUS_PATH
+        path = default_corpus_path()
 
     if not path.exists():
         raise EvalCorpusError(f"corpus file not found: {path}")

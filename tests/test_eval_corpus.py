@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from brain.eval.corpus import _DEFAULT_CORPUS_PATH, EvalQuery, load_corpus
+from brain.eval.corpus import EvalQuery, default_corpus_path, load_corpus
 from brain.eval.errors import EvalCorpusError
 
 
@@ -223,22 +223,22 @@ def test_load_corpus_multiple_queries(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(
-    not _DEFAULT_CORPUS_PATH.exists(),
+    not default_corpus_path().exists(),
     reason=(
         "golden_corpus.yaml is gitignored and must be authored locally — "
         "see tests/eval/.gitignore"
     ),
 )
 def test_default_corpus_path_points_to_existing_file() -> None:
-    """_DEFAULT_CORPUS_PATH resolves to the golden corpus YAML when present."""
-    assert _DEFAULT_CORPUS_PATH.exists(), (
-        f"_DEFAULT_CORPUS_PATH {_DEFAULT_CORPUS_PATH} does not exist — "
+    """default_corpus_path() resolves to the golden corpus YAML when present."""
+    assert default_corpus_path().exists(), (
+        f"default_corpus_path() {default_corpus_path()} does not exist — "
         "check the path computation in corpus.py"
     )
 
 
 @pytest.mark.skipif(
-    not _DEFAULT_CORPUS_PATH.exists(),
+    not default_corpus_path().exists(),
     reason=(
         "golden_corpus.yaml is gitignored and must be authored locally — "
         "see tests/eval/.gitignore"

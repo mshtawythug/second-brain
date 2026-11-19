@@ -140,8 +140,7 @@ import psycopg
 import typer
 from rich.table import Table
 
-from . import cli_tags
-from . import config as _config_module
+from . import cli_tags, install_paths
 from .backfill import backfill_search, backfill_source_rows
 from .config import Config, ConfigError
 from .db import (
@@ -362,15 +361,6 @@ from .vault.templates import list_template_names
 from .vault.watch import WATCHER_CONNECT_TIMEOUT_S, WatchConfig, run_watcher
 
 logger = logging.getLogger(__name__)
-
-# Baseline JSON files live next to the golden corpus: tests/eval/baselines/.
-# Derived from the repo layout independently of `brain.eval.corpus`
-# (importing that package pulls the networkx graph-eval chain and slows every
-# `brain` invocation) — mirrors `_DEFAULT_CORPUS_PATH.parent / "baselines"`.
-# Kept a module-level attribute so tests can monkeypatch `brain.cli._BASELINES_DIR`.
-_BASELINES_DIR: Path = (
-    Path(__file__).resolve().parent.parent.parent / "tests" / "eval" / "baselines"
-)
 
 _KRISP_INGEST_HELP = (
     "Importing Krisp calls — Krisp has no CLI, so transcripts are pulled by "
@@ -4003,18 +3993,18 @@ def eval_cmd(
 ) -> None:
     """Run the eval harness over the golden corpus and display ranking metrics.
 
-    By default runs all queries in ``tests/eval/golden_corpus.yaml`` and prints
-    a Rich table of nDCG@5 / MRR / Recall@20 per query plus aggregate means.
-    That file is gitignored and must be authored locally (see
-    ``tests/eval/.gitignore``); pass ``--corpus PATH`` to point at a different
-    YAML, or expect ``EvalCorpusError`` when the default path is absent.
+    The eval directory is ``tests/eval/`` in a source checkout and
+    ``$BRAIN_HOME/eval/`` in an installed ``brain`` (F25). By default runs all
+    queries in its ``golden_corpus.yaml`` and prints a Rich table of nDCG@5 /
+    MRR / Recall@20 per query plus aggregate means. That file is authored
+    locally; pass ``--corpus PATH`` for a different YAML, or expect exit 1.
 
     Use ``--record-baseline NAME`` to persist the result for future comparison,
     and ``--baseline NAME --diff`` to compare the current run against a saved
-    baseline.  Baseline files live in ``tests/eval/baselines/<NAME>.json``.
+    baseline.  Baseline files live in ``<eval dir>/baselines/<NAME>.json``.
 
     ``--answer`` switches to the answer-synthesis harness (Plan 06): it loads
-    ``tests/eval/answer_corpus.yaml``, runs ``brain ask --no-loop`` per case
+    ``<eval dir>/answer_corpus.yaml``, runs ``brain ask --no-loop`` per case
     against a live Ollama, and reports ``mean_fact_recall`` /
     ``mean_citation_count`` (no baselines — live-model gated).
     """
@@ -4041,7 +4031,7 @@ def eval_cmd(
         degraded_run_message,
         mean_metrics_regressed,
     )
-    from .eval.corpus import _DEFAULT_CORPUS_PATH, _VALID_CATEGORIES
+    from .eval.corpus import _VALID_CATEGORIES, default_corpus_path
     from .eval.errors import EvalBaselineError, EvalCorpusError
 
     # Validate mutual-exclusion and dependency constraints.
@@ -4065,7 +4055,7 @@ def eval_cmd(
             raise typer.BadParameter(str(exc)) from exc
 
     # Load corpus.
-    effective_corpus_path = corpus_path or _DEFAULT_CORPUS_PATH
+    effective_corpus_path = corpus_path or default_corpus_path()
     try:
         queries = load_corpus(effective_corpus_path)
     except EvalCorpusError as exc:
@@ -4115,7 +4105,7 @@ def eval_cmd(
 
     # Persist baseline if requested.
     if record_baseline is not None:
-        baseline_file = _BASELINES_DIR / f"{record_baseline}.json"
+        baseline_file = install_paths.eval_baselines_dir() / f"{record_baseline}.json"
         # save_baseline refuses a degraded run (DegradedBaselineError) before it
         # touches the file: saved, a timed-out query's 0.0 would become the
         # reference every later --fail-below judges against. Exit 1, the same
@@ -4130,7 +4120,9 @@ def eval_cmd(
     # Diff mode: compare against a saved baseline.
     if diff and baseline is not None:
         try:
-            baseline_report = load_baseline(_BASELINES_DIR / f"{baseline}.json")
+            baseline_report = load_baseline(
+                install_paths.eval_baselines_dir() / f"{baseline}.json"
+            )
         except EvalBaselineError as exc:
             typer.secho(str(exc), fg="red", err=True)
             raise typer.Exit(code=1) from exc
@@ -7908,14 +7900,17 @@ _OWNER_RELINK_HINT = (
 
 
 def _owner_dotenv_path() -> Path:
-    """Path to the `.env` file the owner subcommands read + mutate.
+    """Path to the `.env` file the owner subcommands read + mutate (F25).
 
-    Indirects through ``config._project_dotenv`` so tests can patch one
-    helper and have it cover both ``Config.load()`` (used by ``show``) and
-    the writer used by ``set/add/remove``. Keeps the source of truth in one
-    place.
+    The repo ``.env`` in a checkout, ``$BRAIN_HOME/.env`` when installed
+    (``install_paths.writable_dotenv``), written THROUGH a symlink; a dangling
+    link is refused with exit 1 (``install_paths.dotenv_write_target``).
     """
-    return _config_module._project_dotenv()
+    try:
+        return install_paths.dotenv_write_target(install_paths.writable_dotenv())
+    except install_paths.DanglingDotenvLinkError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 def _owner_normalize_csv(csv: str) -> list[str]:

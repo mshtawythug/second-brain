@@ -841,6 +841,12 @@ environment-dependent divergence this section exists to prevent.
 * **Re-running either command never overwrites** an existing `$BRAIN_HOME/.env`,
   file or symlink.
 
+`brain owner set` / `add` / `remove` are the only commands that write a `.env`. In a
+source checkout they write the repo `.env`, as always. In an installed `brain` they write
+`$BRAIN_HOME/.env`, never a file beside the installed package (F25). When the target is a
+symlink they write through it, so the link and the file it shares stay one config. A
+dangling link is refused with exit 1 and nothing is written.
+
 When `DATABASE_URL` cannot be resolved, the error prints every path that was
 searched with its state, so you can see which link of the chain is dead:
 

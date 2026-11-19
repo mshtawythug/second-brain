@@ -57,6 +57,7 @@ from typing import Any
 from dotenv import dotenv_values, find_dotenv
 
 from .errors import missing_database_url_message
+from .install_paths import checkout_root_for
 from .ollama_budget import (
     DEFAULT_OLLAMA_EMBED_NUM_CTX,
     DEFAULT_OLLAMA_NUM_CTX,
@@ -710,8 +711,8 @@ def _brain_home_root(_config_file: Path | None = None) -> Path:
 
     Priority:
       1. $BRAIN_HOME env var (expanduser applied).
-      2. Repo-root walk-up: if <three-levels-up>/pyproject.toml exists, that's
-         a dev checkout -- use the repo root (dev backcompat).
+      2. Repo-root walk-up: if <three-levels-up>/pyproject.toml exists, that's a
+         dev checkout (``install_paths.checkout_root_for``) -- use the repo root.
       3. ~/.brain -- NOT created here; ``brain setup`` creates it lazily.
 
     The optional ``_config_file`` parameter is a test-only seam: production
@@ -721,11 +722,8 @@ def _brain_home_root(_config_file: Path | None = None) -> Path:
     env = os.environ.get("BRAIN_HOME")
     if env:
         return Path(env).expanduser()
-    config_file = _config_file or Path(__file__).resolve()
-    repo_root = config_file.parent.parent.parent
-    if (repo_root / "pyproject.toml").is_file():
-        return repo_root
-    return Path.home() / ".brain"
+    repo_root = checkout_root_for(_config_file or Path(__file__).resolve())
+    return repo_root if repo_root is not None else Path.home() / ".brain"
 
 
 def _brain_home_dotenv() -> Path:

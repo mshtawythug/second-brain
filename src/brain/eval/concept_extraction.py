@@ -40,6 +40,7 @@ from pathlib import Path
 
 import yaml
 
+from ..install_paths import eval_data_dir
 from .errors import EvalCorpusError, EvalMetricError
 
 __all__ = [
@@ -75,16 +76,15 @@ PASS_INVALID_RATE = 0.0
 # :data:`brain.eval.corpus._CORPUS_VERSION`).
 _FIXTURE_VERSION = 1
 
-# Default path to the in-repo synthetic labeled fixture. Resolved relative to the
-# package install root exactly like :data:`brain.eval.corpus._DEFAULT_CORPUS_PATH`
-# (eval/ → brain/ → src/ → repo root, then tests/eval/). Unlike the gitignored
-# golden corpus, THIS fixture is synthetic (no PII) and shipped in-repo.
-_DEFAULT_FIXTURE_PATH: Path = (
-    Path(__file__).resolve().parent.parent.parent.parent
-    / "tests"
-    / "eval"
-    / "concept_extraction_fixture.yaml"
-)
+
+
+def _default_fixture_path() -> Path:
+    """The synthetic labeled fixture, beside the golden corpus (``install_paths.eval_data_dir``).
+
+    Unlike the gitignored golden corpus, THIS fixture is synthetic (no PII) and
+    shipped in-repo; an installed ``brain`` looks under ``$BRAIN_HOME/eval/``.
+    """
+    return eval_data_dir() / "concept_extraction_fixture.yaml"
 
 
 @dataclass(frozen=True)
@@ -305,7 +305,7 @@ def load_concept_fixture(path: Path | None = None) -> list[ConceptFixtureDoc]:
     from ..graph_rag.extract import CONCEPT_ENTITY_TYPES
 
     if path is None:
-        path = _DEFAULT_FIXTURE_PATH
+        path = _default_fixture_path()
     if not path.exists():
         raise EvalCorpusError(f"concept fixture not found: {path}")
 

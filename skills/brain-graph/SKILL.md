@@ -257,6 +257,7 @@ brain owner set "Jane Doe,jane.doe@example.com"   # replace the whole list
 | `show` | Reads `Config.owner_participants`, so a shell-env override of `BRAIN_OWNER_PARTICIPANTS` (which beats `.env`) is reflected. An empty list prints `(none — BRAIN_OWNER_PARTICIPANTS unset)` rather than nothing. |
 | `add <identifier>` | Appends. Case-insensitive; entries are stored lowercased. A duplicate add is a **silent no-op** — no `.env` rewrite, no relink hint. |
 | `remove <identifier>` | Drops one entry. Case-insensitive; removing an absent entry is a silent no-op. |
+| (where) | `add` / `remove` / `set` write the repo `.env` in a source checkout and `$BRAIN_HOME/.env` (default `~/.brain/.env`) in an installed `brain`, through a symlink if it is one. A dangling `$BRAIN_HOME/.env` link is refused with exit 1. |
 | `set <csv>` | Replaces the entire list from a comma-separated string. Trims, lowercases, dedupes (the same normalisation `Config.load()` performs), quotes the on-disk value when it contains spaces or commas, and writes atomically. Idempotent — an identical resulting list prints "no change" and skips the rewrite. |
 
 Gotchas worth knowing before you run one:
