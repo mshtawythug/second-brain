@@ -18,7 +18,6 @@ class WheelInstall:
     """
 
     venv: Path
-    package_dir: Path
     package_dotenv: Path
     home: Path
 
@@ -56,6 +55,4 @@ def simulate_wheel_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> W
     monkeypatch.setenv("BRAIN_IGNORE_CWD_DOTENV", "1")
     monkeypatch.delenv("BRAIN_OWNER_PARTICIPANTS", raising=False)
     monkeypatch.chdir(cwd)
-    return WheelInstall(
-        venv=venv, package_dir=package_dir, package_dotenv=package_dotenv, home=home
-    )
+    return WheelInstall(venv=venv, package_dotenv=package_dotenv, home=home)

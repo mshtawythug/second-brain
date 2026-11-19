@@ -77,7 +77,6 @@ PASS_INVALID_RATE = 0.0
 _FIXTURE_VERSION = 1
 
 
-
 def _default_fixture_path() -> Path:
     """The synthetic labeled fixture, beside the golden corpus (``install_paths.eval_data_dir``).
 

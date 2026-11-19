@@ -194,8 +194,8 @@ to `compare/v0.4.0...HEAD`. -->
   `<venv>/lib/python3.X/.env`, the directory above `site-packages`. It is still read, and it
   outranks `$BRAIN_HOME/.env`, so `brain owner show` keeps reporting it. Move its
   `BRAIN_OWNER_PARTICIPANTS` line into `$BRAIN_HOME/.env`, then delete it. Until you do,
-  `brain owner set`, `add` and `remove` print a one-line warning on stderr naming both files
-  (never the value). Do it before a reinstall: `uv tool install --force` recreates the tool's
+  each write by `brain owner set`, `add` or `remove` prints a one-line warning on stderr naming
+  both files (never the value); a no-op that writes nothing stays quiet. Do it before a reinstall: `uv tool install --force` recreates the tool's
   environment and deletes that file, settings and all.
 
 ### Added — opt-in query rewriting, `--rewrite` (RM-54)

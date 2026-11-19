@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from ..ask import AskResult
 
 
-
 def default_answer_corpus_path() -> Path:
     """The answer corpus: ``tests/eval/`` in a checkout, ``$BRAIN_HOME/eval/`` installed (F25).
 

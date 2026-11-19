@@ -257,7 +257,6 @@ brain owner set "Jane Doe,jane.doe@example.com"   # replace the whole list
 | `show` | Reads `Config.owner_participants`, so a shell-env override of `BRAIN_OWNER_PARTICIPANTS` (which beats `.env`) is reflected. An empty list prints `(none — BRAIN_OWNER_PARTICIPANTS unset)` rather than nothing. |
 | `add <identifier>` | Appends. Case-insensitive; entries are stored lowercased. A duplicate add is a **silent no-op** — no `.env` rewrite, no relink hint. |
 | `remove <identifier>` | Drops one entry. Case-insensitive; removing an absent entry is a silent no-op. |
-| (where) | `add` / `remove` / `set` write the repo `.env` in a source checkout and `$BRAIN_HOME/.env` (default `~/.brain/.env`) in an installed `brain`, through a symlink if it is one. A dangling `$BRAIN_HOME/.env` link is refused with exit 1. |
 | `set <csv>` | Replaces the entire list from a comma-separated string. Trims, lowercases, dedupes (the same normalisation `Config.load()` performs), quotes the on-disk value when it contains spaces or commas, and writes atomically. Idempotent — an identical resulting list prints "no change" and skips the rewrite. |
 
 Gotchas worth knowing before you run one:
@@ -272,6 +271,12 @@ Gotchas worth knowing before you run one:
 - `brain owner set` / `add` / `remove` **edit `.env`**. Treat them as
   configuration changes: state what you are about to write and confirm first.
   `brain owner show` is read-only and always safe.
+- **Where the write goes.** In a source checkout, `set` / `add` / `remove` write the
+  repo `.env`; in an installed `brain`, `$BRAIN_HOME/.env` (default `~/.brain/.env`),
+  through a symlink if it is one (a dangling link is refused with exit 1). On an
+  installed `brain`, an old `<venv>/lib/python3.X/.env` that still sets
+  `BRAIN_OWNER_PARTICIPANTS` keeps winning over `$BRAIN_HOME/.env`, and each write
+  prints a warning naming both files until its line is moved and the file deleted.
 
 ## If a command errors
 
