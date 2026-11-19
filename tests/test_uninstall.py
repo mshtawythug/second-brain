@@ -547,19 +547,70 @@ def _unsafe_inside_runtime_entry(
     return home, _make_vault(home / ".shims" / "vault")
 
 
-#: Unsafe-vault scenarios; each builder returns ``(brain_home, configured vault)``.
-_UNSAFE_TARGETS: dict[str, Callable[[Path, pytest.MonkeyPatch], tuple[Path, Path]]] = {
-    "home": _unsafe_home,
-    "parent_of_home": _unsafe_parent_of_home,
-    "brain_home": _unsafe_brain_home,
-    "parent_of_brain_home": _unsafe_parent_of_brain_home,
-    "symlink": _unsafe_symlink,
-    "not_a_directory": _unsafe_not_a_directory,
-    "database": _unsafe_database,
-    "parent_of_database": _unsafe_parent_of_database,
-    "inside_database": _unsafe_inside_database,
-    "runtime_entry": _unsafe_runtime_entry,
-    "inside_runtime_entry": _unsafe_inside_runtime_entry,
+def _unsafe_parent_of_symlinked_brain_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    """$BRAIN_HOME is a symlink; the vault is the REAL parent of the directory it names."""
+    real_home = _build_brain_home(tmp_path / "real" / "outer")
+    link = tmp_path / "brain-home-link"
+    link.symlink_to(real_home, target_is_directory=True)
+    return link, tmp_path / "real" / "outer"
+
+
+def _unsafe_symlinked_home_real_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    """HOME is a symlink; the vault is the real parent of the home directory."""
+    real_home = tmp_path / "real-homes" / "me"
+    real_home.mkdir(parents=True)
+    home_link = tmp_path / "home-link"
+    home_link.symlink_to(real_home, target_is_directory=True)
+    monkeypatch.setenv("HOME", str(home_link))
+    return _build_brain_home(tmp_path), tmp_path / "real-homes"
+
+
+def _unsafe_symlinked_brain_home_real_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    """A PARENT of $BRAIN_HOME is a symlink; the vault is an ancestor of its real target."""
+    _build_brain_home(tmp_path / "real-tree" / "outer")
+    parent_link = tmp_path / "parent-link"
+    parent_link.symlink_to(tmp_path / "real-tree" / "outer", target_is_directory=True)
+    return parent_link / ".brain", tmp_path / "real-tree"
+
+
+_HOME_REASON = "is your home directory or a parent of it"
+_BRAIN_HOME_REASON = "is $BRAIN_HOME or a parent of it"
+_DATABASE_REASON = "is the database directory, inside it, or a parent of it"
+_RUNTIME_REASON = "$BRAIN_HOME/.shims or inside it"
+
+_UnsafeBuilder = Callable[[Path, pytest.MonkeyPatch], tuple[Path, Path]]
+
+#: Unsafe-vault scenarios: a builder returning ``(brain_home, configured vault)``
+#: and the refusal reason THAT case must print. Asserting each case's own reason
+#: is what pins every guard: with only ``Abort`` checked, a later guard could
+#: cover for a disabled one.
+_UNSAFE_TARGETS: dict[str, tuple[_UnsafeBuilder, str]] = {
+    "home": (_unsafe_home, _HOME_REASON),
+    "parent_of_home": (_unsafe_parent_of_home, _HOME_REASON),
+    "symlinked_home_real_parent": (_unsafe_symlinked_home_real_parent, _HOME_REASON),
+    "brain_home": (_unsafe_brain_home, _BRAIN_HOME_REASON),
+    "parent_of_brain_home": (_unsafe_parent_of_brain_home, _BRAIN_HOME_REASON),
+    "parent_of_symlinked_brain_home": (
+        _unsafe_parent_of_symlinked_brain_home,
+        _BRAIN_HOME_REASON,
+    ),
+    "symlinked_brain_home_real_parent": (
+        _unsafe_symlinked_brain_home_real_parent,
+        _BRAIN_HOME_REASON,
+    ),
+    "symlink": (_unsafe_symlink, "is a symlink"),
+    "not_a_directory": (_unsafe_not_a_directory, "is not a directory"),
+    "database": (_unsafe_database, _DATABASE_REASON),
+    "parent_of_database": (_unsafe_parent_of_database, _DATABASE_REASON),
+    "inside_database": (_unsafe_inside_database, _DATABASE_REASON),
+    "runtime_entry": (_unsafe_runtime_entry, _RUNTIME_REASON),
+    "inside_runtime_entry": (_unsafe_inside_runtime_entry, _RUNTIME_REASON),
 }
 
 
@@ -570,7 +621,8 @@ def test_remove_vault_refuses_unsafe_target(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    home, configured = _UNSAFE_TARGETS[case](tmp_path, monkeypatch)
+    build, reason = _UNSAFE_TARGETS[case]
+    home, configured = build(tmp_path, monkeypatch)
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(configured))
     launchd_calls, fake_launchd = _launchd_recorder()
 
@@ -587,7 +639,9 @@ def test_remove_vault_refuses_unsafe_target(
     assert configured.exists() or configured.is_symlink(), f"{case}: target must survive"
     assert (home / ".env").exists(), f"{case}: nothing may be removed"
     assert not launchd_calls
-    assert "Refusing --remove-vault" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Refusing --remove-vault" in out
+    assert reason in out, f"{case}: expected its own refusal reason {reason!r}; got:\n{out}"
 
 
 def test_remove_vault_refuses_case_variant_of_home(
@@ -614,7 +668,9 @@ def test_remove_vault_refuses_case_variant_of_home(
     assert fake_home.is_dir(), "the home directory must survive"
     assert (home / ".env").exists()
     assert not launchd_calls
-    assert "Refusing --remove-vault" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Refusing --remove-vault" in out
+    assert _HOME_REASON in out
 
 
 def test_remove_vault_missing_target_skips_without_prompt(

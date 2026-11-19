@@ -13,6 +13,7 @@ and ``--yes`` never skips the prompt. Unsafe targets are refused up front
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -97,16 +98,31 @@ def _same_file(a: Path, b: Path) -> bool:
         return False
 
 
+def _lineage(path: Path) -> list[Path]:
+    """*path* and its ancestors along BOTH chains: as spelled, and as resolved.
+
+    When a directory (or one of its parents) is a symlink, the two chains
+    differ: ``/links/home`` → ``/real/me`` has the ancestor ``/links`` as
+    spelled but ``/real`` as resolved, and a vault at ``/real`` must still be
+    caught. A path whose resolution fails (a symlink loop) keeps its spelled
+    chain only.
+    """
+    starts = [path.absolute()]
+    with contextlib.suppress(OSError, RuntimeError):
+        starts.append(path.resolve())
+    return [p for start in starts for p in (start, *start.parents)]
+
+
 def _is_at_or_above(upper: Path, lower: Path) -> bool:
     """Whether *upper* is *lower* or one of its ancestors, compared by file identity.
 
     Identity rather than spelling: on a case-insensitive volume ``…/HOME`` is
     ``…/home``, and macOS reaches the same directory through
-    ``/System/Volumes/Data/…``; a string comparison misses both. Ancestors of
-    *lower* that do not exist are skipped.
+    ``/System/Volumes/Data/…``; a string comparison misses both. Both the
+    spelled and the resolved ancestry of *lower* are checked
+    (:func:`_lineage`); entries that do not exist are skipped.
     """
-    absolute = lower.absolute()
-    return any(_same_file(upper, p) for p in (absolute, *absolute.parents))
+    return any(_same_file(upper, p) for p in _lineage(lower))
 
 
 def _vault_refusal(vault: _Vault, home: Path) -> str | None:
@@ -133,7 +149,7 @@ def _vault_refusal(vault: _Vault, home: Path) -> str | None:
         return f"{target} is the database directory, inside it, or a parent of it"
     for name in _BRAIN_HOME_SAFE_REMOVES:
         if _is_at_or_above(home / name, target):
-            return f"{target} is inside $BRAIN_HOME/{name}, which uninstall removes first"
+            return f"{target} is $BRAIN_HOME/{name} or inside it, which uninstall removes first"
     return None
 
 
