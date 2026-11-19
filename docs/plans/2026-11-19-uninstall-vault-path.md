@@ -242,3 +242,20 @@ plus `ruff check` and `mypy src/`.
 8. **The step-4 launchd `except` branch keeps its inline `typer.secho("[warn]…")`.** It sits
    beside the `uninstall_main()` line that PR-B changes to `uninstall_main([])`. Routing it
    through `_warn` would turn a clean merge into a conflict, so only step 5 uses `_warn`.
+
+## 10. Review round 2 (PR #135 @ `7f7a53fe`, NOT APPROVED, fixed in follow-up commits)
+
+1. **`_is_at_or_above` walks both chains.** It compares, by `samefile`, against
+   `lower.absolute()` and its parents **and** `lower.resolve()` and its parents
+   (`_lineage`). Before this, when HOME or `$BRAIN_HOME` (or a parent of either) was a symlink,
+   the real parent of the resolved directory was never compared. Three new cases cover it:
+   `parent_of_symlinked_brain_home`, `symlinked_home_real_parent` and
+   `symlinked_brain_home_real_parent`. All three were RED (`DID NOT RAISE Abort`) at
+   `7f7a53fe`.
+2. **Each unsafe-target case asserts its own refusal reason.** A later guard can no longer
+   cover for a disabled one. An `if False:` mutation of every guard was run in a git-archive
+   copy, and every mutation was killed.
+   - The runtime-entry message now reads `is $BRAIN_HOME/<name> or inside it`, because it fires
+     for the entry itself as well as for paths inside it.
+3. The CHANGELOG and `docs/configuration.md` now describe the identity comparison over both
+   chains.

@@ -1224,5 +1224,8 @@ symlink or not a directory. It also refuses your home directory, `$BRAIN_HOME`,
 or a parent of either; the database directory (`$BRAIN_HOME/data/postgres`),
 anything inside it, or a parent of it (use `--remove-db` for the database); and
 anything at or inside a runtime entry that uninstall removes first, such as
-`$BRAIN_HOME/.shims`. These checks compare the directories themselves, not how
-their paths are spelled. A vault that does not exist is reported and skipped.
+`$BRAIN_HOME/.shims`. Each check compares directories by identity, not by
+spelling. It checks each guarded path and its parents as written, and again with
+symlinks resolved. So a case variant of your home directory, or the real parent of
+a symlinked `$BRAIN_HOME`, is refused too. A vault that does not exist is
+reported and skipped.
