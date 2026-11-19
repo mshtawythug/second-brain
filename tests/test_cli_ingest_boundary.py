@@ -447,3 +447,136 @@ def test_bare_connect_guard_allows_the_sanctioned_paths(tmp_path: Path, source: 
     module = tmp_path / "cli_ingest_synthetic.py"
     module.write_text(source, encoding="utf-8")
     assert not _imports_bare_connect(module)
+
+
+# ---------------------------------------------------------------------------
+# Review round rev-137b. db_address prints host:port only from a structurally clean DSN:
+# a password can never be read as the host or the port, however it is malformed.
+# ---------------------------------------------------------------------------
+
+_LEAKY_URIS = [
+    # An unescaped '/', '?', '#' or '@' in the password moves the parser's host into it.
+    "postgresql://u:Pa@ss/word@127.0.0.1:1/x_test",
+    "postgresql://u:Pa@1234/x@127.0.0.1/x_test",
+    "postgresql://u:Pa@ss:5432/x@127.0.0.1/x_test",
+    "postgresql://synthetic_user:20261119/x@localhost:5434/x_test",
+    "postgresql://u:QZJ?x@127.0.0.1:1/x_test",
+    "postgresql://u:QZJ#x@127.0.0.1:1/x_test",
+    "postgres://u:Q@ZJ@127.0.0.1:1/x_test",
+    # A query that sets the host or port after the userinfo (an unescaped '&').
+    "postgresql://127.0.0.1:1/x_test?password=a&host=QZJ",
+    "postgresql://127.0.0.1:1/x_test?password=a&port=4242",
+    # Found by trying to break the rule: libpq percent-decodes query keys, and honours a
+    # keyword after any whitespace, not only a space.
+    "postgresql://u:pw@127.0.0.1:1/x_test?password=a&ho%73t=QZJ",
+    "postgresql://u:pw@127.0.0.1:1/x_test?password=a&po%72t=4242",
+    "postgresql://u:pw@127.0.0.1:1/x_test?password=a&hostaddr=10.0.0.9",
+    "postgresql://u:pw@127.0.0.1:1,QZJ:2/x_test",
+    "POSTGRESQL://u:Pa@ss/x@127.0.0.1/x_test",
+    # A port that is not one libpq would use.
+    "postgresql://u:p@127.0.0.1:0/x_test",
+    "postgresql://u:p@127.0.0.1:70000/x_test",
+    "postgresql://u:p@127.0.0.1:QZJ/x_test",
+]
+_LEAKY_KEYWORDS = [
+    # An unquoted space in the password injects a keyword that libpq then honours.
+    "host=127.0.0.1 port=1 password=x host=QZJ",
+    "host=127.0.0.1 port=1 password=x port=4242",
+    "port=1 password=x host=QZJ",
+    "host=127.0.0.1 password=x port=4242",
+    "host=127.0.0.1 port=0",
+    "host=127.0.0.1 port=1 password=x\thost=QZJ",
+    "host=127.0.0.1 port=1 password=x\x0bhost=QZJ",
+    "host=127.0.0.1 port=1 password=x\nport=4242",
+    "password=x host=QZJ",
+    "host=127.0.0.1 port=70000",
+]
+
+
+@pytest.mark.parametrize(
+    ("url", "address"),
+    [
+        ("postgresql://u:p%40ss@127.0.0.1:1/x_test", "127.0.0.1:1"),
+        ("postgresql://u:pw@127.0.0.1:1/x_test?application_name=QZJ", "127.0.0.1:1"),
+        ("host = 127.0.0.1 port = 1 password = x", "127.0.0.1:1"),
+        ("host=127.0.0.1 port=1 password='a b'", "127.0.0.1:1"),
+        ("postgresql://u:pw@:1/x_test", "localhost:1"),
+    ],
+)
+def test_db_address_still_prints_a_clean_dsn(url: str, address: str) -> None:
+    from brain import cli_ingest_boundary
+
+    assert cli_ingest_boundary.db_address(url) == address
+
+
+@pytest.mark.parametrize("url", _LEAKY_URIS + _LEAKY_KEYWORDS)
+def test_db_address_refuses_a_dsn_whose_host_could_be_password_text(url: str) -> None:
+    from brain import cli_ingest_boundary
+
+    assert cli_ingest_boundary.db_address(url) == "(unparseable)"
+
+
+def _password_alphabet_samples(seed: int, count: int) -> list[str]:
+    import random
+
+    pieces = ["QZJ", "@", "/", "?", "#", ":", "[", "]", "&", "=", " ", "'", "\\",
+              " host=QZJ", " port=4242", "&host=QZJ", "&port=4242", "%40", "%2F",
+              "&ho%73t=QZJ", "\thost=QZJ", "\nport=4242"]
+    rng = random.Random(seed)
+    return ["".join(rng.choice(pieces) for _ in range(rng.randint(1, 6))) for _ in range(count)]
+
+
+@pytest.mark.parametrize("password", _password_alphabet_samples(seed=137, count=400))
+def test_db_address_never_prints_any_part_of_a_password(password: str) -> None:
+    """Property: the password, wherever it sits, never becomes the printed address.
+
+    For every DSN below the true address is 127.0.0.1:1, so the only acceptable outputs
+    are that and ``(unparseable)``. The alphabet is every character that moves a libpq
+    parser boundary, plus injected keywords.
+    """
+    from brain import cli_ingest_boundary
+
+    quoted = password.replace("\\", "\\\\").replace("'", "\\'")
+    dsns = [
+        f"postgresql://synthetic_user:{password}@127.0.0.1:1/x_test",
+        f"postgresql://{password}@127.0.0.1:1/x_test",
+        f"postgresql://127.0.0.1:1/x_test?password={password}",
+        f"host=127.0.0.1 port=1 password={password}",
+        f"host=127.0.0.1 port=1 password='{quoted}'",
+        f"password={password} host=127.0.0.1 port=1",
+    ]
+    for dsn in dsns:
+        assert cli_ingest_boundary.db_address(dsn) in ("127.0.0.1:1", "(unparseable)"), dsn
+
+
+# rev-137b #2: a lone surrogate is refused like a NUL (Postgres cannot store either).
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ['{"a": "x\\ud800y"}', '{"k\\udfff": 1}', '{"a": [{"b": "\\udc00"}]}'],
+    ids=["surrogate-value", "surrogate-key", "nested-surrogate"],
+)
+def test_ingest_stdin_metadata_surrogate_exits_2(offline_cli: Path, raw: str) -> None:
+    result = _stdin(offline_cli, "--metadata", raw)
+    assert result.exit_code == 2, result.output[-500:]
+    assert "--metadata" in result.output
+    assert "UTF-8" in result.output
+    assert "stdin was empty" not in result.output
+    _assert_no_traceback(result)
+
+
+@pytest.mark.parametrize("value", ["inf", "-inf", 1e300, 99999999999, -99999999999, "NaN"])
+def test_promote_skips_a_duration_outside_int4(value: object) -> None:
+    from brain.ingest import _promote_metadata_to_columns
+
+    assert "duration_min" not in _promote_metadata_to_columns({"duration_min": value})
+
+
+@pytest.mark.parametrize("value", [0, 42, 42.7, "42.7", 2**31 - 1, -(2**31)])
+def test_promote_keeps_a_duration_inside_int4(value: object) -> None:
+    from brain.ingest import _promote_metadata_to_columns
+
+    assert _promote_metadata_to_columns({"duration_min": value})["duration_min"] == int(
+        float(value)  # type: ignore[arg-type]
+    )

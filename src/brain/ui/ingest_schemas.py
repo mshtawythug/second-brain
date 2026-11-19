@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..errors import SensitivityError
+from ..ingest.text_safety import encodes_utf8
 from ..sensitivity import SensitivityLevel, normalize_level
 from ..tags import normalize_tags
 from .errors import UiBadRequest, UiPayloadTooLarge
@@ -128,19 +129,6 @@ def parse_inbox(
         sensitivity=_sensitivity(default_sensitivity if level is None else level),
         enrich=_enrich(payload.get("enrich", True)),
     )
-
-
-def encodes_utf8(value: str) -> bool:
-    """Strict UTF-8: a lone surrogate (valid JSON, ``"\\ud800"``) is refused here.
-
-    Accepted, it would fail inside the job at the database and report the
-    "may already have been saved" message for a document that never was.
-    """
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return True
 
 
 def _title(value: Any) -> str:

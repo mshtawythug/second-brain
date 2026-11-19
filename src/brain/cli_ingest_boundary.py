@@ -16,13 +16,13 @@ Exit codes:
 What is printed is content-free. An error's class goes through
 :func:`brain.errors.describe_failure`, never its message: a psycopg message names the user
 and database, and an Ollama message can quote a response body. A DSN is reduced to
-``host:port`` through :func:`brain.backup.pgtool.dsn_target`, which carries no password.
+``host:port`` by :func:`brain.dsn_address.db_address`, and only when no part of a
+password can be in it.
 """
 from __future__ import annotations
 
 import json
 import math
-import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -30,8 +30,8 @@ from typing import Any
 import psycopg
 import typer
 
-from .backup.pgtool import dsn_target
 from .db import connect_raw
+from .dsn_address import db_address
 from .errors import (
     BrainError,
     EmbedError,
@@ -40,40 +40,15 @@ from .errors import (
     describe_failure,
 )
 from .ingest.sent_at import parse_sent_at
-from .ingest.text_safety import one_line
+from .ingest.text_safety import encodes_utf8, one_line
 
 _DOCTOR_HINT = "Try: brain doctor"
 
-#: One libpq host: a host name or IPv4 address, a bare IPv6 address (an optional
-#: ``%zone``), or an absolute Unix-socket directory. Anything else is not printed.
-#: An unescaped ``@`` in a password parses as part of the host (review rev-137 #1),
-#: and a percent-encoded control character decodes into it.
-_HOST_RE = re.compile(
-    r"[A-Za-z0-9_](?:[A-Za-z0-9._-]*[A-Za-z0-9_])?"
-    r"|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*(?:%[A-Za-z0-9]+)?"
-    r"|/[A-Za-z0-9._/-]*"
-)
-_UNPARSEABLE = "(unparseable)"
-
-
-def db_address(database_url: str) -> str:
-    """``host:port`` of ``database_url``, or ``(unparseable)``. Never a credential.
-
-    A host list (``h1,h2``) is printed only when every entry is a well-formed host.
-    """
-    try:
-        target = dsn_target(database_url)
-    except (psycopg.Error, ValueError):
-        return _UNPARSEABLE
-    hosts = (target.host or "").split(",")
-    if target.host is not None and not all(_HOST_RE.fullmatch(h) for h in hosts):
-        return _UNPARSEABLE
-    return target.address
-
-
 def unreachable_line(database_url: str, exc: BaseException) -> str:
     """The one line a failed connect prints: the address and the error class."""
-    return one_line(
+    # Content-free by construction: db_address prints only a validated host:port (its
+    # host pattern admits no control character), and describe_failure only class names.
+    return (
         f"cannot reach DATABASE_URL {db_address(database_url)} ({describe_failure(exc)}). "
         f"Is Postgres running? {_DOCTOR_HINT}"
     )
@@ -160,12 +135,9 @@ class MetadataValueError(BrainError):
     """A ``--metadata`` value that parses as JSON but that Postgres would refuse."""
 
 
-def _reject_constant(name: str) -> Any:
-    raise MetadataValueError(f"{name} is not a finite number")
-
-
 def _check_storable(value: Any) -> None:
-    """Refuse what ``jsonb`` / ``text`` refuse: a non-finite float, a NUL (rev-137 #2).
+    """Refuse what ``jsonb`` / ``text`` refuse: a non-finite float (``NaN``, ``Infinity``,
+    ``1e400``), a NUL, or a string that is not UTF-8, i.e. a lone surrogate (rev-137 #2).
 
     Iterative, not recursive: a nesting depth ``json.loads`` accepted must not be the
     one that overflows this walk's stack.
@@ -177,6 +149,8 @@ def _check_storable(value: Any) -> None:
             raise MetadataValueError("a number is not finite (out of range)")
         if isinstance(item, str) and "\x00" in item:
             raise MetadataValueError("a string contains a NUL character")
+        if isinstance(item, str) and not encodes_utf8(item):
+            raise MetadataValueError("a string is not valid UTF-8 (a lone surrogate)")
         if isinstance(item, dict):
             pending.extend(item.keys())
             pending.extend(item.values())
@@ -192,7 +166,7 @@ def _metadata_object(raw: str) -> dict[str, Any]:
     a ``RecursionError`` (deep nesting) are named by class only.
     """
     try:
-        parsed = json.loads(raw, parse_constant=_reject_constant)
+        parsed = json.loads(raw)
         _check_storable(parsed)
     except json.JSONDecodeError as e:
         reason = f"not valid JSON: {e.msg} (line {e.lineno}, column {e.colno})"

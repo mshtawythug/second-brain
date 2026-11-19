@@ -262,3 +262,47 @@ def test_ingest_dir_failed_line_names_the_class_not_the_message(
     assert "malformed PDF" not in result.output  # the wrapped message is not printed
     assert "synthetic-body-marker" not in result.output
     assert "  ingested: note1.txt" in result.output
+
+
+# ---------------------------------------------------------------------------
+# rev-137b #2: a duration_min Postgres cannot store is skipped, not a crash.
+# ---------------------------------------------------------------------------
+
+
+def _duration_of(conn: psycopg.Connection) -> list[object]:
+    return [r[0] for r in conn.execute("SELECT duration_min FROM documents").fetchall()]
+
+
+@pytest.mark.parametrize("raw", ['"inf"', "1e300", "99999999999"])
+def test_ingest_stdin_out_of_range_duration_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, test_db: psycopg.Connection, tmp_path: Path, raw: str
+) -> None:
+    _use(monkeypatch, tmp_path, FakeEmbedder())
+    result = CliRunner().invoke(
+        app,
+        ["ingest-stdin", "--source", "slack", "--external-id", "qa-d", "--title", "QA",
+         "--no-enrich", "--metadata", f'{{"duration_min": {raw}}}'],
+        input="hello synthetic\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "Traceback" not in result.output
+    assert _duration_of(test_db) == [None]
+
+
+def test_mcp_ingest_stdin_out_of_range_duration_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, test_db: psycopg.Connection, tmp_path: Path
+) -> None:
+    state = mcp_server._State(
+        cfg=Config(database_url=TEST_DATABASE_URL, vault_path=tmp_path),
+        embedder=FakeEmbedder(),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(mcp_server, "_state", state)
+    payload = mcp_server.brain_ingest_stdin(
+        content="synthetic snippet body",
+        source="slack",
+        external_id="qa-mcp-d",
+        title="QA snippet",
+        metadata={"duration_min": 1e300},
+    )
+    assert payload["created"] is True
+    assert _duration_of(test_db) == [None]

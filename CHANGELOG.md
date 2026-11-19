@@ -97,11 +97,19 @@ to `compare/v0.4.0...HEAD`. -->
   fails only that file, and the walk goes on.
 - When Postgres is down, every ingest command prints `cannot reach DATABASE_URL host:port` and the
   error class, with exit 1, instead of a psycopg traceback. The one exception is `brain ingest-code`,
-  which already printed one line. The password, user, database name and URL are never printed. A
-  host that does not look like a host name, an IP address or a socket path (for example, an
-  unescaped `@` in the password) prints as `(unparseable)`.
+  which already printed one line. The user, database name and URL are never printed. The
+  `host:port` is printed only when no part of the password can be in it; otherwise it reads
+  `(unparseable)`:
+  - In a URI, the authority (up to the first `/`, `?` or `#`) holds at most one `@`, and no `@`
+    follows it.
+  - In a URI, the query sets no `host`, `hostaddr` or `port`.
+  - In a `key=value` DSN, `host` and `port` each appear at most once, and before any `password`.
+  - The port is 1 to 65535.
+  - Every host is a host name, an IP address or an absolute socket directory.
 - `brain ingest-stdin --metadata` must be a JSON object that Postgres can store: no `NaN`,
-  infinite or out-of-range numbers, and no NUL characters. `--date` must parse as ISO 8601 or
+  infinite or out-of-range numbers, no NUL characters, and no lone surrogates (text that is not
+  UTF-8). A `duration_min` that does not fit the integer column is skipped with a warning,
+  from the CLI and the MCP tool alike. `--date` must parse as ISO 8601 or
   RFC 2822 and stay in range in UTC. Either mistake is a usage error (exit 2), caught before stdin
   is read. A bad `--date` used to be stored with only a warning, and an out-of-range one crashed.
 - Tags given to `brain ingest`, `ingest-dir`, `ingest-stdin`, `ingest-gmail` and the MCP

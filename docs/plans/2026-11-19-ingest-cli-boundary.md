@@ -374,3 +374,30 @@ Line numbers are on this branch's head.
    more line.
 7. **CHANGELOG.** It names the `ingest-code` exception and the wider DOCX / metadata
    refusals.
+
+## 9. Review round rev-137b (third commit; each new test RED against `7a897c1c` first)
+
+1. **The address rule is structural now.** It lives in the new leaf `src/brain/dsn_address.py`;
+   the module docstring is the rule.
+   - A password's text only extends rightwards, so host and port are printed only from where it
+     cannot reach.
+   - For a URI, that is the authority: at most one `@`, and no `@` after it. The query must not
+     set host, hostaddr or port; keys are compared percent-decoded, as libpq decodes them.
+   - For `key=value`, host and port appear at most once each, and before `password`.
+   - In both forms, the port is 1 to 65535 and the host must have a valid shape.
+   - The tests include a 400-sample property test over the characters that move libpq's parse
+     boundaries, with six DSN shapes per sample. Each output must be either `127.0.0.1:1` or
+     `(unparseable)`.
+   - Trying to break the rule found percent-encoded query keys (`ho%73t=`). That bypass is fixed
+     and pinned.
+2. **Metadata.**
+   - A lone surrogate is refused, in a key or a value. `encodes_utf8` moved from
+     `ui/ingest_schemas.py` to `ingest/text_safety.py`, so the UI and the CLI share one rule.
+   - `duration_min` outside int4, or infinite (`OverflowError`), is skipped with a warning in
+     `_promote_metadata_to_columns`. That covers CLI and MCP. `ingest/__init__.py` is net −1.
+3. **Unpinned code is removed, not pinned.**
+   - `one_line()` on the "cannot reach" line is redundant: the host pattern admits no control
+     character, and `describe_failure` emits only class names.
+   - The `parse_constant` hook is redundant: the walk's `math.isfinite` refuses `NaN` and
+     `Infinity` too.
+   - The mutation proofs show the remaining mechanism is what pins each behaviour.
