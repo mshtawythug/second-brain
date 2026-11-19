@@ -3,18 +3,30 @@
 Does NOT remove the pipx installation itself; a CLI cannot safely uninstall
 its own running process.  After running this command, the user should manually
 run `pipx uninstall secondbrain-py`.
+
+The vault (F16) is resolved the way the installers resolve it
+(:func:`brain.install_config.resolve_install_vault_with_source`), and before
+anything is removed: step 6 deletes ``$BRAIN_HOME/.env``, which may be the only
+place the path is set. Removing it needs that resolved path typed back exactly,
+and ``--yes`` never skips the prompt. Unsafe targets are refused up front
+(:func:`_vault_refusal`).
 """
 from __future__ import annotations
 
+import contextlib
+import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 
 from ._compose import compose_cmd
-from .config import DEFAULT_VAULT_PATH, _brain_home_root
+from .config import _brain_home_root
+from .install_config import resolve_install_vault_with_source
 
 # Files / dirs inside $BRAIN_HOME that are safe to remove even when --remove-db
 # is NOT set (i.e. everything except the data/ subtree).
@@ -41,6 +53,145 @@ def _skipped(label: str) -> None:
     typer.echo(f"  [skipped] {label}")
 
 
+def _warn(label: str) -> None:
+    typer.secho(f"  [warn]   {label}", fg="yellow")
+
+
+#: Source label for the test-only ``vault_path`` override of :func:`run_uninstall`.
+_VAULT_SOURCE_OVERRIDE = "explicit override"
+#: How much of a failed ``docker compose down``'s stderr the warning repeats (F41).
+_STDERR_TAIL_LINES = 3
+_STDERR_TAIL_CHARS = 300
+
+
+@dataclass(frozen=True)
+class _Vault:
+    """The vault ``--remove-vault`` would delete, resolved before anything is removed.
+
+    ``configured`` is the absolute path as configured (only used to spot a
+    symlink); ``target`` is its canonical form, which is what the summary
+    prints, what the user must type, and what ``rmtree`` receives. When the
+    path cannot be resolved (a symlink loop raises on Python 3.11),
+    ``resolvable`` is False and ``target`` falls back to ``configured``, for
+    display only: ``--remove-vault`` refuses such a vault.
+    """
+
+    configured: Path
+    target: Path
+    source: str
+    resolvable: bool = True
+
+    @property
+    def shown(self) -> str:
+        return f"{self.target}  (from {self.source})"
+
+
+def _resolve_vault(home: Path, override: Path | None) -> _Vault:
+    if override is not None:
+        raw, source = override, _VAULT_SOURCE_OVERRIDE
+    else:
+        raw, source = resolve_install_vault_with_source(home)
+    configured = raw.expanduser().absolute()
+    try:
+        target = configured.resolve()
+    except (OSError, RuntimeError):
+        # A plain uninstall must not crash on it; the kept line shows it as configured.
+        return _Vault(configured=configured, target=configured, source=source, resolvable=False)
+    return _Vault(configured=configured, target=target, source=source)
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """File identity (device + inode); a path that does not exist matches nothing."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _lineage(path: Path) -> list[Path]:
+    """*path* and its ancestors along BOTH chains: as spelled, and as resolved.
+
+    When a directory (or one of its parents) is a symlink, the two chains
+    differ: ``/links/home`` → ``/real/me`` has the ancestor ``/links`` as
+    spelled but ``/real`` as resolved, and a vault at ``/real`` must still be
+    caught. A path whose resolution fails (a symlink loop) keeps its spelled
+    chain only.
+    """
+    starts = [path.absolute()]
+    with contextlib.suppress(OSError, RuntimeError):
+        starts.append(path.resolve())
+    return [p for start in starts for p in (start, *start.parents)]
+
+
+def _is_at_or_above(upper: Path, lower: Path) -> bool:
+    """Whether *upper* is *lower* or one of its ancestors, compared by file identity.
+
+    Identity rather than spelling: on a case-insensitive volume ``…/HOME`` is
+    ``…/home``, and macOS reaches the same directory through
+    ``/System/Volumes/Data/…``; a string comparison misses both. Both the
+    spelled and the resolved ancestry of *lower* are checked
+    (:func:`_lineage`); entries that do not exist are skipped.
+    """
+    return any(_same_file(upper, p) for p in _lineage(lower))
+
+
+def _vault_refusal(vault: _Vault, home: Path) -> str | None:
+    """Why ``rmtree`` must not touch this vault, or ``None`` when it may.
+
+    A symlink would be refused by ``rmtree`` only mid-run (after the runtime
+    files are gone), as would a non-directory. The home directory, ``/`` (an
+    ancestor of it), ``$BRAIN_HOME`` and its ancestors hold far more than notes.
+    The database directory, anything inside it or any parent of it is never a
+    vault (``--remove-db`` is the way to delete it). A vault at or inside a
+    runtime entry step 6 deletes would be gone before step 8 reaches it.
+    """
+    target = vault.target
+    if vault.configured.is_symlink():
+        return f"{vault.configured} is a symlink"
+    if not target.is_dir():
+        return f"{target} is not a directory"
+    if _is_at_or_above(target, Path.home()):
+        return f"{target} is your home directory or a parent of it"
+    if _is_at_or_above(target, home):
+        return f"{target} is $BRAIN_HOME or a parent of it"
+    database = home / "data" / "postgres"
+    if _is_at_or_above(target, database) or _is_at_or_above(database, target):
+        return f"{target} is the database directory, inside it, or a parent of it"
+    for name in _BRAIN_HOME_SAFE_REMOVES:
+        if _is_at_or_above(home / name, target):
+            return f"{target} is $BRAIN_HOME/{name} or inside it, which uninstall removes first"
+    return None
+
+
+def _refuse_vault(reason: str) -> NoReturn:
+    """Stop the whole uninstall before anything is removed."""
+    typer.secho(f"Refusing --remove-vault: {reason}. Nothing was removed.", fg="red")
+    raise typer.Abort()
+
+
+def _confirm_vault_removal(vault: _Vault) -> None:
+    """Typed confirmation of the resolved path. Never bypassed by ``--yes``.
+
+    At EOF (no TTY, no input) click raises ``Abort``, so a script without the
+    exact path on stdin stops here with nothing removed.
+    """
+    typer.echo("")
+    typer.echo("WARNING: --remove-vault will permanently delete your notes at:")
+    typer.echo(f"  {vault.shown}")
+    answer = typer.prompt("Type the vault path exactly as shown above to confirm")
+    if answer != str(vault.target):
+        typer.secho("Aborted — the vault was NOT removed (nothing was removed).", fg="yellow")
+        raise typer.Abort()
+
+
+def _compose_down_failure(returncode: int, stderr: str | None) -> str:
+    """The F41 warning: the exit code plus the last few non-empty stderr lines."""
+    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+    tail = " | ".join(lines[-_STDERR_TAIL_LINES:])[-_STDERR_TAIL_CHARS:]
+    message = f"docker compose down exited {returncode}"
+    return f"{message}: {tail}" if tail else message
+
+
 def run_uninstall(
     *,
     yes: bool = False,
@@ -55,22 +206,38 @@ def run_uninstall(
     Parameters
     ----------
     yes:
-        Skip the interactive confirmation prompt.
+        Skip the ``Proceed?`` prompt only. It never skips ``--remove-db``'s typed
+        phrase or ``--remove-vault``'s typed vault path.
     remove_db:
         Also remove ``$BRAIN_HOME/data/postgres/`` (requires extra typed
         confirmation regardless of ``yes``).
     remove_vault:
-        Also remove the vault directory.
+        Also remove the vault directory. The vault is resolved before anything is
+        removed: ``BRAIN_VAULT_PATH`` from the environment, then from
+        ``$BRAIN_HOME/.env``, then ``~/brain-vault``
+        (:func:`brain.install_config.resolve_install_vault_with_source`). An unsafe
+        target is refused (:func:`_vault_refusal`), and removal needs the resolved
+        path typed back exactly. A vault that does not exist is skipped.
     brain_home:
         Override the resolved ``$BRAIN_HOME`` path (for tests).
     vault_path:
-        Override the resolved ``$BRAIN_VAULT_PATH`` path (for tests).
+        Override the resolved vault path (for tests). It still goes through the
+        refusal guards and the typed confirmation.
     _launchd_uninstall:
         Dependency-injected callable that replaces ``brain.bin.launchd.uninstall_main``
         (for tests that don't want real launchctl calls).
     """
     home = brain_home if brain_home is not None else _brain_home_root()
-    vault = vault_path if vault_path is not None else DEFAULT_VAULT_PATH
+    # Resolve now: step 6 deletes $BRAIN_HOME/.env, which may hold the path.
+    vault = _resolve_vault(home, vault_path)
+    # Checked before exists(): pathlib reports a symlink loop as not existing.
+    if remove_vault and not vault.resolvable:
+        _refuse_vault(f"{vault.configured} cannot be resolved (symlink loop)")
+    removing_vault = remove_vault and vault.configured.exists()
+    if removing_vault:
+        refusal = _vault_refusal(vault, home)
+        if refusal is not None:
+            _refuse_vault(refusal)
 
     # -----------------------------------------------------------------------
     # 1. Print summary of what will be removed.
@@ -87,8 +254,8 @@ def run_uninstall(
             typer.echo(f"  • {p}")
     if remove_db:
         typer.echo(f"  • {home / 'data' / 'postgres'}  ← ALL DATABASE DATA")
-    if remove_vault:
-        typer.echo(f"  • {vault}  ← YOUR NOTES")
+    if removing_vault:
+        typer.echo(f"  • {vault.shown}  ← YOUR NOTES")
     typer.echo("")
 
     # -----------------------------------------------------------------------
@@ -109,6 +276,12 @@ def run_uninstall(
             raise typer.Abort()
 
     # -----------------------------------------------------------------------
+    # 3b. Typed confirmation of the resolved vault path (NEVER bypassed by --yes).
+    # -----------------------------------------------------------------------
+    if removing_vault:
+        _confirm_vault_removal(vault)
+
+    # -----------------------------------------------------------------------
     # 4. Uninstall launchd (macOS only).
     # -----------------------------------------------------------------------
     if sys.platform == "darwin":
@@ -126,19 +299,26 @@ def run_uninstall(
         _skipped("launchd (not macOS)")
 
     # -----------------------------------------------------------------------
-    # 5. Stop Docker compose (fail-silent — user may have stopped it already).
+    # 5. Stop Docker compose (never fatal — user may have stopped it already),
+    #    but only an exit 0 is reported as [ok] (F41).
     # -----------------------------------------------------------------------
     _step("Stopping Docker compose …")
     try:
-        subprocess.run(
+        result = subprocess.run(
             compose_cmd("down", brain_home=home),
             check=False,
             capture_output=True,
+            text=True,
+            errors="replace",
             timeout=30,
         )
-        _ok("docker compose down")
     except Exception as exc:  # noqa: BLE001
-        typer.secho(f"  [warn]   docker compose down: {exc}", fg="yellow")
+        _warn(f"docker compose down: {exc}")
+    else:
+        if result.returncode == 0:
+            _ok("docker compose down")
+        else:
+            _warn(_compose_down_failure(result.returncode, result.stderr))
 
     # -----------------------------------------------------------------------
     # 6. Remove safe $BRAIN_HOME entries.
@@ -167,14 +347,13 @@ def run_uninstall(
     # -----------------------------------------------------------------------
     # 8. Optionally remove the vault.
     # -----------------------------------------------------------------------
-    if remove_vault:
-        if vault.exists():
-            shutil.rmtree(vault)
-            _ok(f"removed vault {vault}")
-        else:
-            _skipped(f"vault not found at {vault}")
+    if removing_vault:
+        shutil.rmtree(vault.target)
+        _ok(f"removed vault {vault.target}")
+    elif remove_vault:
+        _skipped(f"vault not found at {vault.target}, nothing to remove")
     else:
-        _skipped(f"vault kept at {vault}  (pass --remove-vault to delete)")
+        _skipped(f"vault kept at {vault.shown}  (pass --remove-vault to delete)")
 
     # -----------------------------------------------------------------------
     # 9. Final hint.

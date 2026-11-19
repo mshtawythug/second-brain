@@ -8189,7 +8189,7 @@ def claude_install_skill_cmd(
 
 @app.command("uninstall")
 def uninstall_cmd(
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the Proceed? prompt only"),
     remove_db: bool = typer.Option(
         False,
         "--remove-db",
@@ -8198,7 +8198,7 @@ def uninstall_cmd(
     remove_vault: bool = typer.Option(
         False,
         "--remove-vault",
-        help="Also remove $BRAIN_VAULT_PATH (YOUR NOTES — be careful)",
+        help="Also remove the vault (YOUR NOTES; type its printed path to confirm, even with -y)",
     ),
 ) -> None:
     """Remove brain runtime state and supervised daemons.

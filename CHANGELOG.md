@@ -78,6 +78,33 @@ to `compare/v0.4.0...HEAD`. -->
   an empty re-run. **Empty pages written by earlier versions stay in the vault**, and brain never
   deletes vault files, so remove them by hand if you want them gone.
 
+### Fixed — `brain uninstall --remove-vault` deletes the configured vault, and only once you type its path (F16, F41)
+
+- `--remove-vault` always deleted `~/brain-vault`, whatever `BRAIN_VAULT_PATH` said, so a vault
+  kept elsewhere survived and whatever sat at `~/brain-vault` was deleted instead. The vault is
+  now resolved the way `brain setup` and `brain-install-launchd` resolve it: `BRAIN_VAULT_PATH`
+  from the environment, then from `$BRAIN_HOME/.env`, then `~/brain-vault`. It is resolved before
+  anything is removed, because uninstall deletes `$BRAIN_HOME/.env` along the way.
+- The summary prints the vault's absolute path and where it came from (`BRAIN_VAULT_PATH env`,
+  `$BRAIN_HOME/.env` or `default ~/brain-vault`). The vault is deleted only after you type that
+  path exactly. `--yes` skips only the `Proceed?` prompt, not this one. With no input (a script,
+  `</dev/null`), the prompt reads end-of-file and the uninstall stops with nothing removed. **A
+  script that ran `brain uninstall --yes --remove-vault` now stops there.** It has to supply the
+  exact path on stdin.
+- `--remove-vault` refuses, before anything is removed, a vault path that is a symlink or is not
+  a directory. It also refuses your home directory, `$BRAIN_HOME`, or a parent of either; the
+  database directory (`$BRAIN_HOME/data/postgres`), anything inside it, or a parent of it; and
+  anything at or inside a runtime entry that uninstall removes first (such as
+  `$BRAIN_HOME/.shims`). Each check compares directories by identity, not by spelling, and
+  checks each guarded path and its parents both as written and with symlinks resolved. So a case
+  variant of your home directory, or the real parent of a symlinked `$BRAIN_HOME`, is refused
+  too. A vault path that cannot be resolved (a symlink loop) is refused as well, and a plain
+  `brain uninstall` shows it as configured instead of failing. A vault that does not exist is
+  reported (`vault not found at <path>, nothing to remove`) and skipped without a prompt.
+- `brain uninstall` printed `[ok] docker compose down` even when the command failed. It now
+  prints `[ok]` only on exit 0, and otherwise a `[warn]` with the exit code and the end of
+  compose's error output.
+
 ### Fixed — the reranker's launchd job no longer refuses long passages (RM-14c)
 
 - The `com.brain.reranker` template now starts `llama-server` with `--batch-size 2048
