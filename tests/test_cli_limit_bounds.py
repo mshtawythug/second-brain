@@ -31,10 +31,7 @@ ZERO_MEANS: dict[str, str] = {
 
 #: Commands whose limit options another PR owns. Each is still held to min >= 1 once it
 #: has a minimum, so the test is right in either merge order.
-OWNED_ELSEWHERE: dict[str, str] = {
-    # PR-C1 (fix/ingest-cli-boundary, F12) owns `reembed --batch-size/--limit`.
-    "reembed": "PR-C1 (F12)",
-}
+OWNED_ELSEWHERE: dict[str, str] = {}
 
 
 _ISOLATED_ENV = {
