@@ -20,6 +20,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 
@@ -69,12 +70,16 @@ class _Vault:
 
     ``configured`` is the absolute path as configured (only used to spot a
     symlink); ``target`` is its canonical form, which is what the summary
-    prints, what the user must type, and what ``rmtree`` receives.
+    prints, what the user must type, and what ``rmtree`` receives. When the
+    path cannot be resolved (a symlink loop raises on Python 3.11),
+    ``resolvable`` is False and ``target`` falls back to ``configured``, for
+    display only: ``--remove-vault`` refuses such a vault.
     """
 
     configured: Path
     target: Path
     source: str
+    resolvable: bool = True
 
     @property
     def shown(self) -> str:
@@ -87,7 +92,12 @@ def _resolve_vault(home: Path, override: Path | None) -> _Vault:
     else:
         raw, source = resolve_install_vault_with_source(home)
     configured = raw.expanduser().absolute()
-    return _Vault(configured=configured, target=configured.resolve(), source=source)
+    try:
+        target = configured.resolve()
+    except (OSError, RuntimeError):
+        # A plain uninstall must not crash on it; the kept line shows it as configured.
+        return _Vault(configured=configured, target=configured, source=source, resolvable=False)
+    return _Vault(configured=configured, target=target, source=source)
 
 
 def _same_file(a: Path, b: Path) -> bool:
@@ -153,6 +163,12 @@ def _vault_refusal(vault: _Vault, home: Path) -> str | None:
     return None
 
 
+def _refuse_vault(reason: str) -> NoReturn:
+    """Stop the whole uninstall before anything is removed."""
+    typer.secho(f"Refusing --remove-vault: {reason}. Nothing was removed.", fg="red")
+    raise typer.Abort()
+
+
 def _confirm_vault_removal(vault: _Vault) -> None:
     """Typed confirmation of the resolved path. Never bypassed by ``--yes``.
 
@@ -214,12 +230,14 @@ def run_uninstall(
     home = brain_home if brain_home is not None else _brain_home_root()
     # Resolve now: step 6 deletes $BRAIN_HOME/.env, which may hold the path.
     vault = _resolve_vault(home, vault_path)
+    # Checked before exists(): pathlib reports a symlink loop as not existing.
+    if remove_vault and not vault.resolvable:
+        _refuse_vault(f"{vault.configured} cannot be resolved (symlink loop)")
     removing_vault = remove_vault and vault.configured.exists()
     if removing_vault:
         refusal = _vault_refusal(vault, home)
         if refusal is not None:
-            typer.secho(f"Refusing --remove-vault: {refusal}. Nothing was removed.", fg="red")
-            raise typer.Abort()
+            _refuse_vault(refusal)
 
     # -----------------------------------------------------------------------
     # 1. Print summary of what will be removed.
