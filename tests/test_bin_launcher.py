@@ -221,11 +221,32 @@ def test_brain_down_main_dispatches_to_shim(monkeypatch: Any) -> None:
         captured["args"] = list(args)
 
     monkeypatch.setattr("brain.bin.down.exec_shim", fake_exec_shim)
-    monkeypatch.setattr(sys, "argv", ["brain-down", "--verbose"])
+    monkeypatch.setattr(sys, "argv", ["brain-down"])
     down.main()
 
     assert captured["name"] == "brain-down"
-    assert captured["args"] == ["--verbose"]
+    assert captured["args"] == []
+
+
+@pytest.mark.parametrize("module", ["up", "down", "status"])
+def test_shim_main_rejects_an_argument_before_exec(monkeypatch: Any, module: str) -> None:
+    """F18: an argument is a usage error (exit 2) and the shim is never exec'd.
+
+    These mains used to forward argv to a shell script that ignored it, so
+    ``brain-down --verbose`` (or ``--help``) silently ran the command.
+    """
+    import importlib
+
+    mod = importlib.import_module(f"brain.bin.{module}")
+    called: list[str] = []
+    monkeypatch.setattr(mod, "exec_shim", lambda name, args: called.append(name))
+    monkeypatch.setattr(sys, "argv", [f"brain-{module}", "--verbose"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        mod.main()
+
+    assert exc_info.value.code == 2
+    assert called == []
 
 
 def test_brain_status_main_dispatches_to_shim(monkeypatch: Any) -> None:
@@ -239,11 +260,11 @@ def test_brain_status_main_dispatches_to_shim(monkeypatch: Any) -> None:
         captured["args"] = list(args)
 
     monkeypatch.setattr("brain.bin.status.exec_shim", fake_exec_shim)
-    monkeypatch.setattr(sys, "argv", ["brain-status", "--json"])
+    monkeypatch.setattr(sys, "argv", ["brain-status"])
     status.main()
 
     assert captured["name"] == "brain-status"
-    assert captured["args"] == ["--json"]
+    assert captured["args"] == []
 
 
 def test_brain_rebuild_main_delegates_to_orchestrator(monkeypatch: Any) -> None:

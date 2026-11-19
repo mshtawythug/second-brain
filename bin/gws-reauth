@@ -9,7 +9,32 @@
 #
 # Opens a browser tab for OAuth consent. Approve the new scope set, then
 # verify with: gws people otherContacts list --format json | head -20
+#
+# Arguments for `gws auth login` itself go after `--`.
 set -euo pipefail
+
+# Arguments (F20) are handled BEFORE the token cache is deleted below: -h/--help
+# prints the usage and exits 0; any other argument (a typo, `help`) exits 2 and
+# deletes nothing. Only what follows `--` reaches gws.
+usage() {
+  echo "Usage: gws-reauth [-h|--help] [-- <gws auth login args>]  — delete gws's cached access token (~/.config/gws/token_cache.json) and re-run gws auth login with the full second-brain scope set (opens a browser). Arguments after -- go to gws auth login."
+}
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  --) shift ;;
+  "")
+    if (($#)); then
+      echo "error: unknown argument: '' (pass gws auth login arguments after --)" >&2
+      usage >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "error: unknown argument: $1 (pass gws auth login arguments after --)" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
 
 SCOPES=(
   https://www.googleapis.com/auth/contacts.other.readonly
