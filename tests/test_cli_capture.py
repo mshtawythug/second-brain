@@ -842,6 +842,9 @@ def test_capture_exits_on_vault_sync_error(
     assert result.exit_code == 1
     # The CLI must print a friendly "sync error: …" line rather than a traceback.
     assert "sync error" in result.output or "vault note sync" in result.output.lower()
+    # 0.4.0 QA (F13): the reason names the template and the fix.
+    assert "template 'note' not found" in result.output
+    assert "brain vault init" in result.output
 
 
 # ---------------------------------------------------------------------------
