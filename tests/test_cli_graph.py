@@ -540,3 +540,39 @@ def test_graphrag_aliases_apply_exits_when_age_absent(
     res = CliRunner().invoke(app, ["graphrag", "aliases", "apply"])
     assert res.exit_code == 1
     assert "Apache AGE is not available" in res.output
+
+
+# F28 (0.4.0 QA, B11): `--out` into a directory that does not exist was a raw
+# FileNotFoundError traceback, raised AFTER the graph query had run. It is now a usage
+# error (exit 2) raised before any database work. The unreachable DATABASE_URL proves
+# the order: had the command reached `connect`, it would fail differently.
+_DEAD_DB = "postgresql://brain:brain@localhost:1/none_test"
+
+
+def test_graph_out_into_a_missing_directory_exits_2_before_querying(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", _DEAD_DB)
+    out_path = tmp_path / "no-such-dir" / "graph.json"
+
+    result = CliRunner().invoke(
+        app, ["graph", "--out", str(out_path)], env={"COLUMNS": "300"}
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "does not exist" in result.output
+    assert "Traceback" not in result.output
+    assert not out_path.parent.exists(), "the parent must not be created"
+
+
+def test_graph_out_onto_a_directory_exits_2(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", _DEAD_DB)
+
+    result = CliRunner().invoke(
+        app, ["graph", "--out", str(tmp_path)], env={"COLUMNS": "300"}
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "is a directory" in result.output

@@ -4,9 +4,12 @@ Centralising this prevents call sites from drifting — every invocation MUST
 use both ``-f <BRAIN_HOME>/docker-compose.yml`` AND ``--project-name`` (default
 ``brain``).  Without ``--project-name``, the project name defaults to cwd
 basename and shells from different directories can target different compose
-projects against the same compose file.
+projects against the same compose file. :func:`compose_failure` words a failed
+invocation for the user (F17).
 """
 import os
+import shlex
+from collections.abc import Sequence
 from pathlib import Path
 
 from .config import _brain_home_root
@@ -72,3 +75,30 @@ def compose_cmd(*args: str, brain_home: Path | None = None) -> list[str]:
         compose_project_name(),
         *args,
     ]
+
+
+#: How many trailing stderr lines :func:`compose_failure` quotes.
+FAILURE_TAIL_LINES = 10
+
+
+def compose_failure(
+    argv: Sequence[str], returncode: int, stderr: str | None, *, pg_port: int
+) -> str:
+    """The message for a ``docker compose`` call that exited non-zero (F17, 0.4.0 QA).
+
+    Names the exit code, quotes the last :data:`FAILURE_TAIL_LINES` non-empty lines of
+    stderr (control characters removed: it is docker's text, printed to a terminal), and
+    ends with what to check and the command to re-run by hand for the full output.
+    """
+    # Lazy: ``brain.ingest`` is heavy, and only a failure needs it here.
+    from .ingest.text_safety import one_line
+
+    lines = [one_line(line) for line in (stderr or "").splitlines()]
+    tail = [line for line in lines if line][-FAILURE_TAIL_LINES:] or ["(no stderr)"]
+    quoted = "\n".join(f"    {line}" for line in tail)
+    return (
+        f"docker compose failed (exit {returncode}). The last lines of its stderr:\n"
+        f"{quoted}\n"
+        f"Is Docker running, and is port {pg_port} free? Fix that, then re-run "
+        f"`brain setup`. For the full output, run it by hand:\n    {shlex.join(argv)}"
+    )

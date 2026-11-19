@@ -37,6 +37,17 @@
 
 set -euo pipefail
 
+# Arguments (F18): none. -h/--help prints the usage and exits 0 BEFORE any
+# action; anything else is a usage error (exit 2), never a silent run.
+usage() {
+  echo "Usage: brain-up [-h|--help]  — start the brain vault-sync watcher and the daily-brief job under launchd (runs brain-install-launchd). Idempotent. Takes no arguments."
+}
+case "$#:${1:-}" in
+  0:) ;;
+  1:-h|1:--help) usage; exit 0 ;;
+  *) echo "error: unknown argument(s): $*" >&2; usage >&2; exit 2 ;;
+esac
+
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # Resolve $BRAIN_HOME from this script's location ($BRAIN_HOME/.shims/ under a
 # pipx install, $repo_root/bin/ in a dev checkout). Honor an explicit

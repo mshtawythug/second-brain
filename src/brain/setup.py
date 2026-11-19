@@ -8,6 +8,8 @@ wiki at R3 (phase 9), which shrank this file. 2026-10-16: a re-run honours
 (setup never calls ``Config.load``, so nothing published it), reasoned at both
 reads. The lookup and the vault precedence now live in
 :mod:`brain.install_config`, shared with ``brain-install-launchd``.
+2026-11-19 (F17): ``_compose_up`` captures ``up -d``'s stderr and raises ``SetupError``
+with its tail and a hint instead of a ``CalledProcessError`` traceback, reasoned inline.
 """
 import enum
 import os
@@ -24,7 +26,7 @@ from pathlib import Path
 import typer
 
 from . import config as _config_module
-from ._compose import compose_cmd, compose_project_name, postgres_container_name
+from ._compose import compose_cmd, compose_failure, compose_project_name, postgres_container_name
 from .bin._launcher import ensure_shim
 from .config import _brain_home_root
 from .errors import BrainError
@@ -1119,10 +1121,14 @@ def run_setup(
                 "  [info] docker compose pull failed — falling back to the "
                 "local image / build"
             )
-        subprocess.run(
-            compose_cmd("up", "-d", brain_home=brain_home),
-            check=True,
-        )
+        # F17 (growth, see the module docstring): a refused `up -d` was a raw
+        # CalledProcessError traceback with no cause on screen. stderr is captured to
+        # quote its tail, so its progress lines no longer stream: say so first.
+        typer.echo("  Starting Postgres (a first run may build the image: a few minutes)…")
+        up_argv = compose_cmd("up", "-d", brain_home=brain_home)
+        up = subprocess.run(up_argv, stderr=subprocess.PIPE, text=True)
+        if up.returncode != 0:
+            raise SetupError(compose_failure(up_argv, up.returncode, up.stderr, pg_port=pg_port))
 
     _perform_action("docker compose pull + up -d (Postgres)", _compose_up, dry_run)
 

@@ -2390,7 +2390,7 @@ def graphrag_build(
         None, "--tenant", help="Tenant to build (default: BRAIN_GRAPH_TENANT)."
     ),
     limit: int | None = typer.Option(
-        None, "--limit", "-n", help="Max documents to reconcile (default: all)."
+        None, "--limit", "-n", min=1, help="Max documents to reconcile (default: all)."
     ),
     concepts: bool = typer.Option(
         False,
@@ -2790,7 +2790,7 @@ def graphrag_search(
         None, "--depth", help="Traversal depth (default: BRAIN_GRAPH_DEPTH)."
     ),
     limit: int | None = typer.Option(
-        None, "--limit", "-n", help="Max documents returned (default: 10)."
+        None, "--limit", "-n", min=1, help="Max documents returned (default: 10)."
     ),
     tenant: str | None = typer.Option(
         None, "--tenant", help="Tenant to query (default: BRAIN_GRAPH_TENANT)."
@@ -2847,7 +2847,7 @@ def graphrag_themes(
         None, "--depth", help="Traversal depth (default: BRAIN_GRAPH_DEPTH)."
     ),
     limit: int | None = typer.Option(
-        None, "--limit", "-n", help="Max documents returned (default: 10)."
+        None, "--limit", "-n", min=1, help="Max documents returned (default: 10)."
     ),
     tenant: str | None = typer.Option(
         None, "--tenant", help="Tenant to query (default: BRAIN_GRAPH_TENANT)."
@@ -2975,7 +2975,7 @@ def timeline(
         None, "--until", help="Upper cutoff, inclusive of the month (ISO month YYYY-MM)."
     ),
     limit: int | None = typer.Option(
-        None, "--limit", "-n", help="Max buckets (default: BRAIN_TIMELINE_LIMIT)."
+        None, "--limit", "-n", min=1, help="Max buckets (default: BRAIN_TIMELINE_LIMIT)."
     ),
     synthesize: bool = typer.Option(
         False,
@@ -3227,8 +3227,7 @@ def graphrag_communities_build(
     ),
     limit: int | None = typer.Option(
         None,
-        "--limit",
-        "-n",
+        "--limit", "-n", min=1,
         help="Max stale/new communities to (re)summarize this run (default: all).",
     ),
     json_output: bool = typer.Option(
@@ -3257,8 +3256,7 @@ def graphrag_communities_refresh(
     ),
     limit: int | None = typer.Option(
         None,
-        "--limit",
-        "-n",
+        "--limit", "-n", min=1,
         help="Max stale/new communities to (re)summarize this run (default: all).",
     ),
     json_output: bool = typer.Option(
@@ -3285,7 +3283,7 @@ def graphrag_communities_list(
         None, "--tenant", help="Tenant to list (default: BRAIN_GRAPH_TENANT)."
     ),
     limit: int | None = typer.Option(
-        None, "--limit", "-n", help="Max communities to show (default: all)."
+        None, "--limit", "-n", min=1, help="Max communities to show (default: all)."
     ),
     json_output: bool = typer.Option(
         False, "--json", help="Emit machine-readable JSON instead of the table."
@@ -3505,8 +3503,7 @@ def graphrag_entities(
     ),
     limit: int = typer.Option(
         50,
-        "--limit",
-        "-n",
+        "--limit", "-n", min=0,
         help="Max entities to show (default 50; 0 = all).",
     ),
     tenant: str | None = typer.Option(
@@ -3796,7 +3793,7 @@ def enrich(
         ),
     ),
     limit: int | None = typer.Option(
-        None, "--limit", "-n",
+        None, "--limit", "-n", min=1,
         help="Max docs to enrich in --backfill mode.",
     ),
     since: str | None = typer.Option(
@@ -4399,7 +4396,7 @@ def rate(
 @app.command()
 def todo(
     source: str = typer.Option(
-        "krisp", "--source",
+        "krisp", "--source", callback=_validate_source_choice,
         help="Filter to one source kind. Today only 'krisp' is supported.",
     ),
     since: str | None = typer.Option(
@@ -4410,7 +4407,7 @@ def todo(
         False, "--closed",
         help="Include closed [x] items (default: open only).",
     ),
-    limit: int = typer.Option(50, "--limit", "-n"),
+    limit: int = typer.Option(50, "--limit", "-n", min=1),
     json_output: bool = typer.Option(
         False, "--json", help="Emit machine-readable JSON instead of the table."
     ),
@@ -4635,7 +4632,7 @@ def review_scan(
         False, "--dry-run", help="Compute findings without writing to the queue."
     ),
     limit: int | None = typer.Option(
-        None, "--limit", help="Cap entity candidates for the conflict scan."
+        None, "--limit", min=1, help="Cap entity candidates for the conflict scan."
     ),
     json_output: bool = typer.Option(
         False, "--json", help="Newline-delimited JSON, one finding per line."
@@ -4661,8 +4658,6 @@ def review_scan(
     run_conflicts = conflicts or not (conflicts or stale)
     run_stale = stale or not (conflicts or stale)
     if limit is not None:
-        if limit < 1:
-            raise typer.BadParameter("must be >= 1", param_hint="--limit")
         cfg = replace(cfg, review_conflict_limit=limit)
 
     tenant = cfg.graph_tenant_id
@@ -4801,7 +4796,7 @@ def review_list(
     kind: str = typer.Option(
         "all", "--kind", help="Filter findings: conflicts|stale|all."
     ),
-    limit: int = typer.Option(20, "--limit", "-n", help="Max findings to show."),
+    limit: int = typer.Option(20, "--limit", "-n", min=1, help="Max findings to show."),
     json_output: bool = typer.Option(False, "--json", help="Emit a JSON array."),
     include_snoozed: bool = typer.Option(
         False,
@@ -5451,7 +5446,7 @@ register_usage(app)
 @app.command()
 def resurface(
     limit: int | None = typer.Option(
-        None, "--limit", "-n", help="Number of docs to surface (default: 7)."
+        None, "--limit", "-n", min=1, help="Number of docs to surface (default: 7)."
     ),
     min_age_days: int | None = typer.Option(
         None,
@@ -5471,8 +5466,6 @@ def resurface(
     staleness, and importance (tags + summary), then lists the highest-scoring
     ones. Re-scored fresh on each run, so a doc you just opened drops out.
     """
-    if limit is not None and limit < 1:
-        raise typer.BadParameter("--limit must be an integer >= 1")
     if min_age_days is not None and min_age_days < 0:
         raise typer.BadParameter("--min-age-days must be a non-negative integer")
     _validate_source_choice(source)
@@ -6215,7 +6208,7 @@ def vault_sync_summaries(
     ),
     limit: int | None = typer.Option(
         None,
-        "--limit",
+        "--limit", min=1,
         help=(
             "Cap the total number of documents inspected. Pairs with "
             "``--dry-run`` for incremental drains on a large corpus."
@@ -7474,7 +7467,7 @@ def graph(
     ),
     out: Path | None = typer.Option(
         None,
-        "--out",
+        "--out", dir_okay=False,
         help="Write output to PATH instead of stdout.",
     ),
 ) -> None:
@@ -7505,6 +7498,9 @@ def graph(
         raise typer.BadParameter("--depth requires --root")
     if depth is not None and depth < 0:
         raise typer.BadParameter("--depth must be >= 0")
+    # F28: refuse a missing parent before the query (not mkdir: a typo'd path stays visible).
+    if out is not None and not out.parent.is_dir():
+        raise typer.BadParameter(f"directory does not exist: {out.parent}", param_hint="--out")
 
     cfg = Config.load()
     with connect(cfg.database_url) as conn:
@@ -8274,7 +8270,7 @@ def _validate_elicit_types(type_filter: list[str]) -> list[str] | None:
 def elicit_list(
     as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of a table."),
     limit: int = typer.Option(
-        0, "--limit", "-n", help="Max gaps to show (0 = use BRAIN_ELICIT_QUEUE_LIMIT)."
+        0, "--limit", "-n", min=0, help="Max gaps to show (0 = use BRAIN_ELICIT_QUEUE_LIMIT)."
     ),
     low_confidence: bool = typer.Option(
         False, "--low-confidence", help="Include gaps below the score floor."
@@ -8570,7 +8566,7 @@ def gaps(
              "BRAIN_GAPS_LOOKBACK_DAYS). Suffixes: 7d / 24h / 90m.",
     ),
     limit: int = typer.Option(
-        20, "--limit", "-n", help="Max failed queries to show."
+        20, "--limit", "-n", min=1, help="Max failed queries to show."
     ),
     as_json: bool = typer.Option(
         False, "--json", help="Emit JSON instead of a table."

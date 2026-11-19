@@ -141,6 +141,41 @@ to `compare/v0.4.0...HEAD`. -->
   matches the identity the backfill wrote, so there the leg reports `no_document_vectors` and
   leaves the order alone. It fails safe; the fix is backlog BL-49.
 
+### Fixed — CLI boundaries: limits, `graph --out`, `todo --source`, setup and capture-import errors (F13, F17, F28, F29, F34)
+
+- Every `-n`/`--limit` option now has a minimum. A value below it exits 2 with a usage
+  error from Typer. Before:
+  - `graphrag communities list -n -1` and `review list -n -1` sent a negative SQL `LIMIT`
+    and printed a traceback.
+  - `resurface -n 0`, `review scan --limit 0` and `timeline -n 0` already refused the value
+    (in the command body or the library). They now refuse it through Typer.
+  - Most other options accepted the value silently.
+  Where 0 is documented it keeps its meaning: `graphrag entities -n 0` and
+  `graphrag entity -n 0` show all, `elicit list -n 0` uses `BRAIN_ELICIT_QUEUE_LIMIT`, and
+  `backfill scan-secrets --limit 0` means no limit. Every other option needs at least 1.
+- **Two behaviour changes:**
+  - `brain todo -n 0` exits 2. Before, it printed one item.
+  - `brain graphrag entities -n -1` exits 2. Before, any negative value meant "all".
+    `-n 0` still means all.
+- `brain graph --out` into a directory that does not exist exits 2 and names the directory,
+  before it queries the graph. So does `--out` pointing at a directory. Before, the query
+  ran first and then a `FileNotFoundError` traceback was printed. The directory is not
+  created for you.
+- `brain todo --source` is checked against the known source kinds and exits 2 on an
+  unknown one. Before, `--source bogus` printed "(no action items)" and exited 0.
+- `brain setup`: a failed `docker compose up -d` exits 1 with the last lines of compose's
+  stderr and a hint (is Docker running, is the port free, the command to re-run by hand).
+  Before, it raised a `CalledProcessError` traceback. Because stderr is captured, the
+  `up -d` progress lines no longer stream; setup prints a "Starting Postgres" line instead.
+- `brain capture import`, and `brain ingest-folder` over a capture folder, stop before
+  moving any file when the vault has no `_templates/note.md`. They say to run
+  `brain vault init`. Before, every file failed with only `(VaultNoteSyncError)`.
+  The shared "template not found" error now ends with the same hint, which changes what
+  `brain capture` prints on an unscaffolded vault. `brain note new` already checked for
+  the template itself, and its output is unchanged. Capture
+  titles are unchanged: they come from the share's first words, as `brain capture` titles
+  a note.
+
 ### Added — engagement-aware ranking stage, off by default (RM-22b)
 
 - A new search stage, `engagement`, ranks a little higher the documents you open and rate
@@ -187,6 +222,24 @@ to `compare/v0.4.0...HEAD`. -->
 - The query goes to `OLLAMA_HOST`. With `BRAIN_EMBEDDER=voyage`, Voyage embeds the paraphrases; with
   `BRAIN_RERANKER=voyage`, passages they find can go to Voyage, confidential rows excepted.
   The new fixed-ceiling chat call is declared in `capped_call_budgets()`. No new setting.
+
+### Fixed — `--help` no longer runs the daemon scripts; a bad reranker setting is one line (F18, F19, F20, F37)
+
+- `brain-up`, `brain-down`, `brain-status` and `brain-uninstall-launchd` ignored their arguments,
+  so `--help` ran them: `brain-down --help` booted out the watcher and swept its processes, and
+  `brain-uninstall-launchd --help` deleted every brain LaunchAgent. `-h`/`--help` now prints the
+  usage and exits 0 before the command installs a shim or calls `launchctl`, `pkill` or anything
+  else. Any other argument is a usage error (exit 2), where it used to be silently ignored.
+- The scripts behind them do the same when run by hand: `$BRAIN_HOME/.shims/brain-{up,down,status}`
+  and launchd's `_brain-{watcher,brief,dropfolders}-fg` (and `bin/_brain-watcher-fg` in a checkout).
+- `bin/gws-reauth --help` prints its usage. It used to delete `~/.config/gws/token_cache.json`
+  first. Arguments for `gws auth login` now go after `--`. Any other argument exits 2 and deletes
+  nothing.
+- `brain-install-launchd --with-reranker` with no model file, a relative `BRAIN_RERANK_GGUF` or an
+  unusable `BRAIN_RERANK_URL` prints one line that names the variable (never its value) and exits
+  1, where it printed a `RerankerConfigError` traceback. Nothing is installed when a reranker input
+  is unusable. A failed `launchctl bootstrap` stops the install at that agent, and its error is one
+  line too (launchctl's own message, joined).
 
 ### Fixed — `brain ingest-gmail` cannot hang on, or hold, an unbounded `gws` answer (BL-39)
 

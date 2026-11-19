@@ -163,3 +163,19 @@ def test_brain_todo_limit_caps_output(
         if ln.startswith("[open]")
     ]
     assert len(lines) == 1
+
+
+def test_brain_todo_unknown_source_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    """F34 (0.4.0 QA, B13): ``--source bogus`` printed "(no action items)" and exited 0.
+
+    It is now checked against the canonical source kinds, before any database work:
+    the unreachable ``DATABASE_URL`` would fail differently had the body run.
+    """
+    monkeypatch.setenv("DATABASE_URL", "postgresql://brain:brain@localhost:1/none_test")
+    result = CliRunner().invoke(
+        app, ["todo", "--source", "bogus"], env={"COLUMNS": "300"}
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "unknown source 'bogus'" in result.output
+    assert "krisp" in result.output  # the accepted set is named
