@@ -53,7 +53,7 @@ that share a module or a symptom class.
 | BL-89 | `brain setup`: a failed `ollama list` / `ollama pull` is a traceback | cli-boundaries plan |
 | BL-90 | Capture import: take the title from a leading heading (F13 option b) | cli-boundaries plan |
 | BL-91 | `EmbedError` still escapes eight ingest loops | PR #137 plan |
-| BL-92 | Stdin metadata: `date` inside `--metadata` and MCP `date` are warn-only; MCP `metadata` unchecked | PR #137 plan |
+| BL-92 | Stdin metadata: `date` inside `--metadata` and MCP `date` are warn-only; MCP `metadata` and `content_type` unchecked | PR #137 plan |
 | BL-93 | Two DSN describers and two refused-connect lines | PR #137 plan |
 | BL-94 | Restore residue, round 2: staging collision, `--json` errors, loopback aliases | PR #139 plan |
 | BL-95 | `brain demo status --port N` opens the demo DB unguarded | PR #139 plan |
@@ -65,7 +65,7 @@ that share a module or a symptom class.
 
 - F39 (C31): BL-27 is the same defect. Add the QA sighting and the call sites re-derived at `8e9478e1`.
 - F30, the `brain explain` half: BL-57 already covers it. Add the QA sighting.
-- N7, "MCP `brain_search source=bogus` returns empty": the same gap as BL-17 (`since_days`). Add it there.
+- N7's unvalidated MCP `brain_search` source filter: the same gap as BL-17 (`since_days`). Add it there.
 
 ## Deliberately not filed
 
@@ -76,7 +76,9 @@ that share a module or a symptom class.
   inline; synthesis is themes-only). No doc or help text claims otherwise. The synthesis bullet is
   covered by BL-69(a).
 - **Uninstall plan, "Not in scope"**: `DEFAULT_VAULT_PATH` bound at import is a design note
-  (`resolve_install_vault` reads it at call time), and the memory-file update is coordinator work.
+  (`resolve_install_vault` reads it at call time).
+- **Memory-file updates in any plan** (the uninstall, shims and ingest-cli-boundary plans each
+  name a `cli.md` update): coordinator work, not backlog items.
 - **F1–F4, F7, F10, F12, F13, F15–F20, F22–F25, F27–F29, F34, F37, F41**: fixed in this program.
 
 ## Corrections found while re-deriving
@@ -84,8 +86,8 @@ that share a module or a symptom class.
 - The shims plan says a `ConfigError` from `resolve_install_vault` escapes `install_main`. On
   `8e9478e1` that function raises no `ConfigError`. The real escape is `RuntimeError` from
   `Path.expanduser()` on a `~nosuchuser/...` value. BL-88 is filed as found.
-- N7 "capture import ignores `.txt`": QA row A19's own dry run listed a `.txt` share. BL-83(d)
-  is filed as "re-verify first".
+- N7's claim that capture import skips plain-text shares: QA row A19's dry run listed one as
+  importable. BL-83(d) is filed as needing re-verification first.
 - F45 asks for a JSON array, but `review scan --json` is documented as newline-delimited JSON, and an
   empty stream is valid NDJSON. BL-68 proposes a stderr count, not an array.
 
