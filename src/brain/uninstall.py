@@ -273,7 +273,7 @@ def run_uninstall(
                 _launchd_uninstall()  # type: ignore[operator]
             else:
                 from .bin.launchd import uninstall_main
-                uninstall_main()
+                uninstall_main([])
             _ok("launchd plists removed")
         except Exception as exc:  # noqa: BLE001
             typer.secho(f"  [warn]   launchd uninstall: {exc}", fg="yellow")

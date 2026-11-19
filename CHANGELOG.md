@@ -180,6 +180,24 @@ to `compare/v0.4.0...HEAD`. -->
   `BRAIN_RERANKER=voyage`, passages they find can go to Voyage, confidential rows excepted.
   The new fixed-ceiling chat call is declared in `capped_call_budgets()`. No new setting.
 
+### Fixed — `--help` no longer runs the daemon scripts; a bad reranker setting is one line (F18, F19, F20, F37)
+
+- `brain-up`, `brain-down`, `brain-status` and `brain-uninstall-launchd` ignored their arguments,
+  so `--help` ran them: `brain-down --help` booted out the watcher and swept its processes, and
+  `brain-uninstall-launchd --help` deleted every brain LaunchAgent. `-h`/`--help` now prints the
+  usage and exits 0 before the command installs a shim or calls `launchctl`, `pkill` or anything
+  else. Any other argument is a usage error (exit 2), where it used to be silently ignored.
+- The scripts behind them do the same when run by hand: `$BRAIN_HOME/.shims/brain-{up,down,status}`
+  and launchd's `_brain-{watcher,brief,dropfolders}-fg` (and `bin/_brain-watcher-fg` in a checkout).
+- `bin/gws-reauth --help` prints its usage. It used to delete `~/.config/gws/token_cache.json`
+  first. Arguments for `gws auth login` now go after `--`. Any other argument exits 2 and deletes
+  nothing.
+- `brain-install-launchd --with-reranker` with no model file, a relative `BRAIN_RERANK_GGUF` or an
+  unusable `BRAIN_RERANK_URL` prints one line that names the variable (never its value) and exits
+  1, where it printed a `RerankerConfigError` traceback. Nothing is installed when a reranker input
+  is unusable. A failed `launchctl bootstrap` stops the install at that agent, and its error is one
+  line too (launchctl's own message, joined).
+
 ### Fixed — `brain ingest-gmail` cannot hang on, or hold, an unbounded `gws` answer (BL-39)
 
 - Every `messages list` / `messages get` call now runs through the shared `gws` runner with a 60 s

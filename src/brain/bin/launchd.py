@@ -8,7 +8,10 @@ process is by definition the right Python.
 
 Entry points (registered in pyproject.toml by T1.8):
     brain-install-launchd  → install_main()   [--with-reranker] [--with-dropfolders]
-    brain-uninstall-launchd → uninstall_main()
+    brain-uninstall-launchd → uninstall_main()  (no arguments; -h/--help runs nothing, F18)
+
+A ``LaunchdError`` (an unusable reranker input, a failed bootstrap) reaches the
+install user as one ``brain-install-launchd: error:`` line and exit 1 (F19).
 
 Optional labels (RM-14b): ``com.brain.reranker`` is installed only by
 ``--with-reranker``, then kept by every later install, flagless included,
@@ -40,7 +43,7 @@ from ..settings.rerank import (
     MIN_LAUNCHD_PORT,
     launchd_rerank_port,
 )
-from ._launcher import ensure_shim
+from ._launcher import ensure_shim, parse_no_args
 
 # The launchd labels brain installs. watcher is the KeepAlive vault-sync daemon;
 # brief (Plan 01) is a one-shot StartCalendarInterval job (07:00 daily).
@@ -477,18 +480,36 @@ def install_main(argv: Sequence[str] | None = None) -> None:
     )
     launchctl = resolve_launchctl()
     brain_home = _brain_home_root()
-    install_plists(
-        brain_home,
-        launchd_dir,
-        launchctl,
-        with_reranker=args.with_reranker,
-        with_dropfolders=args.with_dropfolders,
-    )
+    try:
+        install_plists(
+            brain_home,
+            launchd_dir,
+            launchctl,
+            with_reranker=args.with_reranker,
+            with_dropfolders=args.with_dropfolders,
+        )
+    except LaunchdError as exc:
+        # F19: one line, not a traceback. A reranker config error names the
+        # variable, never its value; a bootstrap error carries launchctl's own
+        # stderr, which is usually two lines, so whitespace is collapsed to keep
+        # the message on one. brain-up.sh reads only the nonzero exit.
+        print(f"brain-install-launchd: error: {' '.join(str(exc).split())}", file=sys.stderr)
+        raise SystemExit(1) from None
     print(f"🧠 brain LaunchAgents installed in {launchd_dir}")
 
 
-def uninstall_main() -> None:
-    """Entry point: brain-uninstall-launchd."""
+def uninstall_main(argv: Sequence[str] | None = None) -> None:
+    """Entry point: brain-uninstall-launchd (no arguments; ``-h``/``--help`` runs nothing).
+
+    *argv* defaults to ``sys.argv[1:]`` for the console script. An in-process
+    caller (``brain uninstall``) passes ``[]``: ``sys.argv`` is then brain's own.
+    """
+    parse_no_args(
+        "brain-uninstall-launchd",
+        "Boot out and delete every brain LaunchAgent (com.brain.*). Idempotent. "
+        "Takes no arguments.",
+        sys.argv[1:] if argv is None else argv,
+    )
     launchd_dir = Path(
         os.environ.get("BRAIN_LAUNCHD_DIR") or Path.home() / "Library" / "LaunchAgents"
     )
