@@ -50,8 +50,8 @@ from .cli_ingest import (
     _emit_secret_notice,
     _validate_sensitivity_or_exit,
 )
+from .cli_ingest_boundary import connect_or_exit
 from .config import Config
-from .db import connect
 from .errors import SecretGuardError, describe_failure
 from .ingest import Embedder, ExtractedDoc, ingest_document
 from .ingest import apple_notes as an
@@ -208,7 +208,7 @@ def _ingest_all(
         graph_syncer=_build_graph_syncer(cfg),
         allow_secrets=allow_secrets,
     )
-    with connect(cfg.database_url) as conn:
+    with connect_or_exit(cfg.database_url) as conn:
         conn.autocommit = True
         for note in batch.notes:
             # The conversion runs inside the guard too: a body is the note author's

@@ -51,8 +51,8 @@ from .cli_ingest import (
     _emit_secret_notice,
     _validate_sensitivity_or_exit,
 )
+from .cli_ingest_boundary import connect_or_exit
 from .config import Config
-from .db import connect
 from .errors import BrainError, SecretGuardError, describe_failure
 from .ingest import Embedder, ingest_document
 from .ingest import notion_archive as na
@@ -209,7 +209,7 @@ class _Run:
 
 
 def _ingest_all(export: na.ExportReader, plan: ne.ExportPlan, run: _Run) -> None:
-    with connect(run.cfg.database_url) as conn:
+    with connect_or_exit(run.cfg.database_url) as conn:
         conn.autocommit = True
         try:
             for ref in plan.pages:

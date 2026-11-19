@@ -18,7 +18,7 @@ from typing import Any, NoReturn
 import psycopg
 import typer
 
-from .db import connect
+from .cli_ingest_boundary import connect_or_exit
 from .ingest.import_sync import (
     ImportSyncRefused,
     PruneCandidate,
@@ -123,7 +123,7 @@ class DirSync:
 
     def dry_run_or_exit(self, database_url: str) -> None:
         """``--dry-run --sync``: the preflight and the listing on a connection of its own."""
-        with connect(database_url) as conn:
+        with connect_or_exit(database_url) as conn:
             self.preflight_or_exit(conn)
             self.prune(conn, graph_syncer=None)
 
