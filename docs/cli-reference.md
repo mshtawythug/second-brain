@@ -1633,6 +1633,21 @@ vault aside whole, so a `.quartz/` on disk moves with it to
 `--yes` skips the y/N prompt but **never** skips the pre-flight compatibility
 checks — those are what stop a restore from half-applying.
 
+Each leg previews and gates only on what it replaces: `--vault-only` never
+lists the database or asks for the typed phrase because of it, and `--db-only`
+does the same for the vault. With `--json`, prompts and warnings go to stderr
+and stdout carries exactly one JSON object; the typed phrase is still read from
+stdin when the target is not empty, and a declined run prints
+`{"restored": false, "aborted": true}` and exits 1.
+
+A database restore keeps the replaced database as `<db>_replaced_<timestamp>`,
+and prints the command that drops it on the server the restore actually used:
+`docker exec <container> psql …` when `pg_restore` ran in a container that
+serves `DATABASE_URL`, otherwise `psql -h <host> -p <port> -U <user> …`. The
+password is never printed. The archive is unpacked under
+`$BRAIN_HOME/run/restore-<timestamp>/` and removed when the command ends,
+whether it was declined, refused, failed or done.
+
 After a successful restore (either leg), `brain restore` writes
 `$BRAIN_HOME/state/restored-from.json`: the restored backup's `created_at`, the
 archive's file name (never its path) and when the restore ran. `brain doctor`

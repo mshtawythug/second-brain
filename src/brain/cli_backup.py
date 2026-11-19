@@ -11,6 +11,8 @@ module object inside a function body, the same delegation pattern as
 """
 from __future__ import annotations
 
+import shlex
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -19,8 +21,10 @@ import typer
 from .backup import (
     RESTORE_PHRASE,
     Preflight,
+    PreparedRestore,
     RestoreReport,
     create_backup,
+    discard_prepared_restore,
     latest_backup,
     preflight,
     prepare_restore,
@@ -167,12 +171,19 @@ def backup_cmd(
 
 
 def _print_preflight(
-    check: Preflight, archive: Path, *, vault_path: Path, target_database: str
+    check: Preflight,
+    archive: Path,
+    *,
+    vault_path: Path,
+    target_database: str,
+    db_leg: bool,
 ) -> None:
     """The pre-gate summary: what the archive holds versus what is here now.
 
     ``target_database`` is the database this restore replaces. It is not the
     archive's ``database_name``, which differs on a read replica (RM-47).
+    ``db_leg`` is False for ``--vault-only``, which never touches the database,
+    so the database is not listed as something that will be overwritten (F24).
     """
     manifest = check.manifest
     counts = manifest.counts
@@ -201,18 +212,19 @@ def _print_preflight(
     )
     typer.echo("")
     typer.echo("WILL BE OVERWRITTEN:")
-    typer.echo(f"  • database {target_database}")
-    typer.echo(
-        f"      currently holds {check.target_documents} documents / "
-        f"{check.target_chunks} chunks / {check.target_sources} sources"
-    )
+    if db_leg:
+        typer.echo(f"  • database {target_database}")
+        typer.echo(
+            f"      currently holds {check.target_documents} documents / "
+            f"{check.target_chunks} chunks / {check.target_sources} sources"
+        )
     if check.target_vault_files:
         typer.echo(f"  • vault {vault_path}")
         typer.echo(f"      currently holds {check.target_vault_files} files")
     typer.echo("")
 
 
-def _gate(check: Preflight, *, yes: bool) -> None:
+def _gate(check: Preflight, *, yes: bool, err: bool) -> None:
     """Confirm, then demand the typed phrase whenever the target is not empty.
 
     ``--yes`` skips the y/N prompt but can NEVER skip the typed phrase while
@@ -221,28 +233,89 @@ def _gate(check: Preflight, *, yes: bool) -> None:
     production wipe. When both targets are empty (the fresh-machine
     disaster-recovery case) nothing is being destroyed, so ``--yes`` is honoured
     fully and the flow stays scriptable.
+
+    ``err`` sends the prompts to stderr, which ``--json`` needs: the typed
+    phrase cannot be skipped by any flag, so a ``--json`` run on a non-empty
+    target always prompts, and stdout must carry nothing but the JSON (F23).
     """
     if not yes:
-        typer.confirm("Proceed?", default=False, abort=True)
+        if not err:
+            typer.confirm("Proceed?", default=False, abort=True)
+        elif _read_line_on_stderr("Proceed? [y/N]: ").strip().lower() not in {"y", "yes"}:
+            raise typer.Abort()
     if not check.target_is_non_empty:
         return
-    answer = typer.prompt(f'Type "{RESTORE_PHRASE}" to confirm', default="")
+    prompt = f'Type "{RESTORE_PHRASE}" to confirm'
+    answer = (
+        _read_line_on_stderr(f"{prompt}: ") if err else typer.prompt(prompt, default="")
+    )
     if answer != RESTORE_PHRASE:
-        typer.secho("Aborted — nothing was changed.", fg="yellow")
+        typer.secho("Aborted — nothing was changed.", fg="yellow", err=err)
         raise typer.Abort()
 
 
-def _print_report(report: RestoreReport, steps: list[str]) -> None:
+def _read_line_on_stderr(prompt: str) -> str:
+    """Prompt on stderr and read one line, writing NOTHING to stdout.
+
+    Not ``typer.prompt(..., err=True)``: Click still writes the prompt's last
+    character to stdout through ``input()`` (a readline workaround), which would
+    put stray text ahead of the ``--json`` object. End of input aborts, as it
+    does for Click's prompts.
+    """
+    typer.echo(prompt, nl=False, err=True)
+    line = sys.stdin.readline()
+    if not line:
+        raise typer.Abort()
+    return line.rstrip("\r\n")
+
+
+#: The only DSN keys the drop hint may print. An allowlist, so a password,
+#: an ``sslpassword`` or any key added later can never reach the terminal.
+_HINT_DSN_FLAGS = (("host", "-h"), ("port", "-p"))
+
+
+def drop_database_command(
+    database: str, *, database_url: str, container: str | None
+) -> str:
+    """The shell command that drops the database a restore parked (F22).
+
+    It targets the server the restore actually ran against, never an assumed
+    one. ``container`` is the container ``pg_restore`` ran in, which
+    :func:`brain.backup.pgtool.resolve_pg_tool` only picks after proving it
+    publishes ``database_url``'s port. Without one, no container is known to
+    serve this database, so the hint is ``psql`` against the DSN's host and port
+    rather than a guessed ``docker exec``. Only host, port and user are read
+    from the DSN, and every value is shell-quoted.
+    """
+    parts = dsn_parts(database_url)
+    user = ["-U", parts["user"]] if parts.get("user") else []
+    tail = [*user, "-d", "postgres", "-c", f"DROP DATABASE {database}"]
+    if container is not None:
+        argv = ["docker", "exec", container, "psql", *tail]
+    else:
+        where = [
+            word
+            for key, flag in _HINT_DSN_FLAGS
+            if parts.get(key)
+            for word in (flag, parts[key])
+        ]
+        argv = ["psql", *where, *tail]
+    return shlex.join(argv)
+
+
+def _print_report(report: RestoreReport, steps: list[str], *, database_url: str) -> None:
     for step in steps:
         _ok(step)
     typer.echo("")
     typer.secho("Done.", fg="green")
     if report.replaced_database:
         typer.echo(f"  The previous database is retained as {report.replaced_database}.")
-        typer.echo(
-            "  Drop it when satisfied:   docker exec second-brain-postgres psql "
-            f"-U brain -d postgres -c 'DROP DATABASE {report.replaced_database}'"
+        command = drop_database_command(
+            report.replaced_database,
+            database_url=database_url,
+            container=report.restore_container,
         )
+        typer.echo(f"  Drop it when satisfied:   {command}")
     if report.replaced_vault_path:
         typer.echo(f"  The previous vault is retained at {report.replaced_vault_path}.")
     for item in report.follow_up:
@@ -295,7 +368,34 @@ def restore_cmd(
         typer.secho(str(exc), fg="red", err=True)
         raise typer.Exit(1) from exc
 
-    if vault_only and not state.manifest.vault_included:
+    # The unpack is a plaintext copy of the archive. Remove it however this
+    # ends — declined, refused, blocked, failed or done (F27).
+    try:
+        _restore_prepared(
+            archive,
+            cfg,
+            state,
+            yes=yes,
+            db_leg=db_leg,
+            vault_leg=vault_leg,
+            json_output=json_output,
+        )
+    finally:
+        discard_prepared_restore(state, cfg)
+
+
+def _restore_prepared(
+    archive: Path,
+    cfg: Config,
+    state: PreparedRestore,
+    *,
+    yes: bool,
+    db_leg: bool,
+    vault_leg: bool,
+    json_output: bool,
+) -> None:
+    """Everything after the archive is unpacked: preflight, gate, restore, report."""
+    if not db_leg and not state.manifest.vault_included:  # i.e. --vault-only
         raise typer.BadParameter(
             f"{archive.name} contains no vault (it was taken with --no-vault)"
         )
@@ -304,66 +404,24 @@ def restore_cmd(
             f"  [warn]   {archive.name}.sha256 is missing — falling back to the "
             "manifest's per-member checksums.",
             fg="yellow",
+            err=json_output,
         )
 
-    try:
-        embedder = _build_embedder(cfg)
-        with connect(cfg.database_url) as conn:
-            check = preflight(
-                state.staging_dir,
-                state.manifest,
-                cfg,
-                embedder,
-                conn,
-                vault_path=cfg.vault_path,
-                db_leg=db_leg,
-                vault_leg=vault_leg,
-            )
-    except BrainError as exc:
-        typer.secho(str(exc), fg="red", err=True)
-        raise typer.Exit(1) from exc
-
-    # In --json mode stdout must stay parseable, so the human summary is
-    # suppressed and any blocking issues come back as JSON instead.
-    if not json_output:
-        _print_preflight(
-            check,
-            archive,
-            vault_path=cfg.vault_path,
-            target_database=dsn_parts(cfg.database_url).get("dbname", ""),
-        )
-        for issue in check.issues:
-            colour = "red" if issue.fatal else "yellow"
-            marker = "FATAL" if issue.fatal else "note "
-            typer.secho(f"  [{marker}]  {issue.message}", fg=colour)
-            typer.secho(f"            {issue.remedy}", fg=colour)
-
-    if check.blocked:
-        if json_output:
-            emit_json(
-                {
-                    "restored": False,
-                    "blocked": True,
-                    "issues": [
-                        {
-                            "code": issue.code,
-                            "fatal": issue.fatal,
-                            "message": issue.message,
-                            "remedy": issue.remedy,
-                        }
-                        for issue in check.issues
-                    ],
-                }
-            )
-        else:
-            typer.secho("\nRestore refused — nothing was changed.", fg="red", err=True)
-        raise typer.Exit(EXIT_INCOMPATIBLE)
+    embedder, check = _run_preflight(cfg, state, db_leg=db_leg, vault_leg=vault_leg)
+    _show_preflight(check, archive, cfg, db_leg=db_leg, json_output=json_output)
 
     if not json_output:
         typer.echo("A pre-restore backup will be taken first, into:")
         typer.echo(f"  {cfg.backup_dir}")
         typer.echo("")
-    _gate(check, yes=yes)
+    try:
+        _gate(check, yes=yes, err=json_output)
+    except typer.Abort:
+        if not json_output:
+            raise
+        # Without this a declined `--json` run printed a prompt and no JSON (F23).
+        emit_json({"restored": False, "aborted": True})
+        raise typer.Exit(1) from None
 
     steps: list[str] = []
     try:
@@ -386,33 +444,97 @@ def restore_cmd(
         raise typer.Exit(1) from exc
 
     if json_output:
+        emit_json(_result_payload(archive, state, report))
+        return
+    _print_report(report, steps, database_url=cfg.database_url)
+
+
+def _run_preflight(
+    cfg: Config, state: PreparedRestore, *, db_leg: bool, vault_leg: bool
+) -> tuple[Embedder, Preflight]:
+    try:
+        embedder = _build_embedder(cfg)
+        with connect(cfg.database_url) as conn:
+            check = preflight(
+                state.staging_dir,
+                state.manifest,
+                cfg,
+                embedder,
+                conn,
+                vault_path=cfg.vault_path,
+                db_leg=db_leg,
+                vault_leg=vault_leg,
+            )
+    except BrainError as exc:
+        typer.secho(str(exc), fg="red", err=True)
+        raise typer.Exit(1) from exc
+    return embedder, check
+
+
+def _show_preflight(
+    check: Preflight, archive: Path, cfg: Config, *, db_leg: bool, json_output: bool
+) -> None:
+    """Print the summary and its issues; exit 3 when a fatal issue blocks."""
+    # In --json mode stdout must stay parseable, so the human summary is
+    # suppressed and any blocking issues come back as JSON instead.
+    if not json_output:
+        _print_preflight(
+            check,
+            archive,
+            vault_path=cfg.vault_path,
+            target_database=dsn_parts(cfg.database_url).get("dbname", ""),
+            db_leg=db_leg,
+        )
+        for issue in check.issues:
+            colour = "red" if issue.fatal else "yellow"
+            marker = "FATAL" if issue.fatal else "note "
+            typer.secho(f"  [{marker}]  {issue.message}", fg=colour)
+            typer.secho(f"            {issue.remedy}", fg=colour)
+
+    if not check.blocked:
+        return
+    if json_output:
         emit_json(
             {
-                "schema": state.manifest.schema,
-                "restored": True,
-                "db_restored": report.db_restored,
-                "vault_restored": report.vault_restored,
-                "archive_path": str(archive),
-                "manifest": state.manifest.to_dict(),
-                "pre_restore_backup": (
-                    str(report.pre_restore_backup)
-                    if report.pre_restore_backup
-                    else None
-                ),
-                "replaced_database": report.replaced_database,
-                "replaced_vault_path": (
-                    str(report.replaced_vault_path)
-                    if report.replaced_vault_path
-                    else None
-                ),
-                "documents": report.documents,
-                "chunks": report.chunks,
-                "follow_up": list(report.follow_up),
+                "restored": False,
+                "blocked": True,
+                "issues": [
+                    {
+                        "code": issue.code,
+                        "fatal": issue.fatal,
+                        "message": issue.message,
+                        "remedy": issue.remedy,
+                    }
+                    for issue in check.issues
+                ],
             }
         )
-        return
+    else:
+        typer.secho("\nRestore refused — nothing was changed.", fg="red", err=True)
+    raise typer.Exit(EXIT_INCOMPATIBLE)
 
-    _print_report(report, steps)
+
+def _result_payload(
+    archive: Path, state: PreparedRestore, report: RestoreReport
+) -> dict[str, Any]:
+    return {
+        "schema": state.manifest.schema,
+        "restored": True,
+        "db_restored": report.db_restored,
+        "vault_restored": report.vault_restored,
+        "archive_path": str(archive),
+        "manifest": state.manifest.to_dict(),
+        "pre_restore_backup": (
+            str(report.pre_restore_backup) if report.pre_restore_backup else None
+        ),
+        "replaced_database": report.replaced_database,
+        "replaced_vault_path": (
+            str(report.replaced_vault_path) if report.replaced_vault_path else None
+        ),
+        "documents": report.documents,
+        "chunks": report.chunks,
+        "follow_up": list(report.follow_up),
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ The three byte constants are re-exported under their original names because
 """
 from __future__ import annotations
 
+import re
 import shutil
 import tarfile
 from collections.abc import Callable, Sequence
@@ -75,6 +76,9 @@ _VAULT_DISK_FACTOR = 2
 FOLLOW_UP = ("brain graphrag build --force", "brain doctor")
 #: The step reported when the RM-47 marker cannot be written after a completed restore.
 RESTORED_FROM_NOT_RECORDED = "restored-from marker NOT recorded (brain doctor will not show it)"
+#: The only shape :func:`discard_prepared_restore` will delete: the directory
+#: :func:`prepare_restore` names from ``TIMESTAMP_FORMAT`` (``%Y%m%d-%H%M%S``).
+_STAGING_NAME_RE = re.compile(r"restore-\d{8}-\d{6}")
 
 
 @dataclass(frozen=True)
@@ -131,6 +135,32 @@ class RestoreReport:
     documents: int
     chunks: int
     follow_up: tuple[str, ...]
+    #: The container ``pg_restore`` ran in — proven to serve ``DATABASE_URL``
+    #: by its published port — or ``None`` when the host's ``pg_restore`` ran.
+    #: The CLI builds the "drop the parked database" hint from it (F22).
+    restore_container: str | None
+
+
+def _staging_root(cfg: Config) -> Path:
+    return cfg.brain_home / "run"
+
+
+def discard_prepared_restore(state: PreparedRestore, cfg: Config) -> None:
+    """Remove the unpacked archive :func:`prepare_restore` left in ``run/`` (F27).
+
+    The unpack is a plaintext copy of the whole dump and vault, so it must not
+    outlive a declined, refused or failed restore. This deletes ONLY a
+    directory that is exactly ``$BRAIN_HOME/run/restore-<timestamp>``; anything
+    else — a caller-built ``PreparedRestore`` pointing elsewhere included — is
+    left alone. A symlink at that path is not followed: ``shutil.rmtree``
+    refuses a symlinked root (``tests/test_restore_hints.py`` pins it). A failed
+    removal is ignored: a leftover directory is untidy, not dangerous, and must
+    not mask the original error.
+    """
+    path = state.staging_dir
+    if path.parent != _staging_root(cfg) or not _STAGING_NAME_RE.fullmatch(path.name):
+        return
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def _count_vault_files(vault_path: Path) -> int:
@@ -192,12 +222,19 @@ def prepare_restore(
             ),
         )
     manifest = read_manifest(archive)
-    staging_dir = cfg.brain_home / "run" / f"restore-{now.strftime(TIMESTAMP_FORMAT)}"
+    staging_dir = _staging_root(cfg) / f"restore-{now.strftime(TIMESTAMP_FORMAT)}"
     shutil.rmtree(staging_dir, ignore_errors=True)
-    extract_archive(archive, staging_dir)
-    return PreparedRestore(
+    state = PreparedRestore(
         staging_dir=staging_dir, manifest=manifest, sidecar_ok=sidecar_ok
     )
+    try:
+        extract_archive(archive, staging_dir)
+    except BaseException:
+        # `extract_archive` creates the directory before it vets the members,
+        # so a refused (hostile) archive would otherwise leave it behind (F27).
+        discard_prepared_restore(state, cfg)
+        raise
+    return state
 
 
 def _checksum_issues(
@@ -352,7 +389,9 @@ def preflight(
                     )
                 )
 
-    counts = summary_counts(conn) if conn is not None else None
+    # Each leg counts only what it would replace: a `--vault-only` restore never
+    # touches the database, so it must neither preview nor gate on it (F24).
+    counts = summary_counts(conn) if db_leg and conn is not None else None
     target_vault_files = _count_vault_files(vault_path) if vault_leg else 0
 
     dump_entry = manifest.files.get(DUMP_MEMBER)
@@ -516,8 +555,12 @@ def _restore_database(
     stamp: str,
     runner: CommandRunner,
     report: Callable[[str], None],
-) -> tuple[int, int, str]:
-    """Restore into a staging DB, verify it, then swap it in. Returns counts + parked."""
+) -> tuple[int, int, str, str | None]:
+    """Restore into a staging DB, verify it, then swap it in.
+
+    Returns the counts, the parked database's name, and the container
+    ``pg_restore`` ran in (``None`` for the host leg).
+    """
     manifest = state.manifest
     parts = dsn_parts(cfg.database_url)
     live_db = _validated_restorable_db_name(parts.get("dbname", ""))
@@ -572,7 +615,7 @@ def _restore_database(
         _swap_databases(maintenance, live_db, staging_db, parked_db)
         report(f"swapped: {live_db} → {parked_db}")
 
-    return documents, chunks, parked_db
+    return documents, chunks, parked_db, plan.container
 
 
 def restore_backup(
@@ -602,7 +645,6 @@ def restore_backup(
     active_runner = runner if runner is not None else SubprocessRunner()
     now = clock() if clock is not None else datetime.now(UTC)
     report = on_step if on_step is not None else (lambda _message: None)
-    stamp = now.strftime(TIMESTAMP_FORMAT)
 
     # Length-check the live database name BEFORE the pre-restore backup below,
     # not just where the derived names are built. `_restore_database` validates
@@ -618,6 +660,40 @@ def restore_backup(
         if prepared is not None
         else prepare_restore(archive, cfg, clock=lambda: now)
     )
+    # The unpack is removed on EVERY exit, not only on success (F27); nothing
+    # after this point reads it — the report and the manifest are in memory.
+    try:
+        return _apply_restore(
+            archive,
+            cfg,
+            state,
+            db_leg=db_leg,
+            vault_leg=vault_leg,
+            runner=active_runner,
+            now=now,
+            pre_backup=pre_backup,
+            report=report,
+            embedder=embedder,
+        )
+    finally:
+        discard_prepared_restore(state, cfg)
+
+
+def _apply_restore(
+    archive: Path,
+    cfg: Config,
+    state: PreparedRestore,
+    *,
+    db_leg: bool,
+    vault_leg: bool,
+    runner: CommandRunner,
+    now: datetime,
+    pre_backup: Callable[[], Path] | None,
+    report: Callable[[str], None],
+    embedder: Embedder | None,
+) -> RestoreReport:
+    """Everything after the archive is unpacked: the safety backup, then each leg."""
+    stamp = now.strftime(TIMESTAMP_FORMAT)
     manifest = state.manifest
 
     # Safety net first: a restore without one is exactly the scenario the
@@ -630,7 +706,7 @@ def restore_backup(
             out_dir=cfg.backup_dir,
             include_vault=vault_leg,
             label="pre-restore",
-            runner=active_runner,
+            runner=runner,
             clock=lambda: now,
             embedder=embedder,
         ).archive_path
@@ -639,10 +715,11 @@ def restore_backup(
     documents = 0
     chunks = 0
     replaced_database: str | None = None
+    restore_container: str | None = None
     db_restored = False
     if db_leg:
-        documents, chunks, replaced_database = _restore_database(
-            cfg, state, stamp=stamp, runner=active_runner, report=report
+        documents, chunks, replaced_database, restore_container = _restore_database(
+            cfg, state, stamp=stamp, runner=runner, report=report
         )
         db_restored = True
 
@@ -676,8 +753,6 @@ def restore_backup(
         except ReplicaMarkerError:
             report(RESTORED_FROM_NOT_RECORDED)
 
-    shutil.rmtree(state.staging_dir, ignore_errors=True)
-
     return RestoreReport(
         db_restored=db_restored,
         vault_restored=vault_restored,
@@ -687,4 +762,5 @@ def restore_backup(
         documents=documents,
         chunks=chunks,
         follow_up=FOLLOW_UP,
+        restore_container=restore_container,
     )
