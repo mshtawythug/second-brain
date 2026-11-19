@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import plistlib
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -568,6 +569,90 @@ def test_install_main_rejects_an_unknown_flag(monkeypatch: pytest.MonkeyPatch) -
         install_main(["--with-everything"])
 
     assert exc.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# F19: an unusable reranker input is one line and exit 1, never a traceback
+# ---------------------------------------------------------------------------
+
+_MARKER = "synthetic-marker-7f3a"
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "with_model"),
+    [
+        ("BRAIN_RERANK_GGUF", None, False),  # the default $BRAIN_HOME/models/... is absent
+        ("BRAIN_RERANK_GGUF", f"models/{_MARKER}.gguf", False),  # relative
+        ("BRAIN_RERANK_URL", f"http://{_MARKER}.example.test:8091", True),  # not loopback
+    ],
+    ids=["missing-model", "relative-model", "non-loopback-url"],
+)
+def test_install_main_reranker_config_error_is_one_line(
+    tmp_path: Path,
+    brain_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    variable: str,
+    value: str | None,
+    with_model: bool,
+) -> None:
+    agents = tmp_path / "agents"
+    stub, log = _recorder(tmp_path)
+    monkeypatch.setenv("BRAIN_HOME", str(brain_home))
+    monkeypatch.setenv("BRAIN_LAUNCHD_DIR", str(agents))
+    monkeypatch.setenv("BRAIN_LAUNCHCTL", str(stub))
+    if with_model:
+        monkeypatch.setenv("BRAIN_RERANK_GGUF", str(_gguf(tmp_path)))
+    if value is not None:
+        monkeypatch.setenv(variable, value)
+
+    with pytest.raises(SystemExit) as exc:
+        install_main(["--with-reranker"])
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    (line,) = err.splitlines()
+    assert line.startswith("brain-install-launchd: error: ")
+    assert variable in line
+    assert _MARKER not in err
+    assert _calls(log) == []
+    assert not agents.exists() or sorted(agents.iterdir()) == []
+    assert not (brain_home / ".shims").exists()
+
+
+def test_install_launchd_missing_model_prints_no_traceback(tmp_path: Path) -> None:
+    """The QA repro (C38), end to end through the console script: no GGUF on disk."""
+    brain_home = tmp_path / "brain"
+    brain_home.mkdir()
+    agents = tmp_path / "agents"
+    stub, log = _recorder(tmp_path)
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "BRAIN_HOME": str(brain_home),
+        "BRAIN_LAUNCHD_DIR": str(agents),
+        "BRAIN_LAUNCHCTL": str(stub),
+        "BRAIN_IGNORE_CWD_DOTENV": "1",
+    }
+    script = Path(__file__).resolve().parents[1] / "bin" / "brain-install-launchd"
+
+    result = subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(script), "--with-reranker"],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "Traceback" not in result.stderr
+    (line,) = result.stderr.splitlines()
+    assert line.startswith("brain-install-launchd: error: ") and "BRAIN_RERANK_GGUF" in line
+    assert _calls(log) == []
+    assert not agents.exists()
+    assert not (brain_home / ".shims").exists()
 
 
 # ---------------------------------------------------------------------------

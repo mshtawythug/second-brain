@@ -129,14 +129,18 @@ def test_undoubled_uninstall_plists_lands_on_the_env_stub(
 
 
 def test_install_main_lands_on_the_env_stub(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     launchd_dir, _ = _isolate(monkeypatch, tmp_path)
     env_before, path_before = len(_calls(_env_stub())), len(_calls(_path_stub()))
 
-    with pytest.raises(LaunchdError, match="bootstrap failed"):
+    # The stub's failed bootstrap is install_main's one-line error, exit 1 (F19),
+    # where it used to escape as a LaunchdError traceback.
+    with pytest.raises(SystemExit) as exc:
         install_main([])
 
+    assert exc.value.code == 1
+    assert "brain-install-launchd: error: launchctl bootstrap failed" in capsys.readouterr().err
     _assert_only_the_env_stub_was_called(env_before, path_before, str(launchd_dir))
 
 

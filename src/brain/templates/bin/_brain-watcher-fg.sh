@@ -34,6 +34,17 @@
 
 set -euo pipefail
 
+# Arguments (F18): none. -h/--help prints the usage and exits 0 BEFORE any
+# action; anything else is a usage error (exit 2), never a silent run.
+usage() {
+  echo "Usage: _brain-watcher-fg [-h|--help]  — launchd's foreground wrapper for com.brain.watcher: writes the pid file, then execs brain vault sync --watch. Run by launchd, not by hand. Takes no arguments."
+}
+case "$#:${1:-}" in
+  0:) ;;
+  1:-h|1:--help) usage; exit 0 ;;
+  *) echo "error: unknown argument(s): $*" >&2; usage >&2; exit 2 ;;
+esac
+
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 VENV_BIN="$PROJECT_ROOT/.venv/bin"

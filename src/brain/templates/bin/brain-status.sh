@@ -8,6 +8,17 @@
 
 set -euo pipefail
 
+# Arguments (F18): none. -h/--help prints the usage and exits 0 BEFORE any
+# action; anything else is a usage error (exit 2), never a silent run.
+usage() {
+  echo "Usage: brain-status [-h|--help]  — show whether the brain vault-sync watcher is running, and the vault it watches. Read-only. Takes no arguments."
+}
+case "$#:${1:-}" in
+  0:) ;;
+  1:-h|1:--help) usage; exit 0 ;;
+  *) echo "error: unknown argument(s): $*" >&2; usage >&2; exit 2 ;;
+esac
+
 # Shim is installed at $BRAIN_HOME/.shims/brain-status, so $BRAIN_HOME is
 # two parent-traversals up (.shims/ → $BRAIN_HOME). Honor an explicit
 # BRAIN_HOME override if the launcher set one.

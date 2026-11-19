@@ -11,6 +11,17 @@
 
 set -euo pipefail
 
+# Arguments (F18): none. -h/--help prints the usage and exits 0 BEFORE any
+# action; anything else is a usage error (exit 2), never a silent run.
+usage() {
+  echo "Usage: _brain-dropfolders-fg [-h|--help]  — launchd's one-shot wrapper for com.brain.dropfolders: runs brain ingest-folder --configured --since 2d once. Run by launchd, not by hand. Takes no arguments."
+}
+case "$#:${1:-}" in
+  0:) ;;
+  1:-h|1:--help) usage; exit 0 ;;
+  *) echo "error: unknown argument(s): $*" >&2; usage >&2; exit 2 ;;
+esac
+
 if [[ -n "${BRAIN_PY:-}" ]]; then
     PY="$BRAIN_PY"
 elif command -v python3 >/dev/null 2>&1; then

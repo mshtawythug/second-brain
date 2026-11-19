@@ -1,4 +1,5 @@
-"""Shared shim-install drift-protection and execvpe helper for brain-* console scripts."""
+"""Shared argv guard, shim-install drift-protection and execvpe helper for brain-* scripts."""
+import argparse
 import contextlib
 import hashlib
 import os
@@ -10,6 +11,18 @@ from pathlib import Path
 from typing import NoReturn
 
 from ..config import _brain_home_root
+
+
+def parse_no_args(prog: str, description: str, argv: Sequence[str]) -> None:
+    """Accept no arguments but ``-h``/``--help``, and do it before any action (F18).
+
+    ``-h``/``--help`` prints the usage and exits 0; anything else is argparse's
+    usage error (exit 2). The daemon scripts used to ignore argv, so ``--help``
+    ran them: bootouts, pkill sweeps, plist deletion. Callers run this before
+    resolving ``$BRAIN_HOME``, installing a shim or exec'ing anything.
+    """
+    parser = argparse.ArgumentParser(prog=prog, description=description)
+    parser.parse_args(list(argv))
 
 
 def _sha256(data: bytes) -> str:

@@ -20,6 +20,17 @@
 
 set -euo pipefail
 
+# Arguments (F18): none. -h/--help prints the usage and exits 0 BEFORE any
+# action; anything else is a usage error (exit 2), never a silent run.
+usage() {
+  echo "Usage: brain-down [-h|--help]  — stop the brain vault-sync watcher: boot out its LaunchAgents and stop the processes in its pid files (and legacy wiki leftovers). The plists stay. Takes no arguments."
+}
+case "$#:${1:-}" in
+  0:) ;;
+  1:-h|1:--help) usage; exit 0 ;;
+  *) echo "error: unknown argument(s): $*" >&2; usage >&2; exit 2 ;;
+esac
+
 # Resolve $BRAIN_HOME from this script's location ($BRAIN_HOME/.shims/ under a
 # pipx install, $repo_root/bin/ in a dev checkout) so the pid paths match where
 # the fg wrappers write them. Honor an explicit BRAIN_HOME override if set.
