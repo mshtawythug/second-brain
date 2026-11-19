@@ -264,7 +264,6 @@ def test_json_abort_emits_an_abort_object(
     assert _staging_dirs(cfg) == []
 
 
-
 class _InterruptingStdin:
     """A stdin whose read is interrupted, as by Ctrl-C at the prompt."""
 
@@ -300,6 +299,7 @@ def test_json_ctrl_c_at_the_prompt_emits_the_abort_object(
     assert runner.calls == []
     assert live_document_count(TEST_DATABASE_URL) == 1
     assert _staging_dirs(cfg) == []
+
 
 def test_json_missing_sidecar_warning_goes_to_stderr(
     archive: Path, wired: RefusingConnectionFactory, test_db: psycopg.Connection  # noqa: F811 — the imported fixture
@@ -463,4 +463,3 @@ def test_successful_restore_removes_staging_dir_and_still_prints_the_hint(
     assert result.exit_code == 0, result.output
     assert "Drop it when satisfied" in result.output
     assert _staging_dirs(cfg) == []
-

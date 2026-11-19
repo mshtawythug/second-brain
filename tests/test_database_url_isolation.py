@@ -447,7 +447,7 @@ def test_value_first_sweep_still_allows_the_one_legitimate_form() -> None:
 # --- conftest prod-DB destructive-reset guard (DB-safety) -------------------
 # conftest._assert_not_prod_db is the hard guard that aborts the destructive
 # DROP SCHEMA reset if it would ever target the prod container. These pin its
-# contract (prod port on localhost, or the prod db name on any host, is
+# contract (a prod port on ANY host, or the prod db name on any host, is
 # refused; the AGE test instance passes).
 
 

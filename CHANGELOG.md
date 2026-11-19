@@ -182,6 +182,25 @@ to `compare/v0.4.0...HEAD`. -->
   removed however the command ends, including a refused hostile archive. The removal touches only a
   `restore-<timestamp>` directory directly under `$BRAIN_HOME/run`, never a symlink.
 
+### Fixed — prod safety: `brain demo` cannot be pointed at the production database
+
+- `brain demo --database-url` could seed and query the production `second_brain` database. Its
+  guard refused ports 55432 and 5433 only for five literal local host spellings, and read the URL
+  with `urlparse`. These all got through: `127.1:55432`, `[::ffff:127.0.0.1]:55432`,
+  `localhost.:55432`, a percent-encoded `second%5Fbrain`, the key=value form
+  `host=localhost port=55432 dbname=second_brain`, and `?port=55432&dbname=second_brain`.
+- The guard now parses the DSN the way libpq does. It refuses a prod port on any host, including
+  every entry of a multi-host port list. A port or database the DSN leaves out is taken from
+  `PGPORT` / `PGDATABASE` and then libpq's defaults (5432, the user name).
+- It also refuses database `second_brain`, a `pg_service.conf` service (whose host, port and
+  database it cannot see), and a DSN it cannot parse. Each is refused before any connection is
+  attempted.
+- Test safety: the test suite's own guard (`tests/conftest.py`) also refused prod ports only for
+  literal local host spellings, and it read `TEST_DATABASE_URL` with `urlparse`, so a key=value
+  DSN on 55432 passed. It now refuses a prod port on any host, and parses `TEST_DATABASE_URL`
+  with `conninfo_to_dict` (with the `PGPORT` fallback) before anything connects.
+  `tests/test_restore_real_pg_tools.py` runs its admin DSN through the same guard.
+
 ### Added — `brain tags summarize`, a cited synthesis of one tag (RM-55)
 
 - `brain tags summarize TAG [--limit 20] [--json]` reads the tag's most recent non-draft documents,

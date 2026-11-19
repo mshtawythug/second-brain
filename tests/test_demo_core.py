@@ -190,3 +190,139 @@ def test_run_docker_translates_timeout(mocker: MockerFixture) -> None:
     mocker.patch("brain.demo._run", side_effect=subprocess.TimeoutExpired(["docker"], 120))
     with pytest.raises(DemoError, match="timed out"):
         demo_mod._run_docker(["docker", "compose", "up", "-d"])
+
+
+# --- rev-139: the demo prod guard, hardened ---------------------------------
+# Each DSN below reaches the prod database (port 55432/5433, or db
+# ``second_brain``) and each slipped past the old guard, which matched the host
+# against five literal local spellings and read the URL with ``urlparse``.
+
+
+class _RefusingConnect:
+    """A ``brain.demo.connect`` that records the attempt and NEVER connects.
+
+    Installed for every refusal test below, so a guard that lets a DSN through
+    fails the test on an ``AssertionError`` here — it cannot reach a server,
+    which matters: these DSNs name the production port.
+    """
+
+    def __init__(self) -> None:
+        self.attempts: list[str] = []
+
+    def __call__(self, database_url: str) -> object:
+        self.attempts.append(database_url)
+        raise AssertionError("brain demo attempted a connection")
+
+
+@pytest.fixture
+def refusing_connect(monkeypatch: pytest.MonkeyPatch) -> _RefusingConnect:
+    recorder = _RefusingConnect()
+    monkeypatch.setattr("brain.demo.connect", recorder)
+    return recorder
+
+
+_BYPASS_DSNS = [
+    "postgresql://brain:brain@127.1:55432/second_brain_demo",
+    "postgresql://brain:brain@[::ffff:127.0.0.1]:55432/second_brain_demo",
+    "postgresql://brain:brain@localhost.:55432/second_brain_demo",
+    "postgresql://brain:brain@127.0.0.2:55432/second_brain_demo",
+    "host=host.docker.internal port=55432 dbname=second_brain_demo",
+    "host=host.docker.internal port=5433 dbname=second_brain_demo",
+    "postgresql://brain:brain@localhost:5434/second%5Fbrain",
+    "host=localhost port=55432 dbname=second_brain",
+    "host=localhost port=55432 dbname=second_brain_demo user=brain",
+    "postgresql://brain:brain@localhost/second_brain_demo?port=55432",
+    "postgresql://brain:brain@localhost/?port=55432&dbname=second_brain",
+    "host=db-a,db-b port=5434,55432 dbname=second_brain_demo",
+    "postgresql://brain:brain@db-a:5434,db-b:55432/second_brain_demo",
+]
+
+
+@pytest.mark.parametrize("dsn", _BYPASS_DSNS)
+def test_guard_refuses_every_spelling_of_prod(dsn: str) -> None:
+    with pytest.raises(BrainError, match="PROD"):
+        demo_mod._assert_not_demo_prod_db(dsn)
+
+
+@pytest.mark.parametrize("dsn", _BYPASS_DSNS)
+def test_seed_refuses_before_connecting(
+    dsn: str, refusing_connect: _RefusingConnect
+) -> None:
+    with pytest.raises(BrainError, match="PROD"):
+        demo_mod.seed_demo(dsn)
+    assert refusing_connect.attempts == []
+
+
+@pytest.mark.parametrize("dsn", _BYPASS_DSNS)
+def test_query_refuses_before_connecting(
+    dsn: str, refusing_connect: _RefusingConnect
+) -> None:
+    with pytest.raises(BrainError, match="PROD"):
+        demo_mod.query_demo(dsn, "anything")
+    assert refusing_connect.attempts == []
+
+
+@pytest.mark.parametrize(
+    ("env", "dsn"),
+    [
+        ({"PGPORT": "55432"}, "postgresql://brain:brain@localhost/second_brain_demo"),
+        ({"PGPORT": "55432"}, "host=localhost dbname=second_brain_demo"),
+        ({"PGDATABASE": "second_brain"}, "postgresql://brain:brain@localhost:5434"),
+        ({"PGUSER": "second_brain"}, "host=localhost port=5434"),
+    ],
+    ids=["pgport-url", "pgport-keyword", "pgdatabase", "user-as-default-dbname"],
+)
+def test_guard_applies_the_libpq_environment_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    refusing_connect: _RefusingConnect,
+    env: dict[str, str],
+    dsn: str,
+) -> None:
+    """A DSN without a port or db name gets libpq's: PGPORT, PGDATABASE, then the user."""
+    for key in ("PGPORT", "PGDATABASE", "PGUSER", "PGSERVICE"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    with pytest.raises(BrainError, match="PROD"):
+        demo_mod.seed_demo(dsn)
+    assert refusing_connect.attempts == []
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    ["host=localhost port", "postgresql://brain@localhost:notaport/second_brain_demo"],
+    ids=["malformed-keyword", "non-numeric-port"],
+)
+def test_guard_refuses_an_unparseable_dsn(
+    dsn: str, refusing_connect: _RefusingConnect
+) -> None:
+    with pytest.raises(BrainError):
+        demo_mod.seed_demo(dsn)
+    assert refusing_connect.attempts == []
+
+
+def test_guard_refuses_a_service_it_cannot_see_through(
+    monkeypatch: pytest.MonkeyPatch, refusing_connect: _RefusingConnect
+) -> None:
+    """``service=`` takes host/port/dbname from pg_service.conf, out of the guard's sight."""
+    monkeypatch.delenv("PGSERVICE", raising=False)
+    with pytest.raises(BrainError, match="service"):
+        demo_mod.seed_demo("service=synthetic_demo")
+    assert refusing_connect.attempts == []
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        demo_mod.demo_database_url(55433),
+        "postgresql://brain:brain@localhost:5434/synthetic_scratch_test",
+        "host=localhost port=5434 dbname=synthetic_scratch_test user=brain",
+    ],
+)
+def test_guard_still_allows_the_demo_and_test_servers(
+    monkeypatch: pytest.MonkeyPatch, dsn: str
+) -> None:
+    for key in ("PGPORT", "PGDATABASE", "PGUSER", "PGSERVICE"):
+        monkeypatch.delenv(key, raising=False)
+    demo_mod._assert_not_demo_prod_db(dsn)  # must not raise

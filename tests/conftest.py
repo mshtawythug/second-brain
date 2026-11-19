@@ -128,11 +128,26 @@ def _assert_not_prod_db(host: str | None, port: int | None, dbname: str | None) 
         )
 
 
-# Fail fast at import/collection time on the resolved TEST_DATABASE_URL.
-_test_url = urlparse(TEST_DATABASE_URL)
-_assert_not_prod_db(
-    _test_url.hostname, _test_url.port, (_test_url.path or "").lstrip("/")
-)
+def _assert_dsn_not_prod(dsn: str) -> None:
+    """:func:`_assert_not_prod_db` on a whole DSN, parsed the way libpq parses it.
+
+    ``psycopg.conninfo.conninfo_to_dict`` reads every form, URL, query string
+    (``?port=``), percent-encoding and key=value. ``urlparse`` saw a key=value
+    DSN as having no host, port or path, so a keyword DSN on 55432 used to pass.
+    Each entry of a multi-host port list is checked, and an absent port falls
+    back to ``PGPORT`` and then libpq's 5432, as libpq does.
+    """
+    params = psycopg.conninfo.conninfo_to_dict(dsn)
+    host = str(params.get("host") or "") or None
+    dbname = str(params.get("dbname") or os.environ.get("PGDATABASE") or "") or None
+    fallback = os.environ.get("PGPORT") or "5432"
+    for entry in str(params.get("port") or "").split(","):
+        _assert_not_prod_db(host, int(entry.strip() or fallback), dbname)
+
+
+# Fail fast at import/collection time on the resolved TEST_DATABASE_URL, before
+# the suite-lock fixture or any reset can connect to it.
+_assert_dsn_not_prod(TEST_DATABASE_URL)
 
 
 # --- Live PROD DB URL for read-only canary / eval tests ---------------------

@@ -348,3 +348,36 @@ tests/test_repo_hygiene_files.py --no-cov`. Then `ruff check`, `mypy src/` and
   `127.0.0.2` and `host.docker.internal` all passed on 55432. It now refuses a prod port on ANY
   host. The two tests that pinned the old scoping are inverted. `test_restore_real_pg_tools.py`
   refuses its `ADMIN_DSN` at import.
+
+## 10. Review round 2 (rev-139 r2; scope widened by team-lead to land here)
+
+Master `66cd9cb2` was merged in (no rebase, no conflicts).
+
+- **Prod safety, `brain demo`.** `src/brain/demo/__init__.py` `_assert_not_demo_prod_db` used
+  `urlparse` and the `_LOCAL_HOSTS` list. It now does the following:
+  - parses with `conninfo_to_dict`;
+  - refuses 55432/5433 on any host and on every entry of a multi-host port list;
+  - falls back to `PGPORT` / `PGDATABASE` / user name / libpq's 5432;
+  - refuses `second_brain`;
+  - refuses `service=` / `PGSERVICE`;
+  - raises `BrainError` for an unparseable DSN or a non-numeric port.
+
+  `_LOCAL_HOSTS` is deleted. The refusal tests install a recording `connect` that never connects,
+  so even the RED run against the old guard could not reach a server.
+- **Test safety, `tests/conftest.py`.** `_assert_dsn_not_prod(dsn)` parses `TEST_DATABASE_URL`
+  with `conninfo_to_dict` at import, with the `PGPORT` fallback and every port of a list checked.
+- **Stale comments.** The `demo/__init__.py` module docstring and the guard-constants comment
+  are updated. So is the contract comment in `tests/test_database_url_isolation.py`.
+- **PEP 8.** Blank lines and the trailing newline in `tests/test_restore_qa_c24.py` are fixed.
+
+### Not in scope (round 2, for the backlog)
+
+- **`src/brain/backup/pgtool.py:46` `_LOCAL_HOSTS` (`DsnTarget.is_local`).** It misses loopback
+  aliases such as `127.1` and `localhost.`. That fails safe: a missed alias makes `is_local`
+  False, so `container_serves` / `discover_container` return False/None and the host leg (which
+  honours `-h`/`-p`) is chosen. It never sends a dump or restore into a container that does not
+  serve the DSN. The cost is only a missed container leg for an unusual spelling.
+- **`brain demo status --port N`.** `src/brain/demo/__init__.py` `status` → `_count_documents`
+  opens `demo_database_url(port)` (db `second_brain_demo`) without the guard. It is read-only
+  (`SELECT count(*)`), and its database is never `second_brain`. Guarding it would turn a
+  status probe into an error, so it is left for triage.

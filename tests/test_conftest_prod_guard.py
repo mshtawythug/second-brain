@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 
 from tests.conftest import (
+    _assert_dsn_not_prod,
     _assert_not_prod_db,
     _looks_like_prod_db,
     prod_database_url,
@@ -88,7 +89,7 @@ def test_guard_refuses_every_local_spelling_of_the_prod_port(host: str) -> None:
     [
         ("localhost", 5434, "second_brain_test"),
         ("localhost", 5434, "postgres"),
-        ("127.0.0.1", 5434, "fix_d_test_sbx"),
+        ("127.0.0.1", 5434, "synthetic_scratch_test_sbx"),
         ("localhost", 1, "none"),
         ("remote.example", 5434, "second_brain_test"),
     ],
@@ -120,3 +121,35 @@ def test_prod_url_resolver_never_returns_test_db(
     assert url.rstrip("/").endswith("/second_brain"), (
         f"canary resolver must point at the prod db name; got {url!r}"
     )
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "host=localhost port=55432 dbname=second_brain_test",
+        "host=localhost port=5434,55432 dbname=second_brain_test",
+        "postgresql://brain:brain@localhost/synthetic_scratch_test?port=55432",
+    ],
+)
+def test_import_time_guard_parses_every_dsn_form(dsn: str) -> None:
+    """A keyword-form or query-string prod DSN is refused as a pure call.
+
+    ``TEST_DATABASE_URL`` used to go through ``urlparse``, which reads a
+    keyword-form DSN as having no host, port or path — so a keyword DSN on 55432
+    passed the import-time guard and the suite-lock fixture connected to it.
+    """
+    with pytest.raises(RuntimeError, match="PROD database"):
+        _assert_dsn_not_prod(dsn)
+
+
+def test_import_time_guard_uses_pgport_for_a_portless_dsn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PGPORT", "55432")
+    with pytest.raises(RuntimeError, match="PROD database"):
+        _assert_dsn_not_prod("host=localhost dbname=second_brain_test")
+
+
+def test_import_time_guard_allows_the_test_server() -> None:
+    _assert_dsn_not_prod("host=localhost port=5434 dbname=second_brain_test")
+    _assert_dsn_not_prod("postgresql://brain:brain@localhost:5434/synthetic_scratch_test")

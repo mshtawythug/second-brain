@@ -8,15 +8,18 @@ search, and tear the whole thing down.
 
 The isolation contract is binding (see the module constants): a dedicated
 compose project / container / database / named volume, and a hard guard
-(:func:`_assert_not_demo_prod_db`) that refuses to operate against the prod
-database on port 55432 / db ``second_brain``. The Typer surface lives in
+(:func:`_assert_not_demo_prod_db`) that refuses to operate against a prod
+port (55432, or the historical 5433) on any host, or db ``second_brain``. The
+Typer surface lives in
 :mod:`brain.cli_demo`; this module owns the provision / seed / query / status /
 teardown primitives it calls.
 """
 from __future__ import annotations
 
+import getpass
 import importlib.resources
 import json
+import os
 import socket
 import subprocess
 import time
@@ -24,7 +27,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+
+import psycopg
 
 from brain.db import connect, ensure_relational_embedding_columns, run_migrations
 from brain.errors import BrainError, DemoError
@@ -53,12 +57,12 @@ DEFAULT_DEMO_PORT = 55433
 DEMO_HOME = Path.home() / ".brain-demo"
 COMPOSE_FILENAME = "docker-compose.yml"
 
-# Prod-safety guard values — mirror ``tests/conftest.py``'s ``_assert_not_prod_db``.
+# Prod-safety guard values. ``tests/conftest.py`` keeps its own copy on purpose:
+# the test suite's guard must not depend on the code under test.
 _PROD_PORTS = frozenset({5433, 55432})
 _PROD_DB_NAME = "second_brain"
-# ``0.0.0.0`` binds all interfaces on the local host — treat it as local so a
-# ``0.0.0.0:55432`` URL can't slip past the prod guard.
-_LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
+#: libpq's port when neither the DSN nor ``PGPORT`` names one.
+_LIBPQ_DEFAULT_PORT = 5432
 
 # How long to wait for the freshly-provisioned container to accept connections.
 _PROVISION_READY_TIMEOUT_S = 30.0
@@ -113,28 +117,87 @@ def demo_database_url(port: int) -> str:
     )
 
 
+def _dsn_params(database_url: str) -> dict[str, str]:
+    """Parse ``database_url`` exactly as libpq will, or raise :class:`BrainError`.
+
+    The message never quotes the DSN, which can carry a password.
+    """
+    try:
+        params = psycopg.conninfo.conninfo_to_dict(database_url)
+    except psycopg.ProgrammingError as exc:
+        raise BrainError(
+            "--database-url is not a valid PostgreSQL connection string "
+            "(URL or key=value form)."
+        ) from exc
+    return {key: str(value) for key, value in params.items() if value is not None}
+
+
+def _effective_ports(params: dict[str, str]) -> list[int]:
+    """Every port libpq may connect to: one per entry of a multi-host list.
+
+    An absent or empty entry falls back to ``PGPORT``, then libpq's 5432.
+    """
+    fallback = os.environ.get("PGPORT") or str(_LIBPQ_DEFAULT_PORT)
+    entries = params.get("port", "").split(",")
+    ports: list[int] = []
+    for entry in entries:
+        text = entry.strip() or fallback
+        try:
+            ports.append(int(text))
+        except ValueError as exc:
+            raise BrainError(
+                "--database-url (or PGPORT) names a port that is not a number."
+            ) from exc
+    return ports
+
+
+def _effective_dbname(params: dict[str, str]) -> str:
+    """The database libpq will open: dbname, then PGDATABASE, then the user name."""
+    explicit = params.get("dbname") or os.environ.get("PGDATABASE")
+    if explicit:
+        return explicit
+    user = params.get("user") or os.environ.get("PGUSER")
+    if user:
+        return user
+    try:
+        return getpass.getuser()
+    except (OSError, KeyError):  # no login name resolvable: libpq would fail too
+        return ""
+
+
 def _assert_not_demo_prod_db(database_url: str) -> None:
     """Refuse to operate against the prod database.
 
-    Copied in spirit from ``tests/conftest.py``'s ``_assert_not_prod_db``:
-    aborts when the resolved (host, port, dbname) looks like the prod container
-    — any known prod port (55432 current, 5433 historical) on a local host, OR
-    the exact prod database name on any host. Every demo primitive that opens a
-    connection calls this first so a mis-pointed ``--database-url`` can never
-    seed / query / drop prod data.
+    Resolves the DSN the way libpq will — :func:`psycopg.conninfo.conninfo_to_dict`
+    for URL, query-string, percent-encoded and key=value forms, then the
+    ``PGPORT`` / ``PGDATABASE`` / user-name defaults for what the DSN leaves
+    out — and refuses when ANY port it may connect to is a prod port (55432
+    current, 5433 historical), whatever the host, or the database is
+    ``second_brain``. The host is deliberately not consulted: ``127.1``,
+    ``localhost.``, ``[::ffff:127.0.0.1]`` and ``host.docker.internal`` all
+    reach this machine's 55432, and no list of local spellings is complete.
+
+    A ``service=`` (or ``PGSERVICE``) is refused too: it takes host, port and
+    dbname from ``pg_service.conf``, where this check cannot see them. Every
+    demo primitive that opens a connection calls this first, so a mis-pointed
+    ``--database-url`` can never seed / query / drop prod data.
     """
-    parsed = urlparse(database_url)
-    host = (parsed.hostname or "").lower()
-    port = parsed.port
-    dbname = (parsed.path or "").lstrip("/")
-    is_local = host in _LOCAL_HOSTS
-    if (is_local and port in _PROD_PORTS) or (dbname == _PROD_DB_NAME):
+    params = _dsn_params(database_url)
+    if params.get("service") or os.environ.get("PGSERVICE"):
+        raise BrainError(
+            "REFUSING to run `brain demo` through a pg_service.conf service: its "
+            "host, port and database are invisible to the prod guard. Pass "
+            "--database-url with an explicit host, port and dbname."
+        )
+    ports = _effective_ports(params)
+    dbname = _effective_dbname(params)
+    if dbname == _PROD_DB_NAME or any(port in _PROD_PORTS for port in ports):
         raise BrainError(
             "REFUSING to run `brain demo` against what looks like the PROD "
-            f"database (host={host!r} port={port!r} db={dbname!r}). The demo "
-            "must only ever touch its own throwaway container "
-            f"(db {DEMO_DB_NAME!r}, named volume {DEMO_VOLUME!r}). Fix "
-            "--database-url so it does not point at prod."
+            f"database (port(s) {ports} db={dbname!r}). The demo must only ever "
+            f"touch its own throwaway container (db {DEMO_DB_NAME!r}, named "
+            f"volume {DEMO_VOLUME!r}). Fix --database-url so it does not point "
+            "at prod."
         )
 
 
