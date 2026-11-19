@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from brain.bin._launcher import ensure_shim
 from brain.bin.launchd import (
     _ALL_LABELS,
     _INSTALLED_LABELS,
@@ -618,6 +619,54 @@ def test_install_main_reranker_config_error_is_one_line(
     assert _calls(log) == []
     assert not agents.exists() or sorted(agents.iterdir()) == []
     assert not (brain_home / ".shims").exists()
+
+
+def test_install_main_multi_line_bootstrap_failure_is_one_line(
+    tmp_path: Path,
+    brain_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed bootstrap carries launchctl's stderr, which on macOS is two lines.
+
+    The handler must still print exactly one line (F19 review): launchctl's
+    lines are joined, not dropped.
+    """
+    agents = tmp_path / "agents"
+    log = tmp_path / "launchctl.calls"
+    stub = tmp_path / "launchctl"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{log}"\n'
+        'case "$1" in\n'
+        "  print) exit 1 ;;\n"
+        "  bootstrap)\n"
+        "    echo 'Bootstrap failed: 5: Input/output error' >&2\n"
+        "    echo 'Try re-running the command as root for richer errors.' >&2\n"
+        "    exit 5 ;;\n"
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("BRAIN_HOME", str(brain_home))
+    monkeypatch.setenv("BRAIN_LAUNCHD_DIR", str(agents))
+    monkeypatch.setenv("BRAIN_LAUNCHCTL", str(stub))
+    monkeypatch.setattr("brain.bin.launchd.time.sleep", lambda _s: None)
+    # Pre-install the wrapper shims so their "shim installed" notes are not in
+    # the stderr under test: only the error line may be there.
+    for wrapper in ("_brain-watcher-fg", "_brain-brief-fg", "_brain-dropfolders-fg"):
+        ensure_shim(wrapper, brain_home)
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as exc:
+        install_main([])
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    (line,) = err.splitlines()
+    assert line.startswith("brain-install-launchd: error: launchctl bootstrap failed")
+    assert "Input/output error" in line and "richer errors." in line
 
 
 def test_install_launchd_missing_model_prints_no_traceback(tmp_path: Path) -> None:

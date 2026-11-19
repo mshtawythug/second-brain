@@ -489,9 +489,11 @@ def install_main(argv: Sequence[str] | None = None) -> None:
             with_dropfolders=args.with_dropfolders,
         )
     except LaunchdError as exc:
-        # F19: one line, not a traceback. Every LaunchdError names a variable,
-        # never its value; brain-up.sh reads only the nonzero exit.
-        print(f"brain-install-launchd: error: {exc}", file=sys.stderr)
+        # F19: one line, not a traceback. A reranker config error names the
+        # variable, never its value; a bootstrap error carries launchctl's own
+        # stderr, which is usually two lines, so whitespace is collapsed to keep
+        # the message on one. brain-up.sh reads only the nonzero exit.
+        print(f"brain-install-launchd: error: {' '.join(str(exc).split())}", file=sys.stderr)
         raise SystemExit(1) from None
     print(f"🧠 brain LaunchAgents installed in {launchd_dir}")
 

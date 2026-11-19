@@ -166,9 +166,10 @@ except LaunchdError as exc:
 ```
 
 This catches `LaunchdError`, the module's own base class, which covers `RerankerConfigError`, a
-failed bootstrap and a bad render. It does not catch `BrainError` broadly. Every `LaunchdError`
-message names variables, never values (a documented invariant in `launchd.py:156-159, 177-179,
-197-199`). A bootstrap failure carries launchctl's own stderr, which holds no secret. Exit 1, not 2:
+failed bootstrap and a bad render. It does not catch `BrainError` broadly. A reranker config error
+names the variable, never its value (a documented invariant in `launchd.py:156-159, 177-179,
+197-199`). A bootstrap failure carries launchctl's own stderr, which holds no secret and is usually
+two lines, so the handler collapses whitespace to print exactly one line (review round 1). Exit 1, not 2:
 this is a config problem, not a usage problem. `brain-up.sh` already treats any nonzero exit as
 "brain-install-launchd failed — daemons NOT supervised", so its behaviour does not change. The
 `--with-reranker` path already fails closed before any shim, plist or launchctl call (inputs are
@@ -281,9 +282,16 @@ Each mutation is checked as applied (grep) before its run.
   nothing.
 - `brain-install-launchd --with-reranker` with no model file, a relative `BRAIN_RERANK_GGUF` or an
   unusable `BRAIN_RERANK_URL` prints one line that names the variable (never its value) and exits
-  1, where it printed a `RerankerConfigError` traceback. A failed `launchctl bootstrap` is one line
-  the same way. Nothing is installed in either case.
+  1, where it printed a `RerankerConfigError` traceback. Nothing is installed when a reranker input
+  is unusable. A failed `launchctl bootstrap` stops the install at that agent, and its error is one
+  line too (launchctl's own message, joined).
 ```
+
+Review round 1 (PR #136 @ c445a899): the bootstrap error was two lines (launchctl's stderr), the
+handler comment claimed every `LaunchdError` names only variables, and the CHANGELOG said nothing is
+installed after a failed bootstrap. Fixed: whitespace collapsed in the handler, pinned by
+`test_install_main_multi_line_bootstrap_failure_is_one_line` (RED first), the comment and both
+texts corrected.
 
 ## 7. Risks
 

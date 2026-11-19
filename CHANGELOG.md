@@ -168,8 +168,9 @@ to `compare/v0.4.0...HEAD`. -->
   nothing.
 - `brain-install-launchd --with-reranker` with no model file, a relative `BRAIN_RERANK_GGUF` or an
   unusable `BRAIN_RERANK_URL` prints one line that names the variable (never its value) and exits
-  1, where it printed a `RerankerConfigError` traceback. A failed `launchctl bootstrap` is one line
-  the same way. Nothing is installed in either case.
+  1, where it printed a `RerankerConfigError` traceback. Nothing is installed when a reranker input
+  is unusable. A failed `launchctl bootstrap` stops the install at that agent, and its error is one
+  line too (launchctl's own message, joined).
 
 ### Fixed — `brain ingest-gmail` cannot hang on, or hold, an unbounded `gws` answer (BL-39)
 
