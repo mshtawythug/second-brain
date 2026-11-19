@@ -1213,9 +1213,29 @@ brain uninstall
 
 # 2. (Destructive — opt in explicitly.) Also remove the DB and/or vault:
 brain uninstall --remove-db --remove-vault   # --remove-db requires a typed
-                                             # confirmation: "yes, delete my data"
+                                             # confirmation: "yes, delete my data";
+                                             # --remove-vault requires typing the
+                                             # vault path it prints. --yes skips
+                                             # neither.
 
 # 3. Remove the pipx-installed CLI itself (must be a separate command —
 #    a Python CLI can't safely uninstall its own running process).
 pipx uninstall secondbrain-py
 ```
+
+`--remove-vault` resolves the vault the way `brain setup` does: `BRAIN_VAULT_PATH`
+from the environment, then from `$BRAIN_HOME/.env`, then `~/brain-vault`. A value
+that lives only in a repo or working-directory `.env` is not read. The summary
+prints the resolved absolute path and where it came from (for example
+`(from $BRAIN_HOME/.env)`). The vault is deleted only after you type that path
+exactly. With no input (a script, `</dev/null`), the prompt reads end-of-file and
+nothing is removed. Before removing anything, it refuses a vault path that is a
+symlink or not a directory. It also refuses your home directory, `$BRAIN_HOME`,
+or a parent of either; the database directory (`$BRAIN_HOME/data/postgres`),
+anything inside it, or a parent of it (use `--remove-db` for the database); and
+anything at or inside a runtime entry that uninstall removes first, such as
+`$BRAIN_HOME/.shims`. Each check compares directories by identity, not by
+spelling. It checks each guarded path and its parents as written, and again with
+symlinks resolved. So a case variant of your home directory, or the real parent of
+a symlinked `$BRAIN_HOME`, is refused too, as is a vault path that cannot be
+resolved (a symlink loop). A vault that does not exist is reported and skipped.
