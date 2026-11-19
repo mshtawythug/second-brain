@@ -401,3 +401,25 @@ Line numbers are on this branch's head.
    - The `parse_constant` hook is redundant: the walk's `math.isfinite` refuses `NaN` and
      `Infinity` too.
    - The mutation proofs show the remaining mechanism is what pins each behaviour.
+
+## 10. Review round rev-137c (one commit; each new test RED against `11f61663` first)
+
+1. **`#` in a URI query.** libpq does not end a query at `#`, so `?password=#&port=4242`
+   printed `127.0.0.1:4242`. The query check now reads to the end of the DSN; the authority
+   still stops at `#`.
+   - Both URIs are in `_LEAKY_URIS`.
+   - The property test adds `#&key=` pieces, plus a seeded set that always places `#`
+     directly before an `&key=`.
+2. **Quadratic host pattern.** A host entry over 255 characters is `(unparseable)` before the
+   pattern runs. The tests assert the result for 16k colons (in both key=value and URI
+   form), 256 characters and a 300-character list entry. A 255-character host still prints.
+3. **libpq defaults.** With no `host`, or with `hostaddr` / `service`, the address is
+   `(libpq default)`. With no `port`, it is `<host> (default port)`.
+   - **Chosen over reading PGHOST/PGPORT:** reading them would reimplement libpq's
+     resolution order (PGHOST, PGHOSTADDR, PGSERVICE, `pg_service.conf`, the socket
+     directory). That kind of partial copy is how the old line came to print a wrong
+     address.
+   - `db_address` now reads `conninfo_to_dict` itself, so it can see `hostaddr` /
+     `service`. The `DsnTarget.address` property added to `backup/pgtool.py` in round 1 is
+     reverted, and `pgtool.py` is unchanged from `ef824ed1`.
+   - §7 item 4 now reads: `cli_ui._describe_db` duplicates `DsnTarget.__str__`.

@@ -102,10 +102,16 @@ to `compare/v0.4.0...HEAD`. -->
   `(unparseable)`:
   - In a URI, the authority (up to the first `/`, `?` or `#`) holds at most one `@`, and no `@`
     follows it.
-  - In a URI, the query sets no `host`, `hostaddr` or `port`.
+  - In a URI, the query (everything after `?`, `#` included) sets no `host`, `hostaddr` or
+    `port`.
   - In a `key=value` DSN, `host` and `port` each appear at most once, and before any `password`.
   - The port is 1 to 65535.
-  - Every host is a host name, an IP address or an absolute socket directory.
+  - Every host is at most 255 characters, and is a host name, an IP address or an absolute
+    socket directory.
+
+  When libpq rather than the DSN picks the target (no `host`, or a `hostaddr` or `service`),
+  the line says `(libpq default)`, and with no port it says `<host> (default port)`. It does
+  not guess `localhost:5432`.
 - `brain ingest-stdin --metadata` must be a JSON object that Postgres can store: no `NaN`,
   infinite or out-of-range numbers, no NUL characters, and no lone surrogates (text that is not
   UTF-8). A `duration_min` that does not fit the integer column is skipped with a warning,

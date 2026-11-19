@@ -328,10 +328,13 @@ def test_unreachable_line_never_prints_a_malformed_host(url: str) -> None:
     ("url", "address"),
     [
         ("postgresql://u:p@127.0.0.1:1/x_test", "127.0.0.1:1"),
-        ("postgresql://u:p@db-host_1.example.internal/x_test", "db-host_1.example.internal:5432"),
+        (
+            "postgresql://u:p@db-host_1.example.internal/x_test",
+            "db-host_1.example.internal (default port)",
+        ),
         ("postgresql://u:p@[::1]:5434/x_test", "::1:5434"),
         ("host=/var/run/postgresql port=5434 dbname=x_test", "/var/run/postgresql:5434"),
-        ("dbname=x_test", "localhost:5432"),
+        ("dbname=x_test", "(libpq default)"),
     ],
 )
 def test_db_address_keeps_well_formed_hosts(url: str, address: str) -> None:
@@ -466,6 +469,9 @@ _LEAKY_URIS = [
     # A query that sets the host or port after the userinfo (an unescaped '&').
     "postgresql://127.0.0.1:1/x_test?password=a&host=QZJ",
     "postgresql://127.0.0.1:1/x_test?password=a&port=4242",
+    # libpq does not end a query at '#' (rev-137c #1): '#' is just a byte of the value.
+    "postgresql://127.0.0.1:1/x_test?password=#&port=4242",
+    "postgresql://127.0.0.1:1/x_test?password=#&host=QZJ",
     # Found by trying to break the rule: libpq percent-decodes query keys, and honours a
     # keyword after any whitespace, not only a space.
     "postgresql://u:pw@127.0.0.1:1/x_test?password=a&ho%73t=QZJ",
@@ -500,7 +506,7 @@ _LEAKY_KEYWORDS = [
         ("postgresql://u:pw@127.0.0.1:1/x_test?application_name=QZJ", "127.0.0.1:1"),
         ("host = 127.0.0.1 port = 1 password = x", "127.0.0.1:1"),
         ("host=127.0.0.1 port=1 password='a b'", "127.0.0.1:1"),
-        ("postgresql://u:pw@:1/x_test", "localhost:1"),
+        ("postgresql://u:pw@:1/x_test", "(libpq default)"),
     ],
 )
 def test_db_address_still_prints_a_clean_dsn(url: str, address: str) -> None:
@@ -521,12 +527,35 @@ def _password_alphabet_samples(seed: int, count: int) -> list[str]:
 
     pieces = ["QZJ", "@", "/", "?", "#", ":", "[", "]", "&", "=", " ", "'", "\\",
               " host=QZJ", " port=4242", "&host=QZJ", "&port=4242", "%40", "%2F",
-              "&ho%73t=QZJ", "\thost=QZJ", "\nport=4242"]
+              "&ho%73t=QZJ", "\thost=QZJ", "\nport=4242",
+              "#&host=QZJ", "#&port=4242", "#&ho%73t=QZJ"]
     rng = random.Random(seed)
     return ["".join(rng.choice(pieces) for _ in range(rng.randint(1, 6))) for _ in range(count)]
 
 
-@pytest.mark.parametrize("password", _password_alphabet_samples(seed=137, count=400))
+def _hash_then_keyword_samples(seed: int, count: int) -> list[str]:
+    """Passwords that always put ``#`` straight before an ``&key=`` (rev-137c #1).
+
+    The random alphabet can miss a two-piece sequence; these cannot.
+    """
+    import random
+
+    rng = random.Random(seed)
+    prefixes = ["", "a", "QZJ", "x/y", "p:q", "%40"]
+    injected = ["host=QZJ", "port=4242", "ho%73t=QZJ", "po%72t=4242", "hostaddr=10.0.0.9"]
+    return [
+        f"{rng.choice(prefixes)}#&{rng.choice(injected)}{rng.choice(['', '&a=b', '#'])}"
+        for _ in range(count)
+    ]
+
+
+@pytest.mark.parametrize(
+    "password",
+    [
+        *_password_alphabet_samples(seed=137, count=400),
+        *_hash_then_keyword_samples(seed=137, count=60),
+    ],
+)
 def test_db_address_never_prints_any_part_of_a_password(password: str) -> None:
     """Property: the password, wherever it sits, never becomes the printed address.
 
@@ -580,3 +609,70 @@ def test_promote_keeps_a_duration_inside_int4(value: object) -> None:
     assert _promote_metadata_to_columns({"duration_min": value})["duration_min"] == int(
         float(value)  # type: ignore[arg-type]
     )
+
+
+
+# rev-137c #2: a host entry longer than any real host name is refused before the pattern,
+# whose IPv6 branch is quadratic on a long run of colons.
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "host=" + ":" * 16_000 + " port=1",
+        "postgresql://u:pw@[" + ":" * 16_000 + "]:1/x_test",
+        "host=" + "a" * 256 + " port=1",
+        "host=127.0.0.1," + "b" * 300 + " port=1",
+    ],
+    ids=["kv-colons", "uri-colons", "kv-256", "list-entry-300"],
+)
+def test_db_address_refuses_an_overlong_host(url: str) -> None:
+    from brain.dsn_address import db_address
+
+    assert db_address(url) == "(unparseable)"
+
+
+def test_db_address_accepts_a_255_char_host() -> None:
+    from brain.dsn_address import db_address
+
+    assert db_address("host=" + "a" * 255 + " port=1") == "a" * 255 + ":1"
+
+
+# rev-137c #3: where libpq takes the host or port from somewhere the DSN does not say
+# (PGHOST / PGPORT, hostaddr, a service file), the line does not invent localhost:5432.
+
+
+def test_db_address_does_not_claim_localhost_when_pghost_decides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from brain.dsn_address import db_address
+
+    monkeypatch.setenv("PGHOST", "10.9.9.9")
+    for url in ("dbname=x_test", "postgresql:///x_test", "postgresql://u:pw@/x_test"):
+        assert db_address(url) == "(libpq default)", url
+
+
+def test_db_address_does_not_claim_5432_when_pgport_decides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from brain.dsn_address import db_address
+
+    monkeypatch.setenv("PGPORT", "4242")
+    assert db_address("postgresql://u:pw@127.0.0.1/x_test") == "127.0.0.1 (default port)"
+    assert db_address("host=127.0.0.1 dbname=x_test") == "127.0.0.1 (default port)"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "host=db.example hostaddr=10.0.0.9 port=1 dbname=x_test",
+        "hostaddr=10.0.0.9 port=1 dbname=x_test",
+        "service=synthetic_svc",
+        "service=synthetic_svc host=127.0.0.1 port=1",
+        "postgresql://u:pw@127.0.0.1:1/x_test?service=synthetic_svc",
+    ],
+)
+def test_db_address_is_neutral_under_hostaddr_or_service(url: str) -> None:
+    from brain.dsn_address import db_address
+
+    assert db_address(url) == "(libpq default)"
