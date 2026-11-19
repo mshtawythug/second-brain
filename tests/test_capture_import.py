@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -444,3 +445,31 @@ def test_the_importer_calls_import_file(
     ingest = importer(_ctx(fake_embedder))
 
     assert ingest(test_db, _share(tmp_path, SHARE), title="share", timeout=1.0) == "ingested"
+
+
+# ---------------------------------------------------------------------------
+# F13 (0.4.0 QA, A19): an unscaffolded vault is refused before any file moves
+# ---------------------------------------------------------------------------
+
+
+def _ctx_for(vault: Path, tmp_path: Path) -> CaptureContext:
+    """A context whose embedder is never reached: ``importer`` only checks the folder."""
+    cfg = replace(Config.load(), vault_path=vault)
+    return CaptureContext(
+        cfg=cfg, embedder=None, sensitivity="normal", folder=tmp_path / "shares"  # type: ignore[arg-type]
+    )
+
+
+def test_the_importer_refuses_a_vault_with_no_note_template(tmp_path: Path) -> None:
+    bare = tmp_path / "bare-vault"
+    bare.mkdir()
+
+    with pytest.raises(DropFolderError, match="brain vault init"):
+        importer(_ctx_for(bare, tmp_path))
+
+
+def test_the_importer_accepts_a_scaffolded_vault(tmp_path: Path) -> None:
+    scaffolded = tmp_path / "vault"
+    vault_module.init_vault(scaffolded)
+
+    assert callable(importer(_ctx_for(scaffolded, tmp_path)))
