@@ -1203,9 +1203,22 @@ brain uninstall
 
 # 2. (Destructive — opt in explicitly.) Also remove the DB and/or vault:
 brain uninstall --remove-db --remove-vault   # --remove-db requires a typed
-                                             # confirmation: "yes, delete my data"
+                                             # confirmation: "yes, delete my data";
+                                             # --remove-vault requires typing the
+                                             # vault path it prints. --yes skips
+                                             # neither.
 
 # 3. Remove the pipx-installed CLI itself (must be a separate command —
 #    a Python CLI can't safely uninstall its own running process).
 pipx uninstall secondbrain-py
 ```
+
+`--remove-vault` resolves the vault the way `brain setup` does: `BRAIN_VAULT_PATH`
+from the environment, then from `$BRAIN_HOME/.env`, then `~/brain-vault`. A value
+that lives only in a repo or working-directory `.env` is not read. The summary
+prints the resolved absolute path and where it came from (for example
+`(from $BRAIN_HOME/.env)`). The vault is deleted only after you type that path
+exactly. With no input (a script, `</dev/null`), the prompt reads end-of-file and
+nothing is removed. It refuses, before removing anything, a vault path that is a
+symlink, is not a directory, or is your home directory, `$BRAIN_HOME`, or a
+parent of either. A vault that does not exist is reported and skipped.

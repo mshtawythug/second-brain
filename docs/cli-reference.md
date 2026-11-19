@@ -1549,7 +1549,11 @@ them in.
 deletes the `$BRAIN_HOME` runtime files (`.env`, `.shims/`, and a legacy
 `Caddyfile` an older install may have left).
 **Your database and vault are kept by default** — read its `--help` before
-passing anything that widens the blast radius.
+passing anything that widens the blast radius. `--remove-vault` deletes the vault
+`brain setup` would use (`BRAIN_VAULT_PATH` from the environment, then from
+`$BRAIN_HOME/.env`, then `~/brain-vault`). It prints that path and where it came
+from, and deletes it only after you type the path back. `--yes` does not skip
+that prompt.
 
 ## brain docembed
 

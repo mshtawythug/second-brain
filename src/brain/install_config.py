@@ -1,7 +1,10 @@
 """Install-time config lookups shared by the installers and the shell tooling.
 
 ``brain setup`` and ``brain-install-launchd`` call :func:`resolve_install_vault`
-directly; ``brain-monitor`` does too. The bash shims (``brain-status``,
+directly; ``brain-monitor`` does too. ``brain uninstall`` calls
+:func:`resolve_install_vault_with_source`, the same precedence plus a label
+saying which leg won, so it removes the vault the installers set up and can
+tell the user where that path came from. The bash shims (``brain-status``,
 ``_brain-watcher-fg``) reach it through ``python -m brain.install_config
 BRAIN_HOME`` (:func:`main`), so the vault precedence is defined once and never
 restated in bash.
@@ -35,6 +38,32 @@ def brain_home_dotenv_value(brain_home: Path, name: str) -> str | None:
     return dotenv_values(stream=StringIO(text)).get(name) or None
 
 
+#: Labels :func:`resolve_install_vault_with_source` reports, one per leg.
+VAULT_SOURCE_ENV = "BRAIN_VAULT_PATH env"
+VAULT_SOURCE_BRAIN_HOME_DOTENV = "$BRAIN_HOME/.env"
+VAULT_SOURCE_DEFAULT = "default ~/brain-vault"
+
+
+def resolve_install_vault_with_source(brain_home: Path) -> tuple[Path, str]:
+    """The install vault (no ``--vault`` override) and which leg supplied it.
+
+    Precedence: ``BRAIN_VAULT_PATH`` in the process env >
+    ``BRAIN_VAULT_PATH`` in ``$BRAIN_HOME/.env`` > the default vault, each leg
+    ``expanduser``-ed; the label is one of the ``VAULT_SOURCE_*`` constants.
+    :func:`resolve_install_vault` delegates here, so the precedence is defined
+    once. A value that lives only in a repo or cwd ``.env`` is NOT read, so it
+    reports ``VAULT_SOURCE_DEFAULT``: what a caller prints is what the
+    installers and the daemons would use.
+    """
+    env = os.environ.get("BRAIN_VAULT_PATH")
+    if env:
+        return Path(env).expanduser(), VAULT_SOURCE_ENV
+    dotenv = brain_home_dotenv_value(brain_home, "BRAIN_VAULT_PATH")
+    if dotenv:
+        return Path(dotenv).expanduser(), VAULT_SOURCE_BRAIN_HOME_DOTENV
+    return _config.DEFAULT_VAULT_PATH, VAULT_SOURCE_DEFAULT
+
+
 def resolve_install_vault(brain_home: Path, override: Path | None = None) -> Path:
     """The vault an install should use.
 
@@ -52,10 +81,7 @@ def resolve_install_vault(brain_home: Path, override: Path | None = None) -> Pat
     """
     if override is not None:
         return override.expanduser()
-    raw = os.environ.get("BRAIN_VAULT_PATH") or brain_home_dotenv_value(
-        brain_home, "BRAIN_VAULT_PATH"
-    )
-    return Path(raw).expanduser() if raw else _config.DEFAULT_VAULT_PATH
+    return resolve_install_vault_with_source(brain_home)[0]
 
 
 _USAGE = "usage: python -m brain.install_config BRAIN_HOME"

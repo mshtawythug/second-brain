@@ -5,15 +5,55 @@ Tests cover:
 2. --remove-db requires typed confirmation "yes, delete my data"; wrong answer aborts.
 3. --remove-vault removes the vault; absence of flag keeps it.
 4. launchd uninstall_main is called on macOS.
+5. F16: --remove-vault resolves the configured vault (env, then $BRAIN_HOME/.env,
+   then the default), prints it with its source, demands the typed path even
+   under --yes, and refuses unsafe targets. A decoy default vault is never touched.
+6. F41: "docker compose down" reports [ok] only on exit 0.
 """
 from __future__ import annotations
 
+import io
+import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 import typer
+
+import brain.config as config_module
+import brain.uninstall as uninstall_module
+
+# Pure filesystem tests: no database connection, so no suite-wide DB lock.
+pytestmark = pytest.mark.nodb
+
+# ---------------------------------------------------------------------------
+# Isolation — no test in this file can reach a real home or a real vault
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def decoy_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point ``HOME`` and every ``DEFAULT_VAULT_PATH`` binding at ``tmp_path``.
+
+    The returned path is the DECOY default vault (``<fake home>/brain-vault``).
+    Before the F16 fix, ``brain.uninstall`` bound ``DEFAULT_VAULT_PATH`` (the
+    real ``~/brain-vault``) at import and rmtree'd it, so both bindings are
+    redirected here; ``raising=False`` because the fixed module no longer
+    imports the name. Only pytest's ``monkeypatch`` is used, so all of it is
+    undone after each test.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    decoy = fake_home / "brain-vault"
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(config_module, "DEFAULT_VAULT_PATH", decoy)
+    monkeypatch.setattr(uninstall_module, "DEFAULT_VAULT_PATH", decoy, raising=False)
+    assert decoy == config_module.DEFAULT_VAULT_PATH
+    assert fake_home == Path.home()
+    return decoy
+
 
 # ---------------------------------------------------------------------------
 # Helper — run run_uninstall with pre-populated directories
@@ -153,8 +193,11 @@ def test_uninstall_remove_vault_takes_explicit_flag(tmp_path: Path) -> None:
     # Rebuild brain home for the second call.
     home2 = _build_brain_home(tmp_path / "run2")
 
-    # With flag: vault is removed.
-    with patch("subprocess.run", side_effect=_subprocess_noop):
+    # With flag: vault is removed once its resolved path is typed.
+    with (
+        patch("subprocess.run", side_effect=_subprocess_noop),
+        patch("typer.prompt", return_value=str(vault.resolve())),
+    ):
         run_uninstall(
             yes=True,
             remove_db=False,
@@ -234,3 +277,319 @@ def test_uninstall_hint_uses_current_distribution_name(
     assert "second-brain" not in out, (
         f"uninstall hint must not reference the OLD distribution name 'second-brain'; got:\n{out}"
     )
+
+
+# ---------------------------------------------------------------------------
+# F16 — --remove-vault targets the CONFIGURED vault, never a decoy default
+# ---------------------------------------------------------------------------
+
+
+def _make_vault(path: Path) -> Path:
+    path.mkdir(parents=True)
+    (path / "note.md").write_text("# synthetic note\n")
+    return path
+
+
+def _launchd_recorder() -> tuple[list[int], Callable[[], None]]:
+    calls: list[int] = []
+
+    def _fake() -> None:
+        calls.append(1)
+
+    return calls, _fake
+
+
+def test_remove_vault_targets_brain_vault_path_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decoy_vault: Path
+) -> None:
+    home = _build_brain_home(tmp_path)
+    _make_vault(decoy_vault)
+    configured = _make_vault(tmp_path / "elsewhere" / "notes")
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(configured))
+
+    with (
+        patch("subprocess.run", side_effect=_subprocess_noop),
+        patch("typer.prompt", return_value=str(configured.resolve())),
+    ):
+        uninstall_module.run_uninstall(
+            yes=True, remove_vault=True, brain_home=home, _launchd_uninstall=MagicMock()
+        )
+
+    assert not configured.exists(), "the vault BRAIN_VAULT_PATH names must be removed"
+    assert (decoy_vault / "note.md").exists(), "the default ~/brain-vault must be untouched"
+
+
+def test_remove_vault_targets_brain_vault_path_from_brain_home_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decoy_vault: Path
+) -> None:
+    home = _build_brain_home(tmp_path)
+    _make_vault(decoy_vault)
+    configured = _make_vault(tmp_path / "elsewhere" / "notes")
+    monkeypatch.delenv("BRAIN_VAULT_PATH", raising=False)
+    (home / ".env").write_text(f"BRAIN_VAULT_PATH={configured}\n")
+
+    with (
+        patch("subprocess.run", side_effect=_subprocess_noop),
+        patch("typer.prompt", return_value=str(configured.resolve())),
+    ):
+        uninstall_module.run_uninstall(
+            yes=True, remove_vault=True, brain_home=home, _launchd_uninstall=MagicMock()
+        )
+
+    # Step 6 deleted the .env, so the path must have been read before it.
+    assert not (home / ".env").exists()
+    assert not configured.exists(), "the vault $BRAIN_HOME/.env names must be removed"
+    assert (decoy_vault / "note.md").exists(), "the default ~/brain-vault must be untouched"
+
+
+def test_summary_and_kept_line_print_resolved_absolute_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", "rel-vault")
+    configured = _make_vault(tmp_path / "rel-vault")
+    absolute = configured.resolve()
+
+    with patch("subprocess.run", side_effect=_subprocess_noop):
+        uninstall_module.run_uninstall(
+            yes=True,
+            brain_home=_build_brain_home(tmp_path / "run1"),
+            _launchd_uninstall=MagicMock(),
+        )
+    assert f"vault kept at {absolute}" in capsys.readouterr().out
+
+    with (
+        patch("subprocess.run", side_effect=_subprocess_noop),
+        patch("typer.prompt", return_value="not the path"),
+        pytest.raises(typer.Abort),
+    ):
+        uninstall_module.run_uninstall(
+            yes=True,
+            remove_vault=True,
+            brain_home=_build_brain_home(tmp_path / "run2"),
+            _launchd_uninstall=MagicMock(),
+        )
+    assert f"  • {absolute}  (from BRAIN_VAULT_PATH env)  ← YOUR NOTES" in (
+        capsys.readouterr().out
+    )
+
+
+def test_remove_vault_wrong_typed_path_removes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _build_brain_home(tmp_path)
+    vault = _make_vault(tmp_path / "vault")
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
+    launchd_calls, fake_launchd = _launchd_recorder()
+    run = MagicMock(side_effect=_subprocess_noop)
+
+    with (
+        patch("subprocess.run", run),
+        patch("typer.prompt", return_value="y"),
+        pytest.raises(typer.Abort),
+    ):
+        uninstall_module.run_uninstall(
+            yes=True, remove_vault=True, brain_home=home, _launchd_uninstall=fake_launchd
+        )
+
+    assert (vault / "note.md").exists(), "a wrong typed path must leave the vault intact"
+    assert (home / ".env").exists() and (home / ".shims").exists(), "nothing may be removed"
+    assert not launchd_calls, "launchd must not be touched after a failed confirmation"
+    run.assert_not_called()
+
+
+def test_yes_does_not_bypass_vault_confirmation_at_eof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--yes plus no input (a script, </dev/null): the REAL prompt hits EOF and aborts."""
+    home = _build_brain_home(tmp_path)
+    vault = _make_vault(tmp_path / "vault")
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    launchd_calls, fake_launchd = _launchd_recorder()
+
+    with (
+        patch("subprocess.run", side_effect=_subprocess_noop),
+        pytest.raises(typer.Abort),
+    ):
+        uninstall_module.run_uninstall(
+            yes=True, remove_vault=True, brain_home=home, _launchd_uninstall=fake_launchd
+        )
+
+    assert (vault / "note.md").exists(), "--yes must not bypass the typed vault path"
+    assert (home / ".env").exists(), "nothing may be removed when the prompt aborts"
+    assert not launchd_calls
+
+
+def _unsafe_target(
+    case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    """Build one unsafe-vault scenario; return ``(brain_home, configured vault)``."""
+    if case == "parent_of_brain_home":
+        home = _build_brain_home(tmp_path / "outer")
+        return home, tmp_path / "outer"
+    home = _build_brain_home(tmp_path)
+    if case == "home":
+        return home, Path.home()
+    if case == "parent_of_home":
+        nested_home = tmp_path / "users" / "me"
+        nested_home.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(nested_home))
+        return home, tmp_path / "users"
+    if case == "brain_home":
+        return home, home
+    if case == "symlink":
+        real = _make_vault(tmp_path / "real-vault")
+        link = tmp_path / "vault-link"
+        link.symlink_to(real, target_is_directory=True)
+        return home, link
+    assert case == "not_a_directory"
+    file_vault = tmp_path / "vault.txt"
+    file_vault.write_text("not a directory\n")
+    return home, file_vault
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "home",
+        "parent_of_home",
+        "brain_home",
+        "parent_of_brain_home",
+        "symlink",
+        "not_a_directory",
+    ],
+)
+def test_remove_vault_refuses_unsafe_target(
+    case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home, configured = _unsafe_target(case, tmp_path, monkeypatch)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(configured))
+    launchd_calls, fake_launchd = _launchd_recorder()
+
+    # The correct typed answer, so the guard is the only thing that can refuse.
+    with (
+        patch("subprocess.run", side_effect=_subprocess_noop),
+        patch("typer.prompt", return_value=str(configured.resolve())),
+        pytest.raises(typer.Abort),
+    ):
+        uninstall_module.run_uninstall(
+            yes=True, remove_vault=True, brain_home=home, _launchd_uninstall=fake_launchd
+        )
+
+    assert configured.exists() or configured.is_symlink(), f"{case}: target must survive"
+    assert (home / ".env").exists(), f"{case}: nothing may be removed"
+    assert not launchd_calls
+    assert "Refusing --remove-vault" in capsys.readouterr().out
+
+
+def test_remove_vault_missing_target_skips_without_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    absent = tmp_path / "no-such-vault"
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(absent))
+    prompt = MagicMock(return_value="unused")
+
+    with patch("subprocess.run", side_effect=_subprocess_noop), patch("typer.prompt", prompt):
+        uninstall_module.run_uninstall(
+            yes=True,
+            remove_vault=True,
+            brain_home=_build_brain_home(tmp_path),
+            _launchd_uninstall=MagicMock(),
+        )
+
+    assert f"vault not found at {absent.resolve()}, nothing to remove" in (
+        capsys.readouterr().out
+    )
+    prompt.assert_not_called()
+
+
+@pytest.mark.parametrize("source", ["env", "brain_home_dotenv", "default"])
+def test_vault_source_label_printed_in_summary_and_prompt(
+    source: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    decoy_vault: Path,
+) -> None:
+    home = _build_brain_home(tmp_path)
+    monkeypatch.delenv("BRAIN_VAULT_PATH", raising=False)
+    if source == "env":
+        target = _make_vault(tmp_path / "env-vault")
+        monkeypatch.setenv("BRAIN_VAULT_PATH", str(target))
+        label = "BRAIN_VAULT_PATH env"
+    elif source == "brain_home_dotenv":
+        target = _make_vault(tmp_path / "dotenv-vault")
+        (home / ".env").write_text(f"BRAIN_VAULT_PATH={target}\n")
+        label = "$BRAIN_HOME/.env"
+    else:
+        # Set nowhere uninstall reads: not in env, not in $BRAIN_HOME/.env.
+        target = _make_vault(decoy_vault)
+        label = "default ~/brain-vault"
+
+    with (
+        patch("subprocess.run", side_effect=_subprocess_noop),
+        patch("typer.prompt", return_value="decline"),
+        pytest.raises(typer.Abort),
+    ):
+        uninstall_module.run_uninstall(
+            yes=True, remove_vault=True, brain_home=home, _launchd_uninstall=MagicMock()
+        )
+
+    out = capsys.readouterr().out
+    shown = f"{target.resolve()}  (from {label})"
+    assert out.count(shown) == 2, f"summary and prompt must both show {shown!r}; got:\n{out}"
+    assert (target / "note.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# F41 — "docker compose down" is [ok] only on exit 0
+# ---------------------------------------------------------------------------
+
+
+def _compose_result(returncode: int, stderr: str) -> Callable[..., object]:
+    def _run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout="", stderr=stderr
+        )
+
+    return _run
+
+
+def test_compose_down_nonzero_exit_warns_with_code_and_stderr_tail(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stderr = "pulling state\nError: no such project\n"
+    with patch("subprocess.run", side_effect=_compose_result(1, stderr)):
+        uninstall_module.run_uninstall(
+            yes=True, brain_home=_build_brain_home(tmp_path), _launchd_uninstall=MagicMock()
+        )
+
+    out = capsys.readouterr().out
+    assert "[ok]     docker compose down" not in out
+    assert "[warn]   docker compose down exited 1" in out
+    assert "no such project" in out
+
+
+@pytest.mark.parametrize("outcome", ["rc0", "exception"])
+def test_compose_down_ok_only_on_zero_and_warns_on_exception(
+    outcome: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Pin (passes on master too): rc 0 stays [ok]; a missing docker stays [warn]."""
+    effect: object = (
+        _compose_result(0, "") if outcome == "rc0" else FileNotFoundError("docker")
+    )
+    with patch("subprocess.run", side_effect=effect):
+        uninstall_module.run_uninstall(
+            yes=True, brain_home=_build_brain_home(tmp_path), _launchd_uninstall=MagicMock()
+        )
+
+    out = capsys.readouterr().out
+    if outcome == "rc0":
+        assert "[ok]     docker compose down" in out
+    else:
+        assert "[warn]   docker compose down" in out
+        assert "[ok]     docker compose down" not in out
