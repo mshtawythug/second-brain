@@ -423,3 +423,43 @@ Line numbers are on this branch's head.
      `service`. The `DsnTarget.address` property added to `backup/pgtool.py` in round 1 is
      reverted, and `pgtool.py` is unchanged from `ef824ed1`.
    - §7 item 4 now reads: `cli_ui._describe_db` duplicates `DsnTarget.__str__`.
+
+## 11. Decision: the unreachable-database line names no address (supersedes F2's address in §1, §8–§10)
+
+**Address display was removed after four review rounds of libpq-parsing edge cases. `brain
+doctor` shows the target.** That is the team-lead's decision on #137 after rev-137c. The
+rounds kept finding inputs where a password, or a default libpq chose, ended up in the
+printed host or port:
+- an unescaped `@`, `/`, `?` or `#`;
+- percent-encoded query keys;
+- `#` inside a query;
+- PGHOST / PGPORT, `hostaddr`, `service`;
+- quadratic host matching.
+
+Each fix was one more partial copy of libpq's parser.
+
+- **The line.** It is now exactly `cannot reach the database (<ErrorClass>). Is Postgres
+  running? Try: brain doctor`. There is no host, port, user, database name or any other DSN
+  text in it.
+- **Deleted.**
+  - `src/brain/dsn_address.py`, and `unreachable_line`'s DSN argument.
+  - The address tests: the leak lists, the 460-sample property test, the long-host,
+    PGHOST/PGPORT and hostaddr/service tests, the clean-DSN and well-formed-host tests, the
+    unparseable-DSN test, and the class-only `unreachable_line` test.
+- **Dead-code re-check.**
+  - `backup/pgtool.py` is already identical to `ef824ed1`, since the round-1 `address`
+    property was reverted in rev-137c.
+  - `ingest/text_safety.encodes_utf8` is still used by the `--metadata` walk and `brain ui`.
+  - `cli_ingest_boundary` keeps `one_line` for the embed-failure and per-file lines.
+- **The proof.** It is one parametrized test,
+  `test_unreachable_db_line_is_fixed_text_whatever_the_dsn`. Its inputs are every DSN from
+  the old leak lists, plus a clean URI, a clean `key=value` DSN and a no-host DSN, each run
+  under both `OperationalError` and `ProgrammingError`.
+  - A recording fake `connect_raw` never connects: it raises an error whose message quotes
+    the whole DSN.
+  - The test asserts stderr **equals** the fixed text. Nothing from the DSN can appear.
+- The CLI tests for `ingest-stdin`, `ingest`, `ingest-dir` and `reembed` still refuse
+  through a real port-1 connect. They expect the new wording, and they still assert that
+  no credential appears.
+- Everything else in #137 is unchanged: metadata, date, DOCX, tags, reembed,
+  `connect_or_exit`, the scan guard, `ingest-dir`.

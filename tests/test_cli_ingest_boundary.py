@@ -62,7 +62,7 @@ def test_ingest_stdin_unreachable_db_prints_one_line(offline_cli: Path) -> None:
         input="hello synthetic\n",
     )
     assert result.exit_code == 1, result.output
-    assert "cannot reach DATABASE_URL 127.0.0.1:1 (OperationalError)" in result.output
+    assert "cannot reach the database (OperationalError)" in result.output
     _assert_no_traceback(result)
     _assert_no_credentials(result)
 
@@ -80,23 +80,9 @@ def test_other_ingest_commands_unreachable_db(offline_cli: Path, command: str) -
     }[command]
     result = CliRunner().invoke(app, args)
     assert result.exit_code == 1, result.output
-    assert "cannot reach DATABASE_URL 127.0.0.1:1 (OperationalError)" in result.output
+    assert "cannot reach the database (OperationalError)" in result.output
     _assert_no_traceback(result)
     _assert_no_credentials(result)
-
-
-def test_connect_or_exit_unparseable_dsn(capsys: pytest.CaptureFixture[str]) -> None:
-    from brain import cli_ingest_boundary
-
-    with (
-        pytest.raises(typer.Exit) as excinfo,
-        cli_ingest_boundary.connect_or_exit(f"not a dsn {SYNTHETIC_PASSWORD}"),
-    ):
-        pass  # pragma: no cover - the connect refuses first
-    assert excinfo.value.exit_code == 1
-    err = capsys.readouterr().err
-    assert "cannot reach DATABASE_URL (unparseable)" in err
-    assert SYNTHETIC_PASSWORD not in err
 
 
 #: The calls that open a connection with no refusal around it. ``connect_raw`` is not
@@ -289,59 +275,9 @@ def test_parse_sent_at_moved_unchanged() -> None:
     assert ingest._parse_sent_at is sent_at.parse_sent_at
 
 
-def test_connect_error_class_is_reported_not_its_message() -> None:
-    from brain import cli_ingest_boundary
-
-    line = cli_ingest_boundary.unreachable_line(
-        UNREACHABLE_URL, psycopg.OperationalError(f"boom {SYNTHETIC_PASSWORD}")
-    )
-    assert line.startswith("cannot reach DATABASE_URL 127.0.0.1:1 (OperationalError)")
-    assert SYNTHETIC_PASSWORD not in line
-
-
 # ---------------------------------------------------------------------------
 # Review round rev-137.
 # ---------------------------------------------------------------------------
-
-# Item 1: an unescaped '@' in the password, or a control character in the host, never
-# reaches the terminal through the "cannot reach" line.
-
-
-@pytest.mark.parametrize(
-    "url",
-    [
-        "postgresql://synthetic_user:Synth@3ticPw@127.0.0.1:1/unreachable_test",
-        "postgresql://synthetic_user:pw@%1B%5B31mevil:1/unreachable_test",
-        "postgresql://synthetic_user:pw@host%0Aname:1/unreachable_test",
-    ],
-)
-def test_unreachable_line_never_prints_a_malformed_host(url: str) -> None:
-    from brain import cli_ingest_boundary
-
-    line = cli_ingest_boundary.unreachable_line(url, psycopg.OperationalError("synthetic"))
-    assert line.startswith("cannot reach DATABASE_URL (unparseable) (OperationalError)")
-    for fragment in ("Synth", "3ticPw", "evil", "\x1b", "\n"):
-        assert fragment not in line
-
-
-@pytest.mark.parametrize(
-    ("url", "address"),
-    [
-        ("postgresql://u:p@127.0.0.1:1/x_test", "127.0.0.1:1"),
-        (
-            "postgresql://u:p@db-host_1.example.internal/x_test",
-            "db-host_1.example.internal (default port)",
-        ),
-        ("postgresql://u:p@[::1]:5434/x_test", "::1:5434"),
-        ("host=/var/run/postgresql port=5434 dbname=x_test", "/var/run/postgresql:5434"),
-        ("dbname=x_test", "(libpq default)"),
-    ],
-)
-def test_db_address_keeps_well_formed_hosts(url: str, address: str) -> None:
-    from brain import cli_ingest_boundary
-
-    assert cli_ingest_boundary.db_address(url) == address
-
 
 # Item 2: --metadata values Postgres would reject are usage errors too.
 
@@ -452,132 +388,6 @@ def test_bare_connect_guard_allows_the_sanctioned_paths(tmp_path: Path, source: 
     assert not _imports_bare_connect(module)
 
 
-# ---------------------------------------------------------------------------
-# Review round rev-137b. db_address prints host:port only from a structurally clean DSN:
-# a password can never be read as the host or the port, however it is malformed.
-# ---------------------------------------------------------------------------
-
-_LEAKY_URIS = [
-    # An unescaped '/', '?', '#' or '@' in the password moves the parser's host into it.
-    "postgresql://u:Pa@ss/word@127.0.0.1:1/x_test",
-    "postgresql://u:Pa@1234/x@127.0.0.1/x_test",
-    "postgresql://u:Pa@ss:5432/x@127.0.0.1/x_test",
-    "postgresql://synthetic_user:20261119/x@localhost:5434/x_test",
-    "postgresql://u:QZJ?x@127.0.0.1:1/x_test",
-    "postgresql://u:QZJ#x@127.0.0.1:1/x_test",
-    "postgres://u:Q@ZJ@127.0.0.1:1/x_test",
-    # A query that sets the host or port after the userinfo (an unescaped '&').
-    "postgresql://127.0.0.1:1/x_test?password=a&host=QZJ",
-    "postgresql://127.0.0.1:1/x_test?password=a&port=4242",
-    # libpq does not end a query at '#' (rev-137c #1): '#' is just a byte of the value.
-    "postgresql://127.0.0.1:1/x_test?password=#&port=4242",
-    "postgresql://127.0.0.1:1/x_test?password=#&host=QZJ",
-    # Found by trying to break the rule: libpq percent-decodes query keys, and honours a
-    # keyword after any whitespace, not only a space.
-    "postgresql://u:pw@127.0.0.1:1/x_test?password=a&ho%73t=QZJ",
-    "postgresql://u:pw@127.0.0.1:1/x_test?password=a&po%72t=4242",
-    "postgresql://u:pw@127.0.0.1:1/x_test?password=a&hostaddr=10.0.0.9",
-    "postgresql://u:pw@127.0.0.1:1,QZJ:2/x_test",
-    "POSTGRESQL://u:Pa@ss/x@127.0.0.1/x_test",
-    # A port that is not one libpq would use.
-    "postgresql://u:p@127.0.0.1:0/x_test",
-    "postgresql://u:p@127.0.0.1:70000/x_test",
-    "postgresql://u:p@127.0.0.1:QZJ/x_test",
-]
-_LEAKY_KEYWORDS = [
-    # An unquoted space in the password injects a keyword that libpq then honours.
-    "host=127.0.0.1 port=1 password=x host=QZJ",
-    "host=127.0.0.1 port=1 password=x port=4242",
-    "port=1 password=x host=QZJ",
-    "host=127.0.0.1 password=x port=4242",
-    "host=127.0.0.1 port=0",
-    "host=127.0.0.1 port=1 password=x\thost=QZJ",
-    "host=127.0.0.1 port=1 password=x\x0bhost=QZJ",
-    "host=127.0.0.1 port=1 password=x\nport=4242",
-    "password=x host=QZJ",
-    "host=127.0.0.1 port=70000",
-]
-
-
-@pytest.mark.parametrize(
-    ("url", "address"),
-    [
-        ("postgresql://u:p%40ss@127.0.0.1:1/x_test", "127.0.0.1:1"),
-        ("postgresql://u:pw@127.0.0.1:1/x_test?application_name=QZJ", "127.0.0.1:1"),
-        ("host = 127.0.0.1 port = 1 password = x", "127.0.0.1:1"),
-        ("host=127.0.0.1 port=1 password='a b'", "127.0.0.1:1"),
-        ("postgresql://u:pw@:1/x_test", "(libpq default)"),
-    ],
-)
-def test_db_address_still_prints_a_clean_dsn(url: str, address: str) -> None:
-    from brain import cli_ingest_boundary
-
-    assert cli_ingest_boundary.db_address(url) == address
-
-
-@pytest.mark.parametrize("url", _LEAKY_URIS + _LEAKY_KEYWORDS)
-def test_db_address_refuses_a_dsn_whose_host_could_be_password_text(url: str) -> None:
-    from brain import cli_ingest_boundary
-
-    assert cli_ingest_boundary.db_address(url) == "(unparseable)"
-
-
-def _password_alphabet_samples(seed: int, count: int) -> list[str]:
-    import random
-
-    pieces = ["QZJ", "@", "/", "?", "#", ":", "[", "]", "&", "=", " ", "'", "\\",
-              " host=QZJ", " port=4242", "&host=QZJ", "&port=4242", "%40", "%2F",
-              "&ho%73t=QZJ", "\thost=QZJ", "\nport=4242",
-              "#&host=QZJ", "#&port=4242", "#&ho%73t=QZJ"]
-    rng = random.Random(seed)
-    return ["".join(rng.choice(pieces) for _ in range(rng.randint(1, 6))) for _ in range(count)]
-
-
-def _hash_then_keyword_samples(seed: int, count: int) -> list[str]:
-    """Passwords that always put ``#`` straight before an ``&key=`` (rev-137c #1).
-
-    The random alphabet can miss a two-piece sequence; these cannot.
-    """
-    import random
-
-    rng = random.Random(seed)
-    prefixes = ["", "a", "QZJ", "x/y", "p:q", "%40"]
-    injected = ["host=QZJ", "port=4242", "ho%73t=QZJ", "po%72t=4242", "hostaddr=10.0.0.9"]
-    return [
-        f"{rng.choice(prefixes)}#&{rng.choice(injected)}{rng.choice(['', '&a=b', '#'])}"
-        for _ in range(count)
-    ]
-
-
-@pytest.mark.parametrize(
-    "password",
-    [
-        *_password_alphabet_samples(seed=137, count=400),
-        *_hash_then_keyword_samples(seed=137, count=60),
-    ],
-)
-def test_db_address_never_prints_any_part_of_a_password(password: str) -> None:
-    """Property: the password, wherever it sits, never becomes the printed address.
-
-    For every DSN below the true address is 127.0.0.1:1, so the only acceptable outputs
-    are that and ``(unparseable)``. The alphabet is every character that moves a libpq
-    parser boundary, plus injected keywords.
-    """
-    from brain import cli_ingest_boundary
-
-    quoted = password.replace("\\", "\\\\").replace("'", "\\'")
-    dsns = [
-        f"postgresql://synthetic_user:{password}@127.0.0.1:1/x_test",
-        f"postgresql://{password}@127.0.0.1:1/x_test",
-        f"postgresql://127.0.0.1:1/x_test?password={password}",
-        f"host=127.0.0.1 port=1 password={password}",
-        f"host=127.0.0.1 port=1 password='{quoted}'",
-        f"password={password} host=127.0.0.1 port=1",
-    ]
-    for dsn in dsns:
-        assert cli_ingest_boundary.db_address(dsn) in ("127.0.0.1:1", "(unparseable)"), dsn
-
-
 # rev-137b #2: a lone surrogate is refused like a NUL (Postgres cannot store either).
 
 
@@ -611,68 +421,87 @@ def test_promote_keeps_a_duration_inside_int4(value: object) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Decision after rev-137c: the unreachable-DB line names no address at all. Four review
+# rounds of libpq-parsing edge cases showed that printing host:port safely means copying
+# libpq's parser; `brain doctor` shows the target instead.
+# ---------------------------------------------------------------------------
 
-# rev-137c #2: a host entry longer than any real host name is refused before the pattern,
-# whose IPv6 branch is quadratic on a long run of colons.
+_ANY_DSN = [
+    # Every DSN from the four review rounds' leak lists ...
+    "postgresql://u:Pa@ss/word@127.0.0.1:1/x_test",
+    "postgresql://u:Pa@1234/x@127.0.0.1/x_test",
+    "postgresql://u:Pa@ss:5432/x@127.0.0.1/x_test",
+    "postgresql://synthetic_user:20261119/x@localhost:5434/x_test",
+    "postgresql://u:QZJ?x@127.0.0.1:1/x_test",
+    "postgresql://u:QZJ#x@127.0.0.1:1/x_test",
+    "postgres://u:Q@ZJ@127.0.0.1:1/x_test",
+    "postgresql://127.0.0.1:1/x_test?password=a&host=QZJ",
+    "postgresql://127.0.0.1:1/x_test?password=a&port=4242",
+    "postgresql://127.0.0.1:1/x_test?password=#&port=4242",
+    "postgresql://127.0.0.1:1/x_test?password=#&host=QZJ",
+    "postgresql://u:pw@127.0.0.1:1/x_test?password=a&ho%73t=QZJ",
+    "postgresql://u:pw@127.0.0.1:1/x_test?password=a&po%72t=4242",
+    "postgresql://u:pw@127.0.0.1:1/x_test?password=a&hostaddr=10.0.0.9",
+    "postgresql://u:pw@127.0.0.1:1,QZJ:2/x_test",
+    "POSTGRESQL://u:Pa@ss/x@127.0.0.1/x_test",
+    "postgresql://u:p@127.0.0.1:0/x_test",
+    "postgresql://u:p@127.0.0.1:70000/x_test",
+    "postgresql://u:p@127.0.0.1:QZJ/x_test",
+    "host=127.0.0.1 port=1 password=x host=QZJ",
+    "host=127.0.0.1 port=1 password=x port=4242",
+    "port=1 password=x host=QZJ",
+    "host=127.0.0.1 password=x port=4242",
+    "host=127.0.0.1 port=0",
+    "host=127.0.0.1 port=1 password=x\thost=QZJ",
+    "host=127.0.0.1 port=1 password=x\x0bhost=QZJ",
+    "host=127.0.0.1 port=1 password=x\nport=4242",
+    "password=x host=QZJ",
+    "host=127.0.0.1 port=70000",
+    # ... plus a clean URI, a clean key=value DSN and one with no host at all.
+    f"postgresql://{SYNTHETIC_USER}:{SYNTHETIC_PASSWORD}@127.0.0.1:1/{SYNTHETIC_DB}",
+    f"host=127.0.0.1 port=1 user={SYNTHETIC_USER} password={SYNTHETIC_PASSWORD}"
+    f" dbname={SYNTHETIC_DB}",
+    f"dbname={SYNTHETIC_DB} user={SYNTHETIC_USER}",
+]
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
-        "host=" + ":" * 16_000 + " port=1",
-        "postgresql://u:pw@[" + ":" * 16_000 + "]:1/x_test",
-        "host=" + "a" * 256 + " port=1",
-        "host=127.0.0.1," + "b" * 300 + " port=1",
-    ],
-    ids=["kv-colons", "uri-colons", "kv-256", "list-entry-300"],
-)
-def test_db_address_refuses_an_overlong_host(url: str) -> None:
-    from brain.dsn_address import db_address
+class _RecordingConnect:
+    """A ``connect_raw`` that never connects: it records the DSN and raises ``error``.
 
-    assert db_address(url) == "(unparseable)"
+    The error's MESSAGE quotes the whole DSN, as psycopg's can quote host, port, user and
+    dbname. The printed line must not depend on it.
+    """
 
+    def __init__(self, error: type[psycopg.Error]) -> None:
+        self.error = error
+        self.seen: list[str] = []
 
-def test_db_address_accepts_a_255_char_host() -> None:
-    from brain.dsn_address import db_address
-
-    assert db_address("host=" + "a" * 255 + " port=1") == "a" * 255 + ":1"
+    def __call__(self, database_url: str, **_: object) -> psycopg.Connection:
+        self.seen.append(database_url)
+        raise self.error(f"synthetic failure for {database_url}")
 
 
-# rev-137c #3: where libpq takes the host or port from somewhere the DSN does not say
-# (PGHOST / PGPORT, hostaddr, a service file), the line does not invent localhost:5432.
-
-
-def test_db_address_does_not_claim_localhost_when_pghost_decides(
+@pytest.mark.parametrize("error", [psycopg.OperationalError, psycopg.ProgrammingError])
+@pytest.mark.parametrize("dsn", _ANY_DSN)
+def test_unreachable_db_line_is_fixed_text_whatever_the_dsn(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    dsn: str,
+    error: type[psycopg.Error],
 ) -> None:
-    from brain.dsn_address import db_address
+    from brain import cli_ingest_boundary
 
-    monkeypatch.setenv("PGHOST", "10.9.9.9")
-    for url in ("dbname=x_test", "postgresql:///x_test", "postgresql://u:pw@/x_test"):
-        assert db_address(url) == "(libpq default)", url
-
-
-def test_db_address_does_not_claim_5432_when_pgport_decides(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from brain.dsn_address import db_address
-
-    monkeypatch.setenv("PGPORT", "4242")
-    assert db_address("postgresql://u:pw@127.0.0.1/x_test") == "127.0.0.1 (default port)"
-    assert db_address("host=127.0.0.1 dbname=x_test") == "127.0.0.1 (default port)"
-
-
-@pytest.mark.parametrize(
-    "url",
-    [
-        "host=db.example hostaddr=10.0.0.9 port=1 dbname=x_test",
-        "hostaddr=10.0.0.9 port=1 dbname=x_test",
-        "service=synthetic_svc",
-        "service=synthetic_svc host=127.0.0.1 port=1",
-        "postgresql://u:pw@127.0.0.1:1/x_test?service=synthetic_svc",
-    ],
-)
-def test_db_address_is_neutral_under_hostaddr_or_service(url: str) -> None:
-    from brain.dsn_address import db_address
-
-    assert db_address(url) == "(libpq default)"
+    fake = _RecordingConnect(error)
+    monkeypatch.setattr(cli_ingest_boundary, "connect_raw", fake)
+    with (
+        pytest.raises(typer.Exit) as excinfo,
+        cli_ingest_boundary.connect_or_exit(dsn),
+    ):
+        pass  # pragma: no cover - the fake refuses first
+    assert fake.seen == [dsn]  # the fake, not a real server, received the DSN
+    assert excinfo.value.exit_code == 1
+    expected = (
+        f"cannot reach the database ({error.__name__}). Is Postgres running? Try: brain doctor\n"
+    )
+    assert capsys.readouterr().err == expected

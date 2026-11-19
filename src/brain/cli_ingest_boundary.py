@@ -15,9 +15,10 @@ Exit codes:
 
 What is printed is content-free. An error's class goes through
 :func:`brain.errors.describe_failure`, never its message: a psycopg message names the user
-and database, and an Ollama message can quote a response body. A DSN is reduced to
-``host:port`` by :func:`brain.dsn_address.db_address`, and only when no part of a
-password can be in it.
+and database, and an Ollama message can quote a response body. The unreachable-database
+line names no address at all, not even a host or port. Showing one safely meant copying
+libpq's DSN parser, and four review rounds kept finding edge cases in that copy.
+``brain doctor`` shows the target.
 """
 from __future__ import annotations
 
@@ -31,7 +32,6 @@ import psycopg
 import typer
 
 from .db import connect_raw
-from .dsn_address import db_address
 from .errors import (
     BrainError,
     EmbedError,
@@ -44,13 +44,12 @@ from .ingest.text_safety import encodes_utf8, one_line
 
 _DOCTOR_HINT = "Try: brain doctor"
 
-def unreachable_line(database_url: str, exc: BaseException) -> str:
-    """The one line a failed connect prints: the address and the error class."""
-    # Content-free by construction: db_address prints only a validated host:port (its
-    # host pattern admits no control character), and describe_failure only class names.
+
+def unreachable_line(exc: BaseException) -> str:
+    """The one line a failed connect prints: fixed text and the error class, nothing else."""
     return (
-        f"cannot reach DATABASE_URL {db_address(database_url)} ({describe_failure(exc)}). "
-        f"Is Postgres running? {_DOCTOR_HINT}"
+        f"cannot reach the database ({describe_failure(exc)}). Is Postgres running? "
+        f"{_DOCTOR_HINT}"
     )
 
 
@@ -64,7 +63,7 @@ def connect_or_exit(database_url: str) -> Iterator[psycopg.Connection[Any]]:
     try:
         conn = connect_raw(database_url)
     except psycopg.Error as exc:
-        typer.secho(unreachable_line(database_url, exc), fg="red", err=True)
+        typer.secho(unreachable_line(exc), fg="red", err=True)
         raise typer.Exit(code=1) from None
     try:
         yield conn

@@ -95,23 +95,10 @@ to `compare/v0.4.0...HEAD`. -->
   embedding times out or cannot reach Ollama. It says where it stopped and exits 1; a re-run skips
   the files already ingested. With `--sync`, a stopped run prunes nothing. Any other embedding error
   fails only that file, and the walk goes on.
-- When Postgres is down, every ingest command prints `cannot reach DATABASE_URL host:port` and the
-  error class, with exit 1, instead of a psycopg traceback. The one exception is `brain ingest-code`,
-  which already printed one line. The user, database name and URL are never printed. The
-  `host:port` is printed only when no part of the password can be in it; otherwise it reads
-  `(unparseable)`:
-  - In a URI, the authority (up to the first `/`, `?` or `#`) holds at most one `@`, and no `@`
-    follows it.
-  - In a URI, the query (everything after `?`, `#` included) sets no `host`, `hostaddr` or
-    `port`.
-  - In a `key=value` DSN, `host` and `port` each appear at most once, and before any `password`.
-  - The port is 1 to 65535.
-  - Every host is at most 255 characters, and is a host name, an IP address or an absolute
-    socket directory.
-
-  When libpq rather than the DSN picks the target (no `host`, or a `hostaddr` or `service`),
-  the line says `(libpq default)`, and with no port it says `<host> (default port)`. It does
-  not guess `localhost:5432`.
+- When Postgres is down, every ingest command except `brain ingest-code` (which already printed one
+  line) prints `cannot reach the database (<error class>). Is Postgres running? Try: brain doctor`
+  and exits 1, instead of a psycopg traceback. The line names no host, port, user, database or
+  any other part of `DATABASE_URL`; `brain doctor` shows the target.
 - `brain ingest-stdin --metadata` must be a JSON object that Postgres can store: no `NaN`,
   infinite or out-of-range numbers, no NUL characters, and no lone surrogates (text that is not
   UTF-8). A `duration_min` that does not fit the integer column is skipped with a warning,
