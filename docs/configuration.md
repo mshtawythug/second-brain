@@ -1219,6 +1219,10 @@ that lives only in a repo or working-directory `.env` is not read. The summary
 prints the resolved absolute path and where it came from (for example
 `(from $BRAIN_HOME/.env)`). The vault is deleted only after you type that path
 exactly. With no input (a script, `</dev/null`), the prompt reads end-of-file and
-nothing is removed. It refuses, before removing anything, a vault path that is a
-symlink, is not a directory, or is your home directory, `$BRAIN_HOME`, or a
-parent of either. A vault that does not exist is reported and skipped.
+nothing is removed. Before removing anything, it refuses a vault path that is a
+symlink or not a directory. It also refuses your home directory, `$BRAIN_HOME`,
+or a parent of either; the database directory (`$BRAIN_HOME/data/postgres`),
+anything inside it, or a parent of it (use `--remove-db` for the database); and
+anything at or inside a runtime entry that uninstall removes first, such as
+`$BRAIN_HOME/.shims`. These checks compare the directories themselves, not how
+their paths are spelled. A vault that does not exist is reported and skipped.

@@ -100,14 +100,15 @@ All checks and prompts run **before step 4**: nothing is removed until every gat
    `[warn]   docker compose down exited <rc>: <tail>`, where the tail is the last 3 non-empty
    stderr lines joined with ` | ` and capped at 300 characters (omitted when stderr is empty). An
    exception (`FileNotFoundError` for a missing docker, `TimeoutExpired`) keeps today's `[warn]`.
-   A new `_warn()` helper replaces the two inline `typer.secho(... "[warn]" ...)` calls (DRY).
+   A new `_warn()` helper replaces the step-5 inline `typer.secho(... "[warn]" ...)` call. The
+   step-4 launchd `except` branch keeps its inline call on purpose, see §9.
 
 ## 3. Files
 
 | File | Change |
 |---|---|
 | `src/brain/uninstall.py` (185 lines → about 270) | Resolve via `resolve_install_vault`; a `_vault_refusal(configured, target, home) -> str \| None` helper; the summary path; the typed vault confirmation; step 8 on the target; F41 return-code handling; `_warn`. Drop the `DEFAULT_VAULT_PATH` import. Update the docstring. |
-| `src/brain/cli.py` (over the ceiling) | Only the `--yes` and `--remove-vault` help strings are reworded **in place on their existing lines**, for example `--remove-vault`: `"Also remove the vault (YOUR NOTES; typed confirmation of its path, even with --yes)"`. **Net-zero lines**, so no growth record and no ceiling-table hop are owed. If review wants docstring prose that cannot fit net-zero, it goes in `docs/` instead. |
+| `src/brain/cli.py` (over the ceiling) | Only the `--yes` and `--remove-vault` help strings are reworded **in place on their existing lines**, for example `--remove-vault`: `"Also remove the vault (YOUR NOTES; typed confirmation of its path, even with --yes)"`. **Net-zero lines**, so no growth record is owed. A ceiling-table trail hop **is** still owed, because touching a tabled file means promoting its trailing descriptive hop and adding one for this change (see §9). If review wants docstring prose that cannot fit net-zero, it goes in `docs/` instead. |
 | `tests/test_uninstall.py` (236 → about 450) | New tests (§4). The existing `test_uninstall_remove_vault_takes_explicit_flag` gains a `typer.prompt` answer of `str(vault.resolve())`, a deliberate behaviour change. An autouse fixture points `HOME` and `DEFAULT_VAULT_PATH` (in both `brain.config` and `brain.uninstall`, `raising=False`) at `tmp_path`, so no test in the file can reach a real home, on master or on the branch. |
 | `docs/configuration.md` § Uninstall (line ~1202) | Say how the vault is resolved (env > `$BRAIN_HOME/.env` > `~/brain-vault`, the same as `brain setup`). Say that the resolved path is printed and must be typed, and that `--yes` does not skip it. |
 | `docs/cli-reference.md` (line ~1548) | One sentence with the same facts. |
@@ -213,3 +214,31 @@ plus `ruff check` and `mypy src/`.
 - **(c)** Item 4 is unchanged: EOF aborts, and there is no `isatty()` refusal.
 - **(d)** The autouse decoy fixture uses only `monkeypatch.setenv` / `monkeypatch.setattr`.
 - PR-B owns the step-4 `uninstall_main()` call line, so this diff leaves that line untouched.
+  The launchd `except` branch next to it also keeps its inline `[warn]` call, so `_warn()`
+  replaces only step 5's inline call (§9 item 8).
+
+## 9. Review round 1 (PR #135 @ `7784c4c1`, NOT APPROVED, fixed in follow-up commits)
+
+1. **The guards compare file identity.** `_is_at_or_above` uses `os.path.samefile` between the
+   target and each existing path in a guarded path's chain. Paths that do not exist are skipped.
+   On a case-insensitive volume `…/HOME` is `…/home`, and the old string comparison let it
+   through. The new test is `test_remove_vault_refuses_case_variant_of_home`. It skips when the
+   tmp filesystem is case-sensitive.
+2. **The database and runtime entries are guarded.** A target is refused if it is
+   `$BRAIN_HOME/data/postgres`, anything inside it, or any parent of it. A target is also refused
+   if it is at or inside any `_BRAIN_HOME_SAFE_REMOVES` entry: step 6 deletes that entry first,
+   so step 8 would crash mid-run. New parametrized cases: `database`, `parent_of_database`,
+   `inside_database`, `runtime_entry`, `inside_runtime_entry`.
+3. `test_remove_db_then_wrong_vault_path_removes_nothing` kills the mutation
+   `if removing_vault and not remove_db:`. The mutation was verified in a scratch copy: it
+   survived every earlier test, and this test fails on it.
+4. **Ceiling table.** The `cli.py` trail promotes `0f32826d` (8,704, the empty-daily-brief
+   commit) and adds a hop for `7784c4c1` (8,704, net-zero). That hop is bound to its SHA by the
+   later commit that edits the table and does not touch `cli.py` (the `bc3b868` precedent).
+5. The wrong-answer test is parametrized with near misses: `y`, trailing space, trailing
+   slash, and the unresolved spelling through a symlinked parent.
+6. The autouse fixture also `delenv`s `BRAIN_VAULT_PATH`.
+7. The `run_uninstall` docstrings for `yes` and `remove_vault` are corrected.
+8. **The step-4 launchd `except` branch keeps its inline `typer.secho("[warn]…")`.** It sits
+   beside the `uninstall_main()` line that PR-B changes to `uninstall_main([])`. Routing it
+   through `_warn` would turn a clean merge into a conflict, so only step 5 uses `_warn`.

@@ -91,9 +91,13 @@ to `compare/v0.4.0...HEAD`. -->
   `</dev/null`), the prompt reads end-of-file and the uninstall stops with nothing removed. **A
   script that ran `brain uninstall --yes --remove-vault` now stops there.** It has to supply the
   exact path on stdin.
-- `--remove-vault` refuses, before anything is removed, a vault path that is a symlink, is not a
-  directory, or is your home directory, `$BRAIN_HOME`, or a parent of either. A vault that does
-  not exist is reported (`vault not found at <path>, nothing to remove`) and skipped without a
+- `--remove-vault` refuses, before anything is removed, a vault path that is a symlink or is not
+  a directory. It also refuses your home directory, `$BRAIN_HOME`, or a parent of either; the
+  database directory (`$BRAIN_HOME/data/postgres`), anything inside it, or a parent of it; and
+  anything at or inside a runtime entry that uninstall removes first (such as
+  `$BRAIN_HOME/.shims`). These checks compare the directories themselves, not how their paths
+  are spelled, so a case variant of your home directory is refused too. A vault that does not
+  exist is reported (`vault not found at <path>, nothing to remove`) and skipped without a
   prompt.
 - `brain uninstall` printed `[ok] docker compose down` even when the command failed. It now
   prints `[ok]` only on exit 0, and otherwise a `[warn]` with the exit code and the end of
