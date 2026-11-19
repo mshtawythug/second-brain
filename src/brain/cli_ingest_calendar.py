@@ -51,8 +51,8 @@ from .cli_ingest import (
     _emit_egress_notice,
     _emit_secret_notice,
 )
+from .cli_ingest_boundary import connect_or_exit
 from .config import Config
-from .db import connect
 from .errors import SecretGuardError, describe_failure
 from .ingest import Embedder, ingest_document
 from .ingest import calendar as calendar_ingest
@@ -224,7 +224,7 @@ def _ingest_all(
     counts = dict.fromkeys(
         ("ingested", "updated", "refreshed", "unchanged", "empty", "same_body", "failed"), 0
     )
-    with connect(cfg.database_url) as conn:
+    with connect_or_exit(cfg.database_url) as conn:
         conn.autocommit = True
         for cd in documents:
             try:

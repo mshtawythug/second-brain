@@ -24,7 +24,6 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -33,6 +32,7 @@ from pgvector.psycopg import register_vector  # noqa: F401  (ensures adapter loa
 
 from brain.config import DEFAULT_SECRET_GUARD
 from brain.errors import EnrichmentError, IngestAmbiguousSource, OllamaUnavailable, describe_failure
+from brain.ingest.sent_at import parse_sent_at as _parse_sent_at  # QA F4: shared with --date
 from brain.sensitivity import DEFAULT_SENSITIVITY, is_confidential, normalize_level
 from brain.tags import normalize_tags
 
@@ -341,38 +341,6 @@ _PROMOTED_COLUMNS: tuple[str, ...] = (
     # are human paths and stay unattributed by design.
     "agent_id",
 )
-
-
-def _parse_sent_at(raw: Any) -> datetime | None:
-    """Parse a date string into a TZ-aware UTC ``datetime``.
-
-    Accepts both RFC 2822 (Gmail ``Date:`` header style — e.g.
-    ``"Tue, 04 May 2026 14:23:01 -0400"``) and ISO 8601 (Krisp-style — e.g.
-    ``"2026-05-04T14:23:01+00:00"``) inputs. Returns ``None`` for any input
-    we can't parse — callers log + skip the column rather than crashing the
-    ingest. Naive datetimes are treated as UTC.
-    """
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-
-    parsed: datetime | None = None
-    # RFC 2822 first — ``parsedate_to_datetime`` is strict-but-tolerant and
-    # is the format Gmail's ``Date:`` header uses, so it's the more common
-    # case for this codebase.
-    try:
-        parsed = parsedate_to_datetime(raw)
-    except (TypeError, ValueError):
-        parsed = None
-    if parsed is None:
-        try:
-            # ``fromisoformat`` accepts the trailing-Z form in 3.11+.
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
 
 
 def _promote_metadata_to_columns(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -784,7 +752,7 @@ def ingest_document(
         doc = replace(doc, content=guard.content)
 
     h = _content_hash(doc.content)
-    tags = tags or []
+    tags = normalize_tags(tags or [])  # QA F7: the INSERT path stored raw tags
     source_metadata = source_metadata or {}
 
     result = _ingest_within_transaction(

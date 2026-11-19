@@ -51,9 +51,9 @@ from .cli_ingest import (
     _emit_secret_notice,
     _validate_sensitivity_or_exit,
 )
+from .cli_ingest_boundary import connect_or_exit
 from .cli_sensitivity_rerun import escalate_stored_sensitivity
 from .config import Config
-from .db import connect
 from .errors import SecretGuardError, describe_failure
 from .ingest import Embedder, ingest_document
 from .ingest import social_posts as sp
@@ -224,7 +224,7 @@ def _ingest_all(batch: sp.PostBatch, options: _Options) -> None:
         embedder=_build_embedder(cfg),
         graph_syncer=_build_graph_syncer(cfg),
     )
-    with connect(cfg.database_url) as conn:
+    with connect_or_exit(cfg.database_url) as conn:
         conn.autocommit = True
         for post in batch.posts:
             _guarded(post, run, functools.partial(_write_post, conn, post, run))

@@ -41,13 +41,15 @@ exit 1, stops after three ``gws`` timeouts in a row (:mod:`brain.ingest.gmail_ti
 ingest and in ``--dry-run``, and runs under ``sigterm_as_system_exit`` so a signal kills a hung
 ``gws``; only the catch, the calls and the decorator are here (reasoned inline at each).
 
+**0.4.0 QA (F1-F4, F12) shrank it:** every refusal (DB unreachable, guard, embed failure,
+bad ``--metadata`` / ``--date``) is in :mod:`brain.cli_ingest_boundary`; only the calls are here.
+
 That this module cannot import from ``cli`` -- the cycle described above -- is
 exactly why the kind set now lives in :mod:`brain.source_kinds` rather than in
 either file.
 """
 from __future__ import annotations
 
-import json as _json  # aliased — `json` conflicts with the --json output flag name
 import signal
 import sys
 from dataclasses import replace
@@ -61,10 +63,15 @@ from . import cli_gmail_attachments as gmail_attachments
 from . import cli_import_sync as dir_sync
 from .agent import resolve_agent_id
 from .cli_extract import extract_or_exit
+from .cli_ingest_boundary import (
+    connect_or_exit,
+    embed_failure_stops_walk,
+    exit_on_refusal,
+    stdin_metadata_or_exit,
+)
 from .config import Config
-from .db import connect
 from .embeddings import is_hosted_embedder
-from .errors import SecretGuardError, SensitivityError
+from .errors import EmbedError, SecretGuardError, SensitivityError
 from .ingest import Embedder, IngestResult, ingest_document
 from .ingest import gmail as gmail_ingest
 from .ingest.capped_process import sigterm_as_system_exit
@@ -270,36 +277,25 @@ def ingest(
     enricher = None if no_enrich else _build_enricher(cfg)
     graph_syncer = _build_graph_syncer(cfg)
     doc = extract_or_exit(path)
-    with connect(cfg.database_url) as conn:
+    # QA F1/F2: an unreachable DB, a guard refusal or an embed failure is one line, exit 1.
+    with connect_or_exit(cfg.database_url) as conn, exit_on_refusal(path.name):
         conn.autocommit = True
-        try:
-            result = ingest_document(
-                conn,
-                embedder=embedder,
-                doc=_attribute_to_agent(doc, resolve_agent_id(None, cfg)),
-                source_kind="manual",
-                tags=list(tag),
-                force=force,
-                vault_root=cfg.vault_path,
-                enricher=enricher,
-                enrich=not no_enrich,
-                enrich_min_tokens=cfg.enrich_min_tokens,
-                graph_syncer=graph_syncer,
-                secret_guard=cfg.secret_guard,
-                allow_secrets=allow_secrets,
-                sensitivity=sensitivity or default_sensitivity(path),
-            )
-        except SecretGuardError as e:
-            # Single-file ingest: a refusal is the whole outcome, so exit 1. Nothing was
-            # written: the guard raises before the content hash and the write transaction.
-            typer.secho(str(e), fg="red", err=True)
-            raise typer.Exit(code=1) from e
-        except SensitivityError as e:
-            # An invalid --sensitivity is a usage error, and it is raised before
-            # any write for exactly that reason: a user who typo'd the level must
-            # not end up with a document they believe is protected.
-            typer.secho(str(e), fg="red", err=True)
-            raise typer.Exit(code=1) from e
+        result = ingest_document(
+            conn,
+            embedder=embedder,
+            doc=_attribute_to_agent(doc, resolve_agent_id(None, cfg)),
+            source_kind="manual",
+            tags=list(tag),
+            force=force,
+            vault_root=cfg.vault_path,
+            enricher=enricher,
+            enrich=not no_enrich,
+            enrich_min_tokens=cfg.enrich_min_tokens,
+            graph_syncer=graph_syncer,
+            secret_guard=cfg.secret_guard,
+            allow_secrets=allow_secrets,
+            sensitivity=sensitivity or default_sensitivity(path),
+        )
     _emit_secret_notice(result.secret_notice)
     _emit_egress_notice(result.egress_notice)
     verb = _ingest_outcome_verb(result, force=force)
@@ -369,11 +365,12 @@ def ingest_dir(
     enricher = None if no_enrich else _build_enricher(cfg)
     graph_syncer = _build_graph_syncer(cfg)
     wrote = 0
-    with connect(cfg.database_url) as conn:
+    stopped = False
+    with connect_or_exit(cfg.database_url) as conn:
         conn.autocommit = True
         if sync_run is not None:
             sync_run.preflight_or_exit(conn)
-        for f in files:
+        for index, f in enumerate(files, start=1):
             try:
                 doc = extract_path(f)
                 result = ingest_document(
@@ -406,13 +403,20 @@ def ingest_dir(
                 # already behaves.
                 typer.secho(f"  refused: {f.name}", fg="red", err=True)
                 typer.secho(str(e), fg="red", err=True)
+            except EmbedError as e:  # QA F1: a transient failure stops the walk (helper docstring)
+                if stopped := embed_failure_stops_walk(f.name, e, index=index, total=len(files)):
+                    break
             except (ValueError, OSError, psycopg.Error) as e:
                 typer.secho(f"  failed: {f.name} — {e}", fg="red")
-        pruned = sync_run.prune(conn, graph_syncer=graph_syncer) if sync_run else None
+        # A stopped walk prunes nothing: an aborted run must not delete.
+        prune_run = None if stopped else sync_run
+        pruned = prune_run.prune(conn, graph_syncer=graph_syncer) if prune_run else None
         # Refresh planner stats once, after the batch, only if anything landed (or went).
         if wrote or (pruned is not None and pruned.deleted):
             _analyze_after_bulk_write(conn, context="ingest-dir")
     dir_sync.exit_if_prune_failed(pruned)
+    if stopped:
+        raise typer.Exit(code=1)
 
 
 def ingest_stdin(
@@ -468,13 +472,11 @@ def ingest_stdin(
         validate_source_kind(source)
     except InvalidSourceKind as e:
         raise typer.BadParameter(str(e), param_hint="--source") from e
+    meta = stdin_metadata_or_exit(metadata, date)  # QA F3/F4: exit 2, before stdin is read
     content = sys.stdin.read()
     if not content.strip():
         typer.secho("stdin was empty", fg="red", err=True)
         raise typer.Exit(code=1)
-    meta: dict[str, Any] = _json.loads(metadata) if metadata else {}
-    if date:
-        meta.setdefault("date", date)
     # Wave Q1-D — action-items docs require a parent_meeting_external_id so
     # the parent transcript is discoverable. Without it `brain todo` loses
     # the link; surfacing a clean BadParameter here is friendlier than
@@ -509,36 +511,27 @@ def ingest_stdin(
     # CLI; other sources don't need a runner. Refresh failures are warnings,
     # not errors — the ingest itself still succeeds.
     gws_runner = real_gws_runner if source == "krisp" else None
-    with connect(cfg.database_url) as conn:
+    with connect_or_exit(cfg.database_url) as conn, exit_on_refusal(title):
         conn.autocommit = True
-        try:
-            result = ingest_document(
-                conn,
-                embedder=embedder,
-                doc=doc,
-                source_kind=source,
-                source_external_id=external_id,
-                source_metadata=meta,
-                tags=list(tag),
-                force=force,
-                gws_runner=gws_runner,
-                vault_root=cfg.vault_path,
-                enricher=enricher,
-                enrich=not no_enrich,
-                enrich_min_tokens=cfg.enrich_min_tokens,
-                graph_syncer=graph_syncer,
-                secret_guard=cfg.secret_guard,
-                allow_secrets=allow_secrets,
-                sensitivity=sensitivity,
-            )
-        except SecretGuardError as e:
-            # Same shape as the `stdin was empty` refusal above: red on stderr,
-            # exit 1, nothing written.
-            typer.secho(str(e), fg="red", err=True)
-            raise typer.Exit(code=1) from e
-        except SensitivityError as e:
-            typer.secho(str(e), fg="red", err=True)
-            raise typer.Exit(code=1) from e
+        result = ingest_document(
+            conn,
+            embedder=embedder,
+            doc=doc,
+            source_kind=source,
+            source_external_id=external_id,
+            source_metadata=meta,
+            tags=list(tag),
+            force=force,
+            gws_runner=gws_runner,
+            vault_root=cfg.vault_path,
+            enricher=enricher,
+            enrich=not no_enrich,
+            enrich_min_tokens=cfg.enrich_min_tokens,
+            graph_syncer=graph_syncer,
+            secret_guard=cfg.secret_guard,
+            allow_secrets=allow_secrets,
+            sensitivity=sensitivity,
+        )
     _emit_secret_notice(result.secret_notice)
     _emit_egress_notice(result.egress_notice)
     verb = _ingest_outcome_verb(result, force=force)
@@ -646,7 +639,7 @@ def ingest_gmail(
     skipped = 0
     failed = 0
     timeouts = ConsecutiveTimeouts()
-    with connect(cfg.database_url) as conn, attachments.session():
+    with connect_or_exit(cfg.database_url) as conn, attachments.session():
         conn.autocommit = True
         for tid, ts in threads.items():
             try:
@@ -784,10 +777,10 @@ def _gmail_dry_run_threads(threads: dict[str, list[dict[str, Any]]], *, owner: s
 
 
 def reembed(
-    limit: int | None = typer.Option(
-        None, "--limit", "-n", help="Max chunks to embed (default: all)."
+    limit: int | None = typer.Option(  # QA F12: min=1 on both; -1 and 0 were accepted
+        None, "--limit", "-n", min=1, help="Max chunks to embed (default: all)."
     ),
-    batch_size: int = typer.Option(32, "--batch-size", help="Embedding batch size."),
+    batch_size: int = typer.Option(32, "--batch-size", min=1, help="Embedding batch size."),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Report counts without embedding."
     ),
@@ -844,7 +837,7 @@ def reembed(
     # shipped to the hosted service in one batch.
     hosted = is_hosted_embedder(embedder)
 
-    with connect(cfg.database_url) as conn:
+    with connect_or_exit(cfg.database_url) as conn:
         conn.autocommit = True
         confidential_docs = count_confidential_documents(conn) if hosted else 0
         skip_confidential = hosted and confidential_docs > 0

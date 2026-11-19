@@ -51,8 +51,8 @@ from .cli_ingest import (
     _emit_egress_notice,
     _emit_secret_notice,
 )
+from .cli_ingest_boundary import connect_or_exit
 from .config import Config
-from .db import connect
 from .errors import SecretGuardError, describe_failure
 from .ingest import Embedder, ingest_document
 from .ingest import github as gh
@@ -233,7 +233,7 @@ def _ingest_all(
         allow_secrets=allow_secrets,
     )
     unreadable = 0
-    with connect(cfg.database_url) as conn:
+    with connect_or_exit(cfg.database_url) as conn:
         conn.autocommit = True
         for hit in hits:
             _guarded(hit.external_id, run, lambda h=hit: _ingest_hit(conn, h, run))

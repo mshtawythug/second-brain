@@ -65,9 +65,13 @@ class DsnTarget:
     def is_local(self) -> bool:
         return (self.host or "").lower() in _LOCAL_HOSTS
 
+    @property
+    def address(self) -> str:
+        """``host:port``, with libpq's defaults filled in. No user, no database name."""
+        return f"{self.host or 'localhost'}:{self.port or _DEFAULT_PG_PORT}"
+
     def __str__(self) -> str:
-        where = f"{self.host or 'localhost'}:{self.port or _DEFAULT_PG_PORT}"
-        return f"{self.dbname} @ {where}"
+        return f"{self.dbname} @ {self.address}"
 
 
 def dsn_target(database_url: str) -> DsnTarget:

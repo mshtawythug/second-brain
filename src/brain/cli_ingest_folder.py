@@ -78,8 +78,8 @@ from .cli_ingest import (
     _emit_egress_notice,
     _emit_secret_notice,
 )
+from .cli_ingest_boundary import connect_or_exit
 from .config import Config, ConfigError, _brain_home_root
-from .db import connect
 from .drop_folder import (
     SETTLE_S,
     DropFolder,
@@ -350,7 +350,7 @@ def _ingest_all(
         whisper=whisper,
     )
     failed = False
-    with connect(cfg.database_url) as conn:
+    with connect_or_exit(cfg.database_url) as conn:
         conn.autocommit = True
         for folder in folders:
             try:
