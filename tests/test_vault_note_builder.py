@@ -568,3 +568,20 @@ def test_a_note_that_fails_to_write_leaves_no_partial_file(tmp_path: Path) -> No
     with pytest.raises(UnicodeEncodeError):
         write_vault_note(vault_path=vault, title="Unwritable", body="bad \ud800 text")
     assert not (vault / "unwritable.md").exists()
+
+
+def test_a_missing_template_names_vault_init(tmp_path: Path) -> None:
+    """0.4.0 QA (F13): the "template not found" reason tells the user how to fix it.
+
+    ``brain capture`` prints this reason as-is, so the hint reaches the terminal.
+    """
+    bare = tmp_path / "bare-vault"
+    bare.mkdir()
+
+    with pytest.raises(VaultNoteSyncError) as excinfo:
+        write_vault_note(vault_path=bare, title="Synthetic note")
+
+    [(path, reason)] = excinfo.value.errors
+    assert path == bare / "_templates" / "note.md"
+    assert reason == "template 'note' not found (run `brain vault init`)"
+    assert not any(bare.iterdir()), "nothing may be written"

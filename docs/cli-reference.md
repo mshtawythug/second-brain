@@ -1465,8 +1465,8 @@ Default is open items only.
 `--since` takes a bare number as **days** (suffixes `7d` / `24h` / `90m` also
 work) and filters on `documents.ingested_at`, not the meeting date: a call from
 six months ago that you ingested yesterday still shows under `--since 7`.
-`--source` accepts only `krisp` today and exists for a future Slack/Gmail
-extension. `--json` emits a flat list of `{document_id, document_title,
+`--source` is checked against the known source kinds and exits 2 on any other
+value. Only `krisp` produces action-item documents today. `--json` emits a flat list of `{document_id, document_title,
 ingested_at, state, text}`.
 
 There is no `brain todo close`. To check an item off, edit the source

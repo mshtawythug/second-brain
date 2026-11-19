@@ -110,8 +110,12 @@ to `compare/v0.4.0...HEAD`. -->
 ### Fixed — CLI boundaries: limits, `graph --out`, `todo --source`, setup and capture-import errors (F13, F17, F28, F29, F34)
 
 - Every `-n`/`--limit` option now has a minimum. A value below it exits 2 with a usage
-  error. Before, `graphrag communities list -n -1` and `review list -n -1` sent a negative
-  SQL `LIMIT` and printed a traceback, and the other options accepted the value silently.
+  error from Typer. Before:
+  - `graphrag communities list -n -1` and `review list -n -1` sent a negative SQL `LIMIT`
+    and printed a traceback.
+  - `resurface -n 0`, `review scan --limit 0` and `timeline -n 0` already refused the value
+    (in the command body or the library). They now refuse it through Typer.
+  - Most other options accepted the value silently.
   Where 0 is documented it keeps its meaning: `graphrag entities -n 0` and
   `graphrag entity -n 0` show all, `elicit list -n 0` uses `BRAIN_ELICIT_QUEUE_LIMIT`, and
   `backfill scan-secrets --limit 0` means no limit. Every other option needs at least 1.
@@ -131,7 +135,10 @@ to `compare/v0.4.0...HEAD`. -->
   `up -d` progress lines no longer stream; setup prints a "Starting Postgres" line instead.
 - `brain capture import`, and `brain ingest-folder` over a capture folder, stop before
   moving any file when the vault has no `_templates/note.md`. They say to run
-  `brain vault init`. Before, every file failed with only `(VaultNoteSyncError)`. Capture
+  `brain vault init`. Before, every file failed with only `(VaultNoteSyncError)`.
+  The shared "template not found" error now ends with the same hint, which changes what
+  `brain capture` prints on an unscaffolded vault. `brain note new` already checked for
+  the template itself, and its output is unchanged. Capture
   titles are unchanged: they come from the share's first words, as `brain capture` titles
   a note.
 

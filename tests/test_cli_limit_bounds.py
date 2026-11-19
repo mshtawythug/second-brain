@@ -75,7 +75,10 @@ def test_every_limit_option_has_a_minimum() -> None:
     for path, param in found:
         label = f"brain {path} {'/'.join(param.opts)}"
         minimum = getattr(param.type, "min", None)
-        if not param.type.name.startswith("int"):  # "int" / "int range"
+        # Typer 0.27 vendors click as ``typer._click``, where these are named "int" and
+        # "int range" (measured); upstream Click says "integer" / "integer range". The
+        # prefix accepts both.
+        if not param.type.name.startswith("int"):
             problems.append(f"{label}: not an int option ({param.type.name})")
         elif path in OWNED_ELSEWHERE and minimum is None:
             continue
@@ -92,6 +95,24 @@ def test_the_allowlists_name_only_live_commands() -> None:
     paths = {path for path, _ in _limit_options()}
     stale = sorted((set(ZERO_MEANS) | set(OWNED_ELSEWHERE)) - paths)
     assert not stale, f"allowlist entries with no -n/--limit option: {stale}"
+
+
+def test_an_owned_elsewhere_entry_expires_once_its_owner_bounds_it() -> None:
+    """The exemption is temporary: when the owning PR lands its ``min``, the entry must go.
+
+    Whichever of the two PRs merges second turns this red on its master merge, and the
+    fix is to delete the entry.
+    """
+    options: dict[str, list[Any]] = {}
+    for path, param in _limit_options():
+        options.setdefault(path, []).append(param)
+    stale = [
+        f"stale OWNED_ELSEWHERE entry {path!r}: it is bounded now, remove it"
+        for path in OWNED_ELSEWHERE
+        if options.get(path)
+        and all((getattr(p.type, "min", None) or 0) >= 1 for p in options[path])
+    ]
+    assert not stale, "\n".join(stale)
 
 
 @pytest.mark.parametrize(
