@@ -29,7 +29,8 @@ deletes the ``imported/`` copy after any success (RM-39.D2).
 lies inside it (``<vault>/capture``), or holds it would take the vault's own notes as
 shares, re-create each and delete the original, every run. :func:`importer` refuses it
 with :class:`~brain.drop_folder.DropFolderError`, by RM-37's rule
-(:func:`brain.ingest.import_sync.is_within`, applied both ways).
+(:func:`brain.ingest.import_sync.is_within`, applied both ways). A vault with no note
+template is refused the same way, naming ``brain vault init`` (F13, 0.4.0 QA).
 
 **The note** is written the way ``brain capture`` writes one: a vault-tier note under
 ``capture/``, tagged ``inbox``, titled by
@@ -62,7 +63,12 @@ from .drop_folder import DropFolderError, IngestFn, MoveRaceError, RejectedFileE
 from .errors import describe_failure
 from .ingest.import_sync import is_within
 from .sensitivity import CONFIDENTIAL, VALID_SENSITIVITY_LEVELS
-from .vault.note_builder import index_vault_note, require_autocommit, write_vault_note
+from .vault.note_builder import (
+    index_vault_note,
+    note_template_path,
+    require_autocommit,
+    write_vault_note,
+)
 
 if TYPE_CHECKING:
     import psycopg
@@ -86,6 +92,10 @@ _QUOTES = "\"'"
 VAULT_OVERLAP = (
     "a capture folder must not be the vault, be inside it, or contain it: "
     "it would take the vault's own notes as shares"
+)
+UNSCAFFOLDED = (
+    "the vault has no note template (_templates/note.md): "
+    "run `brain vault init` to scaffold it, then import again"
 )
 
 
@@ -162,10 +172,15 @@ def _level(block: list[str]) -> str | None:
 def importer(ctx: CaptureContext) -> IngestFn:
     """The drop-folder runner's ingest step for a capture folder: :func:`import_file`.
 
-    Raises :class:`~brain.drop_folder.DropFolderError` when the folder overlaps the vault.
+    Raises :class:`~brain.drop_folder.DropFolderError` when the folder overlaps the vault,
+    or when the vault has no note template (F13): every note would fail, and the runner
+    reports a per-file failure by class only, so the cause would never reach the screen.
+    Refusing here, before the runner starts, also leaves every file where it is.
     """
     if overlaps_vault(ctx.folder, ctx.cfg.vault_path):
         raise DropFolderError(VAULT_OVERLAP)
+    if not note_template_path(ctx.cfg.vault_path).is_file():
+        raise DropFolderError(UNSCAFFOLDED)
 
     def ingest(conn: psycopg.Connection[Any], path: Path, *, title: str, timeout: float) -> str:
         return import_file(conn, path, title=title, timeout=timeout, ctx=ctx)

@@ -104,7 +104,7 @@ def _render_list(*, limit: int, json_output: bool, show_all: bool) -> None:
 def connect_default(
     ctx: typer.Context,
     limit: int = typer.Option(
-        _LIST_DEFAULT_LIMIT, "--limit", "-n", help="Max suggestions to show."
+        _LIST_DEFAULT_LIMIT, "--limit", "-n", min=1, help="Max suggestions to show."
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit JSON instead."),
     show_all: bool = typer.Option(
@@ -120,7 +120,7 @@ def connect_default(
 @connect_app.command("list")
 def connect_list(
     limit: int = typer.Option(
-        _LIST_DEFAULT_LIMIT, "--limit", "-n", help="Max suggestions to show."
+        _LIST_DEFAULT_LIMIT, "--limit", "-n", min=1, help="Max suggestions to show."
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit JSON instead."),
     show_all: bool = typer.Option(

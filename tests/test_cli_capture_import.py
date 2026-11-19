@@ -265,10 +265,13 @@ def test_a_share_that_is_not_text_is_rejected_and_kept(
     assert [f.split("-")[0] for f in _files(drop)] == [f"{IMPORTED_DIR}/binary"]
 
 
-def test_a_vault_with_no_template_sends_the_share_back(
+def test_a_vault_with_no_template_is_refused_naming_vault_init(
     test_db: psycopg.Connection[Any], home: Path, drop: Path, embedder: Any,
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """F13 (0.4.0 QA, A19): an unscaffolded vault printed ``failed share.md
+    (VaultNoteSyncError)`` for every file, moving each into ``imported/`` and back, and
+    never said why. The folder is now refused up front, naming the fix."""
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "empty-vault"))
     (tmp_path / "empty-vault").mkdir()
     _share(drop, "share.md", SHARE)
@@ -276,8 +279,31 @@ def test_a_vault_with_no_template_sends_the_share_back(
     result = _import("--dir", str(drop), "--since", "7d")
 
     assert result.exit_code == 1
-    assert "VaultNoteSyncError" in result.output
+    assert "brain vault init" in result.output
+    assert "VaultNoteSyncError" not in result.output
     assert _files(drop) == ["share.md"]
+    assert not (drop / IMPORTED_DIR).exists(), "no file may be moved"
+    assert _notes(test_db) == []
+
+
+def test_ingest_folder_refuses_a_capture_folder_when_the_vault_has_no_template(
+    test_db: psycopg.Connection[Any], home: Path, drop: Path, embedder: Any,
+    no_ocr: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F13, the same refusal through ``brain ingest-folder`` (the one shared importer)."""
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "empty-vault"))
+    (tmp_path / "empty-vault").mkdir()
+    _configure(home, f'[[folder]]\npath = "{drop}"\nmode = "capture"\n')
+    _share(drop, "share.md", SHARE)
+
+    result = CliRunner().invoke(
+        app, ["ingest-folder", "--no-enrich", "--configured", "--since", "7d"]
+    )
+
+    assert result.exit_code == 1
+    assert "skipped" in result.output and "brain vault init" in result.output
+    assert _files(drop) == ["share.md"]
+    assert not (drop / IMPORTED_DIR).exists()
 
 
 def test_a_symlinked_imported_refuses_the_folder(
