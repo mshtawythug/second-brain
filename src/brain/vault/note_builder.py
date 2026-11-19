@@ -228,6 +228,11 @@ def require_autocommit(conn: psycopg.Connection[Any], vault_path: Path) -> None:
         )
 
 
+def note_template_path(vault_path: Path, template: str = "note") -> Path:
+    """Where ``brain vault init`` scaffolds the ``template`` note template."""
+    return vault_path / "_templates" / f"{template}.md"
+
+
 def write_vault_note(
     *,
     vault_path: Path,
@@ -243,10 +248,10 @@ def write_vault_note(
     Touches no database. Raises :class:`~brain.errors.VaultNoteSyncError`, with
     nothing written, when the template is missing or ``folder`` escapes the vault.
     """
-    template_path = vault_path / "_templates" / f"{template}.md"
+    template_path = note_template_path(vault_path, template)
     if not template_path.is_file():
         raise VaultNoteSyncError(
-            [(template_path, f"template {template!r} not found")]
+            [(template_path, f"template {template!r} not found (run `brain vault init`)")]
         )
     template_text = template_path.read_text(encoding="utf-8")
 

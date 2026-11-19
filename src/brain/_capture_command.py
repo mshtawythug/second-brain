@@ -407,8 +407,7 @@ def capture_review(
     ),
     limit: int = typer.Option(
         _REVIEW_DEFAULT_LIMIT,
-        "--limit",
-        "-n",
+        "--limit", "-n", min=1,
         help="Max inbox items to review this pass.",
     ),
 ) -> None:
