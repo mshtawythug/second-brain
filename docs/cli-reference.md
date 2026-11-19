@@ -475,7 +475,7 @@ differ from the MCP twin:
 
 | | CLI | MCP tool |
 |---|---|---|
-| `graphrag entities --limit 0` (and any `limit < 1`) | still means **all entities** | re-mapped to `BRAIN_GRAPH_ENTITIES_MAX_LIMIT` (500) |
+| `graphrag entities --limit 0` | still means **all entities**; a negative `--limit` is refused (exit 2) since 0.4.0 | re-mapped to `BRAIN_GRAPH_ENTITIES_MAX_LIMIT` (500) (as is any `limit < 1`) |
 | `graphrag communities` with no `--limit` | still means **all communities** | finite default: `BRAIN_GRAPH_COMMUNITIES_LIST_LIMIT` (25) |
 | `search --limit`, `recall --budget`, `show` body | unbounded | rejected above the ceiling with the ceiling named |
 
