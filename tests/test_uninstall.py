@@ -48,6 +48,8 @@ def decoy_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     fake_home.mkdir()
     decoy = fake_home / "brain-vault"
     monkeypatch.setenv("HOME", str(fake_home))
+    # A shell's (or the session fixture's) value must not choose the vault.
+    monkeypatch.delenv("BRAIN_VAULT_PATH", raising=False)
     monkeypatch.setattr(config_module, "DEFAULT_VAULT_PATH", decoy)
     monkeypatch.setattr(uninstall_module, "DEFAULT_VAULT_PATH", decoy, raising=False)
     assert decoy == config_module.DEFAULT_VAULT_PATH
@@ -374,18 +376,39 @@ def test_summary_and_kept_line_print_resolved_absolute_vault(
     )
 
 
+def _wrong_answer(case: str, tmp_path: Path) -> tuple[Path, str]:
+    """Build a vault and a near-miss answer; return ``(vault, answer)``."""
+    if case == "unresolved_symlinked_parent":
+        real_parent = tmp_path / "real-parent"
+        vault = _make_vault(real_parent / "vault")
+        link_parent = tmp_path / "link-parent"
+        link_parent.symlink_to(real_parent, target_is_directory=True)
+        configured = link_parent / "vault"
+        # The configured spelling names the same directory, but it is not
+        # the resolved path the prompt printed, so it must not be accepted.
+        assert str(configured) != str(vault.resolve())
+        return configured, str(configured)
+    vault = _make_vault(tmp_path / "vault")
+    target = str(vault.resolve())
+    answers = {"y": "y", "trailing_space": f"{target} ", "trailing_slash": f"{target}/"}
+    return vault, answers[case]
+
+
+@pytest.mark.parametrize(
+    "case", ["y", "trailing_space", "trailing_slash", "unresolved_symlinked_parent"]
+)
 def test_remove_vault_wrong_typed_path_removes_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = _build_brain_home(tmp_path)
-    vault = _make_vault(tmp_path / "vault")
+    vault, answer = _wrong_answer(case, tmp_path)
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
     launchd_calls, fake_launchd = _launchd_recorder()
     run = MagicMock(side_effect=_subprocess_noop)
 
     with (
         patch("subprocess.run", run),
-        patch("typer.prompt", return_value="y"),
+        patch("typer.prompt", return_value=answer),
         pytest.raises(typer.Abort),
     ):
         uninstall_module.run_uninstall(
@@ -395,6 +418,37 @@ def test_remove_vault_wrong_typed_path_removes_nothing(
     assert (vault / "note.md").exists(), "a wrong typed path must leave the vault intact"
     assert (home / ".env").exists() and (home / ".shims").exists(), "nothing may be removed"
     assert not launchd_calls, "launchd must not be touched after a failed confirmation"
+    run.assert_not_called()
+
+
+def test_remove_db_then_wrong_vault_path_removes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--remove-db with --remove-vault: a correct DB phrase does not excuse the vault path."""
+    home = _build_brain_home(tmp_path)
+    pg_marker = home / "data" / "postgres" / "PG_VERSION"
+    vault = _make_vault(tmp_path / "vault")
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
+    launchd_calls, fake_launchd = _launchd_recorder()
+    run = MagicMock(side_effect=_subprocess_noop)
+
+    with (
+        patch("subprocess.run", run),
+        patch("typer.prompt", side_effect=["yes, delete my data", "wrong"]),
+        pytest.raises(typer.Abort),
+    ):
+        uninstall_module.run_uninstall(
+            yes=True,
+            remove_db=True,
+            remove_vault=True,
+            brain_home=home,
+            _launchd_uninstall=fake_launchd,
+        )
+
+    assert pg_marker.exists(), "data/postgres must survive a failed vault confirmation"
+    assert (vault / "note.md").exists()
+    assert (home / ".env").exists() and (home / ".shims").exists()
+    assert not launchd_calls
     run.assert_not_called()
 
 
@@ -421,52 +475,102 @@ def test_yes_does_not_bypass_vault_confirmation_at_eof(
     assert not launchd_calls
 
 
-def _unsafe_target(
-    case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _unsafe_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    return _build_brain_home(tmp_path), Path.home()
+
+
+def _unsafe_parent_of_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[Path, Path]:
-    """Build one unsafe-vault scenario; return ``(brain_home, configured vault)``."""
-    if case == "parent_of_brain_home":
-        home = _build_brain_home(tmp_path / "outer")
-        return home, tmp_path / "outer"
+    nested_home = tmp_path / "users" / "me"
+    nested_home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(nested_home))
+    return _build_brain_home(tmp_path), tmp_path / "users"
+
+
+def _unsafe_brain_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     home = _build_brain_home(tmp_path)
-    if case == "home":
-        return home, Path.home()
-    if case == "parent_of_home":
-        nested_home = tmp_path / "users" / "me"
-        nested_home.mkdir(parents=True)
-        monkeypatch.setenv("HOME", str(nested_home))
-        return home, tmp_path / "users"
-    if case == "brain_home":
-        return home, home
-    if case == "symlink":
-        real = _make_vault(tmp_path / "real-vault")
-        link = tmp_path / "vault-link"
-        link.symlink_to(real, target_is_directory=True)
-        return home, link
-    assert case == "not_a_directory"
+    return home, home
+
+
+def _unsafe_parent_of_brain_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    return _build_brain_home(tmp_path / "outer"), tmp_path / "outer"
+
+
+def _unsafe_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    real = _make_vault(tmp_path / "real-vault")
+    link = tmp_path / "vault-link"
+    link.symlink_to(real, target_is_directory=True)
+    return _build_brain_home(tmp_path), link
+
+
+def _unsafe_not_a_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
     file_vault = tmp_path / "vault.txt"
     file_vault.write_text("not a directory\n")
-    return home, file_vault
+    return _build_brain_home(tmp_path), file_vault
 
 
-@pytest.mark.parametrize(
-    "case",
-    [
-        "home",
-        "parent_of_home",
-        "brain_home",
-        "parent_of_brain_home",
-        "symlink",
-        "not_a_directory",
-    ],
-)
+def _unsafe_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    home = _build_brain_home(tmp_path)
+    return home, home / "data" / "postgres"
+
+
+def _unsafe_parent_of_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    home = _build_brain_home(tmp_path)
+    return home, home / "data"
+
+
+def _unsafe_inside_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    home = _build_brain_home(tmp_path)
+    return home, _make_vault(home / "data" / "postgres" / "base")
+
+
+def _unsafe_runtime_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    home = _build_brain_home(tmp_path)
+    return home, home / ".shims"
+
+
+def _unsafe_inside_runtime_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    home = _build_brain_home(tmp_path)
+    return home, _make_vault(home / ".shims" / "vault")
+
+
+#: Unsafe-vault scenarios; each builder returns ``(brain_home, configured vault)``.
+_UNSAFE_TARGETS: dict[str, Callable[[Path, pytest.MonkeyPatch], tuple[Path, Path]]] = {
+    "home": _unsafe_home,
+    "parent_of_home": _unsafe_parent_of_home,
+    "brain_home": _unsafe_brain_home,
+    "parent_of_brain_home": _unsafe_parent_of_brain_home,
+    "symlink": _unsafe_symlink,
+    "not_a_directory": _unsafe_not_a_directory,
+    "database": _unsafe_database,
+    "parent_of_database": _unsafe_parent_of_database,
+    "inside_database": _unsafe_inside_database,
+    "runtime_entry": _unsafe_runtime_entry,
+    "inside_runtime_entry": _unsafe_inside_runtime_entry,
+}
+
+
+@pytest.mark.parametrize("case", sorted(_UNSAFE_TARGETS))
 def test_remove_vault_refuses_unsafe_target(
     case: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    home, configured = _unsafe_target(case, tmp_path, monkeypatch)
+    home, configured = _UNSAFE_TARGETS[case](tmp_path, monkeypatch)
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(configured))
     launchd_calls, fake_launchd = _launchd_recorder()
 
@@ -482,6 +586,33 @@ def test_remove_vault_refuses_unsafe_target(
 
     assert configured.exists() or configured.is_symlink(), f"{case}: target must survive"
     assert (home / ".env").exists(), f"{case}: nothing may be removed"
+    assert not launchd_calls
+    assert "Refusing --remove-vault" in capsys.readouterr().out
+
+
+def test_remove_vault_refuses_case_variant_of_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The guards compare file identity, not spelling: ``…/HOME`` IS ``…/home`` here."""
+    fake_home = Path.home()
+    variant = fake_home.with_name(fake_home.name.upper())
+    if not variant.exists():
+        pytest.skip("tmp filesystem is case-sensitive; the variant names no directory")
+    home = _build_brain_home(tmp_path)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(variant))
+    launchd_calls, fake_launchd = _launchd_recorder()
+
+    with (
+        patch("subprocess.run", side_effect=_subprocess_noop),
+        patch("typer.prompt", return_value=str(variant.resolve())),
+        pytest.raises(typer.Abort),
+    ):
+        uninstall_module.run_uninstall(
+            yes=True, remove_vault=True, brain_home=home, _launchd_uninstall=fake_launchd
+        )
+
+    assert fake_home.is_dir(), "the home directory must survive"
+    assert (home / ".env").exists()
     assert not launchd_calls
     assert "Refusing --remove-vault" in capsys.readouterr().out
 

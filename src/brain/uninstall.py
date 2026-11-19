@@ -13,6 +13,7 @@ and ``--yes`` never skips the prompt. Unsafe targets are refused up front
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -88,9 +89,24 @@ def _resolve_vault(home: Path, override: Path | None) -> _Vault:
     return _Vault(configured=configured, target=configured.resolve(), source=source)
 
 
-def _is_same_or_ancestor(candidate: Path, path: Path) -> bool:
-    resolved = path.resolve()
-    return candidate == resolved or candidate in resolved.parents
+def _same_file(a: Path, b: Path) -> bool:
+    """File identity (device + inode); a path that does not exist matches nothing."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _is_at_or_above(upper: Path, lower: Path) -> bool:
+    """Whether *upper* is *lower* or one of its ancestors, compared by file identity.
+
+    Identity rather than spelling: on a case-insensitive volume ``…/HOME`` is
+    ``…/home``, and macOS reaches the same directory through
+    ``/System/Volumes/Data/…``; a string comparison misses both. Ancestors of
+    *lower* that do not exist are skipped.
+    """
+    absolute = lower.absolute()
+    return any(_same_file(upper, p) for p in (absolute, *absolute.parents))
 
 
 def _vault_refusal(vault: _Vault, home: Path) -> str | None:
@@ -98,17 +114,26 @@ def _vault_refusal(vault: _Vault, home: Path) -> str | None:
 
     A symlink would be refused by ``rmtree`` only mid-run (after the runtime
     files are gone), as would a non-directory. The home directory, ``/`` (an
-    ancestor of it), ``$BRAIN_HOME`` and its ancestors hold far more than notes;
-    the last two would also take ``data/postgres`` without ``--remove-db``.
+    ancestor of it), ``$BRAIN_HOME`` and its ancestors hold far more than notes.
+    The database directory, anything inside it or any parent of it is never a
+    vault (``--remove-db`` is the way to delete it). A vault at or inside a
+    runtime entry step 6 deletes would be gone before step 8 reaches it.
     """
+    target = vault.target
     if vault.configured.is_symlink():
         return f"{vault.configured} is a symlink"
-    if not vault.target.is_dir():
-        return f"{vault.target} is not a directory"
-    if _is_same_or_ancestor(vault.target, Path.home()):
-        return f"{vault.target} is your home directory or a parent of it"
-    if _is_same_or_ancestor(vault.target, home):
-        return f"{vault.target} is $BRAIN_HOME or a parent of it"
+    if not target.is_dir():
+        return f"{target} is not a directory"
+    if _is_at_or_above(target, Path.home()):
+        return f"{target} is your home directory or a parent of it"
+    if _is_at_or_above(target, home):
+        return f"{target} is $BRAIN_HOME or a parent of it"
+    database = home / "data" / "postgres"
+    if _is_at_or_above(target, database) or _is_at_or_above(database, target):
+        return f"{target} is the database directory, inside it, or a parent of it"
+    for name in _BRAIN_HOME_SAFE_REMOVES:
+        if _is_at_or_above(home / name, target):
+            return f"{target} is inside $BRAIN_HOME/{name}, which uninstall removes first"
     return None
 
 
@@ -149,12 +174,18 @@ def run_uninstall(
     Parameters
     ----------
     yes:
-        Skip the interactive confirmation prompt.
+        Skip the ``Proceed?`` prompt only. It never skips ``--remove-db``'s typed
+        phrase or ``--remove-vault``'s typed vault path.
     remove_db:
         Also remove ``$BRAIN_HOME/data/postgres/`` (requires extra typed
         confirmation regardless of ``yes``).
     remove_vault:
-        Also remove the vault directory.
+        Also remove the vault directory. The vault is resolved before anything is
+        removed: ``BRAIN_VAULT_PATH`` from the environment, then from
+        ``$BRAIN_HOME/.env``, then ``~/brain-vault``
+        (:func:`brain.install_config.resolve_install_vault_with_source`). An unsafe
+        target is refused (:func:`_vault_refusal`), and removal needs the resolved
+        path typed back exactly. A vault that does not exist is skipped.
     brain_home:
         Override the resolved ``$BRAIN_HOME`` path (for tests).
     vault_path:
