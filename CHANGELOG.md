@@ -98,8 +98,9 @@ to `compare/v0.4.0...HEAD`. -->
   `$BRAIN_HOME/.shims`). Each check compares directories by identity, not by spelling, and
   checks each guarded path and its parents both as written and with symlinks resolved. So a case
   variant of your home directory, or the real parent of a symlinked `$BRAIN_HOME`, is refused
-  too. A vault that does not exist is reported (`vault not found at <path>, nothing to
-  remove`) and skipped without a prompt.
+  too. A vault path that cannot be resolved (a symlink loop) is refused as well, and a plain
+  `brain uninstall` shows it as configured instead of failing. A vault that does not exist is
+  reported (`vault not found at <path>, nothing to remove`) and skipped without a prompt.
 - `brain uninstall` printed `[ok] docker compose down` even when the command failed. It now
   prints `[ok]` only on exit 0, and otherwise a `[warn]` with the exit code and the end of
   compose's error output.

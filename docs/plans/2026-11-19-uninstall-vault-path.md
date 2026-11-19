@@ -259,3 +259,22 @@ plus `ruff check` and `mypy src/`.
      for the entry itself as well as for paths inside it.
 3. The CHANGELOG and `docs/configuration.md` now describe the identity comparison over both
    chains.
+
+## 11. Review round 3 (PR #135 @ `4dc43987`, NOT APPROVED, fixed in follow-up commits)
+
+- **Master `6c078c1f` (PR #136) is merged in. There was no rebase.** The merge was clean, and
+  step 4 now reads `uninstall_main([])`.
+- **`_resolve_vault` no longer lets a resolve failure escape.** On Python 3.11 a symlink-loop
+  `BRAIN_VAULT_PATH` raised `RuntimeError` from `configured.resolve()`, so even a plain
+  `brain uninstall` crashed. Master never resolved the path, so this was a regression. The
+  function now catches `(OSError, RuntimeError)` and sets `_Vault.resolvable=False`, and
+  `target` falls back to the configured path.
+  - Without `--remove-vault`, the kept line shows that configured path.
+  - With `--remove-vault`, the run refuses with `<path> cannot be resolved (symlink loop)` before
+    anything is removed. This check runs before `exists()`, because pathlib reports a loop as
+    not existing.
+- **New file `tests/test_uninstall_symlink_loop.py`.** `test_uninstall.py` is near the
+  ceiling, so the tests go in a separate file. They cover both branches above, plus `_lineage`'s
+  fallback to the spelled chain, which kills mutant M19 (an unguarded `resolve()`). The fixture
+  uses the real 3.11 `RuntimeError`. On an interpreter that resolves a loop without raising,
+  the fixture makes `Path.resolve` raise for the two links instead.

@@ -1227,5 +1227,5 @@ anything at or inside a runtime entry that uninstall removes first, such as
 `$BRAIN_HOME/.shims`. Each check compares directories by identity, not by
 spelling. It checks each guarded path and its parents as written, and again with
 symlinks resolved. So a case variant of your home directory, or the real parent of
-a symlinked `$BRAIN_HOME`, is refused too. A vault that does not exist is
-reported and skipped.
+a symlinked `$BRAIN_HOME`, is refused too, as is a vault path that cannot be
+resolved (a symlink loop). A vault that does not exist is reported and skipped.
