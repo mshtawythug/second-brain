@@ -80,6 +80,11 @@ def _refuse_prod(dsn: str) -> None:
         raise ProdDsnLeak(f"refusing a real pg tool run against production: {dsn!r}")
 
 
+# The admin DSN names the `postgres` maintenance database, so only the port
+# check can catch it — refuse it at import, before any fixture can connect.
+_refuse_prod(ADMIN_DSN)
+
+
 def _drop_exact(name: str) -> None:
     assert name in {SOURCE_AGE_DB, SOURCE_PLAIN_DB}, name
     with psycopg.connect(ADMIN_DSN, autocommit=True) as admin:

@@ -55,13 +55,48 @@ def test_guard_allows_age_test_instance() -> None:
     _assert_not_prod_db("localhost", 5434, "second_brain_test")  # must not raise
 
 
-def test_guard_scopes_new_prod_port_to_local_hosts() -> None:
-    """55432 on a REMOTE host with a *_test db is not the prod box → allowed.
+def test_guard_refuses_a_prod_port_on_any_host() -> None:
+    """A prod port is refused whatever the host, even with a ``*_test`` db.
 
-    Proves the new port entry didn't become an overbroad port blocklist.
+    This reverses the earlier contract, which scoped the port refusal to a list
+    of local host spellings. That list cannot be complete — see
+    :func:`test_guard_refuses_every_local_spelling_of_the_prod_port` — and a
+    test suite has no business on a prod port on any host.
     """
-    assert _looks_like_prod_db("remote.example", 55432, "second_brain_test") is False
-    _assert_not_prod_db("remote.example", 55432, "second_brain_test")  # no raise
+    assert _looks_like_prod_db("remote.example", 55432, "second_brain_test") is True
+    with pytest.raises(RuntimeError, match="PROD database"):
+        _assert_not_prod_db("remote.example", 55432, "second_brain_test")
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["127.1", "localhost.", "::ffff:127.0.0.1", "127.0.0.2", "host.docker.internal"],
+)
+def test_guard_refuses_every_local_spelling_of_the_prod_port(host: str) -> None:
+    """Each of these reaches this machine's 55432, and each was let through.
+
+    Under the old literal list (localhost, 127.0.0.1, ::1, 0.0.0.0, "") all five
+    passed as not-prod. The db name is deliberately not ``second_brain``, so
+    only the port refusal can catch them.
+    """
+    assert _looks_like_prod_db(host, 55432, "postgres") is True
+    assert _looks_like_prod_db(host, 55432, "second_brain_restore") is True
+
+
+@pytest.mark.parametrize(
+    ("host", "port", "dbname"),
+    [
+        ("localhost", 5434, "second_brain_test"),
+        ("localhost", 5434, "postgres"),
+        ("127.0.0.1", 5434, "fix_d_test_sbx"),
+        ("localhost", 1, "none"),
+        ("remote.example", 5434, "second_brain_test"),
+    ],
+)
+def test_guard_still_allows_the_test_dsns(host: str, port: int, dbname: str) -> None:
+    """The control: the 5434 test server and the port-1 placeholder still pass."""
+    assert _looks_like_prod_db(host, port, dbname) is False
+    _assert_not_prod_db(host, port, dbname)  # must not raise
 
 
 def test_prod_url_resolver_prefers_explicit_override(

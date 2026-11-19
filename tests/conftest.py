@@ -97,19 +97,23 @@ TEST_DATABASE_URL = os.environ.get(
 # wipe production data.
 _PROD_PORTS = frozenset({5433, 55432})
 _PROD_DB_NAME = "second_brain"
-_LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
 
 def _looks_like_prod_db(host: str | None, port: int | None, dbname: str | None) -> bool:
-    """True if (host, port, dbname) resolves to the prod container.
+    """True if (host, port, dbname) could be the prod container.
 
-    Refuses ANY known prod host port (55432 current, 5433 historical) on a local
-    host, OR the exact prod database name on any host (belt-and-suspenders:
-    catches a prod restore under a different db name, or a non-default port
-    mapping).
+    Refuses ANY known prod port (55432 current, 5433 historical) on ANY host,
+    OR the exact prod database name on any host (belt-and-suspenders: catches a
+    prod restore under a different db name, or a non-default port mapping).
+
+    ``host`` is deliberately not consulted for the port check. It used to be
+    matched against a list of local spellings, and ``127.1``, ``localhost.``,
+    ``::ffff:127.0.0.1``, ``127.0.0.2`` and ``host.docker.internal`` all reach
+    this machine's 55432 while passing as not-prod. No such list is complete,
+    and a test suite has no business on a prod port on any host.
     """
-    is_local = (host or "").lower() in _LOCAL_HOSTS
-    return (is_local and port in _PROD_PORTS) or (dbname == _PROD_DB_NAME)
+    del host  # see the docstring: no host spelling makes a prod port safe
+    return port in _PROD_PORTS or dbname == _PROD_DB_NAME
 
 
 def _assert_not_prod_db(host: str | None, port: int | None, dbname: str | None) -> None:
