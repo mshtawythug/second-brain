@@ -295,3 +295,34 @@ When I'm done, I will drop `fix_e_test` by its exact name.
 - **The docs disagree with the code.** `docs/configuration.md:809` says link 2
   (`<repo>/.env`) is "Source checkouts only". The code consults it unconditionally. Gate the
   link, or correct the row, when the item above is taken up.
+
+## 11. Second commit: warn when the legacy `.env` shadows the write (team-lead ruling)
+
+The package-relative `.env` stays in the read chain (§10), so after this fix a new
+`owner set/add/remove` can still be silently shadowed by the stale file. A pre-fix install wrote
+that file. The ruling: warn, but do not change precedence.
+
+- `install_paths.legacy_dotenv_shadow_warning(key)` returns one line or `None`. It parses the
+  legacy file with the same `dotenv_values` reader `Config.load` uses; there is no new parser. The
+  line names both files and the key, **never the value**. It returns `None` in four cases:
+  - in a checkout, where that file *is* the file being written;
+  - when the legacy file is absent;
+  - when the legacy file is unreadable;
+  - when the legacy file does not set the key.
+- `_owner_write_dotenv` prints that line on stderr in yellow after a successful write. Exit stays
+  0, and the `$BRAIN_HOME/.env` write still happens. All three mutating subcommands go through the
+  writer. A no-op `add`/`remove`/`set` does not write, so it does not warn.
+- `cli.py` change: net zero. Two lines are added, and `_owner_dotenv_path`'s docstring is two
+  lines shorter. `config.py` is untouched. Its F25 hop is bound to `66c833e2` by this commit (the
+  `bc3b868` precedent).
+- CHANGELOG: the upgrade line mentions the warning. It also notes that `uv tool install --force`
+  recreates the tool environment and so deletes that file, settings included. I confirmed this in
+  uv's `install.rs`: with `--force`, `existing_environment` is `None`.
+
+Tests in `tests/test_install_paths.py`:
+
+| Test | What it checks | On `66c833e2` |
+|---|---|---|
+| `test_owner_warns_when_legacy_package_dotenv_shadows_the_write` | `set`, `add` and `remove` each print exactly one `warning:` line that names both paths and contains "wins". No value is printed. Exit is 0. The write lands. `owner show` still reports the stale value, so the shadow is real. | **RED**: no `warning:` line on stderr. |
+| `test_owner_no_warning_when_legacy_package_dotenv_lacks_the_key` | A legacy file without the key produces no warning. | Green by construction, since no warning existed. Its failing power is shown by mutation. |
+| `test_owner_no_legacy_warning_in_checkout` | A checkout produces no warning, even when the repo `.env` already sets the key. | Same as above. |

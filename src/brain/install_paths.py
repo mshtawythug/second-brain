@@ -16,6 +16,8 @@ here, so a module-level import would close a cycle.
 """
 from pathlib import Path
 
+from dotenv import dotenv_values
+
 from .errors import BrainError
 
 #: Directory, under the checkout or ``$BRAIN_HOME``, holding the eval harness's
@@ -109,3 +111,32 @@ def eval_data_dir() -> Path:
 def eval_baselines_dir() -> Path:
     """Where ``brain eval --record-baseline`` / ``--baseline`` read and write ``<NAME>.json``."""
     return eval_data_dir() / "baselines"
+
+
+def legacy_dotenv_shadow_warning(key: str) -> str | None:
+    """A one-line warning when the package-relative ``.env`` still sets *key*, else ``None``.
+
+    Before F25 an installed ``brain owner`` wrote ``<venv>/lib/python3.X/.env``.
+    That file is still link 2 of ``Config.load``'s chain -- deliberately: it may
+    hold the user's real settings -- and it outranks ``$BRAIN_HOME/.env``, so a
+    new write there is silently shadowed until the user moves the line over.
+    Names both files and the key, NEVER the value. ``None`` in a checkout (the
+    package-relative ``.env`` IS the file written), when the legacy file is
+    absent or unreadable, or when it does not set *key*. Parsed with the same
+    ``dotenv_values`` reader ``Config.load`` uses.
+    """
+    if source_checkout_root() is not None:
+        return None
+    from . import config
+
+    legacy = config._project_dotenv()
+    try:
+        if not legacy.is_file() or dotenv_values(legacy).get(key) is None:
+            return None
+    except (OSError, UnicodeDecodeError):
+        return None
+    target = config._brain_home_dotenv()
+    return (
+        f"warning: {legacy} also sets {key} and outranks {target}, so it wins until you "
+        f"move its {key} line into {target} and delete it"
+    )

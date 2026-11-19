@@ -845,7 +845,10 @@ environment-dependent divergence this section exists to prevent.
 source checkout they write the repo `.env`, as always. In an installed `brain` they write
 `$BRAIN_HOME/.env`, never a file beside the installed package (F25). When the target is a
 symlink they write through it, so the link and the file it shares stay one config. A
-dangling link is refused with exit 1 and nothing is written.
+dangling link is refused with exit 1 and nothing is written. If a pre-fix install left
+`BRAIN_OWNER_PARTICIPANTS` in `<venv>/lib/python3.X/.env` (link 2, which outranks
+`$BRAIN_HOME/.env`), each write prints a one-line stderr warning naming both files until
+you move the line into `$BRAIN_HOME/.env` and delete the old file.
 
 When `DATABASE_URL` cannot be resolved, the error prints every path that was
 searched with its state, so you can see which link of the chain is dead:

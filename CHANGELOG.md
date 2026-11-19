@@ -158,7 +158,10 @@ to `compare/v0.4.0...HEAD`. -->
 - Upgrading: if you ran `brain owner set`, `add` or `remove` on an installed `brain`, look for
   `<venv>/lib/python3.X/.env`, the directory above `site-packages`. It is still read, and it
   outranks `$BRAIN_HOME/.env`, so `brain owner show` keeps reporting it. Move its
-  `BRAIN_OWNER_PARTICIPANTS` line into `$BRAIN_HOME/.env`, then delete it.
+  `BRAIN_OWNER_PARTICIPANTS` line into `$BRAIN_HOME/.env`, then delete it. Until you do,
+  `brain owner set`, `add` and `remove` print a one-line warning on stderr naming both files
+  (never the value). Do it before a reinstall: `uv tool install --force` recreates the tool's
+  environment and deletes that file, settings and all.
 
 ### Added — opt-in query rewriting, `--rewrite` (RM-54)
 

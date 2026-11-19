@@ -7900,11 +7900,9 @@ _OWNER_RELINK_HINT = (
 
 
 def _owner_dotenv_path() -> Path:
-    """Path to the `.env` file the owner subcommands read + mutate (F25).
+    """The `.env` the owner subcommands read + mutate (``install_paths.writable_dotenv``).
 
-    The repo ``.env`` in a checkout, ``$BRAIN_HOME/.env`` when installed
-    (``install_paths.writable_dotenv``), written THROUGH a symlink; a dangling
-    link is refused with exit 1 (``install_paths.dotenv_write_target``).
+    Written THROUGH a symlink; a dangling link exits 1 (F25).
     """
     try:
         return install_paths.dotenv_write_target(install_paths.writable_dotenv())
@@ -8033,6 +8031,8 @@ def _owner_write_dotenv(path: Path, entries: list[str]) -> None:
             f"error: failed to write {path}: {exc}", fg="red", err=True
         )
         raise typer.Exit(code=1) from exc
+    if shadow := install_paths.legacy_dotenv_shadow_warning("BRAIN_OWNER_PARTICIPANTS"):
+        typer.secho(shadow, fg="yellow", err=True)
 
 
 @owner_app.command("show")

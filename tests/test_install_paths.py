@@ -143,6 +143,64 @@ def test_owner_refuses_dangling_brain_home_symlink(wheel: WheelInstall, tmp_path
     assert wheel.venv_files() == before
 
 
+def test_owner_warns_when_legacy_package_dotenv_shadows_the_write(wheel: WheelInstall) -> None:
+    """A pre-fix ``owner set`` left the key in ``<venv>/lib/python3.X/.env``, which still wins.
+
+    That file is link 2 of ``Config.load``'s chain and outranks ``$BRAIN_HOME/.env``,
+    so the new write is silently shadowed. Each mutating subcommand warns on
+    stderr, naming both files and never the value; the write itself still lands.
+    """
+    stale = "stale-owner@example.com"
+    wheel.package_dotenv.write_text(f"BRAIN_OWNER_PARTICIPANTS={stale}\n", encoding="utf-8")
+    brain_home_env = wheel.home / ".env"
+
+    for args in (
+        ("owner", "set", "Pat Example,fixture@example.com"),
+        ("owner", "add", "Other Example"),
+        ("owner", "remove", "other example"),
+    ):
+        result = _invoke(*args)
+        assert result.exit_code == 0, result.output
+        warnings = [ln for ln in result.stderr.splitlines() if ln.startswith("warning:")]
+        assert len(warnings) == 1, result.stderr
+        assert str(wheel.package_dotenv) in warnings[0]
+        assert str(brain_home_env) in warnings[0]
+        assert "wins" in warnings[0]
+        assert stale not in result.output
+    assert _LINE in brain_home_env.read_text(encoding="utf-8")
+    assert stale in wheel.package_dotenv.read_text(encoding="utf-8")
+
+    shown = _invoke("owner", "show")
+    assert shown.output.split() == [stale], "the legacy file really does shadow the write"
+
+
+def test_owner_no_warning_when_legacy_package_dotenv_lacks_the_key(
+    wheel: WheelInstall,
+) -> None:
+    wheel.package_dotenv.write_text(
+        "DATABASE_URL=postgresql://x:y@localhost:1/d\n", encoding="utf-8"
+    )
+    result = _invoke("owner", "set", "Pat Example,fixture@example.com")
+    assert result.exit_code == 0, result.output
+    assert "warning" not in result.stderr
+    assert _LINE in (wheel.home / ".env").read_text(encoding="utf-8")
+
+
+def test_owner_no_legacy_warning_in_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """In a checkout the package-relative ``.env`` IS the file written, so nothing shadows it."""
+    project = isolate_config_dotenv(
+        monkeypatch, tmp_path, clear=("BRAIN_OWNER_PARTICIPANTS",),
+        project_env=tmp_path / "project.env",
+    )
+    project.write_text("BRAIN_OWNER_PARTICIPANTS=old@example.com\n", encoding="utf-8")
+    result = _invoke("owner", "set", "Pat Example,fixture@example.com")
+    assert result.exit_code == 0, result.output
+    assert "warning" not in result.stderr
+    assert _LINE in project.read_text(encoding="utf-8")
+
+
 def test_owner_set_in_checkout_writes_project_dotenv_even_with_brain_home_set(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
