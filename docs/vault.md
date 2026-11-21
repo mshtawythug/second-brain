@@ -13,6 +13,8 @@ Brain has two storage tiers, both searchable through the same hybrid index:
 - **Ingested tier** (`kind='ingested'`) — Krisp transcripts, Slack threads, Gmail, raw files. Read-only by convention; the DB is authoritative. Files are mirrored under `_ingested/<source>/` in the vault folder, so the whole corpus is readable as plain Markdown.
 - **Vault tier** (`kind='vault'`) — notes you author. The `.md` file on disk is the source of truth; the DB is a derived index that `brain vault sync` rebuilds from the file. Edit in any text editor.
 
+An ingested mirror is named `_ingested/<source>/<YYYY-MM-DD>-<id8>-<title-slug>.md`. `<id8>` is the first 8 characters of the upstream id after its dashes are removed, when those characters are filename-safe. When they are not, for example an absolute file path from `ingest-code` / `ingest-folder` or a GitHub `owner/repo#N`, it is the first 8 hex digits of the id's SHA-256 instead. A change to this naming rule never moves an existing file, for two reasons. A mirror written by ingest records its path in `documents.vault_path`, and that path is never recomputed. A mirror written only by `brain vault export`, which does not store the path, keeps its place because a file already at the old-rule path is always reused.
+
 Both tiers live in a single vault folder (default `~/brain-vault/`, override with `BRAIN_VAULT_PATH`). Wiki-links (`[[Title]]`, `[[brain:<id>]]`, `[[krisp:<external_id>]]`) cross both tiers — vault notes can link to ingested artifacts and back.
 
 ### One-time vault setup

@@ -8,13 +8,16 @@ the DB.
 Older manual ingests have no ``sources`` row (no upstream identifier). For
 those we synthesize a ``local-<short-uuid>`` placeholder in the filename so
 two such docs with the same date + title can still be disambiguated.
+
+The ``_ingested/`` path rule itself lives in :mod:`brain.vault.mirror_path`
+(split out for F15); this module only asks it for rows with no stored path.
 """
 from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +29,9 @@ from ..sensitivity import DEFAULT_SENSITIVITY
 from . import init_vault
 from ._atomic import atomic_write_text
 from .frontmatter import dump_frontmatter, parse_frontmatter
-from .slug import gmail_slug, slugify
+from .mirror_path import ingested_relative_path
 
 _BATCH_SIZE = 100
-_MAX_SHORT_ID = 8  # first N chars of an external/document UUID for filename use
 _EXPORT_OWNED_FRONTMATTER_KEYS = frozenset(
     {
         "id",
@@ -244,78 +246,6 @@ def _fetch_document_for_export(
     return _row_to_document_for_export(row)
 
 
-def _short_id(value: str) -> str:
-    """Return the first 8 hex chars of a UUID-like value (no surrounding dashes).
-
-    Used both for the external-id slot in filenames and for the collision
-    suffix. Stripping dashes first makes ``-aabbccdd`` collisions deterministic
-    regardless of the full UUID's hyphenation style. For non-UUID
-    ``external_id`` values (e.g. Slack's ``1234567.890`` timestamps) the
-    strip-then-truncate behavior preserves the leading bytes verbatim once
-    any non-hex separator characters have been dropped.
-    """
-    return value.replace("-", "")[:_MAX_SHORT_ID]
-
-
-def _date_prefix(doc: _DocumentForExport) -> str:
-    """Pick the YYYY-MM-DD prefix for an ingested file's filename.
-
-    ``metadata.date`` wins when present (a string ISO date or datetime, or a
-    date/datetime object). Otherwise we fall back to ``ingested_at::date``,
-    which is non-NULL by schema (``documents.ingested_at NOT NULL DEFAULT
-    NOW()``) — the assert is defensive so a future schema regression
-    surfaces here rather than producing a malformed filename.
-    """
-    raw = doc.metadata.get("date")
-    if isinstance(raw, str) and raw:
-        # Accept "2026-04-15" or "2026-04-15T..." — the date is the first 10 chars.
-        return raw[:10]
-    if isinstance(raw, (datetime, date)):
-        return raw.strftime("%Y-%m-%d") if isinstance(raw, date) else raw.date().isoformat()
-    assert doc.ingested_at is not None, "documents.ingested_at is NOT NULL"
-    return doc.ingested_at.date().isoformat()
-
-
-def _parse_iso_datetime(raw: Any) -> datetime | None:
-    """Parse an ISO-8601 string (with optional trailing ``Z``) into a datetime.
-
-    Returns ``None`` for any non-string / unparseable input. Used by the
-    Gmail-slug branch to read ``metadata.sent_at`` (set by the gmail
-    extractor). Naive datetimes survive as-is — :func:`gmail_slug` treats
-    them as UTC.
-    """
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def _gmail_relative_path(doc: _DocumentForExport) -> str | None:
-    """Compute the ``_ingested/gmail/<gmail-slug>.md`` path for a Gmail doc.
-
-    Returns ``None`` when the metadata is too sparse to build a stable slug
-    (no ``thread_id`` AND no usable date) — the caller falls back to the
-    generic ingested-path rules so legacy rows still export. Idempotent: a
-    given ``(thread_id, sent_at, subject)`` triple always yields the same
-    path.
-    """
-    thread_id = doc.metadata.get("thread_id")
-    if not isinstance(thread_id, str) or not thread_id:
-        return None
-    sent_at = _parse_iso_datetime(doc.metadata.get("sent_at"))
-    if sent_at is None and doc.ingested_at is None:
-        return None
-    slug = gmail_slug(
-        thread_id,
-        sent_at,
-        doc.title,
-        fallback_date=doc.ingested_at,
-    )
-    return f"_ingested/gmail/{slug}.md"
-
-
 def _paths_taken_by_others(
     conn: psycopg.Connection[Any], document_id: str
 ) -> Callable[[str], bool]:
@@ -347,92 +277,21 @@ def _paths_taken_by_others(
     return is_taken
 
 
-def _ingested_relative_path(
-    doc: _DocumentForExport, is_taken: Callable[[str], bool]
-) -> str:
-    """Compute the ``_ingested/<source>/...`` path for an ingested-tier doc.
-
-    The shape depends on the source:
-
-    - ``manual``: ``_ingested/manual/<slug>.md`` (no date prefix; older
-      manual ingests had no upstream date at all).
-    - ``gmail``: ``_ingested/gmail/<gmail-slug>.md`` where ``<gmail-slug>``
-      is :func:`brain.vault.slug.gmail_slug` over
-      ``(thread_id, sent_at, subject)``. Stable across re-ingests of the
-      same thread; falls back to the generic shape below for legacy rows
-      missing ``thread_id``.
-    - everything else: ``_ingested/<source>/<YYYY-MM-DD>-<external-id>-<slug>.md``
-      using the first 8 chars of ``sources.external_id`` (or
-      ``local-<short-doc-id>`` when no source row exists, e.g. legacy
-      manual ingests under any kind).
-
-    On collision (two docs hashing to the same path) we append the short
-    document UUID — stable across re-runs because it's keyed off the immutable
-    ``documents.id``.
-
-    ``is_taken`` is the collision oracle, injected rather than assumed. The
-    corpus dump passes its in-run ``used_paths`` set; the single-document path
-    passes a DB-backed predicate (:func:`_paths_taken_by_others`). Making it a
-    parameter is what stopped the two callers disagreeing about whether a
-    collision is even detectable — the single-document caller used to pass an
-    empty set and could therefore never detect one.
-    """
-    source = doc.source_kind or "manual"
-    slug = slugify(doc.title)
-
-    if source == "manual":
-        candidate = f"_ingested/manual/{slug}.md"
-    elif source == "gmail":
-        gmail_path = _gmail_relative_path(doc)
-        if gmail_path is not None:
-            candidate = gmail_path
-        else:
-            date_prefix = _date_prefix(doc)
-            external = (
-                _short_id(doc.source_external_id)
-                if doc.source_external_id
-                else f"local-{_short_id(doc.id)}"
-            )
-            candidate = f"_ingested/gmail/{date_prefix}-{external}-{slug}.md"
-    else:
-        date_prefix = _date_prefix(doc)
-        external = (
-            _short_id(doc.source_external_id)
-            if doc.source_external_id
-            else f"local-{_short_id(doc.id)}"
-        )
-        candidate = f"_ingested/{source}/{date_prefix}-{external}-{slug}.md"
-
-    if is_taken(candidate):
-        # Deterministic collision suffix: short hash of the doc id, never a
-        # counter (counters would shuffle every re-run).
-        suffix = _short_id(doc.id)
-        stem, ext = candidate.rsplit(".", 1)
-        candidate = f"{stem}-{suffix}.{ext}"
-        # A second collision means two documents share both a slug AND the
-        # first 8 hex of their UUIDs. Vanishingly rare, but "vanishingly rare"
-        # is what the original empty-set bug looked like from the inside, and
-        # the cost of being wrong is another UniqueViolation traceback. Widen
-        # the id rather than appending a counter, so the result stays a pure
-        # function of the immutable document id and is stable across re-runs.
-        if is_taken(candidate):
-            candidate = f"{stem}-{doc.id}.{ext}"
-    return candidate
-
-
 def _resolve_relative_path(
-    doc: _DocumentForExport, is_taken: Callable[[str], bool]
+    doc: _DocumentForExport, is_taken: Callable[[str], bool], *, vault_root: Path
 ) -> str:
     """Pick the on-disk path for ``doc``.
 
     Rows with an explicit ``vault_path`` round-trip identity (vault-tier files
     stay where the user authored them; ingested mirrors stay at their recorded
     canonical path). Rows without one land in ``_ingested/`` per
-    :func:`_ingested_relative_path`.
+    :func:`brain.vault.mirror_path.ingested_relative_path`. A stored path is
+    returned before the rule is consulted, so a change to the rule can never
+    move a file that is already mirrored (F15).
     """
     if doc.vault_path:
         return doc.vault_path
-    return _ingested_relative_path(doc, is_taken)
+    return ingested_relative_path(doc, is_taken, vault_root=vault_root)
 
 
 def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
@@ -675,7 +534,9 @@ def export_vault(
     used_paths: set[str] = set()
 
     for doc in _iter_documents(conn):
-        relative = _resolve_relative_path(doc, used_paths.__contains__)
+        relative = _resolve_relative_path(
+            doc, used_paths.__contains__, vault_root=vault_path
+        )
         used_paths.add(relative)
         try:
             _, written = _write_doc_file(
@@ -751,7 +612,7 @@ def regenerate_vault_file(
         )
 
     relative = doc.vault_path or _resolve_relative_path(
-        doc, _paths_taken_by_others(conn, document_id)
+        doc, _paths_taken_by_others(conn, document_id), vault_root=vault_path
     )
 
     target, _ = _write_doc_file(
