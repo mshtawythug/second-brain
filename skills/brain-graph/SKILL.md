@@ -268,15 +268,9 @@ Gotchas worth knowing before you run one:
   To make the change take effect, run `brain vault relink-derived` — a
   full-corpus rebuild, so hand off to `brain-maintenance` and confirm with the
   user rather than firing it off mid-conversation.
-- `brain owner set` / `add` / `remove` **edit `.env`**. Treat them as
-  configuration changes: state what you are about to write and confirm first.
-  `brain owner show` is read-only and always safe.
-- **Where the write goes.** In a source checkout, `set` / `add` / `remove` write the
-  repo `.env`; in an installed `brain`, `$BRAIN_HOME/.env` (default `~/.brain/.env`),
-  through a symlink if it is one (a dangling link is refused with exit 1). On an
-  installed `brain`, an old `<venv>/lib/python3.X/.env` that still sets
-  `BRAIN_OWNER_PARTICIPANTS` keeps winning over `$BRAIN_HOME/.env`, and each write
-  prints a warning naming both files until its line is moved and the file deleted.
+- `brain owner set` / `add` / `remove` **edit `.env`**: the repo `.env` in a checkout, `$BRAIN_HOME/.env` when installed
+  (written through a symlink; a dangling one exits 1). Installed, an old `<venv>/lib/python3.X/.env` setting the key still wins, and each write warns.
+  Treat them as configuration changes: state what you are about to write and confirm first. `brain owner show` is read-only and always safe.
 
 ## If a command errors
 
