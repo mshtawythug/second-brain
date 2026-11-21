@@ -351,3 +351,31 @@ def test_db_leg_disabled_skips_database_checks(
     assert "embedder" not in _codes(result)
     assert "dim" not in _codes(result)
     assert result.blocked is False
+
+
+def test_db_leg_disabled_reports_no_database_counts(
+    test_db: psycopg.Connection,
+    archive_dir: Path,
+    manifest: BackupManifest,
+    cfg: Config,
+    seed_doc: Callable[..., str],
+) -> None:
+    """F24: `--vault-only` must neither preview nor gate on the database."""
+    seed_doc(title="Larkspur review", content="Synthetic body for preflight.")
+
+    result = preflight(
+        archive_dir,
+        manifest,
+        cfg,
+        FakeEmbedder(dim=EMBEDDING_DIM),
+        test_db,
+        vault_path=cfg.vault_path,
+        db_leg=False,
+        vault_leg=True,
+        disk_usage=_plenty_of_disk,
+    )
+
+    assert result.target_documents == 0
+    assert result.target_chunks == 0
+    assert result.target_sources == 0
+    assert result.target_is_non_empty is False

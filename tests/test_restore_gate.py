@@ -190,7 +190,10 @@ def wired(
 
 
 def _inject_fake_runner(
-    monkeypatch: pytest.MonkeyPatch, runner: RecordingRunner
+    monkeypatch: pytest.MonkeyPatch,
+    runner: RecordingRunner,
+    *,
+    pre_backup: Callable[[], Path] | None = None,
 ) -> None:
     """Route the CLI's ``restore_backup`` through ``runner``.
 
@@ -201,11 +204,17 @@ def _inject_fake_runner(
     assertion reads as "no external command ran" while measuring nothing —
     and a gate regression would spawn a REAL ``pg_dump`` against the
     production DSN with the test still green.
+
+    ``pre_backup`` stands in for the pre-restore ``create_backup``. Only the
+    host-leg test passes it: the stub runners materialise a container-leg dump
+    (``docker cp``) but not a host-leg ``pg_dump -f``.
     """
     from brain.backup.restore import restore_backup as real_restore
 
     def _with_fake_runner(*args: Any, **kwargs: Any) -> Any:
         kwargs["runner"] = runner
+        if pre_backup is not None:
+            kwargs["pre_backup"] = pre_backup
         return real_restore(*args, **kwargs)
 
     monkeypatch.setattr("brain.cli_backup.restore_backup", _with_fake_runner)
