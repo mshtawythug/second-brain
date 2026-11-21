@@ -10,6 +10,7 @@ byte, and an old-rule file already on disk is reused rather than duplicated.
 Every external id and path here is synthetic; every vault root is ``tmp_path``.
 """
 import hashlib
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -249,14 +250,24 @@ def test_no_segment_is_a_dot_name_or_holds_a_separator(external_id: str) -> None
     assert "/" not in segment and "\\" not in segment and "\x00" not in segment
 
 
-@pytest.mark.parametrize("external_id", ["/srv/x", "..", ".", ".hidden", "a\x00b", "é"])
+@pytest.mark.parametrize(
+    "external_id",
+    [
+        "/srv/x", "..", ".", ".hidden", "a\x00b",
+        # The plan's full table, so the ``_SAFE_SEGMENT`` allowlist itself is pinned:
+        "/", "\\", "#", ":", " ", "\t", "é", "", "--------",
+    ],
+)
 def test_an_unsafe_segment_is_the_sha256_prefix(external_id: str) -> None:
-    assert external_segment(external_id) == hashlib.sha256(
-        external_id.encode("utf-8")
-    ).hexdigest()[:8]
+    segment = external_segment(external_id)
+
+    assert re.fullmatch(r"[0-9a-f]{8}", segment)
+    assert segment == hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:8]
 
 
-@pytest.mark.parametrize("date_value", ["../../../x", "2026/01/15", ".hidden-date", "a\x00b"])
+@pytest.mark.parametrize(
+    "date_value", ["../../../x", "2026/01/15", "2026\\01\\15", ".hidden-date", "a\x00b"]
+)
 def test_a_hostile_metadata_date_falls_back_to_the_ingest_date(
     tmp_path: Path, date_value: str
 ) -> None:

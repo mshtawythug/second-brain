@@ -421,6 +421,22 @@ Then `ruff check` and `mypy src/`. Every pytest run is taken under
   from the non-editable daemon install. They pick up the rule only after a reinstall.
   There is no ordering hazard: the watcher never computes a path.
 - **No schema change and no migration.**
+- **Accepted pre-existing clobber in `vault export`** (raised in review). When two rows
+  compute the same path and one of them has no stored `vault_path`, the in-run
+  collision set of `export_vault` can let one row write over the other's file. That
+  happens because `export_vault` neither stores nor reads the paths of other rows on
+  disk. This was already the case before this change, which neither adds nor removes it,
+  and it is accepted here.
+
+## 7a. Not in scope (backlog)
+
+- **BL-97: relocate the existing stray directories.** This would be an opt-in command;
+  see §4 for what it must do.
+- **Hardening of the vacancy guard** (the auditor's idea). Reuse an old-rule file only
+  when its frontmatter `id` is this document's id, or resolves to no live row. Today the
+  guard reuses any file found at the old-rule path. That is exactly the old behaviour
+  (the old rule wrote there without looking), so it is not a regression. The check would
+  narrow the pre-existing clobber above.
 
 ## 8. CHANGELOG (under `## 0.4.0 - 2026-11-08`, immediately before the RM-53 `brain examples` subsection)
 
