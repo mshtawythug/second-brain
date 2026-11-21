@@ -204,6 +204,28 @@ to `compare/v0.4.0...HEAD`. -->
   number is now at most 6 ASCII digits: a longer or non-ASCII-digit marker is removed as dangling
   (a 5,000-digit one no longer raises).
 
+### Fixed — an installed `brain` keeps `brain owner` and `brain eval` files in `$BRAIN_HOME` (F25)
+
+- `brain owner set`, `add` and `remove` wrote `BRAIN_OWNER_PARTICIPANTS` to a `.env` beside the
+  installed package (`<venv>/lib/python3.X/.env` for a `pip` or `uv tool` install) instead of your
+  config. Outside a source checkout they now write `$BRAIN_HOME/.env` (default `~/.brain/.env`),
+  the file `brain setup` creates. When that file is a symlink, its target is updated and the link
+  is kept; a dangling link is refused with exit 1 and nothing is written. A source checkout still
+  writes the repo `.env`.
+- `brain eval`'s default golden corpus, answer corpus and baselines directory pointed at
+  `tests/eval/` beside the installed package, so `--record-baseline` wrote into the virtualenv.
+  Outside a source checkout they are now `$BRAIN_HOME/eval/golden_corpus.yaml`,
+  `$BRAIN_HOME/eval/answer_corpus.yaml` and `$BRAIN_HOME/eval/baselines/`. A source checkout still
+  uses `tests/eval/`, so the eval gate (`ci.json`, `golden_corpus.yaml`) is unchanged.
+- Upgrading: if you ran `brain owner set`, `add` or `remove` on an installed `brain`, look for
+  `<venv>/lib/python3.X/.env`, the directory above `site-packages`. It is still read, and it
+  outranks `$BRAIN_HOME/.env`, so `brain owner show` keeps reporting it. Move its
+  `BRAIN_OWNER_PARTICIPANTS` line into `$BRAIN_HOME/.env`, then delete it. Until you do,
+  each write by `brain owner set`, `add` or `remove` prints a one-line warning on stderr naming
+  both files (never the value); a no-op that writes nothing stays quiet. Do it before a
+  reinstall: `uv tool install --force` recreates the tool's environment and deletes that file,
+  settings and all.
+
 ### Added — opt-in query rewriting, `--rewrite` (RM-54)
 
 - `brain search --rewrite` and `brain explain --rewrite` also search up to two paraphrases from the

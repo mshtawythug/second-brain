@@ -142,7 +142,7 @@ def _prepare(
     corpus_path = tmp_path / "corpus.yaml"
     corpus_path.write_text(yaml.dump(_MINI_CORPUS), encoding="utf-8")
     baselines_dir = tmp_path / "baselines"
-    monkeypatch.setattr("brain.cli._BASELINES_DIR", baselines_dir)
+    monkeypatch.setattr("brain.install_paths.eval_baselines_dir", lambda: baselines_dir)
     return corpus_path, baselines_dir
 
 

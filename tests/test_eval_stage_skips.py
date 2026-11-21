@@ -176,7 +176,7 @@ def cli_eval(
     tmp_path: Path,
 ) -> Path:
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setattr("brain.cli._BASELINES_DIR", tmp_path / "baselines")
+    monkeypatch.setattr("brain.install_paths.eval_baselines_dir", lambda: tmp_path / "baselines")
     monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: fake_embedder)
     corpus = {
         "version": 1,

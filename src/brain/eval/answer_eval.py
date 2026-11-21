@@ -18,20 +18,21 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from ..install_paths import eval_data_dir
 from .errors import EvalCorpusError
 
 if TYPE_CHECKING:
     from ..ask import AskResult
 
-# Default answer-corpus path: eval/ -> brain/ -> src/ -> repo root, then into
-# tests/eval/. Committed (unlike the hybrid golden corpus) because it is fully
-# synthetic — no real doc IDs, names, or employers (CLAUDE.md rule 15).
-_DEFAULT_ANSWER_CORPUS_PATH: Path = (
-    Path(__file__).resolve().parent.parent.parent.parent
-    / "tests"
-    / "eval"
-    / "answer_corpus.yaml"
-)
+
+def default_answer_corpus_path() -> Path:
+    """The answer corpus: ``tests/eval/`` in a checkout, ``$BRAIN_HOME/eval/`` installed (F25).
+
+    Committed in the checkout (unlike the hybrid golden corpus) because it is
+    fully synthetic — no real doc IDs, names, or employers (CLAUDE.md rule 15).
+    """
+    return eval_data_dir() / "answer_corpus.yaml"
+
 
 _VALID_ANSWER_CATEGORIES: frozenset[str] = frozenset(
     ("synthesis", "multi-hop", "person", "timeline")
@@ -181,7 +182,7 @@ def load_answer_corpus(path: Path | None = None) -> list[AnswerEvalCase]:
             category, missing required field, or empty ``expected_facts``.
     """
     if path is None:
-        path = _DEFAULT_ANSWER_CORPUS_PATH
+        path = default_answer_corpus_path()
 
     if not path.exists():
         raise EvalCorpusError(f"answer corpus file not found: {path}")
