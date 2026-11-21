@@ -381,3 +381,86 @@ Master `66cd9cb2` was merged in (no rebase, no conflicts).
   opens `demo_database_url(port)` (db `second_brain_demo`) without the guard. It is read-only
   (`SELECT count(*)`), and its database is never `second_brain`. Guarding it would turn a
   status probe into an error, so it is left for triage.
+
+## 11. Review round 3 (rev-139 r3, after the prod incident)
+
+**Root cause of the incident.** The original `_PROD_URLS` tests in `tests/test_demo_core.py`
+(`test_seed_refuses_prod_urls`, `test_query_refuses_prod_urls`) called the REAL `brain.db.connect`.
+With the guard mutated away, they connected to 55432. `test_provision_refuses_prod_port` had no
+Docker or compose-file fake either.
+
+**Fix.**
+- The recording `connect` is now **autouse for the whole module**. It is passed through to the real
+  `connect` only for the exact `TEST_DATABASE_URL` string, which `conftest` refuses at import if it
+  is a prod DSN. Every other DSN is recorded and refused with an `AssertionError`, never opened.
+- Every refusal test asserts `attempts == []`.
+- `test_provision_refuses_prod_port` fakes `_write_compose_file` and `_run_docker` and asserts
+  neither is called.
+- A second autouse fixture clears `PGSERVICE`, `PGPORT`, `PGDATABASE` and `PGUSER`.
+
+**PGSERVICE.** A service is refused only when the DSN leaves a port entry or the dbname to it.
+With explicit port(s) and dbname it is allowed, because those override the service file, and they
+are then checked like any other values. Allowed, refused and prod-alongside-a-service cases are
+tested.
+
+### Grep proof: real connect / subprocess / docker paths in every test file this PR touches
+
+Pattern:
+`connect\(|psycopg\.connect|subprocess\.(run|Popen|check)|SubprocessRunner|os\.system|\.invoke\(|create_backup\(|restore_backup\(|prepare_restore\(|preflight\(|seed_demo\(|query_demo\(|provision\(|_run\(`,
+plus `docker|_run_docker|status\(|teardown\(|_count_documents|_wait_until_ready|_container_running` for
+`test_demo_core.py`.
+
+- **`tests/test_demo_core.py`.** Every DB connection in `src/brain/demo/__init__.py` (`seed_demo`,
+  `query_demo`, `_wait_until_ready`, `provision`, `_count_documents`) uses the module-level name
+  `connect`, which the autouse recorder replaces. `ingest_document` and `hybrid_search` open no
+  connection of their own (grep of `ingest/__init__.py` and `search.py`).
+  - Real `connect` happens only in `test_count_documents_counts_seeded_rows`, for the exact
+    `TEST_DATABASE_URL` (5434).
+  - `test_count_documents_unreachable_returns_none` now gets the recorder's refusal, which stands
+    in for a refused connection.
+  - The one real subprocess is `test_run_executes_a_real_subprocess`: `_run(["printf", "hello"])`,
+    a fixed local argv that cannot reach a server.
+  - `_container_running`, `teardown` and the three `_run_docker` tests patch `brain.demo._run`.
+  - `provision(55432)` has `_write_compose_file` and `_run_docker` faked.
+- **`tests/test_restore_qa_c24.py` and `tests/test_restore_gate.py`.**
+  - `create_backup(...)` (qa_c24:99, :411; gate:160, :312, :422) always passes
+    `runner=StubDumpRunner(...)`, a `RecordingRunner` that never spawns a process and asserts no
+    prod DSN in argv.
+  - `CliRunner().invoke(app, ["restore", …])` (gate:224) runs with the `wired` fixture:
+    `brain.cli_backup.connect` and `brain.backup.restore.connect` are a `RefusingConnectionFactory`
+    that refuses any prod DSN, and the runner is a fake.
+  - The unpatched `brain.backup.create.connect` and `brain.backup.restore_run.connect` only ever
+    see `cfg.database_url` / staging parts derived from it, which is the 5434 restore sandbox.
+  - The one prod-config test (`test_refuses_prod_database_url_without_typed_phrase`) is stopped at
+    the first connection in `restore_cmd`, the patched `brain.cli_backup.connect`. That precedes
+    every unpatched one.
+- **`tests/test_restore_hints.py`.**
+  - `prepare_restore` is tar work under `tmp_path` and opens no connection.
+  - `restore_backup` (:262) is vault-only (`db_leg=False`) with a `pre_backup` that raises before
+    any backup or connection, against a synthetic 5999 DSN.
+- **`tests/test_cli_backup.py`.**
+  - `invoke(app, ["backup", …])` goes through the `wired` fixture, whose `_fake_backup` injects
+    `StubDumpRunner`.
+  - `create_backup` (:206, :229) passes `StubDumpRunner`.
+  - Its DSN is the 5434 test database.
+- **`tests/test_restore_preflight.py`.** `preflight(...)` takes the `test_db` connection (5434).
+  It spawns no process.
+- **`tests/test_conftest_prod_guard.py`.** Pure calls only. No match.
+- **`tests/test_database_url_isolation.py`.** The three matches (:5, :234, :398) are a docstring, a
+  comment and a template string the AST scan parses. No connection or process.
+- **`tests/conftest.py`.** The session lock and `test_db` connect to `TEST_DATABASE_URL`, refused
+  at import by `_assert_dsn_not_prod` if it is a prod DSN.
+- **`tests/test_restore_real_pg_tools.py`.** By design it runs real `docker exec` pg tools against
+  the container that publishes the test DSN's port, with `ADMIN_DSN` refused at import if prod.
+  It is excluded from every run in this PR, and it was not run in rounds 2 or 3.
+
+Mutation runs (round 3) are restricted to `tests/test_demo_core.py`, which the proof above covers,
+with `TEST_DATABASE_URL` on 5434, `BRAIN_PROD_DATABASE_URL=postgresql://localhost:1/none`, and
+`PGHOST=127.0.0.1 PGPORT=1`.
+
+### Not in scope (round 3, for the backlog)
+
+- **The `tests/conftest.py` `service=` gap.** `_assert_dsn_not_prod` does not consult `service=` /
+  `PGSERVICE`. A `TEST_DATABASE_URL` such as `service=x` with the port in `pg_service.conf` would
+  pass the import-time guard. Fix: mirror the demo rule, and refuse a service unless the DSN names
+  every port and the dbname.

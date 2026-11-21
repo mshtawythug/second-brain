@@ -192,9 +192,10 @@ to `compare/v0.4.0...HEAD`. -->
 - The guard now parses the DSN the way libpq does. It refuses a prod port on any host, including
   every entry of a multi-host port list. A port or database the DSN leaves out is taken from
   `PGPORT` / `PGDATABASE` and then libpq's defaults (5432, the user name).
-- It also refuses database `second_brain`, a `pg_service.conf` service (whose host, port and
-  database it cannot see), and a DSN it cannot parse. Each is refused before any connection is
-  attempted.
+- It also refuses database `second_brain`, a DSN it cannot parse, and a `service=` / `PGSERVICE`
+  that would supply the port or database from `pg_service.conf`, where the guard cannot see them.
+  A service is allowed when the DSN names every port and the dbname itself, because explicit
+  values override the service file. Each refusal happens before any connection is attempted.
 - Test safety: the test suite's own guard (`tests/conftest.py`) also refused prod ports only for
   literal local host spellings, and it read `TEST_DATABASE_URL` with `urlparse`, so a key=value
   DSN on 55432 passed. It now refuses a prod port on any host, and parses `TEST_DATABASE_URL`

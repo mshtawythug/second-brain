@@ -165,6 +165,18 @@ def _effective_dbname(params: dict[str, str]) -> str:
         return ""
 
 
+def _assert_service_leaves_nothing_hidden(params: dict[str, str]) -> None:
+    """Refuse a service unless the DSN gives every port and the dbname explicitly."""
+    ports = params.get("port", "").split(",")
+    if params.get("dbname") and all(entry.strip() for entry in ports):
+        return
+    raise BrainError(
+        "REFUSING to run `brain demo` through a pg_service.conf service that "
+        "supplies the port or database: the prod guard cannot see those. Give "
+        "--database-url an explicit port and dbname (they override the service)."
+    )
+
+
 def _assert_not_demo_prod_db(database_url: str) -> None:
     """Refuse to operate against the prod database.
 
@@ -177,18 +189,17 @@ def _assert_not_demo_prod_db(database_url: str) -> None:
     ``localhost.``, ``[::ffff:127.0.0.1]`` and ``host.docker.internal`` all
     reach this machine's 55432, and no list of local spellings is complete.
 
-    A ``service=`` (or ``PGSERVICE``) is refused too: it takes host, port and
-    dbname from ``pg_service.conf``, where this check cannot see them. Every
-    demo primitive that opens a connection calls this first, so a mis-pointed
-    ``--database-url`` can never seed / query / drop prod data.
+    A ``service=`` (or ``PGSERVICE``) fills whatever the DSN leaves out from
+    ``pg_service.conf``, where this check cannot see it, so it is refused
+    unless the DSN itself names every port and the dbname — explicit DSN values
+    override the service file, so those are the values libpq will use, and they
+    are checked like any other. Every demo primitive that opens a connection
+    calls this first, so a mis-pointed ``--database-url`` can never seed /
+    query / drop prod data.
     """
     params = _dsn_params(database_url)
     if params.get("service") or os.environ.get("PGSERVICE"):
-        raise BrainError(
-            "REFUSING to run `brain demo` through a pg_service.conf service: its "
-            "host, port and database are invisible to the prod guard. Pass "
-            "--database-url with an explicit host, port and dbname."
-        )
+        _assert_service_leaves_nothing_hidden(params)
     ports = _effective_ports(params)
     dbname = _effective_dbname(params)
     if dbname == _PROD_DB_NAME or any(port in _PROD_PORTS for port in ports):
