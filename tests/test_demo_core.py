@@ -145,9 +145,14 @@ def test_compose_file_text_has_isolation_contract() -> None:
     assert "./" not in text
 
 
-def test_count_documents_unreachable_returns_none() -> None:
-    # Connection refused (nothing listening) → best-effort probe returns None.
-    assert demo_mod._count_documents("postgresql://brain:brain@localhost:1/x") is None
+def test_count_documents_unreachable_returns_none(
+    refusing_connect: _RecordingConnect,
+) -> None:
+    # Any connect failure → best-effort probe returns None; the recorder stands
+    # in for an unreachable server (it refuses every non-test DSN).
+    dsn = "postgresql://brain:brain@localhost:1/x"
+    assert demo_mod._count_documents(dsn) is None
+    assert refusing_connect.attempts == [dsn]
 
 
 @pytest.mark.fresh_schema
