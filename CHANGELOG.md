@@ -111,7 +111,8 @@ to `compare/v0.4.0...HEAD`. -->
 - `brain ingest` on a file type it does not read prints one line: the types it does read, and a
   pointer to `brain ingest-code` for source code. It exits 2. A malformed PDF or DOCX, including a
   zip that is not a Word document, is one `cannot read` line with the error class, exit 1.
-  `brain ingest-dir` reports a file it cannot ingest by error class too, never the error text.
+  `brain ingest-dir` reports a file it cannot ingest by error class too, never the error text, and
+  so does `brain ingest-gmail` for a thread that fails on the database or on its content.
 - `brain reembed --batch-size` and `--limit` must be at least 1 (exit 2). `--batch-size 0` used to
   do nothing, and `--limit -1` reported "would embed -1".
 

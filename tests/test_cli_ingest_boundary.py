@@ -466,6 +466,14 @@ _ANY_DSN = [
 ]
 
 
+def _raise_error(error: type[Exception], database_url: str) -> Exception:
+    """The failure ``connect_raw`` raises, its message quoting the whole DSN."""
+    if issubclass(error, UnicodeEncodeError):
+        # Raised before libpq for a DSN that cannot be encoded (a lone surrogate).
+        return error("utf-8", database_url, 0, 1, f"synthetic failure for {database_url}")
+    return error(f"synthetic failure for {database_url}")
+
+
 class _RecordingConnect:
     """A ``connect_raw`` that never connects: it records the DSN and raises ``error``.
 
@@ -473,22 +481,24 @@ class _RecordingConnect:
     dbname. The printed line must not depend on it.
     """
 
-    def __init__(self, error: type[psycopg.Error]) -> None:
+    def __init__(self, error: type[Exception]) -> None:
         self.error = error
         self.seen: list[str] = []
 
     def __call__(self, database_url: str, **_: object) -> psycopg.Connection:
         self.seen.append(database_url)
-        raise self.error(f"synthetic failure for {database_url}")
+        raise _raise_error(self.error, database_url)
 
 
-@pytest.mark.parametrize("error", [psycopg.OperationalError, psycopg.ProgrammingError])
+@pytest.mark.parametrize(
+    "error", [psycopg.OperationalError, psycopg.ProgrammingError, UnicodeEncodeError]
+)
 @pytest.mark.parametrize("dsn", _ANY_DSN)
 def test_unreachable_db_line_is_fixed_text_whatever_the_dsn(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     dsn: str,
-    error: type[psycopg.Error],
+    error: type[Exception],
 ) -> None:
     from brain import cli_ingest_boundary
 
@@ -505,3 +515,57 @@ def test_unreachable_db_line_is_fixed_text_whatever_the_dsn(
         f"cannot reach the database ({error.__name__}). Is Postgres running? Try: brain doctor\n"
     )
     assert capsys.readouterr().err == expected
+
+
+
+# Audit after 8d8a970f, item 1: ingest-gmail's per-thread failure line names the error
+# class for a psycopg / ValueError / KeyError failure, never its text (a psycopg DETAIL can
+# quote row values; a parser error can quote the message body).
+
+_GMAIL_MARKER = "SYNTHETIC-MARKER-QZJ-0137"
+
+
+class _OfflineConnection:
+    """What ``connect_raw`` returns here: no server behind it, and no row is stored."""
+
+    autocommit = False
+
+    def execute(self, *_: object, **__: object) -> _OfflineConnection:
+        return self
+
+    def fetchone(self) -> None:
+        return None
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        psycopg.errors.DataError(f"bad row {_GMAIL_MARKER}"),
+        ValueError(f"malformed {_GMAIL_MARKER}"),
+        KeyError(_GMAIL_MARKER),
+    ],
+    ids=["psycopg", "value", "key"],
+)
+def test_ingest_gmail_failed_thread_line_names_the_class_not_the_text(
+    offline_cli: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    from tests.test_cli_ingest_gmail import _fake_runner, _msg
+
+    monkeypatch.setattr(
+        "brain.cli_ingest_boundary.connect_raw", lambda *_a, **_k: _OfflineConnection()
+    )
+    msgs = {"m1": _msg(id="m1", subject="Hi", from_addr="n@example.com", body="Hello")}
+    monkeypatch.setattr("brain.ingest.gmail._run", _fake_runner(msgs))
+
+    def fail(*_a: object, **_k: object) -> None:
+        raise error
+
+    monkeypatch.setattr("brain.cli_ingest.ingest_document", fail)
+    result = CliRunner().invoke(app, ["ingest-gmail", "--label", "synthetic", "--no-enrich"])
+    assert result.exit_code == 0, result.output
+    assert f"failed thread tm1 (1 messages): {type(error).__name__}" in result.output
+    assert _GMAIL_MARKER not in result.output
+    _assert_no_traceback(result)

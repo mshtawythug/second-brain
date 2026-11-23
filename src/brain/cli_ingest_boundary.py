@@ -58,11 +58,13 @@ def connect_or_exit(database_url: str) -> Iterator[psycopg.Connection[Any]]:
     """:func:`brain.db.connect`, but a failed connect is one red line and exit 1 (QA F2).
 
     Only the connect is guarded. An error raised inside the ``with`` body propagates
-    unchanged, because "cannot reach" would be a false diagnosis of it.
+    unchanged, because "cannot reach" would be a false diagnosis of it. A DSN that cannot
+    be encoded (a lone surrogate) raises ``UnicodeEncodeError`` before libpq sees it, and
+    is refused the same way.
     """
     try:
         conn = connect_raw(database_url)
-    except psycopg.Error as exc:
+    except (psycopg.Error, UnicodeError) as exc:  # a DSN that cannot be encoded fails pre-libpq
         typer.secho(unreachable_line(exc), fg="red", err=True)
         raise typer.Exit(code=1) from None
     try:

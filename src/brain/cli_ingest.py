@@ -71,7 +71,7 @@ from .cli_ingest_boundary import (
 )
 from .config import Config
 from .embeddings import is_hosted_embedder
-from .errors import EmbedError, SecretGuardError, SensitivityError
+from .errors import EmbedError, SecretGuardError, SensitivityError, describe_failure
 from .ingest import Embedder, IngestResult, ingest_document
 from .ingest import gmail as gmail_ingest
 from .ingest.capped_process import sigterm_as_system_exit
@@ -705,10 +705,8 @@ def ingest_gmail(
                 failed += 1
                 continue
             except (GmailError, psycopg.Error, ValueError, KeyError) as e:
-                typer.secho(
-                    f"  failed thread {tid} ({len(ts)} messages): {e}",
-                    fg="red",
-                )
+                why = e if isinstance(e, GmailError) else describe_failure(e)  # class only: no row
+                typer.secho(f"  failed thread {tid} ({len(ts)} messages): {why}", fg="red")
                 failed += 1
                 if timeouts.failed(e):  # BL-39: a gws that keeps timing out costs 60 s a thread
                     typer.secho(STOP_MESSAGE, fg="red", err=True)

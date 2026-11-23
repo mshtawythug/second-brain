@@ -463,3 +463,19 @@ Each fix was one more partial copy of libpq's parser.
   no credential appears.
 - Everything else in #137 is unchanged: metadata, date, DOCX, tags, reembed,
   `connect_or_exit`, the scan guard, `ingest-dir`.
+
+## 12. Post-approval audit of `8d8a970f` (one commit; each new test RED against `8d8a970f` first)
+
+1. **`ingest-gmail`'s per-thread `failed thread` line.** For a psycopg, `ValueError` or
+   `KeyError` failure it now prints `describe_failure(e)`, the class only. A `GmailError`
+   keeps its message: BL-39 already made those class-only where they could quote `gws`
+   output. `cli_ingest.py` is net −2.
+   - Test: `test_ingest_gmail_failed_thread_line_names_the_class_not_the_text`, with 3 cases,
+     all carrying a synthetic marker.
+   - It runs with no database: an offline `connect_raw` fake, the existing gws runner fake,
+     and `ingest_document` patched to raise.
+2. **`connect_or_exit` also catches `UnicodeError`.** A DSN that cannot be encoded (a lone
+   surrogate) raises `UnicodeEncodeError` before libpq. The `_ANY_DSN` equality test gains
+   `UnicodeEncodeError` as a third error class, adding 32 cases.
+   - RED against `8d8a970f`: 35 failed, the 32 new error cases plus the 3 gmail cases. The 64
+     existing cases passed.
