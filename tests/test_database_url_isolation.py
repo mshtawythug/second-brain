@@ -447,7 +447,7 @@ def test_value_first_sweep_still_allows_the_one_legitimate_form() -> None:
 # --- conftest prod-DB destructive-reset guard (DB-safety) -------------------
 # conftest._assert_not_prod_db is the hard guard that aborts the destructive
 # DROP SCHEMA reset if it would ever target the prod container. These pin its
-# contract (prod port on localhost, or the prod db name on any host, is
+# contract (a prod port on ANY host, or the prod db name on any host, is
 # refused; the AGE test instance passes).
 
 
@@ -472,12 +472,14 @@ def test_prod_db_guard_allows_age_test_instance() -> None:
     _assert_not_prod_db("localhost", 5434, "second_brain_test")  # must not raise
 
 
-def test_prod_db_guard_scopes_prod_port_refusal_to_local_hosts() -> None:
-    """The prod-port refusal is scoped to local hosts (the prod container).
+def test_prod_db_guard_refuses_prod_port_on_any_host() -> None:
+    """The prod-port refusal applies on ANY host, not a list of local spellings.
 
-    A remote host on the same port with a ``*_test`` db is not the prod box,
-    so it is allowed — proving the guard isn't an overbroad port blocklist.
+    ``127.1``, ``localhost.`` or ``host.docker.internal`` all reach the local
+    prod container, and no list of spellings is complete, so the host is not
+    consulted. The ``*_test`` db name does not rescue a prod port.
     """
     prod_port = 5400 + 33
-    assert _looks_like_prod_db("remote.example", prod_port, "second_brain_test") is False
-    _assert_not_prod_db("remote.example", prod_port, "second_brain_test")  # no raise
+    assert _looks_like_prod_db("remote.example", prod_port, "second_brain_test") is True
+    with pytest.raises(RuntimeError, match="PROD database"):
+        _assert_not_prod_db("remote.example", prod_port, "second_brain_test")

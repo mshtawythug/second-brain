@@ -78,6 +78,33 @@ to `compare/v0.4.0...HEAD`. -->
   an empty re-run. **Empty pages written by earlier versions stay in the vault**, and brain never
   deletes vault files, so remove them by hand if you want them gone.
 
+### Fixed — `brain uninstall --remove-vault` deletes the configured vault, and only once you type its path (F16, F41)
+
+- `--remove-vault` always deleted `~/brain-vault`, whatever `BRAIN_VAULT_PATH` said, so a vault
+  kept elsewhere survived and whatever sat at `~/brain-vault` was deleted instead. The vault is
+  now resolved the way `brain setup` and `brain-install-launchd` resolve it: `BRAIN_VAULT_PATH`
+  from the environment, then from `$BRAIN_HOME/.env`, then `~/brain-vault`. It is resolved before
+  anything is removed, because uninstall deletes `$BRAIN_HOME/.env` along the way.
+- The summary prints the vault's absolute path and where it came from (`BRAIN_VAULT_PATH env`,
+  `$BRAIN_HOME/.env` or `default ~/brain-vault`). The vault is deleted only after you type that
+  path exactly. `--yes` skips only the `Proceed?` prompt, not this one. With no input (a script,
+  `</dev/null`), the prompt reads end-of-file and the uninstall stops with nothing removed. **A
+  script that ran `brain uninstall --yes --remove-vault` now stops there.** It has to supply the
+  exact path on stdin.
+- `--remove-vault` refuses, before anything is removed, a vault path that is a symlink or is not
+  a directory. It also refuses your home directory, `$BRAIN_HOME`, or a parent of either; the
+  database directory (`$BRAIN_HOME/data/postgres`), anything inside it, or a parent of it; and
+  anything at or inside a runtime entry that uninstall removes first (such as
+  `$BRAIN_HOME/.shims`). Each check compares directories by identity, not by spelling, and
+  checks each guarded path and its parents both as written and with symlinks resolved. So a case
+  variant of your home directory, or the real parent of a symlinked `$BRAIN_HOME`, is refused
+  too. A vault path that cannot be resolved (a symlink loop) is refused as well, and a plain
+  `brain uninstall` shows it as configured instead of failing. A vault that does not exist is
+  reported (`vault not found at <path>, nothing to remove`) and skipped without a prompt.
+- `brain uninstall` printed `[ok] docker compose down` even when the command failed. It now
+  prints `[ok]` only on exit 0, and otherwise a `[warn]` with the exit code and the end of
+  compose's error output.
+
 ### Fixed — the reranker's launchd job no longer refuses long passages (RM-14c)
 
 - The `com.brain.reranker` template now starts `llama-server` with `--batch-size 2048
@@ -187,6 +214,49 @@ to `compare/v0.4.0...HEAD`. -->
 - Migration 032 indexes `search_queries.session_id`, which the stage looks up for each read. Without
   it, a synthetic 1,000,000-interaction table took 11.7 s per search at p95.
 
+### Fixed — `brain restore` names the server it restored, keeps `--json` clean, and tidies up (F22, F23, F24, F27)
+
+- After a database restore, the "drop it when satisfied" line named the production container
+  (`docker exec second-brain-postgres …`) whatever server the restore ran against, so pasting it
+  could reach the wrong server. It now names the container `pg_restore` actually ran in, or, when
+  the host's `pg_restore` was used, prints `psql -h <host> -p <port> -U <user>` for `DATABASE_URL`
+  with no `docker exec`. Only host, port and user are read from the DSN, so a password is never
+  printed, and every value is shell-quoted.
+- `restore --json` printed its confirmation prompts on stdout, so the output was not JSON. In
+  `--json` mode prompts and warnings now go to stderr, and stdout carries nothing but JSON. The
+  typed phrase still cannot be skipped by any flag, so a non-empty restore reads it from stdin as
+  before. A declined or interrupted (Ctrl-C) run prints `{"restored": false, "aborted": true}`
+  and exits 1. A run that ends in any other error exits non-zero with stdout empty.
+- `restore --vault-only` listed the database under "WILL BE OVERWRITTEN". The preview now follows
+  the scope, as `--db-only` already did for the vault. **Gate change:** `--vault-only` asks for the
+  typed phrase only when the vault is non-empty. It no longer asks because the database is
+  non-empty, since the vault-only path never touches the database. A non-empty vault still needs
+  the phrase, and `--yes` still cannot supply it.
+- A declined, refused or failed restore left the unpacked archive in
+  `$BRAIN_HOME/run/restore-<timestamp>/`: a plaintext copy of the dump and vault. It is now
+  removed however the command ends, including a refused hostile archive. The removal touches only a
+  `restore-<timestamp>` directory directly under `$BRAIN_HOME/run`, never a symlink.
+
+### Fixed — prod safety: `brain demo` cannot be pointed at the production database
+
+- `brain demo --database-url` could seed and query the production `second_brain` database. Its
+  guard refused ports 55432 and 5433 only for five literal local host spellings, and read the URL
+  with `urlparse`. These all got through: `127.1:55432`, `[::ffff:127.0.0.1]:55432`,
+  `localhost.:55432`, a percent-encoded `second%5Fbrain`, the key=value form
+  `host=localhost port=55432 dbname=second_brain`, and `?port=55432&dbname=second_brain`.
+- The guard now parses the DSN the way libpq does. It refuses a prod port on any host, including
+  every entry of a multi-host port list. A port or database the DSN leaves out is taken from
+  `PGPORT` / `PGDATABASE` and then libpq's defaults (5432, the user name).
+- It also refuses database `second_brain`, a DSN it cannot parse, and a `service=` / `PGSERVICE`
+  that would supply the port or database from `pg_service.conf`, where the guard cannot see them.
+  A service is allowed when the DSN names every port and the dbname itself, because explicit
+  values override the service file. Each refusal happens before any connection is attempted.
+- Test safety: the test suite's own guard (`tests/conftest.py`) also refused prod ports only for
+  literal local host spellings, and it read `TEST_DATABASE_URL` with `urlparse`, so a key=value
+  DSN on 55432 passed. It now refuses a prod port on any host, and parses `TEST_DATABASE_URL`
+  with `conninfo_to_dict` (with the `PGPORT` fallback) before anything connects.
+  `tests/test_restore_real_pg_tools.py` runs its admin DSN through the same guard.
+
 ### Added — `brain tags summarize`, a cited synthesis of one tag (RM-55)
 
 - `brain tags summarize TAG [--limit 20] [--json]` reads the tag's most recent non-draft documents,
@@ -204,6 +274,28 @@ to `compare/v0.4.0...HEAD`. -->
 - `brain ask`'s `[N]` citation rule moved to `brain.citations`, so both commands share it. A citation
   number is now at most 6 ASCII digits: a longer or non-ASCII-digit marker is removed as dangling
   (a 5,000-digit one no longer raises).
+
+### Fixed — an installed `brain` keeps `brain owner` and `brain eval` files in `$BRAIN_HOME` (F25)
+
+- `brain owner set`, `add` and `remove` wrote `BRAIN_OWNER_PARTICIPANTS` to a `.env` beside the
+  installed package (`<venv>/lib/python3.X/.env` for a `pip` or `uv tool` install) instead of your
+  config. Outside a source checkout they now write `$BRAIN_HOME/.env` (default `~/.brain/.env`),
+  the file `brain setup` creates. When that file is a symlink, its target is updated and the link
+  is kept; a dangling link is refused with exit 1 and nothing is written. A source checkout still
+  writes the repo `.env`.
+- `brain eval`'s default golden corpus, answer corpus and baselines directory pointed at
+  `tests/eval/` beside the installed package, so `--record-baseline` wrote into the virtualenv.
+  Outside a source checkout they are now `$BRAIN_HOME/eval/golden_corpus.yaml`,
+  `$BRAIN_HOME/eval/answer_corpus.yaml` and `$BRAIN_HOME/eval/baselines/`. A source checkout still
+  uses `tests/eval/`, so the eval gate (`ci.json`, `golden_corpus.yaml`) is unchanged.
+- Upgrading: if you ran `brain owner set`, `add` or `remove` on an installed `brain`, look for
+  `<venv>/lib/python3.X/.env`, the directory above `site-packages`. It is still read, and it
+  outranks `$BRAIN_HOME/.env`, so `brain owner show` keeps reporting it. Move its
+  `BRAIN_OWNER_PARTICIPANTS` line into `$BRAIN_HOME/.env`, then delete it. Until you do,
+  each write by `brain owner set`, `add` or `remove` prints a one-line warning on stderr naming
+  both files (never the value); a no-op that writes nothing stays quiet. Do it before a
+  reinstall: `uv tool install --force` recreates the tool's environment and deletes that file,
+  settings and all.
 
 ### Added — opt-in query rewriting, `--rewrite` (RM-54)
 
@@ -252,6 +344,28 @@ to `compare/v0.4.0...HEAD`. -->
   old path re-exports. A timeout is now its subclass `GwsTimeoutError` of `DirectoryRefreshError`,
   so a Calendar or Contacts refresh WARNING names it `GwsTimeoutError[timed out after …]`. Its
   message no longer ends in the command's arguments (the `--params` JSON), for every caller.
+
+### Fixed — vault mirror filenames no longer contain the source path (F15)
+
+- `brain ingest-code`, `brain ingest-folder` and `brain ingest-github` named a document's
+  mirror after the first 8 characters of its external id. For a file path or an
+  `owner/repo#N` id those characters contain `/`, so the "filename" became stray nested
+  directories: `_ingested/code/2026-11-14-/srv/rep-sample-repo-src-widget-py.md`.
+- That part of the filename is now the first 8 hex digits of the id's SHA-256 whenever
+  the old part held a character that is not safe in a filename, or started with a dot.
+  Ids that were already safe (UUIDs, Slack timestamps, URL hashes) keep exactly the part
+  they had.
+- A `metadata.date` holding a path separator now falls back to the ingest date instead of
+  nesting the file.
+- **Existing mirrors keep their paths.** No file is moved, renamed, rewritten or deleted
+  by this change:
+  - a document that already has a stored `vault_path` keeps it, and so do the wikilinks
+    that point at it;
+  - a document whose old-style file is already on disk keeps using that file.
+
+  The new name applies only to a document mirrored for the first time.
+- **The stray directories that earlier runs created are NOT cleaned up.** An opt-in
+  cleanup command is a later ticket.
 
 ### Added — `brain examples`, finding a command by example (RM-53)
 

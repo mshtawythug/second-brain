@@ -402,3 +402,7 @@ those are personal. If you are writing one, judge honestly — pool candidates f
 more than just the ranker under test, read the documents, and let hard queries
 score badly. A corpus curated until the current ranker looks good is a baseline
 that gates nothing.
+
+These are checkout paths. An installed (non-checkout) `brain` reads
+`$BRAIN_HOME/eval/golden_corpus.yaml` and records baselines in
+`$BRAIN_HOME/eval/baselines/` instead (F25; see `docs/eval-gate.md`).
