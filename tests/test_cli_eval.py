@@ -15,6 +15,7 @@ from voyageai import error as voyage_error
 from brain.cli import app
 from brain.ingest import ExtractedDoc, ingest_document
 from tests.embed_failure_doubles import OLLAMA_OVERFLOW, arctic_failing_on, voyage_failing_on
+from tests.wheel_install import simulate_wheel_install
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -163,7 +164,7 @@ def test_brain_eval_record_baseline_writes_file(
     _setup(monkeypatch, test_db, fake_embedder)
     corpus_path = _write_corpus(tmp_path, _MINI_CORPUS)
     baselines_dir = tmp_path / "baselines"
-    monkeypatch.setattr("brain.cli._BASELINES_DIR", baselines_dir)
+    monkeypatch.setattr("brain.install_paths.eval_baselines_dir", lambda: baselines_dir)
 
     result = CliRunner().invoke(
         app,
@@ -176,6 +177,35 @@ def test_brain_eval_record_baseline_writes_file(
     assert "results" in data
 
 
+def test_brain_eval_record_baseline_on_wheel_install(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """F25: an installed ``brain`` records baselines under ``$BRAIN_HOME/eval/baselines``.
+
+    The default directory is NOT patched here — the point is where it resolves.
+    Before the fix it was ``tests/eval/baselines`` beside the installed package
+    (inside the virtualenv), so a record wrote into the install.
+    """
+    corpus_path = _write_corpus(tmp_path, _MINI_CORPUS)
+    wheel = simulate_wheel_install(monkeypatch, tmp_path)
+    _setup(monkeypatch, test_db, fake_embedder)
+    repo_baseline = (
+        Path(__file__).resolve().parent / "eval" / "baselines" / "wheel-sim.json"
+    )
+    assert not repo_baseline.exists()
+
+    result = CliRunner().invoke(
+        app,
+        ["eval", "--corpus", str(corpus_path), "--record-baseline", "wheel-sim"],
+    )
+    assert result.exit_code == 0, result.output
+    assert (wheel.home / "eval" / "baselines" / "wheel-sim.json").is_file()
+    assert not repo_baseline.exists()
+
+
 def test_brain_eval_diff_against_baseline(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
@@ -186,7 +216,7 @@ def test_brain_eval_diff_against_baseline(
     _setup(monkeypatch, test_db, fake_embedder)
     corpus_path = _write_corpus(tmp_path, _MINI_CORPUS)
     baselines_dir = tmp_path / "baselines"
-    monkeypatch.setattr("brain.cli._BASELINES_DIR", baselines_dir)
+    monkeypatch.setattr("brain.install_paths.eval_baselines_dir", lambda: baselines_dir)
 
     # Record baseline.
     r1 = CliRunner().invoke(
@@ -288,7 +318,7 @@ def test_brain_eval_json_record_baseline_no_stdout_pollution(
     which would corrupt the JSON stream."""
     baselines_dir = tmp_path / "baselines"
     baselines_dir.mkdir()
-    monkeypatch.setattr("brain.cli._BASELINES_DIR", baselines_dir)
+    monkeypatch.setattr("brain.install_paths.eval_baselines_dir", lambda: baselines_dir)
     _setup(monkeypatch, test_db, fake_embedder)
     corpus_path = _write_corpus(tmp_path, _MINI_CORPUS)
     result = CliRunner().invoke(
@@ -350,7 +380,7 @@ def _wire_flaky(
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: embedder)
     baselines_dir = tmp_path / "baselines"
-    monkeypatch.setattr("brain.cli._BASELINES_DIR", baselines_dir)
+    monkeypatch.setattr("brain.install_paths.eval_baselines_dir", lambda: baselines_dir)
     return baselines_dir
 
 
