@@ -97,19 +97,23 @@ TEST_DATABASE_URL = os.environ.get(
 # wipe production data.
 _PROD_PORTS = frozenset({5433, 55432})
 _PROD_DB_NAME = "second_brain"
-_LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
 
 def _looks_like_prod_db(host: str | None, port: int | None, dbname: str | None) -> bool:
-    """True if (host, port, dbname) resolves to the prod container.
+    """True if (host, port, dbname) could be the prod container.
 
-    Refuses ANY known prod host port (55432 current, 5433 historical) on a local
-    host, OR the exact prod database name on any host (belt-and-suspenders:
-    catches a prod restore under a different db name, or a non-default port
-    mapping).
+    Refuses ANY known prod port (55432 current, 5433 historical) on ANY host,
+    OR the exact prod database name on any host (belt-and-suspenders: catches a
+    prod restore under a different db name, or a non-default port mapping).
+
+    ``host`` is deliberately not consulted for the port check. It used to be
+    matched against a list of local spellings, and ``127.1``, ``localhost.``,
+    ``::ffff:127.0.0.1``, ``127.0.0.2`` and ``host.docker.internal`` all reach
+    this machine's 55432 while passing as not-prod. No such list is complete,
+    and a test suite has no business on a prod port on any host.
     """
-    is_local = (host or "").lower() in _LOCAL_HOSTS
-    return (is_local and port in _PROD_PORTS) or (dbname == _PROD_DB_NAME)
+    del host  # see the docstring: no host spelling makes a prod port safe
+    return port in _PROD_PORTS or dbname == _PROD_DB_NAME
 
 
 def _assert_not_prod_db(host: str | None, port: int | None, dbname: str | None) -> None:
@@ -124,11 +128,26 @@ def _assert_not_prod_db(host: str | None, port: int | None, dbname: str | None) 
         )
 
 
-# Fail fast at import/collection time on the resolved TEST_DATABASE_URL.
-_test_url = urlparse(TEST_DATABASE_URL)
-_assert_not_prod_db(
-    _test_url.hostname, _test_url.port, (_test_url.path or "").lstrip("/")
-)
+def _assert_dsn_not_prod(dsn: str) -> None:
+    """:func:`_assert_not_prod_db` on a whole DSN, parsed the way libpq parses it.
+
+    ``psycopg.conninfo.conninfo_to_dict`` reads every form, URL, query string
+    (``?port=``), percent-encoding and key=value. ``urlparse`` saw a key=value
+    DSN as having no host, port or path, so a keyword DSN on 55432 used to pass.
+    Each entry of a multi-host port list is checked, and an absent port falls
+    back to ``PGPORT`` and then libpq's 5432, as libpq does.
+    """
+    params = psycopg.conninfo.conninfo_to_dict(dsn)
+    host = str(params.get("host") or "") or None
+    dbname = str(params.get("dbname") or os.environ.get("PGDATABASE") or "") or None
+    fallback = os.environ.get("PGPORT") or "5432"
+    for entry in str(params.get("port") or "").split(","):
+        _assert_not_prod_db(host, int(entry.strip() or fallback), dbname)
+
+
+# Fail fast at import/collection time on the resolved TEST_DATABASE_URL, before
+# the suite-lock fixture or any reset can connect to it.
+_assert_dsn_not_prod(TEST_DATABASE_URL)
 
 
 # --- Live PROD DB URL for read-only canary / eval tests ---------------------

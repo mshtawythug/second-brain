@@ -272,6 +272,7 @@ def test_restore_preflight_names_the_target_database_not_the_archive_source(
         tmp_path / "brain-backup-20261030-181500.tar.gz",
         vault_path=tmp_path / "vault",
         target_database="synthetic_replica",
+        db_leg=True,
     )
 
     out = capsys.readouterr().out
@@ -291,6 +292,27 @@ def test_restore_preflight_on_the_same_machine_still_names_its_database(
         tmp_path / "brain-backup-20261030-181500.tar.gz",
         vault_path=tmp_path / "vault",
         target_database="synthetic_brain",
+        db_leg=True,
     )
 
     assert "• database synthetic_brain" in capsys.readouterr().out
+
+
+@pytest.mark.nodb
+def test_restore_preflight_without_the_db_leg_lists_no_database(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """F24: C24's `--vault-only` preview listed `• database` it never touches."""
+    from brain.cli_backup import _print_preflight
+
+    _print_preflight(
+        _preflight_for("synthetic_brain"),
+        tmp_path / "brain-backup-20261030-181500.tar.gz",
+        vault_path=tmp_path / "vault",
+        target_database="synthetic_brain",
+        db_leg=False,
+    )
+
+    out = capsys.readouterr().out
+    assert "• database" not in out
+    assert "currently holds 3 documents" not in out

@@ -186,6 +186,49 @@ to `compare/v0.4.0...HEAD`. -->
 - Migration 032 indexes `search_queries.session_id`, which the stage looks up for each read. Without
   it, a synthetic 1,000,000-interaction table took 11.7 s per search at p95.
 
+### Fixed — `brain restore` names the server it restored, keeps `--json` clean, and tidies up (F22, F23, F24, F27)
+
+- After a database restore, the "drop it when satisfied" line named the production container
+  (`docker exec second-brain-postgres …`) whatever server the restore ran against, so pasting it
+  could reach the wrong server. It now names the container `pg_restore` actually ran in, or, when
+  the host's `pg_restore` was used, prints `psql -h <host> -p <port> -U <user>` for `DATABASE_URL`
+  with no `docker exec`. Only host, port and user are read from the DSN, so a password is never
+  printed, and every value is shell-quoted.
+- `restore --json` printed its confirmation prompts on stdout, so the output was not JSON. In
+  `--json` mode prompts and warnings now go to stderr, and stdout carries nothing but JSON. The
+  typed phrase still cannot be skipped by any flag, so a non-empty restore reads it from stdin as
+  before. A declined or interrupted (Ctrl-C) run prints `{"restored": false, "aborted": true}`
+  and exits 1. A run that ends in any other error exits non-zero with stdout empty.
+- `restore --vault-only` listed the database under "WILL BE OVERWRITTEN". The preview now follows
+  the scope, as `--db-only` already did for the vault. **Gate change:** `--vault-only` asks for the
+  typed phrase only when the vault is non-empty. It no longer asks because the database is
+  non-empty, since the vault-only path never touches the database. A non-empty vault still needs
+  the phrase, and `--yes` still cannot supply it.
+- A declined, refused or failed restore left the unpacked archive in
+  `$BRAIN_HOME/run/restore-<timestamp>/`: a plaintext copy of the dump and vault. It is now
+  removed however the command ends, including a refused hostile archive. The removal touches only a
+  `restore-<timestamp>` directory directly under `$BRAIN_HOME/run`, never a symlink.
+
+### Fixed — prod safety: `brain demo` cannot be pointed at the production database
+
+- `brain demo --database-url` could seed and query the production `second_brain` database. Its
+  guard refused ports 55432 and 5433 only for five literal local host spellings, and read the URL
+  with `urlparse`. These all got through: `127.1:55432`, `[::ffff:127.0.0.1]:55432`,
+  `localhost.:55432`, a percent-encoded `second%5Fbrain`, the key=value form
+  `host=localhost port=55432 dbname=second_brain`, and `?port=55432&dbname=second_brain`.
+- The guard now parses the DSN the way libpq does. It refuses a prod port on any host, including
+  every entry of a multi-host port list. A port or database the DSN leaves out is taken from
+  `PGPORT` / `PGDATABASE` and then libpq's defaults (5432, the user name).
+- It also refuses database `second_brain`, a DSN it cannot parse, and a `service=` / `PGSERVICE`
+  that would supply the port or database from `pg_service.conf`, where the guard cannot see them.
+  A service is allowed when the DSN names every port and the dbname itself, because explicit
+  values override the service file. Each refusal happens before any connection is attempted.
+- Test safety: the test suite's own guard (`tests/conftest.py`) also refused prod ports only for
+  literal local host spellings, and it read `TEST_DATABASE_URL` with `urlparse`, so a key=value
+  DSN on 55432 passed. It now refuses a prod port on any host, and parses `TEST_DATABASE_URL`
+  with `conninfo_to_dict` (with the `PGPORT` fallback) before anything connects.
+  `tests/test_restore_real_pg_tools.py` runs its admin DSN through the same guard.
+
 ### Added — `brain tags summarize`, a cited synthesis of one tag (RM-55)
 
 - `brain tags summarize TAG [--limit 20] [--json]` reads the tag's most recent non-draft documents,
