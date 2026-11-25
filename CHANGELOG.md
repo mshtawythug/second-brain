@@ -274,6 +274,28 @@ to `compare/v0.4.0...HEAD`. -->
   so a Calendar or Contacts refresh WARNING names it `GwsTimeoutError[timed out after …]`. Its
   message no longer ends in the command's arguments (the `--params` JSON), for every caller.
 
+### Fixed — vault mirror filenames no longer contain the source path (F15)
+
+- `brain ingest-code`, `brain ingest-folder` and `brain ingest-github` named a document's
+  mirror after the first 8 characters of its external id. For a file path or an
+  `owner/repo#N` id those characters contain `/`, so the "filename" became stray nested
+  directories: `_ingested/code/2026-11-14-/srv/rep-sample-repo-src-widget-py.md`.
+- That part of the filename is now the first 8 hex digits of the id's SHA-256 whenever
+  the old part held a character that is not safe in a filename, or started with a dot.
+  Ids that were already safe (UUIDs, Slack timestamps, URL hashes) keep exactly the part
+  they had.
+- A `metadata.date` holding a path separator now falls back to the ingest date instead of
+  nesting the file.
+- **Existing mirrors keep their paths.** No file is moved, renamed, rewritten or deleted
+  by this change:
+  - a document that already has a stored `vault_path` keeps it, and so do the wikilinks
+    that point at it;
+  - a document whose old-style file is already on disk keeps using that file.
+
+  The new name applies only to a document mirrored for the first time.
+- **The stray directories that earlier runs created are NOT cleaned up.** An opt-in
+  cleanup command is a later ticket.
+
 ### Added — `brain examples`, finding a command by example (RM-53)
 
 - `brain examples [TOPIC]` prints curated, synthetic invocations by task: `search`, `ingest`, `graph`,
