@@ -299,8 +299,10 @@ Existing suites to re-run, targeted, because the refactor touches their paths:
   embedding times out or cannot reach Ollama, prints where it stopped, and exits 1; a re-run
   skips the files already ingested. With `--sync`, a stopped run prunes nothing. An embedding
   error that is not a timeout or connection failure fails only that file, and the walk goes on.
-- Every ingest command prints `cannot reach DATABASE_URL host:port` and exits 1 when Postgres is
-  down, instead of a psycopg traceback. The password and the URL are never printed.
+- Every ingest command prints `cannot reach the database (<ErrorClass>). Is Postgres running?
+  Try: brain doctor` and exits 1 when Postgres is down, instead of a psycopg traceback. The line
+  names no host, port or other part of the URL. (This draft first printed `host:port`; §11
+  dropped the address, and `brain doctor` shows the target.)
 - `brain ingest-stdin --metadata` must be a JSON object, and `--date` must parse as ISO 8601 or
   RFC 2822. Either mistake is a usage error (exit 2) before stdin is read. A bad `--date` used to
   be stored with only a warning.
