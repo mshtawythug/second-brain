@@ -140,7 +140,7 @@ def test_a_refused_archive_exits_1_without_touching_the_database(
     def no_connect(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("a refused archive must not open the database")
 
-    monkeypatch.setattr(cli_ingest_bookmarks, "connect", no_connect)
+    monkeypatch.setattr(cli_ingest_bookmarks, "connect_or_exit", no_connect)
 
     result = _ingest(root)
 
@@ -293,7 +293,7 @@ def test_dry_run_lists_and_writes_nothing(
     def no_connect(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("--dry-run must not open the database")
 
-    monkeypatch.setattr(cli_ingest_bookmarks, "connect", no_connect)
+    monkeypatch.setattr(cli_ingest_bookmarks, "connect_or_exit", no_connect)
 
     result = _ingest(root, "--dry-run")
 

@@ -115,6 +115,34 @@ to `compare/v0.4.0...HEAD`. -->
   +0.36), but the added p95 latency is about 2.6–2.8 s against a 1.0 s limit, so it stays off by
   default (`BRAIN_RERANKER=none`). See `docs/plans/2026-11-12-reranker-measurement.md`.
 
+### Fixed — the ingest commands refuse bad input in one line, not a traceback (QA F1, F2, F3, F4, F7, F10, F12)
+
+- An embedding failure during `brain ingest` or `brain ingest-stdin` is now one line naming the
+  error class, with exit 1, and nothing is stored. `brain ingest-dir` stops at the first file whose
+  embedding times out or cannot reach Ollama. It says where it stopped and exits 1; a re-run skips
+  the files already ingested. With `--sync`, a stopped run prunes nothing. Any other embedding error
+  fails only that file, and the walk goes on.
+- When Postgres is down, every ingest command except `brain ingest-code` (which already printed one
+  line) prints `cannot reach the database (<error class>). Is Postgres running? Try: brain doctor`
+  and exits 1, instead of a psycopg traceback. The line names no host, port, user, database or
+  any other part of `DATABASE_URL`; `brain doctor` shows the target.
+- `brain ingest-stdin --metadata` must be a JSON object that Postgres can store: no `NaN`,
+  infinite or out-of-range numbers, no NUL characters, and no lone surrogates (text that is not
+  UTF-8). A `duration_min` that does not fit the integer column is skipped with a warning,
+  from the CLI and the MCP tool alike. `--date` must parse as ISO 8601 or
+  RFC 2822 and stay in range in UTC. Either mistake is a usage error (exit 2), caught before stdin
+  is read. A bad `--date` used to be stored with only a warning, and an out-of-range one crashed.
+- Tags given to `brain ingest`, `ingest-dir`, `ingest-stdin`, `ingest-gmail` and the MCP
+  `brain_ingest_stdin` tool are normalized (lowercase, hyphenated, deduplicated), like every other
+  tag write. `brain backfill normalize-tags` fixes rows stored before this release.
+- `brain ingest` on a file type it does not read prints one line: the types it does read, and a
+  pointer to `brain ingest-code` for source code. It exits 2. A malformed PDF or DOCX, including a
+  zip that is not a Word document, is one `cannot read` line with the error class, exit 1.
+  `brain ingest-dir` reports a file it cannot ingest by error class too, never the error text, and
+  so does `brain ingest-gmail` for a thread that fails on the database or on its content.
+- `brain reembed --batch-size` and `--limit` must be at least 1 (exit 2). `--batch-size 0` used to
+  do nothing, and `--limit -1` reported "would embed -1".
+
 ### Added — document-level embeddings as a re-scoring search stage, off by default (RM-20)
 
 - Migration 031 adds `document_embeddings`: one vector per document, from its title and summary

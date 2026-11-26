@@ -177,9 +177,14 @@ def _load_docx() -> ExtractorFn:
 
 
 def _docx_errors() -> tuple[type[Exception], ...]:
+    import zipfile
+
     from docx.opc.exceptions import PackageNotFoundError
 
-    return (PackageNotFoundError,)
+    # A zip that is not a document fails past python-docx's own error (review rev-137 #4):
+    # a missing part is a KeyError, a broken archive BadZipFile, a bad part lxml's
+    # XMLSyntaxError, caught as its base SyntaxError (lxml is only a transitive dep).
+    return (PackageNotFoundError, KeyError, zipfile.BadZipFile, SyntaxError)
 
 
 def _load_image() -> ExtractorFn:

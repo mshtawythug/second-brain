@@ -72,9 +72,9 @@ from .cli_ingest import (
     _emit_secret_notice,
     _validate_sensitivity_or_exit,
 )
+from .cli_ingest_boundary import connect_or_exit
 from .cli_sensitivity_rerun import escalate_stored_sensitivity
 from .config import Config, ConfigError, _brain_home_root
-from .db import connect
 from .errors import SecretGuardError, describe_failure
 from .ingest import Embedder, browser_store, ingest_document, web_fetch
 from .ingest import browser as br
@@ -322,7 +322,7 @@ def _ingest_all(batch: br.PageBatch, options: _Options) -> None:
         enricher=_build_enricher(cfg) if options.enrich else None,
         graph_syncer=_build_graph_syncer(cfg),
     )
-    with connect(cfg.database_url) as conn:
+    with connect_or_exit(cfg.database_url) as conn:
         conn.autocommit = True
         for page in batch.pages:
             _guarded(page, run, functools.partial(_write_page, conn, page, run))

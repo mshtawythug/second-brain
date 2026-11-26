@@ -16,6 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ..ask_history import MAX_HISTORY_ANSWER_CHARS, MAX_HISTORY_TURNS, AskTurn
+from ..ingest.text_safety import encodes_utf8
 from ._http import context_of, ok, parse_json_object, read_body_capped
 from .ask_service import (
     ASK_MODES,
@@ -26,7 +27,6 @@ from .ask_service import (
     submit_ask,
 )
 from .errors import UiBadRequest
-from .ingest_schemas import encodes_utf8
 from .routes_ingest import queue_errors
 from .routes_jobs import job_payload
 

@@ -111,12 +111,16 @@ class TestCliIngestStdinBoundary:
 
         monkeypatch.setattr(cli_ingest.sys, "stdin", EmptyStdin())
 
-        # Act / Assert — typer.Exit(1) for empty stdin, NOT BadParameter.
+        # Act / Assert — typer.Exit(1) for empty stdin, NOT BadParameter. Since QA F3/F4,
+        # --metadata and --date are checked before stdin is read, so a direct call passes
+        # them explicitly (a bare call would hand the checks Typer's OptionInfo defaults).
         with pytest.raises(typer.Exit) as excinfo:
             cli_ingest.ingest_stdin(
                 source="krisp",
                 external_id="ext-1",
                 title="Synthetic title",
+                metadata=None,
+                date=None,
             )
         assert excinfo.value.exit_code == 1
 

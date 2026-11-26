@@ -24,7 +24,6 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -33,6 +32,7 @@ from pgvector.psycopg import register_vector  # noqa: F401  (ensures adapter loa
 
 from brain.config import DEFAULT_SECRET_GUARD
 from brain.errors import EnrichmentError, IngestAmbiguousSource, OllamaUnavailable, describe_failure
+from brain.ingest.sent_at import parse_sent_at as _parse_sent_at  # QA F4: shared with --date
 from brain.sensitivity import DEFAULT_SENSITIVITY, is_confidential, normalize_level
 from brain.tags import normalize_tags
 
@@ -343,38 +343,6 @@ _PROMOTED_COLUMNS: tuple[str, ...] = (
 )
 
 
-def _parse_sent_at(raw: Any) -> datetime | None:
-    """Parse a date string into a TZ-aware UTC ``datetime``.
-
-    Accepts both RFC 2822 (Gmail ``Date:`` header style — e.g.
-    ``"Tue, 04 May 2026 14:23:01 -0400"``) and ISO 8601 (Krisp-style — e.g.
-    ``"2026-05-04T14:23:01+00:00"``) inputs. Returns ``None`` for any input
-    we can't parse — callers log + skip the column rather than crashing the
-    ingest. Naive datetimes are treated as UTC.
-    """
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-
-    parsed: datetime | None = None
-    # RFC 2822 first — ``parsedate_to_datetime`` is strict-but-tolerant and
-    # is the format Gmail's ``Date:`` header uses, so it's the more common
-    # case for this codebase.
-    try:
-        parsed = parsedate_to_datetime(raw)
-    except (TypeError, ValueError):
-        parsed = None
-    if parsed is None:
-        try:
-            # ``fromisoformat`` accepts the trailing-Z form in 3.11+.
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
 def _promote_metadata_to_columns(metadata: dict[str, Any]) -> dict[str, Any]:
     """Project a metadata blob onto the typed ``documents`` columns.
 
@@ -399,7 +367,7 @@ def _promote_metadata_to_columns(metadata: dict[str, Any]) -> dict[str, Any]:
       log + skip rather than silently coercing.
     - ``duration_min`` — accept ``int``, ``float``, or a numeric ``str``.
       Floats — and float-valued strings like ``"42.7"`` — round down via
-      ``int(float(...))``; ``bool`` and non-numeric values log + skip.
+      ``int(float(...))``; ``bool``, non-numeric and non-int4 values log + skip.
     """
     out: dict[str, Any] = {}
 
@@ -443,15 +411,14 @@ def _promote_metadata_to_columns(metadata: dict[str, Any]) -> dict[str, Any]:
     raw_duration = metadata.get("duration_min")
     if raw_duration is not None:
         try:
-            # ``bool`` is a subclass of ``int`` in Python — reject it
-            # explicitly so ``True`` doesn't end up as ``1`` in the column.
-            if isinstance(raw_duration, bool):
-                raise TypeError("bool is not a valid duration")
-            # ``int(float(...))`` so numeric strings with a fractional part
-            # ("42.7", Krisp's occasional float-minute serialization) round
-            # down instead of raising ValueError under a bare ``int("42.7")``.
-            out["duration_min"] = int(float(raw_duration))
-        except (TypeError, ValueError):
+            # ``int(float(...))`` rounds "42.7" (Krisp's float minutes) down where a bare
+            # ``int`` raises. A ``bool`` (an ``int`` subclass: ``True`` is not ``1``) and a
+            # value outside the int4 column (inf: OverflowError) are skipped (rev-137b).
+            minutes = int(float(raw_duration))
+            if isinstance(raw_duration, bool) or not -(2**31) <= minutes < 2**31:
+                raise ValueError("duration_min is a bool or outside int4")
+            out["duration_min"] = minutes
+        except (TypeError, ValueError, OverflowError):
             _logger.warning(
                 "metadata.duration_min expected int, got %r; "
                 "skipping column promotion",
@@ -784,7 +751,7 @@ def ingest_document(
         doc = replace(doc, content=guard.content)
 
     h = _content_hash(doc.content)
-    tags = tags or []
+    tags = normalize_tags(tags or [])  # QA F7: the INSERT path stored raw tags
     source_metadata = source_metadata or {}
 
     result = _ingest_within_transaction(
